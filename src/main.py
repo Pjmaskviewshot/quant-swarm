@@ -46,94 +46,97 @@ class DistributedQuantEngine:
             logger.critical("🟢 SYSTEM INITIALIZED IN LIVE PRODUCTION MODE. CAPITAL DEPLOYMENT ARMED.")
         
         # Operational parameters - Hardcoded and env-dependent asset strings DELETED.
-        # Initialized with safe fallback matrices; the satellite boot process will overwrite this dynamically.
+        # Initialized with a safe fallback matrix; the satellite boot process will overwrite this dynamically.
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-        self.active_target: str = self.asset_basket[0]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.macro_interval = int(os.getenv("MACRO_UPDATE_INTERVAL_SECONDS", "300"))
         
         # Dynamic Stream Management Flags
         self.stream_restart_event = asyncio.Event()
         
-        # 1. State & Feature Engines
+        # 1. State Engines & Global Risk Controller
         self.memory = MemoryBank()
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
-        self.feature_engine = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.10, max_single_position_risk_pct=0.02)
         
-        # 2. External Service Interfaces
+        # 2. Swarm Intelligence Matrices (One for each asset)
+        self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
+        self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
+        self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
+        self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
+        self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
+        self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+        
+        self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
+        self.historical_win_rate = 0.58
+        self.historical_win_loss_ratio = 1.65
+
+        # 3. External Service Interfaces
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
         self.ai_router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=os.getenv("DEEPSEEK_API_KEY"))
         self.macro_data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY"))
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
-        # 3. Execution & SOR Integration
+        # 4. Execution & SOR Integration
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
-        
-        # Thread Synchronized Runtime Variables
-        self.macro_regime = "HOLD"  
-        self.macro_confidence = 0.0
-        self.current_atr = 0.0
-        self.last_execution_timestamp = 0.0
-        self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
-
-        # Internal memory matrix for Thread 3 Screener
-        self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
-
-        # Baseline stats for Kelly formulation
-        self.historical_win_rate = 0.58
-        self.historical_win_loss_ratio = 1.65
 
     # ==========================================
-    # THREAD 1: SLOW MACRO AI PIPELINE
+    # THREAD 1: SLOW MACRO AI PIPELINE (SWARM EDITION)
     # ==========================================
     async def run_macro_regime_loop(self):
-        """High-Density Deep Model Context Processing Task focusing on the Active Target."""
+        """High-Density Deep Model Context Processing Task iterating across the entire active basket."""
         while True:
-            try:
-                logger.info(f"Syncing macro perspective matrix for active target {self.active_target} with inference clusters...")
-                context = await self.macro_data_feed.fetch_market_snapshot(self.active_target, self.timeframe)
+            # Create a snapshot of the basket to safely iterate while the Satellite radar might update it
+            current_basket = list(self.asset_basket)
+            
+            for symbol in current_basket:
+                try:
+                    logger.info(f"Syncing macro perspective matrix for swarm node {symbol}...")
+                    context = await self.macro_data_feed.fetch_market_snapshot(symbol, self.timeframe)
+                    
+                    if context:
+                        self.current_atrs[symbol] = context["current_price"] * 0.0045 
+                        
+                        rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
+                        self.fsm.process_state_transition(rolling_acc, total_resolved)
+                        
+                        payload = {
+                            "asset": symbol,
+                            "price": context["current_price"],
+                            "atr_volatility": self.current_atrs[symbol],
+                            "macro_news_stream": context["news_context"],
+                            "rolling_system_accuracy": f"{rolling_acc:.2%}"
+                        }
+                        
+                        verdict = await self.ai_router.extract_market_verdict(payload)
+                        self.macro_regimes[symbol] = verdict.get("direction", "HOLD")
+                        self.macro_confidences[symbol] = verdict.get("confidence", 0.0)
+                        
+                        logger.info(f"🔄 SWARM NODE SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                        
+                except Exception as e:
+                    logger.error(f"Exception encountered inside macro intelligence thread for {symbol}: {e}")
                 
-                if context:
-                    self.current_atr = context["current_price"] * 0.0045 
-                    
-                    rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
-                    self.fsm.process_state_transition(rolling_acc, total_resolved)
-                    
-                    payload = {
-                        "asset": self.active_target,
-                        "price": context["current_price"],
-                        "atr_volatility": self.current_atr,
-                        "macro_news_stream": context["news_context"],
-                        "rolling_system_accuracy": f"{rolling_acc:.2%}"
-                    }
-                    
-                    verdict = await self.ai_router.extract_market_verdict(payload)
-                    self.macro_regime = verdict.get("direction", "HOLD")
-                    self.macro_confidence = verdict.get("confidence", 0.0)
-                    
-                    logger.info(f"🔄 MACRO SYSTEM SYNCED // Target: {self.active_target} | Bias: {self.macro_regime} | Conf: {self.macro_confidence:.2%}")
-                    
-            except Exception as e:
-                logger.error(f"Exception encountered inside background intelligence worker thread: {e}")
+                # Brief execution yield to prevent API rate limiting from the AI/Data providers
+                await asyncio.sleep(3)
                 
+            # Rest the macro pipeline before re-evaluating the entire basket
             await asyncio.sleep(self.macro_interval)
 
     # ==========================================
     # THREAD 2: FAST MICROSTRUCTURE PIPELINE
     # ==========================================
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
-        """Microsecond-Scale Order Book Evaluator with Asset Isolation Filtering."""
+        """Microsecond-Scale Order Book Evaluator processing all 15 active nodes simultaneously."""
         symbol = depth_data.get("s")
-        
-        if symbol != self.active_target:
+        if symbol not in self.asset_basket:
             return
 
         bids = depth_data.get("b", [])
         asks = depth_data.get("a", [])
         
-        features = self.feature_engine.push_orderbook_tick(bids, asks)
+        features = self.feature_engines[symbol].push_orderbook_tick(bids, asks)
         if not features.get("valid"):
             return
 
@@ -141,7 +144,7 @@ class DistributedQuantEngine:
         mid_price = features["mid_price"]
 
         current_time = time.time()
-        if (current_time - self.last_execution_timestamp) < self.execution_cooldown_period:
+        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < self.execution_cooldown_period:
             return
 
         trade_direction = None
@@ -152,22 +155,23 @@ class DistributedQuantEngine:
             elif z_obi <= -0.2:
                 trade_direction = "SELL"
         else:
-            # Strict Institutional Execution Configuration
-            if self.macro_regime == "BUY" and z_obi >= 2.0:
+            # Strict Institutional Execution Configuration applied to the specific symbol
+            regime = self.macro_regimes.get(symbol, "HOLD")
+            if regime == "BUY" and z_obi >= 2.0:
                 trade_direction = "BUY"  
-            elif self.macro_regime == "SELL" and z_obi <= -2.0:
+            elif regime == "SELL" and z_obi <= -2.0:
                 trade_direction = "SELL" 
 
         if trade_direction:
-            self.last_execution_timestamp = current_time
-            logger.critical(f"🔥 EDGE DETECTED // Asset: {self.active_target} | Macro: {self.macro_regime} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
-            asyncio.create_task(self._route_validated_execution_block(trade_direction, mid_price))
+            self.last_execution_timestamps[symbol] = current_time
+            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Macro: {self.macro_regimes.get(symbol, 'HOLD')} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
+            asyncio.create_task(self._route_validated_execution_block(symbol, trade_direction, mid_price))
 
     # ==========================================
-    # THREAD 3: LIGHTWEIGHT BASKET TRACKER & HOT-SWAPPER
+    # THREAD 3: LIGHTWEIGHT BASKET TRACKER
     # ==========================================
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        """Monitors the lightweight public ticker pipeline for our token array matrix."""
+        """Monitors the lightweight public ticker pipeline to log internal alpha state."""
         symbol = data.get("symbol")
         if not symbol or symbol not in self.asset_basket:
             return
@@ -181,7 +185,6 @@ class DistributedQuantEngine:
         current_price = float(price_str)
         current_volume = float(volume_str)
 
-        # Secure initialization guard for dynamic race conditions
         if symbol not in self.screener_memory:
             self.screener_memory[symbol] = {"prices": [], "volumes": []}
 
@@ -209,36 +212,23 @@ class DistributedQuantEngine:
         
         volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
 
-        if (volume_multiplier >= 2.5 or volatility_z >= 2.5) and symbol != self.active_target:
-            old_target = self.active_target
-            self.active_target = symbol
-            
-            self.feature_engine = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
-            
-            logger.critical(f"📡 TARGET HOT-SWAP INITIATED // Detached: {old_target} -> Locked: {self.active_target}")
-            
-            alert_text = (
-                f"📡 *SCREENER CORE TARGET HOT-SWAPPED*\n"
-                f"• Standing Down: {old_target}\n"
-                f"• Active Target Locked: {self.active_target}\n"
-                f"• Volume Multiplier: {volume_multiplier:.2f}x\n"
-                f"• Volatility Divergence: {volatility_z:.2f} σ"
-            )
-            asyncio.create_task(self.telegram.log_message(alert_text, "INFO"))
+        # No more "Hot Swapping". The Swarm manages all assets. We simply log extreme alpha events.
+        if (volume_multiplier >= 2.5 or volatility_z >= 2.5):
+            logger.debug(f"📊 SWARM ALPHA ALERT // {symbol} exhibiting massive divergence. VolMult: {volume_multiplier:.2f}x | Z-Vol: {volatility_z:.2f}")
 
     # ==========================================
     # THREAD 4: KLINE AGGREGATION PIPELINE
     # ==========================================
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
-        """Updates multi-timeframe analytics arrays dynamically for the Active Target."""
+        """Updates multi-timeframe analytics arrays dynamically for the relevant Swarm Node."""
         symbol = data.get("symbol")
-        if symbol != self.active_target:
+        if symbol not in self.asset_basket:
             return
 
         interval = data["interval"]
         candle = data["candle_data"]
         
-        self.feature_engine.update_multi_timeframe_candle(
+        self.feature_engines[symbol].update_multi_timeframe_candle(
             timeframe=interval,
             open_p=float(candle.get("open", 0)),
             high_p=float(candle.get("high", 0)),
@@ -264,21 +254,28 @@ class DistributedQuantEngine:
                 
             self.asset_basket = new_basket
             
-            # Hot Swap guard if our primary instrument gets dropped from the global Top 15 threshold
-            if self.active_target not in self.asset_basket:
-                old_target = self.active_target
-                self.active_target = self.asset_basket[0]
-                self.feature_engine = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
-                logger.critical(f"📡 ACTIVE INSTRUMENT REJECTED BY SATELLITE. Enforcing hot-swap: {old_target} -> {self.active_target}")
-                
-            # Perform atomic matrix serialization step to transfer existing internal historical price/volume arrays safely
+            # Rebuild Swarm Matrices atomically to maintain safety without memory leaks
+            new_feature_engines = {}
             new_screener_memory = {}
+            new_macro_regimes = {}
+            new_macro_confidences = {}
+            new_current_atrs = {}
+            new_last_execs = {}
+            
             for s in self.asset_basket:
-                if s in self.screener_memory:
-                    new_screener_memory[s] = self.screener_memory[s]
-                else:
-                    new_screener_memory[s] = {"prices": [], "volumes": []}
+                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": []})
+                new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
+                new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
+                new_current_atrs[s] = self.current_atrs.get(s, 0.0)
+                new_last_execs[s] = self.last_execution_timestamps.get(s, 0.0)
+                
+            self.feature_engines = new_feature_engines
             self.screener_memory = new_screener_memory
+            self.macro_regimes = new_macro_regimes
+            self.macro_confidences = new_macro_confidences
+            self.current_atrs = new_current_atrs
+            self.last_execution_timestamps = new_last_execs
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
             
@@ -317,73 +314,79 @@ class DistributedQuantEngine:
     # ==========================================
     # EXECUTION ROUTER (PORTFOLIO + SOR)
     # ==========================================
-    async def _route_validated_execution_block(self, direction: str, current_price: float):
+    async def _route_validated_execution_block(self, symbol: str, direction: str, current_price: float):
+        """The Central Nervous System for the Swarm. Validates global risk before executing any node."""
         try:
             signal_id = str(uuid.uuid4())
+            confidence = self.macro_confidences.get(symbol, 0.0)
+            atr = self.current_atrs.get(symbol, current_price * 0.0045)
             
             # Commit decision state to the memory bank for FSM tracking
-            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, self.macro_confidence)
+            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
             
             # --- FSM GUARDRAIL LOCATION ---
-            # If in live production mode but FSM hasn't completed its warmup calibration, halt live order placement.
             if not self.test_mode and not self.fsm.can_execute_trades:
-                logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> ID: {signal_id[:8]} | Dir: {direction} | Price: {current_price}")
+                logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 return
-            # -------------------------------
             
             if self.test_mode:
-                logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed to database row -> ID: {signal_id[:8]}... | Dir: {direction} | Price: {current_price}")
+                logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed to database row -> Node: {symbol} | ID: {signal_id[:8]}... | Dir: {direction}")
                 return 
 
             balance = await self.executor.get_wallet_balance_usdt()
-            if not self.risk_vault.evaluate_portfolio_safety(balance):
-                logger.warning("Execution blocked by institutional portfolio draw-down circuits.")
-                return
-
+            
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance,
                 win_rate=self.historical_win_rate,
                 win_loss_ratio=self.historical_win_loss_ratio,
-                asset_volatility_atr=self.current_atr,
+                asset_volatility_atr=atr,
                 current_price=current_price,
-                ai_confidence=self.macro_confidence 
+                ai_confidence=confidence 
             )
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
-                logger.warning("Execution canceled. Variance-adjusted Kelly criteria not met.")
+                logger.warning(f"Execution canceled for {symbol}. Variance-adjusted Kelly criteria not met.")
                 return
 
-            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Asset: {self.active_target} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
+            # --- GLOBAL PORTFOLIO EXPOSURE CHECK ---
+            if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt']):
+                logger.warning(f"Swarm global execution blocked. Portfolio cannot support additional exposure for {symbol}.")
+                return
+
+            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
             
             # --- DYNAMIC LEVERAGE APPLICATION ---
             target_leverage = risk_matrix.get("recommended_leverage", 1)
-            leverage_success = await self.executor.adjust_leverage(self.active_target, target_leverage)
+            leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             
             if not leverage_success:
-                logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on Bybit.")
+                logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on {symbol}.")
                 return
-            # ------------------------------------
             
+            # Send the execution down to the Smart Order Router
             success = await self.sor.execute_iceberg_block(
-                symbol=self.active_target,
+                symbol=symbol,
                 direction=direction,
                 total_qty=risk_matrix["size"],
                 current_mid_price=current_price
             )
             
             if success:
+                # Tell the Central Banker (Risk Vault) to update the global ledger
+                self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
+                
                 alert_text = (
-                    f"🧬 *DISTRIBUTED ORDER ROUTED SUCCESSFULLY*\n"
-                    f"• Instrument Target: {self.active_target}\n"
+                    f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
+                    f"• Execution Node: {symbol}\n"
                     f"• Action Basis: {direction}\n"
-                    f"• AI Macro Confidence: {self.macro_confidence:.2%}\n"
+                    f"• AI Macro Confidence: {confidence:.2%}\n"
                     f"• Leverage Applied: {target_leverage}x\n"
                     f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT"
                 )
                 asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
 
         except Exception as e:
-            logger.error(f"Distributed execution routing failed: {e}")
+            logger.error(f"Distributed swarm execution routing failed for {symbol}: {e}")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
@@ -397,14 +400,20 @@ class DistributedQuantEngine:
         
         if boot_basket and len(boot_basket) >= 5:
             self.asset_basket = boot_basket
-            self.active_target = self.asset_basket[0]
+            # Pre-allocate dictionary space for all symbols discovered during boot sequence
+            self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
-            logger.info(f"🧬 Boot initialization successful. Matrix structured using {len(self.asset_basket)} elements.")
+            self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
+            self.macro_confidences = {s: 0.0 for s in self.asset_basket}
+            self.current_atrs = {s: 0.0 for s in self.asset_basket}
+            self.last_execution_timestamps = {s: 0.0 for s in self.asset_basket}
+            
+            logger.info(f"🧬 Boot initialization successful. Matrix structured using {len(self.asset_basket)} concurrent nodes.")
         else:
             logger.warning("Initial satellite boot lookup underperformed. Deploying default infrastructure fallback configurations.")
         
         await self.telegram.log_message(
-            f"🚀 *DYNAMIC SATELLITE SWARM ENGINE ONLINE*\nMapping Processing Execution Completed.\nHunting Matrix Scope:\n`{', '.join(self.asset_basket)}`", 
+            f"🚀 *DYNAMIC SATELLITE SWARM ENGINE ONLINE*\nMapping Processing Execution Completed.\nConcurrent Hunting Matrix Scope:\n`{', '.join(self.asset_basket)}`", 
             "SUCCESS"
         )
         
