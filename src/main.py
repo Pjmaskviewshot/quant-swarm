@@ -4,6 +4,7 @@ import time
 import asyncio
 import logging
 import uuid
+import traceback
 import numpy as np
 from typing import Dict, List, Any
 from dotenv import load_dotenv
@@ -45,8 +46,7 @@ class DistributedQuantEngine:
         else:
             logger.critical("🟢 SYSTEM INITIALIZED IN LIVE PRODUCTION MODE. CAPITAL DEPLOYMENT ARMED.")
         
-        # Operational parameters - Hardcoded and env-dependent asset strings DELETED.
-        # Initialized with a safe fallback matrix; the satellite boot process will overwrite this dynamically.
+        # Operational parameters
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         
@@ -58,13 +58,16 @@ class DistributedQuantEngine:
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.10, max_single_position_risk_pct=0.02)
         
-        # 2. Swarm Intelligence Matrices (One for each asset)
+        # 2. Swarm Intelligence Matrices
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+        
+        # 🛡️ THE WATCHDOG REGISTRY
+        self.active_workers: Dict[str, asyncio.Task] = {}
         
         self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
         self.historical_win_rate = 0.58
@@ -81,27 +84,48 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
 
     # ==========================================
-    # THREAD 1: DECOUPLED CONCURRENT WORKER POOL
+    # THREAD 1: THE IMMORTAL WATCHDOG
     # ==========================================
     async def run_macro_regime_loop(self):
-        """Spawns completely isolated concurrent background workers for each asset node."""
-        logger.info("Initializing Concurrent Swarm Worker Matrix...")
-        current_basket = list(self.asset_basket)
+        """Spawns and rigorously monitors independent asset workers. Resurrects dead threads instantly."""
+        logger.critical("🐺 IMMORTAL WATCHDOG ONLINE. Deploying Swarm Matrix...")
         
-        # Spawn an isolated, non-blocking task for every individual asset
-        worker_tasks = []
-        for symbol in current_basket:
+        # 1. Initial Deployment
+        for symbol in self.asset_basket:
             task = asyncio.create_task(self._asset_worker_lifecycle(symbol))
-            worker_tasks.append(task)
+            self.active_workers[symbol] = task
+            await asyncio.sleep(1.5) # Stagger boot sequence to avoid immediate rate limits
             
-            # Stagger worker boot sequences slightly to prevent initial API collision
-            await asyncio.sleep(1.5)
-            
-        logger.info(f"Successfully deployed {len(worker_tasks)} independent asset workers.")
+        logger.info(f"Successfully deployed {len(self.active_workers)} independent asset workers.")
         
-        # Keep the main orchestrator alive tracking the tasks.
-        # return_exceptions=True prevents one failed node from crashing the entire swarm
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
+        # 2. The Infinite Monitoring Loop
+        while True:
+            # Check the health of every worker every 60 seconds
+            await asyncio.sleep(60)
+            
+            for symbol in list(self.asset_basket):
+                task = self.active_workers.get(symbol)
+                
+                # If the task doesn't exist, is done, or threw an exception, it is DEAD.
+                if task is None or task.done():
+                    # Diagnostic Telemetry: Print exactly WHY it died
+                    if task and task.done() and task.exception():
+                        exc = task.exception()
+                        logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception:")
+                        # Extracts the full Python traceback (line number and error type)
+                        traceback_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                        logger.error(f"\n{traceback_str}")
+                    else:
+                        logger.error(f"☠️ WATCHDOG ALERT: {symbol} worker thread vanished or stalled silently.")
+                        
+                    # Brutally cancel the dead task just in case it is zombied in memory
+                    if task and not task.done():
+                        task.cancel()
+                        
+                    # Resurrect the worker
+                    logger.critical(f"⚕️ WATCHDOG RESURRECTING {symbol} NODE...")
+                    new_task = asyncio.create_task(self._asset_worker_lifecycle(symbol))
+                    self.active_workers[symbol] = new_task
 
     async def _asset_worker_lifecycle(self, symbol: str):
         """Isolated background worker managing the data sync and AI routing for a single asset."""
@@ -143,19 +167,19 @@ class DistributedQuantEngine:
                 logger.info(f"🔄 SWARM NODE SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
                 
             except asyncio.TimeoutError:
-                logger.error(f"⏳ WORKER TIMEOUT: API hung on {symbol}. Forcing isolation crash and recycling task thread.")
+                logger.error(f"⏳ WORKER TIMEOUT: API hung on {symbol}. Loop will retry.")
             except Exception as e:
+                # This catches minor network blips. Fatal code errors will break the loop and be caught by the Watchdog.
                 logger.error(f"⚠️ WORKER ERROR: Exception on {symbol} loop: {e}")
                 
             # Each worker rests independently for 60 seconds before pulling fresh AI data.
-            # Because they are staggered, the API load is evenly distributed.
             await asyncio.sleep(60)
 
     # ==========================================
     # THREAD 2: FAST MICROSTRUCTURE PIPELINE
     # ==========================================
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
-        """Microsecond-Scale Order Book Evaluator processing all 15 active nodes simultaneously."""
+        """Microsecond-Scale Order Book Evaluator processing all active nodes simultaneously."""
         symbol = depth_data.get("s")
         if symbol not in self.asset_basket:
             return
@@ -182,7 +206,6 @@ class DistributedQuantEngine:
             elif z_obi <= -0.2:
                 trade_direction = "SELL"
         else:
-            # Strict Institutional Execution Configuration applied to the specific symbol
             regime = self.macro_regimes.get(symbol, "HOLD")
             if regime == "BUY" and z_obi >= 2.0:
                 trade_direction = "BUY"  
@@ -305,10 +328,20 @@ class DistributedQuantEngine:
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
             
-            # Note: We do NOT need to restart the macro workers manually. The next time they loop, 
-            # they will fail their check against the new active basket list and die off gracefully,
-            # while we spawn a fresh batch for the new coins. We handle that below.
-            asyncio.create_task(self.run_macro_regime_loop())
+            # Instead of manually triggering the macro loop, we let the Immortal Watchdog
+            # cleanly kill workers that are no longer in the basket and spawn new ones naturally.
+            for old_symbol in list(self.active_workers.keys()):
+                if old_symbol not in self.asset_basket:
+                    logger.info(f"♻️ Retiring old node: {old_symbol}")
+                    self.active_workers[old_symbol].cancel()
+                    del self.active_workers[old_symbol]
+                    
+            for new_symbol in self.asset_basket:
+                if new_symbol not in self.active_workers:
+                    logger.info(f"🌱 Spawning new node: {new_symbol}")
+                    task = asyncio.create_task(self._asset_worker_lifecycle(new_symbol))
+                    self.active_workers[new_symbol] = task
+            
             self.stream_restart_event.set()
 
     # ==========================================
@@ -326,18 +359,11 @@ class DistributedQuantEngine:
                 kline_callback=self.handle_incoming_kline_update
             )
             
-            # Execute multiplexed streaming configuration concurrently
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
-            
-            # Force structural execution pause until satellite thread triggers the reload flag
             await self.stream_restart_event.wait()
-            
-            # Gracefully cancel tasks and reset event registers
             stream_task.cancel()
             self.stream_restart_event.clear()
             logger.info("♻️ Structural data multiplexers systematically torn down to process hot-universe mutation.")
-            
-            # Brief execution block to ensure clear task clean up before recreation loop triggers
             await asyncio.sleep(2)
 
     # ==========================================
@@ -350,10 +376,8 @@ class DistributedQuantEngine:
             confidence = self.macro_confidences.get(symbol, 0.0)
             atr = self.current_atrs.get(symbol, current_price * 0.0045)
             
-            # Commit decision state to the memory bank for FSM tracking
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
             
-            # --- FSM GUARDRAIL LOCATION ---
             if not self.test_mode and not self.fsm.can_execute_trades:
                 logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 return
@@ -377,14 +401,12 @@ class DistributedQuantEngine:
                 logger.warning(f"Execution canceled for {symbol}. Variance-adjusted Kelly criteria not met.")
                 return
 
-            # --- GLOBAL PORTFOLIO EXPOSURE CHECK ---
             if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
                 logger.warning(f"Swarm global execution blocked. Portfolio cannot support additional exposure for {symbol}.")
                 return
 
             logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
             
-            # --- DYNAMIC LEVERAGE APPLICATION ---
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             
@@ -392,7 +414,6 @@ class DistributedQuantEngine:
                 logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on {symbol}.")
                 return
             
-            # Send the execution down to the Smart Order Router
             success = await self.sor.execute_iceberg_block(
                 symbol=symbol,
                 direction=direction,
@@ -401,7 +422,6 @@ class DistributedQuantEngine:
             )
             
             if success:
-                # Tell the Central Banker (Risk Vault) to update the global ledger
                 self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
                 
                 alert_text = (
@@ -423,13 +443,11 @@ class DistributedQuantEngine:
     async def run_engine_forever(self):
         logger.critical("LAUNCHING DISTRIBUTED QUANT SWARM DAEMON DEPLOYMENTS...")
         
-        # 1. Synchronously execute initial Global Satellite boot scan before initializing system processes
         logger.info("🌍 Booting up Global Satellite Radar to execute asset tracking optimization matrix...")
         boot_basket = await self.executor.get_top_volatile_assets(limit=15, min_turnover=50_000_000)
         
         if boot_basket and len(boot_basket) >= 5:
             self.asset_basket = boot_basket
-            # Pre-allocate dictionary space for all symbols discovered during boot sequence
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
@@ -446,7 +464,6 @@ class DistributedQuantEngine:
             "SUCCESS"
         )
         
-        # 2. Concurrently execute infinite background threads
         await asyncio.gather(
             self.run_macro_regime_loop(),
             self.run_universe_refresher(),
