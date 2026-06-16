@@ -58,7 +58,7 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
         self.feature_engine = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
-        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.03, max_single_position_risk_pct=0.02)
+        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.10, max_single_position_risk_pct=0.02)
         
         # 2. External Service Interfaces
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
@@ -67,7 +67,6 @@ class DistributedQuantEngine:
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
         # 3. Execution & SOR Integration
-        # Ensure testnet=False to route directly to Bybit's live liquidity pools
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
         
@@ -209,7 +208,6 @@ class DistributedQuantEngine:
         
         volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
 
-        # Boundary break check (Restored to 2.5 institutional thresholds)
         if (volume_multiplier >= 2.5 or volatility_z >= 2.5) and symbol != self.active_target:
             old_target = self.active_target
             self.active_target = symbol
@@ -255,32 +253,41 @@ class DistributedQuantEngine:
         try:
             signal_id = str(uuid.uuid4())
             
-            # Commit decision state to the memory bank for later FSM evaluation
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, self.macro_confidence)
             
             if self.test_mode:
                 logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed to database row -> ID: {signal_id[:8]}... | Dir: {direction} | Price: {current_price}")
                 return 
 
-            # Live API logic path
             balance = await self.executor.get_wallet_balance_usdt()
             if not self.risk_vault.evaluate_portfolio_safety(balance):
                 logger.warning("Execution blocked by institutional portfolio draw-down circuits.")
                 return
 
+            # Note the addition of `ai_confidence=self.macro_confidence` below
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance,
                 win_rate=self.historical_win_rate,
                 win_loss_ratio=self.historical_win_loss_ratio,
                 asset_volatility_atr=self.current_atr,
-                current_price=current_price
+                current_price=current_price,
+                ai_confidence=self.macro_confidence 
             )
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
                 logger.warning("Execution canceled. Variance-adjusted Kelly criteria not met.")
                 return
 
-            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Asset: {self.active_target} | Size: {risk_matrix['size']} Units.")
+            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Asset: {self.active_target} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
+            
+            # --- DYNAMIC LEVERAGE APPLICATION ---
+            target_leverage = risk_matrix.get("recommended_leverage", 1)
+            leverage_success = await self.executor.adjust_leverage(self.active_target, target_leverage)
+            
+            if not leverage_success:
+                logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on Bybit.")
+                return
+            # ------------------------------------
             
             success = await self.sor.execute_iceberg_block(
                 symbol=self.active_target,
@@ -295,7 +302,8 @@ class DistributedQuantEngine:
                     f"• Instrument Target: {self.active_target}\n"
                     f"• Action Basis: {direction}\n"
                     f"• AI Macro Confidence: {self.macro_confidence:.2%}\n"
-                    f"• Capital Allocation Value: ${risk_matrix['allocated_value_usdt']} USDT"
+                    f"• Leverage Applied: {target_leverage}x\n"
+                    f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT"
                 )
                 asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
 
@@ -326,11 +334,9 @@ class DistributedQuantEngine:
         )
 
 if __name__ == "__main__":
-    # 1. Start the invisible web server in the background
     from keep_alive import keep_alive
     keep_alive()
     
-    # 2. Boot the Quant Engine
     engine = DistributedQuantEngine()
     try:
         asyncio.run(engine.run_engine_forever())

@@ -33,8 +33,11 @@ class BybitUnifiedExecutor:
             logger.error(f"Failed to fetch Bybit wallet balance metrics: {e}")
             return 0.0
 
-    async def adjust_leverage(self, symbol: str, leverage: int):
-        """Safely modifies isolated/cross leverage thresholds before order dispatch."""
+    async def adjust_leverage(self, symbol: str, leverage: int) -> bool:
+        """
+        Safely modifies isolated/cross leverage thresholds before order dispatch.
+        Returns True if successful or if leverage is already set to target.
+        """
         try:
             await asyncio.to_thread(
                 self.client.set_leverage,
@@ -43,19 +46,25 @@ class BybitUnifiedExecutor:
                 buyLeverage=str(leverage),
                 sellLeverage=str(leverage)
             )
-            logger.info(f"Leverage configuration successfully synchronized to {leverage}x for {symbol}.")
+            logger.info(f"⚙️ AUTO-SCALED LEVERAGE: {symbol} is now set to {leverage}x")
+            return True
         except Exception as e:
-            # Capture and suppress 'Leverage not modified' API error codes (110043)
-            if "not modified" not in str(e):
-                logger.error(f"Failed to synchronize leverage matrix: {e}")
+            error_msg = str(e)
+            # Capture Bybit API error code 110043 ('Leverage not modified') 
+            # to avoid blocking execution for redundant updates.
+            if "110043" in error_msg or "not modified" in error_msg.lower():
+                logger.debug(f"Leverage for {symbol} is already safely configured at {leverage}x.")
+                return True
+                
+            logger.error(f"❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
+            return False
 
     async def dispatch_market_order(self, symbol: str, direction: str, qty: float, tp: float, sl: float) -> str:
         """Signs and executes automated market orders with bracketed protection constraints."""
         side = "Buy" if direction == "BUY" else "Sell"
         
         try:
-            # Set target leverage boundaries before entering the market
-            # Execution params must match string schemas for the V5 specification
+            # Order payload parameters matching string schemas for the V5 specification
             order_payload = await asyncio.to_thread(
                 self.client.place_order,
                 category="linear",
@@ -70,7 +79,7 @@ class BybitUnifiedExecutor:
             )
             
             order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
-            logger.critical(f"ORDER DISPATCHED SUCCESSFUL // ID: {order_id} | Side: {side} | Qty: {qty}")
+            logger.critical(f"🚀 ORDER DISPATCHED SUCCESSFUL // ID: {order_id} | Side: {side} | Qty: {qty}")
             return order_id
             
         except Exception as e:
