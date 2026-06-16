@@ -45,14 +45,15 @@ class DistributedQuantEngine:
         else:
             logger.critical("🟢 SYSTEM INITIALIZED IN LIVE PRODUCTION MODE. CAPITAL DEPLOYMENT ARMED.")
         
-        # Operational parameters - Upgraded to handle a multi-asset basket matrix
-        raw_basket = os.getenv("TRADING_BASKET", "DOGEUSDT,XRPUSDT,ADAUSDT,SOLUSDT")
-        self.asset_basket = [symbol.strip() for symbol in raw_basket.split(",") if symbol.strip()]
-        
-        # This pointer targets the current high-alpha asset under execution
-        self.active_target = self.asset_basket[0]
+        # Operational parameters - Hardcoded and env-dependent asset strings DELETED.
+        # Initialized with safe fallback matrices; the satellite boot process will overwrite this dynamically.
+        self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        self.active_target: str = self.asset_basket[0]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.macro_interval = int(os.getenv("MACRO_UPDATE_INTERVAL_SECONDS", "300"))
+        
+        # Dynamic Stream Management Flags
+        self.stream_restart_event = asyncio.Event()
         
         # 1. State & Feature Engines
         self.memory = MemoryBank()
@@ -78,7 +79,7 @@ class DistributedQuantEngine:
         self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
 
         # Internal memory matrix for Thread 3 Screener
-        self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+        self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
 
         # Baseline stats for Kelly formulation
         self.historical_win_rate = 0.58
@@ -180,6 +181,10 @@ class DistributedQuantEngine:
         current_price = float(price_str)
         current_volume = float(volume_str)
 
+        # Secure initialization guard for dynamic race conditions
+        if symbol not in self.screener_memory:
+            self.screener_memory[symbol] = {"prices": [], "volumes": []}
+
         history = self.screener_memory[symbol]
         history["prices"].append(current_price)
         history["volumes"].append(current_volume)
@@ -241,6 +246,73 @@ class DistributedQuantEngine:
             close_p=float(candle.get("close", 0)),
             volume=float(candle.get("volume", 0))
         )
+
+    # ==========================================
+    # THREAD 5: THE GLOBAL SATELLITE RADAR
+    # ==========================================
+    async def run_universe_refresher(self):
+        """Autonomous 4-Hour Loop executing quantitative global analysis to map out fresh alpha vectors."""
+        while True:
+            await asyncio.sleep(14400) # Sleep interval mapping strictly to 4 hours
+            
+            logger.info("🌍 GLOBAL SATELLITE SCAN INITIATED. Querying Bybit endpoints for volatility targets...")
+            new_basket = await self.executor.get_top_volatile_assets(limit=15, min_turnover=50_000_000)
+            
+            if len(new_basket) < 5:
+                logger.warning("Dynamic satellite scan returned insufficient asset velocity metrics. Maintaining current tracking universe.")
+                continue
+                
+            self.asset_basket = new_basket
+            
+            # Hot Swap guard if our primary instrument gets dropped from the global Top 15 threshold
+            if self.active_target not in self.asset_basket:
+                old_target = self.active_target
+                self.active_target = self.asset_basket[0]
+                self.feature_engine = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
+                logger.critical(f"📡 ACTIVE INSTRUMENT REJECTED BY SATELLITE. Enforcing hot-swap: {old_target} -> {self.active_target}")
+                
+            # Perform atomic matrix serialization step to transfer existing internal historical price/volume arrays safely
+            new_screener_memory = {}
+            for s in self.asset_basket:
+                if s in self.screener_memory:
+                    new_screener_memory[s] = self.screener_memory[s]
+                else:
+                    new_screener_memory[s] = {"prices": [], "volumes": []}
+            self.screener_memory = new_screener_memory
+            
+            logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
+            
+            # Trigger asynchronous signal indicating to the connection manager loop to restart sockets
+            self.stream_restart_event.set()
+
+    # ==========================================
+    # THREAD 6: HIGH-VELOCITY NETWORK CONNECTOR
+    # ==========================================
+    async def stream_manager_loop(self):
+        """Maintains low-latency network state boundaries and hot-swaps WebSocket configurations safely."""
+        while True:
+            intervals_matrix = ["1", "5", "15"]
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket,
+                intervals=intervals_matrix,
+                orderbook_callback=self.handle_incoming_orderbook_tick,
+                screener_callback=self.handle_incoming_basket_screener_update,
+                kline_callback=self.handle_incoming_kline_update
+            )
+            
+            # Execute multiplexed streaming configuration concurrently
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            # Force structural execution pause until satellite thread triggers the reload flag
+            await self.stream_restart_event.wait()
+            
+            # Gracefully cancel tasks and reset event registers
+            stream_task.cancel()
+            self.stream_restart_event.clear()
+            logger.info("♻️ Structural data multiplexers systematically torn down to process hot-universe mutation.")
+            
+            # Brief execution block to ensure clear task clean up before recreation loop triggers
+            await asyncio.sleep(2)
 
     # ==========================================
     # EXECUTION ROUTER (PORTFOLIO + SOR)
@@ -319,21 +391,28 @@ class DistributedQuantEngine:
     async def run_engine_forever(self):
         logger.critical("LAUNCHING DISTRIBUTED QUANT SWARM DAEMON DEPLOYMENTS...")
         
-        intervals_matrix = ["1", "5", "15"]
+        # 1. Synchronously execute initial Global Satellite boot scan before initializing system processes
+        logger.info("🌍 Booting up Global Satellite Radar to execute asset tracking optimization matrix...")
+        boot_basket = await self.executor.get_top_volatile_assets(limit=15, min_turnover=50_000_000)
         
-        stream_feed = HighVelocityMultiFeed(
-            basket=self.asset_basket,
-            intervals=intervals_matrix,
-            orderbook_callback=self.handle_incoming_orderbook_tick,
-            screener_callback=self.handle_incoming_basket_screener_update,
-            kline_callback=self.handle_incoming_kline_update
+        if boot_basket and len(boot_basket) >= 5:
+            self.asset_basket = boot_basket
+            self.active_target = self.asset_basket[0]
+            self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+            logger.info(f"🧬 Boot initialization successful. Matrix structured using {len(self.asset_basket)} elements.")
+        else:
+            logger.warning("Initial satellite boot lookup underperformed. Deploying default infrastructure fallback configurations.")
+        
+        await self.telegram.log_message(
+            f"🚀 *DYNAMIC SATELLITE SWARM ENGINE ONLINE*\nMapping Processing Execution Completed.\nHunting Matrix Scope:\n`{', '.join(self.asset_basket)}`", 
+            "SUCCESS"
         )
         
-        await self.telegram.log_message(f"🚀 *DYNAMIC MULTI-ASSET SWARM ONLINE*\nMonitoring Matrix: {', '.join(self.asset_basket)}", "SUCCESS")
-        
+        # 2. Concurrently execute infinite background threads
         await asyncio.gather(
             self.run_macro_regime_loop(),
-            stream_feed.initialize_multiplexed_stream()
+            self.run_universe_refresher(),
+            self.stream_manager_loop()
         )
 
 if __name__ == "__main__":
