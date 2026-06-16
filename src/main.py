@@ -37,8 +37,8 @@ class DistributedQuantEngine:
         # 🟢 LIVE PRODUCTION MODE ACTIVE
         # test_mode = False -> FSM strict accuracy rules are enforced.
         # Live Bybit API routes are fully armed. Real capital is at risk.
-        self.test_mode = False 
         # ====================================================================
+        self.test_mode = False 
         
         if self.test_mode:
             logger.critical("⚠️ SYSTEM INITIALIZED IN TEST MODE (GHOST TRADING SIMULATION ACTIVE) ⚠️")
@@ -138,10 +138,6 @@ class DistributedQuantEngine:
 
         z_obi = features["adaptive_obi_z"]
         mid_price = features["mid_price"]
-        
-        # Enforces FSM guardrails in production
-        if not self.fsm.can_execute_trades and not self.test_mode:
-            return
 
         current_time = time.time()
         if (current_time - self.last_execution_timestamp) < self.execution_cooldown_period:
@@ -253,7 +249,15 @@ class DistributedQuantEngine:
         try:
             signal_id = str(uuid.uuid4())
             
+            # Commit decision state to the memory bank for FSM tracking
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, self.macro_confidence)
+            
+            # --- FSM GUARDRAIL LOCATION ---
+            # If in live production mode but FSM hasn't completed its warmup calibration, halt live order placement.
+            if not self.test_mode and not self.fsm.can_execute_trades:
+                logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> ID: {signal_id[:8]} | Dir: {direction} | Price: {current_price}")
+                return
+            # -------------------------------
             
             if self.test_mode:
                 logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed to database row -> ID: {signal_id[:8]}... | Dir: {direction} | Price: {current_price}")
@@ -264,7 +268,6 @@ class DistributedQuantEngine:
                 logger.warning("Execution blocked by institutional portfolio draw-down circuits.")
                 return
 
-            # Note the addition of `ai_confidence=self.macro_confidence` below
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance,
                 win_rate=self.historical_win_rate,
