@@ -49,7 +49,6 @@ class DistributedQuantEngine:
         # Initialized with a safe fallback matrix; the satellite boot process will overwrite this dynamically.
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
-        self.macro_interval = int(os.getenv("MACRO_UPDATE_INTERVAL_SECONDS", "300"))
         
         # Dynamic Stream Management Flags
         self.stream_restart_event = asyncio.Event()
@@ -82,47 +81,75 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
 
     # ==========================================
-    # THREAD 1: SLOW MACRO AI PIPELINE (SWARM EDITION)
+    # THREAD 1: DECOUPLED CONCURRENT WORKER POOL
     # ==========================================
     async def run_macro_regime_loop(self):
-        """High-Density Deep Model Context Processing Task iterating across the entire active basket."""
-        while True:
-            # Create a snapshot of the basket to safely iterate while the Satellite radar might update it
-            current_basket = list(self.asset_basket)
+        """Spawns completely isolated concurrent background workers for each asset node."""
+        logger.info("Initializing Concurrent Swarm Worker Matrix...")
+        current_basket = list(self.asset_basket)
+        
+        # Spawn an isolated, non-blocking task for every individual asset
+        worker_tasks = []
+        for symbol in current_basket:
+            task = asyncio.create_task(self._asset_worker_lifecycle(symbol))
+            worker_tasks.append(task)
             
-            for symbol in current_basket:
-                try:
-                    logger.info(f"Syncing macro perspective matrix for swarm node {symbol}...")
-                    context = await self.macro_data_feed.fetch_market_snapshot(symbol, self.timeframe)
+            # Stagger worker boot sequences slightly to prevent initial API collision
+            await asyncio.sleep(1.5)
+            
+        logger.info(f"Successfully deployed {len(worker_tasks)} independent asset workers.")
+        
+        # Keep the main orchestrator alive tracking the tasks.
+        # return_exceptions=True prevents one failed node from crashing the entire swarm
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    async def _asset_worker_lifecycle(self, symbol: str):
+        """Isolated background worker managing the data sync and AI routing for a single asset."""
+        while True:
+            try:
+                # 1. Enforce strict data fetch boundaries using the Guillotine
+                context = await asyncio.wait_for(
+                    self.macro_data_feed.fetch_market_snapshot(symbol, self.timeframe),
+                    timeout=8.0
+                )
+                
+                if not context:
+                    await asyncio.sleep(30)
+                    continue
                     
-                    if context:
-                        self.current_atrs[symbol] = context["current_price"] * 0.0045 
-                        
-                        rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
-                        self.fsm.process_state_transition(rolling_acc, total_resolved)
-                        
-                        payload = {
-                            "asset": symbol,
-                            "price": context["current_price"],
-                            "atr_volatility": self.current_atrs[symbol],
-                            "macro_news_stream": context["news_context"],
-                            "rolling_system_accuracy": f"{rolling_acc:.2%}"
-                        }
-                        
-                        verdict = await self.ai_router.extract_market_verdict(payload)
-                        self.macro_regimes[symbol] = verdict.get("direction", "HOLD")
-                        self.macro_confidences[symbol] = verdict.get("confidence", 0.0)
-                        
-                        logger.info(f"🔄 SWARM NODE SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
-                        
-                except Exception as e:
-                    logger.error(f"Exception encountered inside macro intelligence thread for {symbol}: {e}")
+                # 2. Update memory matrices locally
+                self.current_atrs[symbol] = context["current_price"] * 0.0045
+                rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
+                self.fsm.process_state_transition(rolling_acc, total_resolved)
                 
-                # Brief execution yield to prevent API rate limiting from the AI/Data providers
-                await asyncio.sleep(3)
+                payload = {
+                    "asset": symbol,
+                    "price": context["current_price"],
+                    "atr_volatility": self.current_atrs[symbol],
+                    "macro_news_stream": context["news_context"],
+                    "rolling_system_accuracy": f"{rolling_acc:.2%}"
+                }
                 
-            # Rest the macro pipeline before re-evaluating the entire basket
-            await asyncio.sleep(self.macro_interval)
+                # 3. Route to NVIDIA API with hard isolated timeout limits
+                verdict = await asyncio.wait_for(
+                    self.ai_router.extract_market_verdict(payload),
+                    timeout=15.0
+                )
+                
+                # 4. State updates committed safely to shared thread memory
+                self.macro_regimes[symbol] = verdict.get("direction", "HOLD")
+                self.macro_confidences[symbol] = verdict.get("confidence", 0.0)
+                
+                logger.info(f"🔄 SWARM NODE SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                
+            except asyncio.TimeoutError:
+                logger.error(f"⏳ WORKER TIMEOUT: API hung on {symbol}. Forcing isolation crash and recycling task thread.")
+            except Exception as e:
+                logger.error(f"⚠️ WORKER ERROR: Exception on {symbol} loop: {e}")
+                
+            # Each worker rests independently for 60 seconds before pulling fresh AI data.
+            # Because they are staggered, the API load is evenly distributed.
+            await asyncio.sleep(60)
 
     # ==========================================
     # THREAD 2: FAST MICROSTRUCTURE PIPELINE
@@ -212,7 +239,6 @@ class DistributedQuantEngine:
         
         volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
 
-        # No more "Hot Swapping". The Swarm manages all assets. We simply log extreme alpha events.
         if (volume_multiplier >= 2.5 or volatility_z >= 2.5):
             logger.debug(f"📊 SWARM ALPHA ALERT // {symbol} exhibiting massive divergence. VolMult: {volume_multiplier:.2f}x | Z-Vol: {volatility_z:.2f}")
 
@@ -279,7 +305,10 @@ class DistributedQuantEngine:
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
             
-            # Trigger asynchronous signal indicating to the connection manager loop to restart sockets
+            # Note: We do NOT need to restart the macro workers manually. The next time they loop, 
+            # they will fail their check against the new active basket list and die off gracefully,
+            # while we spawn a fresh batch for the new coins. We handle that below.
+            asyncio.create_task(self.run_macro_regime_loop())
             self.stream_restart_event.set()
 
     # ==========================================
@@ -349,7 +378,7 @@ class DistributedQuantEngine:
                 return
 
             # --- GLOBAL PORTFOLIO EXPOSURE CHECK ---
-            if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt']):
+            if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
                 logger.warning(f"Swarm global execution blocked. Portfolio cannot support additional exposure for {symbol}.")
                 return
 
