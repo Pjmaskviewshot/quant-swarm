@@ -5,6 +5,7 @@ import asyncio
 import logging
 import uuid
 import traceback
+import random
 import numpy as np
 from typing import Dict, List, Any
 from dotenv import load_dotenv
@@ -172,8 +173,10 @@ class DistributedQuantEngine:
                 # This catches minor network blips. Fatal code errors will break the loop and be caught by the Watchdog.
                 logger.error(f"⚠️ WORKER ERROR: Exception on {symbol} loop: {e}")
                 
-            # Each worker rests independently for 60 seconds before pulling fresh AI data.
-            await asyncio.sleep(60)
+            # JITTERED COOLDOWN: Prevents the "Thundering Herd" API crash.
+            # Workers sleep for a random time between 45s and 75s so they desynchronize.
+            cooldown = random.uniform(45.0, 75.0)
+            await asyncio.sleep(cooldown)
 
     # ==========================================
     # THREAD 2: FAST MICROSTRUCTURE PIPELINE
