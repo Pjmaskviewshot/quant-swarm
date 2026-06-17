@@ -417,6 +417,20 @@ class DistributedQuantEngine:
     # ==========================================
     # EXECUTION ROUTER (PORTFOLIO + SOR)
     # ==========================================
+    
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str):
+        """
+        Calculates initial hard stop and phase 2 trigger boundaries.
+        """
+        if side.upper() == "BUY":
+            initial_sl = entry_price - (1.5 * atr)
+            activation_price = entry_price + (2.5 * atr)
+        else:  # SELL
+            initial_sl = entry_price + (1.5 * atr)
+            activation_price = entry_price - (2.5 * atr)
+            
+        return round(initial_sl, 4), round(activation_price, 4)
+
     async def _route_validated_execution_block(self, symbol: str, direction: str, current_price: float):
         try:
             signal_id = str(uuid.uuid4())
@@ -461,11 +475,17 @@ class DistributedQuantEngine:
                 logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on {symbol}.")
                 return
             
+            # --- DUAL-PHASED DYNAMIC BRACKET LOGIC INTEGRATION ---
+            initial_sl, activation_price = self.calculate_initial_bracket(current_price, atr, direction)
+            
             success = await self.sor.execute_iceberg_block(
                 symbol=symbol,
                 direction=direction,
                 total_qty=risk_matrix["size"],
-                current_mid_price=current_price
+                current_mid_price=current_price,
+                # Pass parameters securely down to your Bybit SOR to manage execution
+                stop_loss=initial_sl,
+                activation_price=activation_price 
             )
             
             if success:
@@ -477,7 +497,8 @@ class DistributedQuantEngine:
                     f"• Action Basis: {direction}\n"
                     f"• AI Macro Confidence: {confidence:.2%}\n"
                     f"• Leverage Applied: {target_leverage}x\n"
-                    f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT"
+                    f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
+                    f"🛡️ *Phase 1 Active*: Hard SL at {initial_sl} | Harpoon Trigger at {activation_price}"
                 )
                 asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
 
