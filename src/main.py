@@ -82,7 +82,7 @@ class DistributedQuantEngine:
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
     # ==========================================
     async def run_macro_commander(self):
-        """Batches and COMPRESSES payload data from all nodes to bypass NVIDIA token rate limits."""
+        """Batches payload data into Micro-Batches (chunks of 5) to bypass NVIDIA token limits."""
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
         
         while True:
@@ -94,42 +94,56 @@ class DistributedQuantEngine:
             batch_payload = dict(self.pending_macro_payloads)
             
             try:
-                logger.info(f"🧠 MACRO COMMANDER: Compressing and routing matrix for {len(batch_payload)} assets...")
-                
-                # Compress the JSON payload into a dense string to bypass NVIDIA token mass limits
-                compressed_matrix = ""
-                for sym, data in batch_payload.items():
-                    compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} ACC:{data['rolling_system_accuracy']} | "
-                
-                # Fetch a single global narrative context to prevent string bloat
+                # 1. Fetch a single global narrative context to prevent string bloat
                 global_news = "No significant macro shifts detected."
                 if len(batch_payload) > 0:
                     first_sym = list(batch_payload.keys())[0]
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
+
+                # 2. Slice the payload into micro-batches of 5 assets each
+                asset_list = list(batch_payload.items())
+                chunk_size = 5
+                micro_batches = [asset_list[i:i + chunk_size] for i in range(0, len(asset_list), chunk_size)]
                 
-                # Construct the final, highly compressed LLM prompt dictionary
-                llm_payload = {
-                    "GLOBAL_MACRO_CONTEXT": global_news,
-                    "QUANTITATIVE_ASSET_MATRIX": compressed_matrix
-                }
+                logger.info(f"🧠 MACRO COMMANDER: Sliced {len(asset_list)} assets into {len(micro_batches)} micro-batches to protect NVIDIA token limits.")
                 
-                verdict_matrix = await asyncio.wait_for(
-                    self.ai_router.extract_market_verdict(llm_payload),
-                    timeout=90.0 
-                )
-                
-                if isinstance(verdict_matrix, dict):
-                    for symbol, data in verdict_matrix.items():
-                        if symbol in self.asset_basket and isinstance(data, dict):
-                            self.macro_regimes[symbol] = data.get("direction", "HOLD")
-                            self.macro_confidences[symbol] = data.get("confidence", 0.0)
-                            logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                # 3. Process each micro-batch sequentially
+                for idx, chunk in enumerate(micro_batches):
+                    compressed_matrix = ""
+                    for sym, data in chunk:
+                        compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} ACC:{data['rolling_system_accuracy']} | "
+                        
+                    llm_payload = {
+                        "GLOBAL_MACRO_CONTEXT": global_news,
+                        "QUANTITATIVE_ASSET_MATRIX": compressed_matrix
+                    }
+                    
+                    try:
+                        logger.info(f"🚀 Routing Micro-Batch {idx + 1}/{len(micro_batches)} ({len(chunk)} assets)...")
+                        verdict_matrix = await asyncio.wait_for(
+                            self.ai_router.extract_market_verdict(llm_payload),
+                            timeout=45.0 
+                        )
+                        
+                        if isinstance(verdict_matrix, dict):
+                            for symbol, data in verdict_matrix.items():
+                                if symbol in self.asset_basket and isinstance(data, dict):
+                                    self.macro_regimes[symbol] = data.get("direction", "HOLD")
+                                    self.macro_confidences[symbol] = data.get("confidence", 0.0)
+                                    logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                                    
+                    except asyncio.TimeoutError:
+                        logger.error(f"⏳ COMMANDER TIMEOUT on Micro-Batch {idx + 1}.")
+                    except Exception as e:
+                        logger.error(f"⚠️ COMMANDER ERROR on Micro-Batch {idx + 1}: {e}")
+                    
+                    # Wait 15 seconds before sending the next chunk to cool down the NVIDIA endpoint
+                    if idx < len(micro_batches) - 1:
+                        await asyncio.sleep(15)
                             
-            except asyncio.TimeoutError:
-                logger.error("⏳ COMMANDER TIMEOUT: NVIDIA hung on the batch request. Retrying next minute.")
             except Exception as e:
-                logger.error(f"⚠️ COMMANDER ERROR: Failed to process batched payload: {e}")
+                logger.error(f"⚠️ COMMANDER FATAL ERROR: Failed to process payload: {e}")
 
     # ==========================================
     # THREAD 1B: THE IMMORTAL WATCHDOG
