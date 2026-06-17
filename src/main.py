@@ -61,7 +61,7 @@ class DistributedQuantEngine:
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
         
-        # 📦 BATCHING QUEUE: Holds data from the 15 workers until the Commander is ready
+        # 📦 BATCHING QUEUE: Holds data from the workers until the Commander is ready
         self.pending_macro_payloads: Dict[str, dict] = {}
         
         self.active_workers: Dict[str, asyncio.Task] = {}
@@ -82,7 +82,7 @@ class DistributedQuantEngine:
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
     # ==========================================
     async def run_macro_commander(self):
-        """Batches payload data from all 15 nodes into a SINGLE API request."""
+        """Batches and COMPRESSES payload data from all nodes to bypass NVIDIA token rate limits."""
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
         
         while True:
@@ -94,11 +94,29 @@ class DistributedQuantEngine:
             batch_payload = dict(self.pending_macro_payloads)
             
             try:
-                logger.info(f"🧠 MACRO COMMANDER: Batching {len(batch_payload)} assets into ONE single NVIDIA payload...")
+                logger.info(f"🧠 MACRO COMMANDER: Compressing and routing matrix for {len(batch_payload)} assets...")
+                
+                # Compress the JSON payload into a dense string to bypass NVIDIA token mass limits
+                compressed_matrix = ""
+                for sym, data in batch_payload.items():
+                    compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} ACC:{data['rolling_system_accuracy']} | "
+                
+                # Fetch a single global narrative context to prevent string bloat
+                global_news = "No significant macro shifts detected."
+                if len(batch_payload) > 0:
+                    first_sym = list(batch_payload.keys())[0]
+                    if "macro_news_stream" in batch_payload[first_sym]:
+                        global_news = batch_payload[first_sym]["macro_news_stream"]
+                
+                # Construct the final, highly compressed LLM prompt dictionary
+                llm_payload = {
+                    "GLOBAL_MACRO_CONTEXT": global_news,
+                    "QUANTITATIVE_ASSET_MATRIX": compressed_matrix
+                }
                 
                 verdict_matrix = await asyncio.wait_for(
-                    self.ai_router.extract_market_verdict(batch_payload),
-                    timeout=25.0 
+                    self.ai_router.extract_market_verdict(llm_payload),
+                    timeout=90.0 
                 )
                 
                 if isinstance(verdict_matrix, dict):
@@ -172,7 +190,7 @@ class DistributedQuantEngine:
                     "price": context["current_price"],
                     "atr_volatility": self.current_atrs[symbol],
                     "macro_news_stream": context["news_context"],
-                    "rolling_system_accuracy": f"{rolling_acc:.2%}"
+                    "rolling_system_accuracy": f"{rolling_acc:.2%}" # <--- RESTORED MATHEMATICAL INTEGRITY
                 }
                 
             except asyncio.TimeoutError:
