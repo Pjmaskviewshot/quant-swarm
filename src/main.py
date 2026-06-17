@@ -37,8 +37,6 @@ class DistributedQuantEngine:
         
         # ====================================================================
         # 🟢 LIVE PRODUCTION MODE ACTIVE
-        # test_mode = False -> FSM strict accuracy rules are enforced.
-        # Live Bybit API routes are fully armed. Real capital is at risk.
         # ====================================================================
         self.test_mode = False 
         
@@ -47,19 +45,15 @@ class DistributedQuantEngine:
         else:
             logger.critical("🟢 SYSTEM INITIALIZED IN LIVE PRODUCTION MODE. CAPITAL DEPLOYMENT ARMED.")
         
-        # Operational parameters
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         
-        # Dynamic Stream Management Flags
         self.stream_restart_event = asyncio.Event()
         
-        # 1. State Engines & Global Risk Controller
         self.memory = MemoryBank()
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.10, max_single_position_risk_pct=0.02)
         
-        # 2. Swarm Intelligence Matrices
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
@@ -67,72 +61,98 @@ class DistributedQuantEngine:
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
         
-        # 🛡️ THE WATCHDOG REGISTRY
+        # 📦 BATCHING QUEUE: Holds data from the 15 workers until the Commander is ready
+        self.pending_macro_payloads: Dict[str, dict] = {}
+        
         self.active_workers: Dict[str, asyncio.Task] = {}
         
         self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
 
-        # 3. External Service Interfaces
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
         self.ai_router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=os.getenv("DEEPSEEK_API_KEY"))
         self.macro_data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY"))
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
-        # 4. Execution & SOR Integration
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
 
     # ==========================================
-    # THREAD 1: THE IMMORTAL WATCHDOG
+    # THREAD 1A: THE MACRO COMMANDER (BATCHER)
+    # ==========================================
+    async def run_macro_commander(self):
+        """Batches payload data from all 15 nodes into a SINGLE API request."""
+        logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
+        
+        while True:
+            await asyncio.sleep(60) 
+            
+            if not self.pending_macro_payloads:
+                continue
+                
+            batch_payload = dict(self.pending_macro_payloads)
+            
+            try:
+                logger.info(f"🧠 MACRO COMMANDER: Batching {len(batch_payload)} assets into ONE single NVIDIA payload...")
+                
+                verdict_matrix = await asyncio.wait_for(
+                    self.ai_router.extract_market_verdict(batch_payload),
+                    timeout=25.0 
+                )
+                
+                if isinstance(verdict_matrix, dict):
+                    for symbol, data in verdict_matrix.items():
+                        if symbol in self.asset_basket and isinstance(data, dict):
+                            self.macro_regimes[symbol] = data.get("direction", "HOLD")
+                            self.macro_confidences[symbol] = data.get("confidence", 0.0)
+                            logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                            
+            except asyncio.TimeoutError:
+                logger.error("⏳ COMMANDER TIMEOUT: NVIDIA hung on the batch request. Retrying next minute.")
+            except Exception as e:
+                logger.error(f"⚠️ COMMANDER ERROR: Failed to process batched payload: {e}")
+
+    # ==========================================
+    # THREAD 1B: THE IMMORTAL WATCHDOG
     # ==========================================
     async def run_macro_regime_loop(self):
-        """Spawns and rigorously monitors independent asset workers. Resurrects dead threads instantly."""
-        logger.critical("🐺 IMMORTAL WATCHDOG ONLINE. Deploying Swarm Matrix...")
+        """Monitors the data gatherers and resurrects them if they die."""
+        logger.critical("🐺 IMMORTAL WATCHDOG ONLINE. Deploying Swarm Data Gatherers...")
         
-        # 1. Initial Deployment
         for symbol in self.asset_basket:
-            task = asyncio.create_task(self._asset_worker_lifecycle(symbol))
+            task = asyncio.create_task(self._asset_data_gatherer_lifecycle(symbol))
             self.active_workers[symbol] = task
-            await asyncio.sleep(1.5) # Stagger boot sequence to avoid immediate rate limits
+            await asyncio.sleep(0.5) 
             
         logger.info(f"Successfully deployed {len(self.active_workers)} independent asset workers.")
         
-        # 2. The Infinite Monitoring Loop
         while True:
-            # Check the health of every worker every 60 seconds
             await asyncio.sleep(60)
             
             for symbol in list(self.asset_basket):
                 task = self.active_workers.get(symbol)
                 
-                # If the task doesn't exist, is done, or threw an exception, it is DEAD.
                 if task is None or task.done():
-                    # Diagnostic Telemetry: Print exactly WHY it died
                     if task and task.done() and task.exception():
                         exc = task.exception()
                         logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception:")
-                        # Extracts the full Python traceback (line number and error type)
                         traceback_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
                         logger.error(f"\n{traceback_str}")
                     else:
                         logger.error(f"☠️ WATCHDOG ALERT: {symbol} worker thread vanished or stalled silently.")
                         
-                    # Brutally cancel the dead task just in case it is zombied in memory
                     if task and not task.done():
                         task.cancel()
                         
-                    # Resurrect the worker
                     logger.critical(f"⚕️ WATCHDOG RESURRECTING {symbol} NODE...")
-                    new_task = asyncio.create_task(self._asset_worker_lifecycle(symbol))
+                    new_task = asyncio.create_task(self._asset_data_gatherer_lifecycle(symbol))
                     self.active_workers[symbol] = new_task
 
-    async def _asset_worker_lifecycle(self, symbol: str):
-        """Isolated background worker managing the data sync and AI routing for a single asset."""
+    async def _asset_data_gatherer_lifecycle(self, symbol: str):
+        """Workers NO LONGER TALK TO THE AI. They just fetch data and put it in the Commander's queue."""
         while True:
             try:
-                # 1. Enforce strict data fetch boundaries using the Guillotine
                 context = await asyncio.wait_for(
                     self.macro_data_feed.fetch_market_snapshot(symbol, self.timeframe),
                     timeout=8.0
@@ -142,12 +162,12 @@ class DistributedQuantEngine:
                     await asyncio.sleep(30)
                     continue
                     
-                # 2. Update memory matrices locally
                 self.current_atrs[symbol] = context["current_price"] * 0.0045
                 rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
                 self.fsm.process_state_transition(rolling_acc, total_resolved)
                 
-                payload = {
+                # Drop data into the BATCH QUEUE
+                self.pending_macro_payloads[symbol] = {
                     "asset": symbol,
                     "price": context["current_price"],
                     "atr_volatility": self.current_atrs[symbol],
@@ -155,26 +175,11 @@ class DistributedQuantEngine:
                     "rolling_system_accuracy": f"{rolling_acc:.2%}"
                 }
                 
-                # 3. Route to NVIDIA API with hard isolated timeout limits
-                verdict = await asyncio.wait_for(
-                    self.ai_router.extract_market_verdict(payload),
-                    timeout=15.0
-                )
-                
-                # 4. State updates committed safely to shared thread memory
-                self.macro_regimes[symbol] = verdict.get("direction", "HOLD")
-                self.macro_confidences[symbol] = verdict.get("confidence", 0.0)
-                
-                logger.info(f"🔄 SWARM NODE SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
-                
             except asyncio.TimeoutError:
-                logger.error(f"⏳ WORKER TIMEOUT: API hung on {symbol}. Loop will retry.")
+                logger.error(f"⏳ DATA WORKER TIMEOUT: API hung on {symbol}. Loop will retry.")
             except Exception as e:
-                # This catches minor network blips. Fatal code errors will break the loop and be caught by the Watchdog.
-                logger.error(f"⚠️ WORKER ERROR: Exception on {symbol} loop: {e}")
+                logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
-            # JITTERED COOLDOWN: Prevents the "Thundering Herd" API crash.
-            # Workers sleep for a random time between 45s and 75s so they desynchronize.
             cooldown = random.uniform(45.0, 75.0)
             await asyncio.sleep(cooldown)
 
@@ -182,7 +187,6 @@ class DistributedQuantEngine:
     # THREAD 2: FAST MICROSTRUCTURE PIPELINE
     # ==========================================
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
-        """Microsecond-Scale Order Book Evaluator processing all active nodes simultaneously."""
         symbol = depth_data.get("s")
         if symbol not in self.asset_basket:
             return
@@ -224,7 +228,6 @@ class DistributedQuantEngine:
     # THREAD 3: LIGHTWEIGHT BASKET TRACKER
     # ==========================================
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        """Monitors the lightweight public ticker pipeline to log internal alpha state."""
         symbol = data.get("symbol")
         if not symbol or symbol not in self.asset_basket:
             return
@@ -272,7 +275,6 @@ class DistributedQuantEngine:
     # THREAD 4: KLINE AGGREGATION PIPELINE
     # ==========================================
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
-        """Updates multi-timeframe analytics arrays dynamically for the relevant Swarm Node."""
         symbol = data.get("symbol")
         if symbol not in self.asset_basket:
             return
@@ -293,9 +295,8 @@ class DistributedQuantEngine:
     # THREAD 5: THE GLOBAL SATELLITE RADAR
     # ==========================================
     async def run_universe_refresher(self):
-        """Autonomous 4-Hour Loop executing quantitative global analysis to map out fresh alpha vectors."""
         while True:
-            await asyncio.sleep(14400) # Sleep interval mapping strictly to 4 hours
+            await asyncio.sleep(14400) 
             
             logger.info("🌍 GLOBAL SATELLITE SCAN INITIATED. Querying Bybit endpoints for volatility targets...")
             new_basket = await self.executor.get_top_volatile_assets(limit=15, min_turnover=50_000_000)
@@ -306,7 +307,6 @@ class DistributedQuantEngine:
                 
             self.asset_basket = new_basket
             
-            # Rebuild Swarm Matrices atomically to maintain safety without memory leaks
             new_feature_engines = {}
             new_screener_memory = {}
             new_macro_regimes = {}
@@ -331,18 +331,17 @@ class DistributedQuantEngine:
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
             
-            # Instead of manually triggering the macro loop, we let the Immortal Watchdog
-            # cleanly kill workers that are no longer in the basket and spawn new ones naturally.
             for old_symbol in list(self.active_workers.keys()):
                 if old_symbol not in self.asset_basket:
                     logger.info(f"♻️ Retiring old node: {old_symbol}")
                     self.active_workers[old_symbol].cancel()
                     del self.active_workers[old_symbol]
+                    self.pending_macro_payloads.pop(old_symbol, None) # Remove from batch queue
                     
             for new_symbol in self.asset_basket:
                 if new_symbol not in self.active_workers:
                     logger.info(f"🌱 Spawning new node: {new_symbol}")
-                    task = asyncio.create_task(self._asset_worker_lifecycle(new_symbol))
+                    task = asyncio.create_task(self._asset_data_gatherer_lifecycle(new_symbol))
                     self.active_workers[new_symbol] = task
             
             self.stream_restart_event.set()
@@ -351,7 +350,6 @@ class DistributedQuantEngine:
     # THREAD 6: HIGH-VELOCITY NETWORK CONNECTOR
     # ==========================================
     async def stream_manager_loop(self):
-        """Maintains low-latency network state boundaries and hot-swaps WebSocket configurations safely."""
         while True:
             intervals_matrix = ["1", "5", "15"]
             stream_feed = HighVelocityMultiFeed(
@@ -370,10 +368,24 @@ class DistributedQuantEngine:
             await asyncio.sleep(2)
 
     # ==========================================
+    # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS
+    # ==========================================
+    async def run_system_heartbeat(self):
+        """Prints a periodic health check to prove the background processes are alive and tracking uptime."""
+        start_time = time.time()
+        
+        while True:
+            await asyncio.sleep(60) # Pulse every 1 minute
+            
+            uptime_seconds = time.time() - start_time
+            uptime_hours = uptime_seconds / 3600
+            
+            logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
+
+    # ==========================================
     # EXECUTION ROUTER (PORTFOLIO + SOR)
     # ==========================================
     async def _route_validated_execution_block(self, symbol: str, direction: str, current_price: float):
-        """The Central Nervous System for the Swarm. Validates global risk before executing any node."""
         try:
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
@@ -468,9 +480,11 @@ class DistributedQuantEngine:
         )
         
         await asyncio.gather(
-            self.run_macro_regime_loop(),
+            self.run_macro_commander(),        # <-- The new AI Request Batcher
+            self.run_macro_regime_loop(),      # <-- The Watchdog and Gatherers
             self.run_universe_refresher(),
-            self.stream_manager_loop()
+            self.stream_manager_loop(),
+            self.run_system_heartbeat()        # <-- Uptime Tracking
         )
 
 if __name__ == "__main__":
