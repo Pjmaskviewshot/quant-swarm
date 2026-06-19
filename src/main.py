@@ -36,9 +36,9 @@ class DistributedQuantEngine:
         load_dotenv()
         
         # ====================================================================
-        # 🧪 TEST MODE ACTIVE (SIMULATION ONLY)
+        # 🟢 LIVE PRODUCTION MODE ACTIVE
         # ====================================================================
-        self.test_mode = True 
+        self.test_mode = False 
         
         if self.test_mode:
             logger.critical("⚠️ SYSTEM INITIALIZED IN TEST MODE (GHOST TRADING SIMULATION ACTIVE) ⚠️")
