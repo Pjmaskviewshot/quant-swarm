@@ -145,6 +145,8 @@ class BybitUnifiedExecutor:
         
         try:
             # Order payload parameters matching string schemas for the V5 specification
+            # CRITICAL PARAMETER: positionIdx=0 explicitly maps order execution to One-Way Mode 
+            # to prevent conflict matching structures on Unified Accounts set up for Hedging.
             order_payload = await asyncio.to_thread(
                 self.client.place_order,
                 category="linear",
@@ -155,7 +157,8 @@ class BybitUnifiedExecutor:
                 takeProfit=str(tp),
                 stopLoss=str(sl),
                 tpslMode="Full",
-                timeInForce="IOC"
+                timeInForce="IOC",
+                positionIdx=0  # Fixed: Resolves exchange rejection error 10001
             )
             
             order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
