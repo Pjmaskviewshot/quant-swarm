@@ -1,5 +1,6 @@
 import json
 import logging
+import httpx
 from typing import Dict, Any, List
 from openai import AsyncOpenAI
 
@@ -11,12 +12,21 @@ class ResilientAIRouter:
         # nv_keys is kept in the parameters so main.py doesn't crash, but it is ignored.
         self.deepseek_key = deepseek_key
         
-        # Instantiate Native DeepSeek Async Client directly
-        self.client = AsyncOpenAI(
-            base_url="[https://api.deepseek.com](https://api.deepseek.com)",
-            api_key=self.deepseek_key
+        # 🛡️ HARDENED NETWORK CONFIGURATION FOR CLOUD DEPLOYMENT
+        custom_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(45.0, connect=15.0),
+            http2=False,  # CRITICAL: Disabling HTTP/2 prevents shared-cloud connection drops
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         )
-        logger.info("✅ Native DeepSeek V4 Router initialized (NVIDIA bypassed for maximum speed)")
+        
+        # Instantiate Native DeepSeek Async Client directly with custom HTTP client
+        self.client = AsyncOpenAI(
+            base_url="https://api.deepseek.com/v1",
+            api_key=self.deepseek_key,
+            max_retries=5,  # Automatically retry 5 times on network blips before failing
+            http_client=custom_http_client
+        )
+        logger.info("✅ Native DeepSeek V4 Router initialized (Hardened Network Mode Active)")
 
     def _clean_json_output(self, raw_text: str) -> str:
         """Strips markdown formatting if the LLM wraps the JSON in code blocks."""
@@ -28,7 +38,7 @@ class ResilientAIRouter:
 
     async def extract_market_verdict(self, batched_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Orchestrates structured intent extraction directly via DeepSeek V4 Flash.
+        Orchestrates structured intent extraction directly via DeepSeek V4.
         Processes a BATCHED payload of multiple assets in a single ultra-fast API call.
         """
         prompt = f"""
@@ -56,9 +66,9 @@ class ResilientAIRouter:
         ]
 
         try:
-            # Direct routing to native DeepSeek V4 Flash for lowest possible latency
+            # Direct routing to native DeepSeek for lowest possible latency
             response = await self.client.chat.completions.create(
-                model="deepseek-v4-flash",
+                model="deepseek-chat",
                 messages=messages,
                 temperature=0.1,  # CRITICAL: Kept low for deterministic JSON stability
                 top_p=0.95,
