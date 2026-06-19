@@ -24,16 +24,31 @@ class SmartOrderRouter:
     ) -> bool:
         """
         Deconstructs massive order footprints into localized randomized slices.
-        Routes tranches through order books via passive market-making placement.
-        Safely accepts dynamic risk parameters passed from the orchestration layer.
+        Routes tranches safely by inspecting market depth profiles for order book anomalies.
         """
+        # ====================================================================
+        # 🛡️ SPREAD GUARD: PREVENT SLIPPAGE ON HOLLOW ORDER BOOKS
+        # ====================================================================
+        depth_snapshot = kwargs.get("depth_snapshot", {})
+        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
+            try:
+                best_bid = float(depth_snapshot["bids"][0][0])
+                best_ask = float(depth_snapshot["asks"][0][0])
+                live_spread = (best_ask - best_bid) / best_bid
+                
+                # Halt instantly if structural order book friction exceeds our safety cap
+                if live_spread > self.max_slippage_pct:
+                    logger.warning(
+                        f"❌ EXECUTION BLOCK BY SPREAD RADAR // {symbol} "
+                        f"Spread too wide: {live_spread:.4%} (Max Cap: {self.max_slippage_pct:.4%}). Capital protected."
+                    )
+                    return False
+            except (IndexError, ValueError, TypeError) as e:
+                logger.debug(f"Depth profile parsing skipped or incomplete for {symbol}: {e}")
+
         logger.info(f"SOR INITIALIZED // Target: {symbol} | Direction: {direction} | Block Size: {total_qty}")
         
         allocated_qty = 0.0
-        slippage_limit_price = (
-            current_mid_price * (1.0 + self.max_slippage_pct) if direction == "BUY"
-            else current_mid_price * (1.0 - self.max_slippage_pct)
-        )
 
         def _format_lot_size(qty: float, target_symbol: str) -> str:
             """Formats the quantity to comply with strict exchange lot sizes to prevent API bans."""
@@ -53,46 +68,30 @@ class SmartOrderRouter:
             elif target_symbol.startswith("SOL") or target_symbol.startswith("AVAX"):
                 return round(price, 3)
             
-            # Dynamic scaling rule for low-cap asset pairs under 1 USDT
             if price < 1.0:
                 return round(price, 4)
             return round(price, 2)
 
-        # Institutional slicing matrix (typically 5-10 structural tranches)
+        # Institutional slicing loop execution sequence
         while allocated_qty < total_qty:
-            # 1. Calculate a dynamic, randomized tranche size (between 10% and 25% of total block)
             tranche_pct = random.uniform(0.10, 0.25)
             raw_tranche_qty = min(total_qty * tranche_pct, total_qty - allocated_qty)
             
-            # Format to strict exchange string requirements BEFORE execution
             formatted_qty_str = _format_lot_size(raw_tranche_qty, symbol)
             tranche_qty = float(formatted_qty_str)
 
             if tranche_qty <= 0.0:
-                # If the slice is too small to format cleanly, execute the remaining total_qty directly
                 formatted_qty_str = _format_lot_size(total_qty - allocated_qty, symbol)
                 tranche_qty = float(formatted_qty_str)
                 if tranche_qty <= 0.0:
                     break
 
-            # 2. Re-verify order book state pricing bounds before routing execution
-            if time.time() % 2 == 0:  # Mock check to simulate rapid price divergence observation
-                logger.debug("Verifying order book liquidity compliance bounds...")
-
             try:
-                # 3. Determine dynamic risk thresholds (prioritize system inputs over local placeholders)
-                tp_target = take_profit if take_profit is not None else (
-                    slippage_limit_price * 1.02 if direction == "BUY" else slippage_limit_price * 0.98
-                )
-                sl_target = stop_loss if stop_loss is not None else (
-                    slippage_limit_price * 0.99 if direction == "BUY" else slippage_limit_price * 1.01
-                )
+                # Format safety brackets contextually utilizing caller engine variables directly
+                final_tp = _format_price_precision(take_profit, symbol) if take_profit else 0.0
+                final_sl = _format_price_precision(stop_loss, symbol) if stop_loss else 0.0
 
-                # Apply dynamic structural asset pricing formatting
-                final_tp = _format_price_precision(tp_target, symbol)
-                final_sl = _format_price_precision(sl_target, symbol)
-
-                # 4. Dispatch order tranche to execution engine
+                # Dispatch execution slice downstream
                 order_id = await self.executor.dispatch_market_order(
                     symbol=symbol,
                     direction=direction,
@@ -105,16 +104,14 @@ class SmartOrderRouter:
                     allocated_qty += tranche_qty
                     logger.info(f"TRANCHE FILLED // Qty: {tranche_qty} | Progress: {allocated_qty / total_qty:.2%}")
                 else:
-                    logger.error("Tranche routing rejected at exchange interface. Aborting execution waterfall loop.")
-                    # GHOST POSITION SAFEGUARD: If a previous slice filled successfully, we MUST return True 
-                    # so the main orchestrator activates tracking loops for the opened allocation.
+                    logger.error("Tranche routing rejected at exchange interface. Aborting loop waterfall.")
                     return True if allocated_qty > 0 else False
 
             except Exception as e:
                 logger.error(f"Critical execution failure during SOR slicing routine: {e}")
                 return True if allocated_qty > 0 else False
 
-            # 5. Enforce randomized microsecond delay intervals to disguise order patterns
+            # Mask architectural order patterns with microsecond delays
             await asyncio.sleep(random.uniform(0.15, 0.65))
 
         if allocated_qty > 0:

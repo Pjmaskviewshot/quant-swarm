@@ -200,6 +200,7 @@ class DistributedQuantEngine:
                 if resolved_count > 0:
                     logger.info(f"✅ Resolved {resolved_count} historical ghost trades for {symbol}.")
 
+                # Feature Engine calculation (ATR dynamic fetch later used in Signal Lifecycle)
                 self.current_atrs[symbol] = current_price * 0.0045
                 
                 # Compute rolling accuracy with actual resolved data
@@ -463,30 +464,51 @@ class DistributedQuantEngine:
     # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
     
-    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str):
-        """Generates statistical boundaries for automated exit routing."""
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int):
+        """
+        ⚡ UPGRADE 3: ACCUMULATE TAKER FEES TO DEFEND AGAINST NET DEGRADATION
+        Computes hard boundary price variables offset dynamically to clean out exchange drag.
+        """
+        # Bybit Linear Perpetual fee model = ~0.055% taker on entry and exit
+        fee_drag_factor = 0.00055 * 2 * leverage
+        fee_buffer = entry_price * fee_drag_factor
+        
+        # Deploy institutional asymmetric multiplication (1.5x SL vs 2.5x TP)
         if side.upper() == "BUY":
             initial_sl = entry_price - (1.5 * atr)
-            activation_price = entry_price + (2.5 * atr)
+            # Add the fee offset to ensure the net payout fulfills target metrics
+            target_tp = entry_price + (2.5 * atr) + fee_buffer
         else:  
             initial_sl = entry_price + (1.5 * atr)
-            activation_price = entry_price - (2.5 * atr)
+            target_tp = entry_price - (2.5 * atr) - fee_buffer
             
-        return round(initial_sl, 4), round(activation_price, 4)
+        return round(initial_sl, 4), round(target_tp, 4)
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float):
         """
         Manages the complete lifecycle of a trading signal.
-        Handles risk validation, order routing, and active monitoring until Bybit settlement.
+        Handles real volatility scaling via engine arrays and activates trailing breakeven loops.
         """
         logger.info(f"🚦 PROCESSING SIGNAL // Symbol: {symbol} | Direction: {direction}")
         
         try:
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
-            atr = self.current_atrs.get(symbol, current_price * 0.0045)
             
-            # Record tracking states for system accuracy calibration
+            # ====================================================================
+            # 🟢 UPGRADE 1: DYNAMIC ATTAINMENT OF VOLATILITY MATRICES (REAL ATR)
+            # ====================================================================
+            feature_engine = self.feature_engines.get(symbol)
+            
+            # Extract historical rolling metrics processed via your local thread engines
+            if feature_engine and hasattr(feature_engine, 'get_computed_atr') and feature_engine.get_computed_atr():
+                atr = feature_engine.get_computed_atr()
+                logger.info(f"🎯 Scaled Volatility Engine Engaged // Real ATR for {symbol}: {atr:.4f}")
+            else:
+                # Hard fallback logic if rolling candles are warming up
+                atr = current_price * 0.0045
+            
+            self.current_atrs[symbol] = atr
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
             
             if not self.test_mode and not self.fsm.can_execute_trades:
@@ -494,26 +516,22 @@ class DistributedQuantEngine:
                 return
             
             if self.test_mode:
-                logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed to database row -> Node: {symbol} | ID: {signal_id[:8]}... | Dir: {direction}")
+                logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 return 
 
             balance = await self.executor.get_wallet_balance_usdt()
-            
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
-                account_balance=balance,
-                win_rate=self.historical_win_rate,
-                win_loss_ratio=self.historical_win_loss_ratio,
-                asset_volatility_atr=atr,
-                current_price=current_price,
-                ai_confidence=confidence 
+                account_balance=balance, win_rate=self.historical_win_rate,
+                win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
+                current_price=current_price, ai_confidence=confidence 
             )
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
-                logger.warning(f"Execution canceled for {symbol}. Variance-adjusted Kelly criteria not met.")
+                logger.warning(f"Execution canceled for {symbol}. Kelly criteria failed.")
                 return
 
             if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
-                logger.warning(f"Swarm global execution blocked. Portfolio cannot support additional exposure for {symbol}.")
+                logger.warning(f"Global portfolio safety boundary breached for {symbol}.")
                 return
 
             logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
@@ -522,72 +540,84 @@ class DistributedQuantEngine:
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             
             if not leverage_success:
-                logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on {symbol}.")
+                logger.error(f"Execution aborted. Failed to set required leverage.")
                 return
             
-            initial_sl, activation_price = self.calculate_initial_bracket(current_price, atr, direction)
+            # Process brackets with automated fee drag calculation offsets
+            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage)
             
-            # Send payload parameters to execution router
+            # Pull lookahead order book metadata layers to feed Upgrade 2
+            current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
+            if hasattr(feature_engine, 'get_orderbook_snapshot'):
+                current_depth = feature_engine.get_orderbook_snapshot()
+
             execution_success = await self.sor.execute_iceberg_block(
-                symbol=symbol,
-                direction=direction,
-                total_qty=risk_matrix["size"],
-                current_mid_price=current_price,
-                stop_loss=initial_sl,
-                take_profit=activation_price 
+                symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
+                depth_snapshot=current_depth
             )
             
             if not execution_success:
-                logger.error(f"❌ SIGNAL EXECUTION ABORTED // Capital safely retained for {symbol}. No exchange position opened.")
+                logger.error(f"❌ SIGNAL EXECUTION ABORTED // Capital safely retained for {symbol}.")
                 return False 
                 
             self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
-            logger.critical(f"🔥 POSITION CONFIRMED LIVE // Shifting engine into active monitoring mode for {symbol}.")
+            logger.critical(f"🔥 POSITION CONFIRMED LIVE // Monitoring execution loops armed for {symbol}.")
             
             alert_text = (
                 f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
-                f"• Execution Node: {symbol}\n"
-                f"• Action Basis: {direction}\n"
-                f"• AI Macro Confidence: {confidence:.2%}\n"
+                f"• Node: {symbol} | {direction}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
-                f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
-                f"🛡️ *Phase 1 Active*: Hard SL at {initial_sl} | TP Trigger at {activation_price}"
+                f"• Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
+                f"🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}"
             )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
             # ============================================================
-            # POST-EXECUTION MONITORING DAEMON
+            # 🛡️ UPGRADE 4: TRAILING BREAKEVEN MONITORING PIPELINE
             # ============================================================
-            lookback_window = 45  
             polling_interval = 5  
+            breakeven_amended = False
             
+            # Identify the 50% target threshold mark for safety shifts
+            progress_trigger_mark = current_price + ((target_tp - current_price) * 0.5) if direction == "BUY" else current_price - ((current_price - target_tp) * 0.5)
+
             while True:
                 await asyncio.sleep(polling_interval)
                 
-                # Check official exchange ledger to verify if Bybit closed the trade natively
-                settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=lookback_window)
-                
+                # Check official exchange settlement tracking layers first
+                settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=45)
                 if settlement.get("closed"):
                     logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
-                    
                     message = (
                         f"🔔 <b>TRADE POSITION CLOSED</b> 🔔\n\n"
-                        f"<b>Asset:</b> {settlement['symbol']}\n"
-                        f"<b>Outcome:</b> {settlement['outcome']}\n"
+                        f"<b>Asset:</b> {settlement['symbol']} | {settlement['outcome']}\n"
                         f"<b>Net PnL:</b> {settlement['pnl']} USDT\n"
-                        f"<b>Size:</b> {settlement['qty']} {settlement['side']}\n"
                         f"<b>Entry Price:</b> {settlement['entry']} → <b>Exit:</b> {settlement['exit']}"
                     )
                     asyncio.create_task(self.telegram.send_html_report(message))
-                    
-                    # Release local risk allocation lock to free system capacity
-                    # Note: You may need a dedicated release function in risk_manager, 
-                    # but typically updating the ledger inversely handles it
                     self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
-                    
-                    logger.info(f"✅ State cleared for {symbol}. Engine ready for next generation cycles.")
                     break
+                
+                # Dynamic monitoring tracking block for trailing amendments
+                if not breakeven_amended:
+                    # Safely grab live market execution midpoints from feature engines
+                    live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
                     
+                    if live_mid:
+                        trigger_breakeven = (direction == "BUY" and live_mid >= progress_trigger_mark) or (direction == "SELL" and live_mid <= progress_trigger_mark)
+                        
+                        if trigger_breakeven:
+                            logger.warning(f"🛡️ HARPOON HALFWAY MARK TRIGGERED FOR {symbol} // Amending hard stop risk limit up to entry: {current_price}")
+                            # Execute a safe backend leverage call modifying stop parameters natively on Bybit's engine
+                            amend_success = await asyncio.to_thread(
+                                self.executor.client.set_trading_stop,
+                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(current_price)
+                            )
+                            if amend_success:
+                                breakeven_amended = True
+                                asyncio.create_task(self.telegram.log_message(f"🛡️ <b>RISK MITIGATION SUCCESSFUL</b>\n{symbol} Stop Loss has been pulled to entry price (${current_price}). Free risk-free ride active.", "INFO"))
+                                
             return True
 
         except Exception as e:
