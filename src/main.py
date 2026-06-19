@@ -410,16 +410,41 @@ class DistributedQuantEngine:
     # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS
     # ==========================================
     async def run_system_heartbeat(self):
-        """Prints a periodic health check to prove the background processes are alive and tracking uptime."""
+        """Prints a periodic health check and sends an hourly financial report to Telegram."""
         start_time = time.time()
+        loop_counter = 0
         
         while True:
             await asyncio.sleep(60) # Pulse every 1 minute
+            loop_counter += 1
             
             uptime_seconds = time.time() - start_time
             uptime_hours = uptime_seconds / 3600
             
+            # Standard local terminal logging
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
+
+            # Hourly Telegram Telemetry Report (Triggers every 60 loops)
+            if loop_counter % 60 == 0:
+                # Query the latest telemetry from the memory bank
+                accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=50)
+                state = self.fsm.current_state.value
+                
+                # Construct the HTML-formatted push notification
+                report = (
+                    f"📊 <b>QUANT SWARM HOURLY REPORT</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱ <b>Uptime:</b> <code>{uptime_hours:.2f} hrs</code>\n"
+                    f"🎛 <b>FSM State:</b> <code>{state}</code>\n"
+                    f"🎯 <b>Macro Accuracy:</b> <code>{accuracy:.2%}</code>\n"
+                    f"🏊‍♂️ <b>Resolved Validation Pool:</b> <code>{pool_size}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📡 <b>Active Nodes:</b> <code>{len(self.asset_basket)} Assets</code>\n"
+                    f"🤖 <b>AI Router:</b> <code>DeepSeek V4 (Native)</code>"
+                )
+                
+                # Dispatch asynchronously
+                asyncio.create_task(self.telegram.send_html_report(report))
 
     # ==========================================
     # EXECUTION ROUTER (PORTFOLIO + SOR)
