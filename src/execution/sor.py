@@ -37,18 +37,26 @@ class SmartOrderRouter:
 
         def _format_lot_size(qty: float, target_symbol: str) -> str:
             """Formats the quantity to comply with strict exchange lot sizes to prevent API bans."""
-            # High-value assets allow micro-fractions
             if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
                 return f"{qty:.3f}"
-            # Standard mid-cap assets generally require 1 decimal place
             elif target_symbol.startswith("AVAX") or target_symbol.startswith("NEAR") or target_symbol.startswith("SOL") or target_symbol.startswith("WLD"):
                 return f"{qty:.1f}"
-            # Low-cap, high-supply assets generally require whole numbers
             elif target_symbol.startswith("XLM") or target_symbol.startswith("ONDO") or target_symbol.startswith("ESPORTS"):
                 return f"{int(qty)}"
             else:
-                # Fallback to 1 decimal for general altcoins to maintain safety
                 return f"{qty:.1f}"
+
+        def _format_price_precision(price: float, target_symbol: str) -> float:
+            """Dynamically rounds target boundary prices to prevent decimal step rejections."""
+            if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
+                return round(price, 2)
+            elif target_symbol.startswith("SOL") or target_symbol.startswith("AVAX"):
+                return round(price, 3)
+            
+            # Dynamic scaling rule for low-cap asset pairs under 1 USDT
+            if price < 1.0:
+                return round(price, 4)
+            return round(price, 2)
 
         # Institutional slicing matrix (typically 5-10 structural tranches)
         while allocated_qty < total_qty:
@@ -80,13 +88,17 @@ class SmartOrderRouter:
                     slippage_limit_price * 0.99 if direction == "BUY" else slippage_limit_price * 1.01
                 )
 
+                # Apply dynamic structural asset pricing formatting
+                final_tp = _format_price_precision(tp_target, symbol)
+                final_sl = _format_price_precision(sl_target, symbol)
+
                 # 4. Dispatch order tranche to execution engine
                 order_id = await self.executor.dispatch_market_order(
                     symbol=symbol,
                     direction=direction,
-                    qty=tranche_qty,  # The API wrapper handles final string conversion
-                    tp=round(tp_target, 2),
-                    sl=round(sl_target, 2)
+                    qty=tranche_qty,
+                    tp=final_tp,
+                    sl=final_sl
                 )
 
                 if order_id:
@@ -94,14 +106,19 @@ class SmartOrderRouter:
                     logger.info(f"TRANCHE FILLED // Qty: {tranche_qty} | Progress: {allocated_qty / total_qty:.2%}")
                 else:
                     logger.error("Tranche routing rejected at exchange interface. Aborting execution waterfall loop.")
-                    return False
+                    # GHOST POSITION SAFEGUARD: If a previous slice filled successfully, we MUST return True 
+                    # so the main orchestrator activates tracking loops for the opened allocation.
+                    return True if allocated_qty > 0 else False
 
             except Exception as e:
                 logger.error(f"Critical execution failure during SOR slicing routine: {e}")
-                return False
+                return True if allocated_qty > 0 else False
 
             # 5. Enforce randomized microsecond delay intervals to disguise order patterns
             await asyncio.sleep(random.uniform(0.15, 0.65))
 
-        logger.critical(f"SOR BLOCK EXECUTION COMPLETION SUCCESSFUL // Final Size: {allocated_qty} {symbol}")
-        return True
+        if allocated_qty > 0:
+            logger.critical(f"SOR BLOCK EXECUTION COMPLETION SUCCESSFUL // Final Size: {allocated_qty} {symbol}")
+            return True
+            
+        return False

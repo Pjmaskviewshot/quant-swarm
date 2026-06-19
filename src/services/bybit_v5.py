@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Dict, Any
 from pybit.unified_trading import HTTP
 
@@ -145,8 +146,6 @@ class BybitUnifiedExecutor:
         
         try:
             # Order payload parameters matching string schemas for the V5 specification
-            # CRITICAL PARAMETER: positionIdx=0 explicitly maps order execution to One-Way Mode 
-            # to prevent conflict matching structures on Unified Accounts set up for Hedging.
             order_payload = await asyncio.to_thread(
                 self.client.place_order,
                 category="linear",
@@ -168,3 +167,53 @@ class BybitUnifiedExecutor:
         except Exception as e:
             logger.error(f"Order routing execution failed at exchange interface level: {e}")
             return ""
+
+    async def check_recent_settlement(self, symbol: str, lookback_seconds: int = 60) -> Dict[str, Any]:
+        """
+        Queries the exchange's closed PnL ledger to see if a bracket order executed.
+        Returns formatted trade metrics if a trade closed within the lookback window.
+        """
+        try:
+            response = await asyncio.to_thread(
+                self.client.get_closed_pnl,
+                category="linear",
+                symbol=symbol,
+                limit=1
+            )
+            
+            pnl_list = response.get("result", {}).get("list", [])
+            if not pnl_list:
+                return {"closed": False}
+                
+            latest_trade = pnl_list[0]
+            
+            # Convert exchange millisecond timestamp to seconds
+            updated_time = int(latest_trade.get("updatedTime", 0)) / 1000
+            current_time = time.time()
+            
+            # Verify if this trade closure happened recently
+            if (current_time - updated_time) <= lookback_seconds:
+                pnl = float(latest_trade.get("closedPnl", 0.0))
+                side = latest_trade.get("side", "UNKNOWN")
+                qty = float(latest_trade.get("qty", 0.0))
+                entry_price = float(latest_trade.get("avgEntryPrice", 0.0))
+                exit_price = float(latest_trade.get("avgExitPrice", 0.0))
+                
+                outcome = "🟢 PROFIT" if pnl > 0 else "🔴 LOSS"
+                
+                return {
+                    "closed": True,
+                    "symbol": symbol,
+                    "outcome": outcome,
+                    "pnl": round(pnl, 4),
+                    "side": side,
+                    "qty": qty,
+                    "entry": entry_price,
+                    "exit": exit_price
+                }
+                
+            return {"closed": False}
+            
+        except Exception as e:
+            logger.error(f"Failed to pull closed PnL metrics for {symbol}: {e}")
+            return {"closed": False}

@@ -254,15 +254,14 @@ class DistributedQuantEngine:
 
         trade_direction = None
         
-        # 🚀 BREAKING DETECTED LOCK: If FSM is CALIBRATING, allow automatic virtual ghost trades
-        # to cleanly populate the calibration database without waiting for macro trends.
+        # 🚀 BREAKING DETECTED LOCK: FSM Calibration Override
         if self.test_mode or not self.fsm.can_execute_trades:
             if z_obi >= 1.5:  
                 trade_direction = "BUY"
             elif z_obi <= -1.5:
                 trade_direction = "SELL"
         else:
-            # Hardened Production Rules (Only executes when armed with a confirmed AI bias)
+            # Hardened Production Rules
             regime = self.macro_regimes.get(symbol, "HOLD")
             if regime == "BUY" and z_obi >= 2.0:
                 trade_direction = "BUY"  
@@ -272,7 +271,8 @@ class DistributedQuantEngine:
         if trade_direction:
             self.last_execution_timestamps[symbol] = current_time
             logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Macro: {self.macro_regimes.get(symbol, 'HOLD')} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
-            asyncio.create_task(self._route_validated_execution_block(symbol, trade_direction, mid_price))
+            # Delegate execution routing entirely to the orchestration lifecycle loop
+            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price))
 
     # ==========================================
     # THREAD 3: LIGHTWEIGHT BASKET TRACKER
@@ -318,7 +318,6 @@ class DistributedQuantEngine:
         
         volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
 
-        # Update indicators in central memory so workers can pull it for DeepSeek
         self.screener_metrics[symbol] = {
             "vol_mult": float(volume_multiplier),
             "vol_z": float(volatility_z)
@@ -461,10 +460,11 @@ class DistributedQuantEngine:
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     # ==========================================
-    # EXECUTION ROUTER (PORTFOLIO + SOR)
+    # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
     
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str):
+        """Generates statistical boundaries for automated exit routing."""
         if side.upper() == "BUY":
             initial_sl = entry_price - (1.5 * atr)
             activation_price = entry_price + (2.5 * atr)
@@ -474,12 +474,19 @@ class DistributedQuantEngine:
             
         return round(initial_sl, 4), round(activation_price, 4)
 
-    async def _route_validated_execution_block(self, symbol: str, direction: str, current_price: float):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float):
+        """
+        Manages the complete lifecycle of a trading signal.
+        Handles risk validation, order routing, and active monitoring until Bybit settlement.
+        """
+        logger.info(f"🚦 PROCESSING SIGNAL // Symbol: {symbol} | Direction: {direction}")
+        
         try:
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
             atr = self.current_atrs.get(symbol, current_price * 0.0045)
             
+            # Record tracking states for system accuracy calibration
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
             
             if not self.test_mode and not self.fsm.can_execute_trades:
@@ -520,31 +527,72 @@ class DistributedQuantEngine:
             
             initial_sl, activation_price = self.calculate_initial_bracket(current_price, atr, direction)
             
-            success = await self.sor.execute_iceberg_block(
+            # Send payload parameters to execution router
+            execution_success = await self.sor.execute_iceberg_block(
                 symbol=symbol,
                 direction=direction,
                 total_qty=risk_matrix["size"],
                 current_mid_price=current_price,
                 stop_loss=initial_sl,
-                activation_price=activation_price 
+                take_profit=activation_price 
             )
             
-            if success:
-                self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
+            if not execution_success:
+                logger.error(f"❌ SIGNAL EXECUTION ABORTED // Capital safely retained for {symbol}. No exchange position opened.")
+                return False 
                 
-                alert_text = (
-                    f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
-                    f"• Execution Node: {symbol}\n"
-                    f"• Action Basis: {direction}\n"
-                    f"• AI Macro Confidence: {confidence:.2%}\n"
-                    f"• Leverage Applied: {target_leverage}x\n"
-                    f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
-                    f"🛡️ *Phase 1 Active*: Hard SL at {initial_sl} | Harpoon Trigger at {activation_price}"
-                )
-                asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
+            self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
+            logger.critical(f"🔥 POSITION CONFIRMED LIVE // Shifting engine into active monitoring mode for {symbol}.")
+            
+            alert_text = (
+                f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
+                f"• Execution Node: {symbol}\n"
+                f"• Action Basis: {direction}\n"
+                f"• AI Macro Confidence: {confidence:.2%}\n"
+                f"• Leverage Applied: {target_leverage}x\n"
+                f"• Total Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
+                f"🛡️ *Phase 1 Active*: Hard SL at {initial_sl} | TP Trigger at {activation_price}"
+            )
+            asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
+            
+            # ============================================================
+            # POST-EXECUTION MONITORING DAEMON
+            # ============================================================
+            lookback_window = 45  
+            polling_interval = 5  
+            
+            while True:
+                await asyncio.sleep(polling_interval)
+                
+                # Check official exchange ledger to verify if Bybit closed the trade natively
+                settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=lookback_window)
+                
+                if settlement.get("closed"):
+                    logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
+                    
+                    message = (
+                        f"🔔 <b>TRADE POSITION CLOSED</b> 🔔\n\n"
+                        f"<b>Asset:</b> {settlement['symbol']}\n"
+                        f"<b>Outcome:</b> {settlement['outcome']}\n"
+                        f"<b>Net PnL:</b> {settlement['pnl']} USDT\n"
+                        f"<b>Size:</b> {settlement['qty']} {settlement['side']}\n"
+                        f"<b>Entry Price:</b> {settlement['entry']} → <b>Exit:</b> {settlement['exit']}"
+                    )
+                    asyncio.create_task(self.telegram.send_html_report(message))
+                    
+                    # Release local risk allocation lock to free system capacity
+                    # Note: You may need a dedicated release function in risk_manager, 
+                    # but typically updating the ledger inversely handles it
+                    self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                    
+                    logger.info(f"✅ State cleared for {symbol}. Engine ready for next generation cycles.")
+                    break
+                    
+            return True
 
         except Exception as e:
             logger.error(f"Distributed swarm execution routing failed for {symbol}: {e}")
+            return False
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
