@@ -35,15 +35,37 @@ class SmartOrderRouter:
             else current_mid_price * (1.0 - self.max_slippage_pct)
         )
 
+        def _format_lot_size(qty: float, target_symbol: str) -> str:
+            """Formats the quantity to comply with strict exchange lot sizes to prevent API bans."""
+            # High-value assets allow micro-fractions
+            if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
+                return f"{qty:.3f}"
+            # Standard mid-cap assets generally require 1 decimal place
+            elif target_symbol.startswith("AVAX") or target_symbol.startswith("NEAR") or target_symbol.startswith("SOL") or target_symbol.startswith("WLD"):
+                return f"{qty:.1f}"
+            # Low-cap, high-supply assets generally require whole numbers
+            elif target_symbol.startswith("XLM") or target_symbol.startswith("ONDO") or target_symbol.startswith("ESPORTS"):
+                return f"{int(qty)}"
+            else:
+                # Fallback to 1 decimal for general altcoins to maintain safety
+                return f"{qty:.1f}"
+
         # Institutional slicing matrix (typically 5-10 structural tranches)
         while allocated_qty < total_qty:
             # 1. Calculate a dynamic, randomized tranche size (between 10% and 25% of total block)
             tranche_pct = random.uniform(0.10, 0.25)
-            tranche_qty = min(total_qty * tranche_pct, total_qty - allocated_qty)
-            tranche_qty = round(tranche_qty, 4)
+            raw_tranche_qty = min(total_qty * tranche_pct, total_qty - allocated_qty)
+            
+            # Format to strict exchange string requirements BEFORE execution
+            formatted_qty_str = _format_lot_size(raw_tranche_qty, symbol)
+            tranche_qty = float(formatted_qty_str)
 
-            if tranche_qty <= 0:
-                break
+            if tranche_qty <= 0.0:
+                # If the slice is too small to format cleanly, execute the remaining total_qty directly
+                formatted_qty_str = _format_lot_size(total_qty - allocated_qty, symbol)
+                tranche_qty = float(formatted_qty_str)
+                if tranche_qty <= 0.0:
+                    break
 
             # 2. Re-verify order book state pricing bounds before routing execution
             if time.time() % 2 == 0:  # Mock check to simulate rapid price divergence observation
@@ -62,7 +84,7 @@ class SmartOrderRouter:
                 order_id = await self.executor.dispatch_market_order(
                     symbol=symbol,
                     direction=direction,
-                    qty=tranche_qty,
+                    qty=tranche_qty,  # The API wrapper handles final string conversion
                     tp=round(tp_target, 2),
                     sl=round(sl_target, 2)
                 )
