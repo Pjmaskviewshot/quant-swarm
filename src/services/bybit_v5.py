@@ -36,8 +36,9 @@ class BybitUnifiedExecutor:
     async def adjust_leverage(self, symbol: str, leverage: int) -> bool:
         """
         Safely modifies isolated/cross leverage thresholds before order dispatch.
-        Returns True if successful or if leverage is already set to target.
+        Attempts to set leverage, gracefully clamping to exchange maximums if rejected.
         """
+        import re 
         try:
             await asyncio.to_thread(
                 self.client.set_leverage,
@@ -48,14 +49,39 @@ class BybitUnifiedExecutor:
             )
             logger.info(f"⚙️ AUTO-SCALED LEVERAGE: {symbol} is now set to {leverage}x")
             return True
+            
         except Exception as e:
             error_msg = str(e)
+            
             # Capture Bybit API error code 110043 ('Leverage not modified') 
-            # to avoid blocking execution for redundant updates.
             if "110043" in error_msg or "not modified" in error_msg.lower():
                 logger.debug(f"Leverage for {symbol} is already safely configured at {leverage}x.")
                 return True
                 
+            # ErrCode 110013: Requested leverage exceeds Bybit's hard risk limit for this specific altcoin
+            if "110013" in error_msg and "maxLeverage" in error_msg:
+                try:
+                    # Extract the exchange's max limit directly from the error string (e.g., "maxLeverage [1000]")
+                    match = re.search(r"maxLeverage \[(\d+)\]", error_msg)
+                    if match:
+                        # Bybit formats 10x as 1000 internally. Divide by 100 to get the real multiplier.
+                        max_allowed = int(match.group(1)) // 100
+                        
+                        logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
+                        
+                        # Immediately retry the exchange request with the safely capped maximum
+                        await asyncio.to_thread(
+                            self.client.set_leverage,
+                            category="linear",
+                            symbol=symbol,
+                            buyLeverage=str(max_allowed),
+                            sellLeverage=str(max_allowed)
+                        )
+                        return True
+                except Exception as fallback_err:
+                    logger.error(f"Leverage auto-clamping failed for {symbol}: {fallback_err}")
+                    return False
+                    
             logger.error(f"❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
             return False
 
