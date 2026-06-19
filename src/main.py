@@ -36,9 +36,9 @@ class DistributedQuantEngine:
         load_dotenv()
         
         # ====================================================================
-        # 🟢 LIVE PRODUCTION MODE ACTIVE
+        # 🧪 TEST MODE ACTIVE (SIMULATION ONLY)
         # ====================================================================
-        self.test_mode = False 
+        self.test_mode = True 
         
         if self.test_mode:
             logger.critical("⚠️ SYSTEM INITIALIZED IN TEST MODE (GHOST TRADING SIMULATION ACTIVE) ⚠️")
@@ -52,7 +52,9 @@ class DistributedQuantEngine:
         
         self.memory = MemoryBank()
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
-        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.10, max_single_position_risk_pct=0.02)
+        
+        # Micro-Account Feasibility: Adjusted limits to 50% max drawdown and 15% risk per position
+        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.50, max_single_position_risk_pct=0.15)
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
