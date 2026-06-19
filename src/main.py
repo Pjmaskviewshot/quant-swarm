@@ -82,7 +82,7 @@ class DistributedQuantEngine:
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
     # ==========================================
     async def run_macro_commander(self):
-        """Batches payload data into Micro-Batches (chunks of 5) to bypass NVIDIA token limits."""
+        """Batches payload data into Micro-Batches (chunks of 5) to bypass token limits."""
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
         
         while True:
@@ -106,7 +106,7 @@ class DistributedQuantEngine:
                 chunk_size = 5
                 micro_batches = [asset_list[i:i + chunk_size] for i in range(0, len(asset_list), chunk_size)]
                 
-                logger.info(f"🧠 MACRO COMMANDER: Sliced {len(asset_list)} assets into {len(micro_batches)} micro-batches to protect NVIDIA token limits.")
+                logger.info(f"🧠 MACRO COMMANDER: Sliced {len(asset_list)} assets into {len(micro_batches)} micro-batches to protect token limits.")
                 
                 # 3. Process each micro-batch sequentially
                 for idx, chunk in enumerate(micro_batches):
@@ -138,7 +138,7 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.error(f"⚠️ COMMANDER ERROR on Micro-Batch {idx + 1}: {e}")
                     
-                    # Wait 15 seconds before sending the next chunk to cool down the NVIDIA endpoint
+                    # Wait 15 seconds before sending the next chunk to cool down the API endpoint
                     if idx < len(micro_batches) - 1:
                         await asyncio.sleep(15)
                             
@@ -182,7 +182,10 @@ class DistributedQuantEngine:
                     self.active_workers[symbol] = new_task
 
     async def _asset_data_gatherer_lifecycle(self, symbol: str):
-        """Workers NO LONGER TALK TO THE AI. They just fetch data and put it in the Commander's queue."""
+        """Workers NO LONGER TALK TO THE AI. They fetch data, resolve predictions, and update the FSM queue."""
+        import random
+        await asyncio.sleep(random.uniform(0, 15))
+        
         while True:
             try:
                 context = await asyncio.wait_for(
@@ -193,18 +196,34 @@ class DistributedQuantEngine:
                 if not context:
                     await asyncio.sleep(30)
                     continue
-                    
-                self.current_atrs[symbol] = context["current_price"] * 0.0045
+                
+                current_price = context["current_price"]
+                
+                # ✅ FIX 2 APPLIED: RESOLVE OLD PREDICTIONS BEFORE FSM CALCULATION
+                age_cutoff = time.time() - 300  # 5 minutes old
+                resolved_count = self.memory.resolve_historical_predictions(
+                    current_price=current_price,
+                    age_cutoff=age_cutoff
+                )
+                
+                if resolved_count > 0:
+                    logger.info(f"✅ Resolved {resolved_count} historical ghost trades for {symbol}.")
+
+                self.current_atrs[symbol] = current_price * 0.0045
+                
+                # Compute rolling accuracy with actual resolved data
                 rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
                 self.fsm.process_state_transition(rolling_acc, total_resolved)
+                
+                logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Resolved Pool: {total_resolved}")
                 
                 # Drop data into the BATCH QUEUE
                 self.pending_macro_payloads[symbol] = {
                     "asset": symbol,
-                    "price": context["current_price"],
+                    "price": current_price,
                     "atr_volatility": self.current_atrs[symbol],
                     "macro_news_stream": context["news_context"],
-                    "rolling_system_accuracy": f"{rolling_acc:.2%}" # <--- RESTORED MATHEMATICAL INTEGRITY
+                    "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
                 
             except asyncio.TimeoutError:
