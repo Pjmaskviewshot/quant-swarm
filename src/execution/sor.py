@@ -12,10 +12,20 @@ class SmartOrderRouter:
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
 
-    async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float) -> bool:
+    async def execute_iceberg_block(
+        self, 
+        symbol: str, 
+        direction: str, 
+        total_qty: float, 
+        current_mid_price: float,
+        stop_loss: float = None,
+        take_profit: float = None,
+        **kwargs
+    ) -> bool:
         """
         Deconstructs massive order footprints into localized randomized slices.
         Routes tranches through order books via passive market-making placement.
+        Safely accepts dynamic risk parameters passed from the orchestration layer.
         """
         logger.info(f"SOR INITIALIZED // Target: {symbol} | Direction: {direction} | Block Size: {total_qty}")
         
@@ -36,22 +46,25 @@ class SmartOrderRouter:
                 break
 
             # 2. Re-verify order book state pricing bounds before routing execution
-            # In a production distributed environment, this reads directly from the shared state memory bus
             if time.time() % 2 == 0:  # Mock check to simulate rapid price divergence observation
                 logger.debug("Verifying order book liquidity compliance bounds...")
 
             try:
-                # 3. Dispatch order tranche to execution engine
-                # For high-frequency performance, we route using a strict bracketed framework
-                tp_placeholder = slippage_limit_price * 1.02 if direction == "BUY" else slippage_limit_price * 0.98
-                sl_placeholder = slippage_limit_price * 0.99 if direction == "BUY" else slippage_limit_price * 1.01
+                # 3. Determine dynamic risk thresholds (prioritize system inputs over local placeholders)
+                tp_target = take_profit if take_profit is not None else (
+                    slippage_limit_price * 1.02 if direction == "BUY" else slippage_limit_price * 0.98
+                )
+                sl_target = stop_loss if stop_loss is not None else (
+                    slippage_limit_price * 0.99 if direction == "BUY" else slippage_limit_price * 1.01
+                )
 
+                # 4. Dispatch order tranche to execution engine
                 order_id = await self.executor.dispatch_market_order(
                     symbol=symbol,
                     direction=direction,
                     qty=tranche_qty,
-                    tp=round(tp_placeholder, 2),
-                    sl=round(sl_placeholder, 2)
+                    tp=round(tp_target, 2),
+                    sl=round(sl_target, 2)
                 )
 
                 if order_id:
@@ -65,7 +78,7 @@ class SmartOrderRouter:
                 logger.error(f"Critical execution failure during SOR slicing routine: {e}")
                 return False
 
-            # 4. Enforce randomized microsecond delay intervals to disguise order patterns from HFT trackers
+            # 5. Enforce randomized microsecond delay intervals to disguise order patterns
             await asyncio.sleep(random.uniform(0.15, 0.65))
 
         logger.critical(f"SOR BLOCK EXECUTION COMPLETION SUCCESSFUL // Final Size: {allocated_qty} {symbol}")
