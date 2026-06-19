@@ -61,6 +61,9 @@ class DistributedQuantEngine:
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
         
+        # 📊 LIVE METRICS STORAGE: Holds real context to feed the AI Router
+        self.screener_metrics: Dict[str, Dict[str, float]] = {s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket}
+        
         # 📦 BATCHING QUEUE: Holds data from the workers until the Commander is ready
         self.pending_macro_payloads: Dict[str, dict] = {}
         
@@ -101,10 +104,10 @@ class DistributedQuantEngine:
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
 
-                # 2. Compress the ENTIRE matrix into ONE payload
+                # 2. Compress the ENTIRE matrix into ONE payload with context indicators
                 compressed_matrix = ""
                 for sym, data in batch_payload.items():
-                    compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} ACC:{data['rolling_system_accuracy']} | "
+                    compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} V_Mult:{data['volume_multiplier']}x Z_Vol:{data['volatility_z_score']} ACC:{data['rolling_system_accuracy']} | "
                     
                 llm_payload = {
                     "GLOBAL_MACRO_CONTEXT": global_news,
@@ -170,7 +173,7 @@ class DistributedQuantEngine:
                     self.active_workers[symbol] = new_task
 
     async def _asset_data_gatherer_lifecycle(self, symbol: str):
-        """Workers NO LONGER TALK TO THE AI. They fetch data, resolve predictions, and update the FSM queue."""
+        """Workers fetch data, resolve predictions, and track indicator metrics."""
         import random
         await asyncio.sleep(random.uniform(0, 15))
         
@@ -187,7 +190,7 @@ class DistributedQuantEngine:
                 
                 current_price = context["current_price"]
                 
-                # ✅ RESOLVE OLD PREDICTIONS BEFORE FSM CALCULATION
+                # RESOLVE OLD PREDICTIONS BEFORE FSM CALCULATION
                 age_cutoff = time.time() - 300  # 5 minutes old
                 resolved_count = self.memory.resolve_historical_predictions(
                     current_price=current_price,
@@ -205,11 +208,16 @@ class DistributedQuantEngine:
                 
                 logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Resolved Pool: {total_resolved}")
                 
+                # Safely pull live context features from screener memory
+                metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
+
                 # Drop data into the BATCH QUEUE
                 self.pending_macro_payloads[symbol] = {
                     "asset": symbol,
                     "price": current_price,
                     "atr_volatility": self.current_atrs[symbol],
+                    "volume_multiplier": round(metrics.get("vol_mult", 1.0), 2),
+                    "volatility_z_score": round(metrics.get("vol_z", 0.0), 2),
                     "macro_news_stream": context["news_context"],
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
@@ -246,12 +254,15 @@ class DistributedQuantEngine:
 
         trade_direction = None
         
-        if self.test_mode:
-            if z_obi >= 0.2:
+        # 🚀 BREAKING DETECTED LOCK: If FSM is CALIBRATING, allow automatic virtual ghost trades
+        # to cleanly populate the calibration database without waiting for macro trends.
+        if self.test_mode or not self.fsm.can_execute_trades:
+            if z_obi >= 1.5:  
                 trade_direction = "BUY"
-            elif z_obi <= -0.2:
+            elif z_obi <= -1.5:
                 trade_direction = "SELL"
         else:
+            # Hardened Production Rules (Only executes when armed with a confirmed AI bias)
             regime = self.macro_regimes.get(symbol, "HOLD")
             if regime == "BUY" and z_obi >= 2.0:
                 trade_direction = "BUY"  
@@ -307,6 +318,12 @@ class DistributedQuantEngine:
         
         volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
 
+        # Update indicators in central memory so workers can pull it for DeepSeek
+        self.screener_metrics[symbol] = {
+            "vol_mult": float(volume_multiplier),
+            "vol_z": float(volatility_z)
+        }
+
         if (volume_multiplier >= 2.5 or volatility_z >= 2.5):
             logger.debug(f"📊 SWARM ALPHA ALERT // {symbol} exhibiting massive divergence. VolMult: {volume_multiplier:.2f}x | Z-Vol: {volatility_z:.2f}")
 
@@ -352,6 +369,7 @@ class DistributedQuantEngine:
             new_macro_confidences = {}
             new_current_atrs = {}
             new_last_execs = {}
+            new_screener_metrics = {}
             
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
@@ -360,6 +378,7 @@ class DistributedQuantEngine:
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
                 new_last_execs[s] = self.last_execution_timestamps.get(s, 0.0)
+                new_screener_metrics[s] = self.screener_metrics.get(s, {"vol_mult": 1.0, "vol_z": 0.0})
                 
             self.feature_engines = new_feature_engines
             self.screener_memory = new_screener_memory
@@ -367,6 +386,7 @@ class DistributedQuantEngine:
             self.macro_confidences = new_macro_confidences
             self.current_atrs = new_current_atrs
             self.last_execution_timestamps = new_last_execs
+            self.screener_metrics = new_screener_metrics
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED. Operational Hunt Targets: {', '.join(self.asset_basket)}")
             
@@ -375,7 +395,7 @@ class DistributedQuantEngine:
                     logger.info(f"♻️ Retiring old node: {old_symbol}")
                     self.active_workers[old_symbol].cancel()
                     del self.active_workers[old_symbol]
-                    self.pending_macro_payloads.pop(old_symbol, None) # Remove from batch queue
+                    self.pending_macro_payloads.pop(old_symbol, None)
                     
             for new_symbol in self.asset_basket:
                 if new_symbol not in self.active_workers:
@@ -415,22 +435,18 @@ class DistributedQuantEngine:
         loop_counter = 0
         
         while True:
-            await asyncio.sleep(60) # Pulse every 1 minute
+            await asyncio.sleep(60) 
             loop_counter += 1
             
             uptime_seconds = time.time() - start_time
             uptime_hours = uptime_seconds / 3600
             
-            # Standard local terminal logging
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
-            # Hourly Telegram Telemetry Report (Triggers every 60 loops)
             if loop_counter % 60 == 0:
-                # Query the latest telemetry from the memory bank
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=50)
                 state = self.fsm.current_state.value
                 
-                # Construct the HTML-formatted push notification
                 report = (
                     f"📊 <b>QUANT SWARM HOURLY REPORT</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -442,8 +458,6 @@ class DistributedQuantEngine:
                     f"📡 <b>Active Nodes:</b> <code>{len(self.asset_basket)} Assets</code>\n"
                     f"🤖 <b>AI Router:</b> <code>DeepSeek V4 (Native)</code>"
                 )
-                
-                # Dispatch asynchronously
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     # ==========================================
@@ -451,13 +465,10 @@ class DistributedQuantEngine:
     # ==========================================
     
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str):
-        """
-        Calculates initial hard stop and phase 2 trigger boundaries.
-        """
         if side.upper() == "BUY":
             initial_sl = entry_price - (1.5 * atr)
             activation_price = entry_price + (2.5 * atr)
-        else:  # SELL
+        else:  
             initial_sl = entry_price + (1.5 * atr)
             activation_price = entry_price - (2.5 * atr)
             
@@ -507,7 +518,6 @@ class DistributedQuantEngine:
                 logger.error(f"Execution aborted. Failed to safely set required leverage ({target_leverage}x) on {symbol}.")
                 return
             
-            # --- DUAL-PHASED DYNAMIC BRACKET LOGIC INTEGRATION ---
             initial_sl, activation_price = self.calculate_initial_bracket(current_price, atr, direction)
             
             success = await self.sor.execute_iceberg_block(
@@ -515,7 +525,6 @@ class DistributedQuantEngine:
                 direction=direction,
                 total_qty=risk_matrix["size"],
                 current_mid_price=current_price,
-                # Pass parameters securely down to your Bybit SOR to manage execution
                 stop_loss=initial_sl,
                 activation_price=activation_price 
             )
@@ -554,6 +563,7 @@ class DistributedQuantEngine:
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
             self.last_execution_timestamps = {s: 0.0 for s in self.asset_basket}
+            self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket}
             
             logger.info(f"🧬 Boot initialization successful. Matrix structured using {len(self.asset_basket)} concurrent nodes.")
         else:
@@ -565,11 +575,11 @@ class DistributedQuantEngine:
         )
         
         await asyncio.gather(
-            self.run_macro_commander(),        # <-- The new AI Request Batcher
-            self.run_macro_regime_loop(),      # <-- The Watchdog and Gatherers
+            self.run_macro_commander(),        
+            self.run_macro_regime_loop(),      
             self.run_universe_refresher(),
             self.stream_manager_loop(),
-            self.run_system_heartbeat()        # <-- Uptime Tracking
+            self.run_system_heartbeat()        
         )
 
 if __name__ == "__main__":
