@@ -24,7 +24,7 @@ class SmartOrderRouter:
     ) -> bool:
         """
         Deconstructs massive order footprints into localized randomized slices.
-        Routes tranches safely by inspecting market depth profiles for order book anomalies.
+        Contextually routes tranches as a single block if value approaches exchange floor thresholds.
         """
         # ====================================================================
         # 🛡️ SPREAD GUARD: PREVENT SLIPPAGE ON HOLLOW ORDER BOOKS
@@ -56,8 +56,8 @@ class SmartOrderRouter:
                 return f"{qty:.3f}"
             elif target_symbol.startswith("AVAX") or target_symbol.startswith("NEAR") or target_symbol.startswith("SOL") or target_symbol.startswith("WLD"):
                 return f"{qty:.1f}"
-            elif target_symbol.startswith("XLM") or target_symbol.startswith("ONDO") or target_symbol.startswith("ESPORTS"):
-                return f"{int(qty)}"
+            elif target_symbol.startswith("XLM") or target_symbol.startswith("ONDO") or target_symbol.startswith("ESPORTS") or target_symbol.startswith("XRP"):
+                return f"{qty:.1f}"
             else:
                 return f"{qty:.1f}"
 
@@ -74,14 +74,25 @@ class SmartOrderRouter:
 
         # Institutional slicing loop execution sequence
         while allocated_qty < total_qty:
-            tranche_pct = random.uniform(0.10, 0.25)
-            raw_tranche_qty = min(total_qty * tranche_pct, total_qty - allocated_qty)
+            remaining_qty = total_qty - allocated_qty
+            remaining_notional = remaining_qty * current_mid_price
+            
+            # 🛡️ MICRO-ACCOUNT GROUNDING GATEWAY
+            # If remaining dollar value is close to or under Bybit's floor limit ($5.00),
+            # override the iceberg slicing completely and deploy 100% of the block as a single tranche.
+            if remaining_notional <= 6.0:
+                tranche_pct = 1.0
+                logger.info(f"📦 NOTIONAL FLOOR PROTECTION // Order value (${remaining_notional:.2f} USDT) close to exchange minimums. Slicing bypassed for safe block routing.")
+            else:
+                tranche_pct = random.uniform(0.10, 0.25)
+            
+            raw_tranche_qty = min(total_qty * tranche_pct, remaining_qty)
             
             formatted_qty_str = _format_lot_size(raw_tranche_qty, symbol)
             tranche_qty = float(formatted_qty_str)
 
             if tranche_qty <= 0.0:
-                formatted_qty_str = _format_lot_size(total_qty - allocated_qty, symbol)
+                formatted_qty_str = _format_lot_size(remaining_qty, symbol)
                 tranche_qty = float(formatted_qty_str)
                 if tranche_qty <= 0.0:
                     break
@@ -112,7 +123,8 @@ class SmartOrderRouter:
                 return True if allocated_qty > 0 else False
 
             # Mask architectural order patterns with microsecond delays
-            await asyncio.sleep(random.uniform(0.15, 0.65))
+            if allocated_qty < total_qty:
+                await asyncio.sleep(random.uniform(0.15, 0.65))
 
         if allocated_qty > 0:
             logger.critical(f"SOR BLOCK EXECUTION COMPLETION SUCCESSFUL // Final Size: {allocated_qty} {symbol}")
