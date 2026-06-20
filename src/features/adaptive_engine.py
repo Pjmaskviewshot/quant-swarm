@@ -15,6 +15,10 @@ class AdaptiveFeatureEngine:
         # Multi-Timeframe micro-aggregates (1m, 5m, 15m)
         self.timeframes = {"1m": deque(maxlen=60), "5m": deque(maxlen=300), "15m": deque(maxlen=900)}
         self.long_window = memory_window_long
+        
+        # 🛡️ UPGRADE: State trackers for FSM and execution pipeline
+        self._latest_mid = 0.0
+        self._orderbook_snapshot = {"bids": [], "asks": []}
 
     def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]]) -> Dict[str, Any]:
         """
@@ -30,6 +34,10 @@ class AdaptiveFeatureEngine:
             best_ask = float(asks[0][0])
             mid_price = (best_bid + best_ask) / 2.0
             bid_ask_spread = best_ask - best_bid
+            
+            # 🛡️ UPGRADE: Store latest tick data for orchestrator access
+            self._latest_mid = mid_price
+            self._orderbook_snapshot = {"bids": bids[:5], "asks": asks[:5]}
 
             # 2. Compute Volume-Weighted Order Book Imbalance (OBI)
             # Sample across top 5 high-density institutional liquidity tiers
@@ -98,3 +106,38 @@ class AdaptiveFeatureEngine:
         spreads = np.array(self.spread_history)
         current_spread = spreads[-1]
         return float((current_spread - np.mean(spreads)) / (np.std(spreads) + 1e-6))
+
+    # =================================================================
+    # 🛡️ UPGRADE: NEW EXPOSED METHODS FOR ORCHESTRATOR COMMUNICATION
+    # =================================================================
+
+    def get_latest_mid(self) -> float:
+        """Returns the most recent mid-price from the fast websocket stream."""
+        return getattr(self, '_latest_mid', 0.0)
+
+    def get_orderbook_snapshot(self) -> Dict[str, List]:
+        """Returns the current order book snapshot for Iceberg execution."""
+        return getattr(self, '_orderbook_snapshot', {"bids": [], "asks": []})
+
+    def get_computed_atr(self) -> float:
+        """Calculates dynamic True Range based on recent 1m or 5m candles."""
+        # Try to use 5m candles first, fallback to 1m
+        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 10 else "1m"
+        
+        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 10:
+            candles = list(self.timeframes[target_tf])
+            
+            # Simple ATR approximation using max of High-Low, High-PrevClose, Low-PrevClose
+            tr_values = []
+            for i in range(1, len(candles)):
+                high = float(candles[i].get("high", 0))
+                low = float(candles[i].get("low", 0))
+                prev_close = float(candles[i-1].get("close", 0))
+                
+                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                tr_values.append(tr)
+                
+            if tr_values:
+                return sum(tr_values) / len(tr_values)
+                
+        return 0.0 # Will trigger the safety fallback in main.py if not enough data

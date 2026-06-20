@@ -53,8 +53,8 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
         
-        # Micro-Account Feasibility: Adjusted limits to 50% max drawdown and 15% risk per position
-        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.50, max_single_position_risk_pct=0.15)
+        # 🛡️ UPGRADE: Adjusted limits to 25% max drawdown and 15% risk per position
+        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
@@ -84,7 +84,9 @@ class DistributedQuantEngine:
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
-        self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
+        
+        # 🛡️ UPGRADE: Relaxed spread guard to 0.5% for volatile altcoins
+        self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     # ==========================================
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
@@ -563,6 +565,23 @@ class DistributedQuantEngine:
             # Process brackets with automated fee drag calculation offsets
             initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage)
             
+            # 🛡️ UPGRADE: LIVE LIQUIDITY GUARD (Prevents low-volume slippage)
+            metrics = self.screener_metrics.get(symbol, {})
+            vol_mult = metrics.get("vol_mult", 1.0)
+            if vol_mult < 0.6: # If live volume drops below 60% of the average
+                logger.warning(f"❌ TRADE SKIPPED // {symbol} volume dangerously low (vol_mult: {vol_mult:.2f}). Slippage risk too high.")
+                self.active_positions_lock.discard(symbol)
+                return False
+
+            # 🛡️ UPGRADE: PROFIT VS FEE CHECK (Cost of Capital EV Engine)
+            expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
+            spread_cost = current_price * 0.006  # Estimated 0.6% total friction for entry/exit
+            
+            if expected_profit < (spread_cost * 2):
+                logger.warning(f"❌ TRADE SKIPPED // {symbol} profit margin too tight to clear exchange friction.")
+                self.active_positions_lock.discard(symbol)
+                return False
+
             # Pull lookahead order book metadata layers to feed Upgrade 2
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
