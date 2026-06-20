@@ -611,18 +611,25 @@ class DistributedQuantEngine:
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
             # ============================================================
-            # 🛡️ UPGRADE 4: TRAILING BREAKEVEN MONITORING PIPELINE
+            # 🚀 UPGRADE 5: DYNAMIC STEP-TRAILING ENGINE (10/10 EXIT LOGIC)
             # ============================================================
             polling_interval = 5  
-            breakeven_amended = False
             
-            # Identify the 50% target threshold mark for safety shifts
-            progress_trigger_mark = current_price + ((target_tp - current_price) * 0.5) if direction == "BUY" else current_price - ((current_price - target_tp) * 0.5)
+            # Trailing Stop Configuration Parameters
+            current_hard_stop = initial_sl
+            best_price_reached = current_price
+            
+            # Only start trailing after 1.0 ATR in pure profit
+            activation_distance = atr * 1.0  
+            # Keep the stop 1.5 ATR behind the best price (breathing room)
+            trail_distance = atr * 1.5       
+            # Only hit the API if the new stop is at least 0.2 ATR better (prevents API bans)
+            min_step_update = atr * 0.2      
 
             while True:
                 await asyncio.sleep(polling_interval)
                 
-                # Check official exchange settlement tracking layers first
+                # 1. Check official exchange settlement tracking layers first
                 settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=45)
                 if settlement.get("closed"):
                     logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
@@ -639,24 +646,49 @@ class DistributedQuantEngine:
                     self.active_positions_lock.discard(symbol)
                     break
                 
-                # Dynamic monitoring tracking block for trailing amendments
-                if not breakeven_amended:
-                    # Safely grab live market execution midpoints from feature engines
-                    live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
-                    
-                    if live_mid:
-                        trigger_breakeven = (direction == "BUY" and live_mid >= progress_trigger_mark) or (direction == "SELL" and live_mid <= progress_trigger_mark)
-                        
-                        if trigger_breakeven:
-                            logger.warning(f"🛡️ HARPOON HALFWAY MARK TRIGGERED FOR {symbol} // Amending hard stop risk limit up to entry: {current_price}")
-                            # Execute a safe backend leverage call modifying stop parameters natively on Bybit's engine
-                            amend_success = await asyncio.to_thread(
-                                self.executor.client.set_trading_stop,
-                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(current_price)
-                            )
-                            if amend_success:
-                                breakeven_amended = True
-                                asyncio.create_task(self.telegram.log_message(f"🛡️ <b>RISK MITIGATION SUCCESSFUL</b>\n{symbol} Stop Loss has been pulled to entry price (${current_price}). Free risk-free ride active.", "INFO"))
+                # 2. Advanced Step-Trailing Evaluation
+                live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
+                
+                if live_mid:
+                    # Trailing Logic for BUY (Long) Positions
+                    if direction == "BUY":
+                        # Record the highest high we've seen
+                        if live_mid > best_price_reached:
+                            best_price_reached = live_mid
+                            
+                        # If we have reached the activation threshold (1 ATR in profit)
+                        if best_price_reached >= (current_price + activation_distance):
+                            proposed_stop = best_price_reached - trail_distance
+                            
+                            # Only update if the new stop is a significant step UP from the current stop
+                            if proposed_stop > (current_hard_stop + min_step_update):
+                                amend_success = await asyncio.to_thread(
+                                    self.executor.client.set_trading_stop,
+                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(proposed_stop, 4))
+                                )
+                                if amend_success:
+                                    current_hard_stop = proposed_stop
+                                    logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(proposed_stop, 4)}")
+                                    
+                    # Trailing Logic for SELL (Short) Positions
+                    elif direction == "SELL":
+                        # Record the lowest low we've seen
+                        if live_mid < best_price_reached:
+                            best_price_reached = live_mid
+                            
+                        # If we have reached the activation threshold (1 ATR in profit downwards)
+                        if best_price_reached <= (current_price - activation_distance):
+                            proposed_stop = best_price_reached + trail_distance
+                            
+                            # Only update if the new stop is a significant step DOWN from the current stop
+                            if proposed_stop < (current_hard_stop - min_step_update):
+                                amend_success = await asyncio.to_thread(
+                                    self.executor.client.set_trading_stop,
+                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(proposed_stop, 4))
+                                )
+                                if amend_success:
+                                    current_hard_stop = proposed_stop
+                                    logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(proposed_stop, 4)}")
                                 
             return True
 
