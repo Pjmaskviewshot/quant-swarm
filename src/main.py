@@ -71,6 +71,9 @@ class DistributedQuantEngine:
         
         self.active_workers: Dict[str, asyncio.Task] = {}
         
+        # 🛡️ POSITION LOCK DEPLOYMENT MATRIX
+        self.active_positions_lock = set()
+        
         self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
@@ -488,12 +491,19 @@ class DistributedQuantEngine:
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float):
         """
-        Manages the complete lifecycle of a trading signal.
-        Handles real volatility scaling via engine arrays and activates trailing breakeven loops.
+        Manages the complete lifecycle of a trading signal with concurrent overlap locks active.
         """
+        # 🛡️ THE POSITION OVERLAP GUARD LOCK CHECK
+        if symbol in self.active_positions_lock:
+            logger.info(f"🛑 OVERLAP PREVENTED // Already actively trading {symbol}. Signal safely bypassed.")
+            return False
+            
         logger.info(f"🚦 PROCESSING SIGNAL // Symbol: {symbol} | Direction: {direction}")
         
         try:
+            # Engage structural position barrier
+            self.active_positions_lock.add(symbol)
+            
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
             
@@ -515,10 +525,12 @@ class DistributedQuantEngine:
             
             if not self.test_mode and not self.fsm.can_execute_trades:
                 logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
+                self.active_positions_lock.discard(symbol)
                 return
             
             if self.test_mode:
                 logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
+                self.active_positions_lock.discard(symbol)
                 return 
 
             balance = await self.executor.get_wallet_balance_usdt()
@@ -530,10 +542,12 @@ class DistributedQuantEngine:
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
                 logger.warning(f"Execution canceled for {symbol}. Kelly criteria failed.")
+                self.active_positions_lock.discard(symbol)
                 return
 
             if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
                 logger.warning(f"Global portfolio safety boundary breached for {symbol}.")
+                self.active_positions_lock.discard(symbol)
                 return
 
             logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
@@ -543,6 +557,7 @@ class DistributedQuantEngine:
             
             if not leverage_success:
                 logger.error(f"Execution aborted. Failed to set required leverage.")
+                self.active_positions_lock.discard(symbol)
                 return
             
             # Process brackets with automated fee drag calculation offsets
@@ -561,6 +576,7 @@ class DistributedQuantEngine:
             
             if not execution_success:
                 logger.error(f"❌ SIGNAL EXECUTION ABORTED // Capital safely retained for {symbol}.")
+                self.active_positions_lock.discard(symbol)
                 return False 
                 
             self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
@@ -599,6 +615,9 @@ class DistributedQuantEngine:
                     )
                     asyncio.create_task(self.telegram.send_html_report(message))
                     self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                    
+                    # 🔓 RELEASE LOCK ON POSITION CLOSURE
+                    self.active_positions_lock.discard(symbol)
                     break
                 
                 # Dynamic monitoring tracking block for trailing amendments
@@ -624,6 +643,7 @@ class DistributedQuantEngine:
 
         except Exception as e:
             logger.error(f"Distributed swarm execution routing failed for {symbol}: {e}")
+            self.active_positions_lock.discard(symbol)
             return False
 
     # ==========================================
