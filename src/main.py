@@ -608,6 +608,7 @@ class DistributedQuantEngine:
             # 🚀 UPGRADE: Commit advanced metrics to quantitative ledger
             metrics = self.screener_metrics.get(symbol, {})
             features_dict = {
+                "symbol": symbol,
                 "market_regime": market_regime,
                 "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": metrics.get("vol_mult", 1.0),
