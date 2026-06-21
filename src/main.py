@@ -262,8 +262,9 @@ class DistributedQuantEngine:
 
         trade_direction = None
         
-        # 🚀 BREAKING DETECTED LOCK: FSM Calibration Override
-        if self.test_mode or not self.fsm.can_execute_trades:
+        # 🚀 BREAKING DETECTED LOCK: FSM Calibration Override (BULLETPROOFED)
+        is_active = self.fsm.current_state.value == "ACTIVE_TRADING"
+        if self.test_mode or not is_active:
             if z_obi >= 1.5:  
                 trade_direction = "BUY"
             elif z_obi <= -1.5:
@@ -519,13 +520,15 @@ class DistributedQuantEngine:
                 atr = feature_engine.get_computed_atr()
                 logger.info(f"🎯 Scaled Volatility Engine Engaged // Real ATR for {symbol}: {atr:.4f}")
             else:
-                # Hard fallback logic if rolling candles are warming up
-                atr = current_price * 0.0045
+                # 🛡️ UPGRADE: Widened fallback ATR from 0.45% to 1.5% to prevent whipsaws
+                atr = current_price * 0.015
             
             self.current_atrs[symbol] = atr
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
             
-            if not self.test_mode and not self.fsm.can_execute_trades:
+            # 🛡️ UPGRADE: Bulletproof explicit state check (Ignores buggy FSM flags)
+            is_active = self.fsm.current_state.value == "ACTIVE_TRADING"
+            if not self.test_mode and not is_active:
                 logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 self.active_positions_lock.discard(symbol)
                 return
