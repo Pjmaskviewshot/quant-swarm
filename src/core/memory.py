@@ -1,103 +1,154 @@
 import os
-import sqlite3
 import logging
+from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any
+from supabase import create_client, Client
 
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
-    def __init__(self, db_path: str = "data/quant_memory.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        """
+        Initializes the Cloud-Native Supabase Analytics Engine connection layer.
+        Accepts an optional db_path parameter to preserve interface compatibility with main.py.
+        """
+        # Retrieve configuration details from the host environment
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
         
-        # CRITICAL FIX: Ensure the directory exists before SQLite tries to connect
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
+        if not url or not key:
+            logger.critical("❌ DB CONFIGURATION FAULT: SUPABASE_URL or SUPABASE_KEY environment variables missing.")
+            raise ValueError("Missing Supabase credentials in environment variables.")
             
-        self._migrate_db()
+        try:
+            self.supabase: Client = create_client(url, key)
+            logger.info("🛰️ CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
+        except Exception as e:
+            logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}")
+            raise
 
-    def _get_connection(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, timeout=30.0)
+    def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None):
+        """Saves a fresh prediction sequence with full structural feature vectors for future analytics."""
+        if features is None:
+            features = {}
+            
+        # Parse feature metrics with defensive fallback bounds
+        market_regime = features.get("market_regime", "UNKNOWN")
+        z_obi = features.get("adaptive_obi_z", 0.0)
+        vol_mult = features.get("liquidity_density_ratio", 1.0)
+        spread = features.get("bid_ask_spread", 0.0)
+        symbol = features.get("symbol", "UNKNOWN") # Use symbol from feature payload fallback
 
-    def _migrate_db(self):
-        """Initializes database schema with optimized execution indexing."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS signals (
-                    signal_id TEXT PRIMARY KEY,
-                    timestamp REAL NOT NULL,
-                    price_at_prediction REAL NOT NULL,
-                    predicted_direction TEXT NOT NULL,
-                    confidence REAL NOT NULL,
-                    resolved INTEGER DEFAULT 0,
-                    actual_outcome TEXT,
-                    is_correct INTEGER
-                )
-            ''')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_resolved ON signals(resolved);')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON signals(timestamp DESC);')
-            conn.commit()
+        # Map the incoming Unix Epoch float cleanly into a standardized ISO-8601 string for PostgreSQL TIMESTAMPTZ
+        iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
-    def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float):
-        """Saves a fresh prediction sequence into persistent storage."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO signals (signal_id, timestamp, price_at_prediction, predicted_direction, confidence)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (signal_id, timestamp, price, direction, confidence))
-            conn.commit()
+        payload = {
+            "signal_id": str(signal_id),
+            "timestamp": iso_timestamp,
+            "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN", # Guard clause filled downstream by engine orchestration
+            "predicted_direction": str(direction).upper(),
+            "price_at_prediction": float(price),
+            "ai_confidence": float(confidence),
+            "market_regime": str(market_regime),
+            "z_obi": float(z_obi),
+            "vol_mult": float(vol_mult),
+            "spread": float(spread),
+            "resolved": False
+        }
 
+        try:
+            self.supabase.table("quantitative_ledger").insert(payload).execute()
+            logger.info(f"💾 LEDGER COMMIT SIGNED // ID: {signal_id[:8]}... | Symbol: {symbol} | Dir: {direction}")
+        except Exception as e:
+            logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
+
+    def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str):
+        """ Updates a live trade signal with actual financial execution data for deep post-trade analytics. """
+        is_correct = True if net_pnl > 0 else False
+        
+        update_payload = {
+            "resolved": True,
+            "actual_outcome": str(outcome),
+            "net_pnl": float(net_pnl),
+            "slippage_drag": float(slippage),
+            "is_correct": is_correct
+        }
+
+        try:
+            self.supabase.table("quantitative_ledger")\
+                .update(update_payload)\
+                .eq("signal_id", str(signal_id))\
+                .execute()
+            logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
+        except Exception as e:
+            logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
+            
     def resolve_historical_predictions(self, current_price: float, age_cutoff: float) -> int:
-        """Compares expired, unresolved predictions against current market price."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT signal_id, price_at_prediction, predicted_direction 
-                FROM signals 
-                WHERE resolved = 0 AND timestamp <= ?
-            ''', (age_cutoff,))
-            unresolved = cursor.fetchall()
+        """Compares expired, unresolved ghost predictions against current market price."""
+        # Convert Unix cutoff timestamp to match PostgreSQL timezone structures
+        cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
+        resolved_count = 0
 
-            resolved_count = 0
-            for row in unresolved:
-                sig_id, entry_price, prediction = row
-                actual = "HOLD"
+        try:
+            # Query unresolved records that have aged past the horizon limit window
+            response = self.supabase.table("quantitative_ledger")\
+                .select("signal_id, price_at_prediction, predicted_direction")\
+                .eq("resolved", False)\
+                .lte("timestamp", cutoff_iso)\
+                .execute()
+
+            unresolved_rows = response.data if response else []
+            
+            if not unresolved_rows:
+                return 0
+
+            for row in unresolved_rows:
+                sig_id = row["signal_id"]
+                entry_price = float(row["price_at_prediction"])
+                prediction = str(row["predicted_direction"]).upper()
                 
+                actual = "HOLD"
                 if current_price > entry_price:
                     actual = "BUY"
                 elif current_price < entry_price:
                     actual = "SELL"
 
-                is_correct = 1 if prediction == actual else 0
+                is_correct = True if prediction == actual else False
                 
-                cursor.execute('''
-                    UPDATE signals 
-                    SET resolved = 1, actual_outcome = ?, is_correct = ? 
-                    WHERE signal_id = ?
-                ''', (actual, is_correct, sig_id))
+                self.supabase.table("quantitative_ledger").update({
+                    "resolved": True,
+                    "actual_outcome": actual,
+                    "is_correct": is_correct
+                }).eq("signal_id", sig_id).execute()
+                
                 resolved_count += 1
                 
-            conn.commit()
             return resolved_count
+
+        except Exception as e:
+            logger.error(f"❌ GHOST RESOLUTION ENGINE FAILURE: {e}")
+            return 0
 
     def compute_rolling_accuracy(self, window_size: int = 50) -> Tuple[float, int]:
         """Calculates rolling system accuracy metric over the target baseline sample window."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT is_correct FROM signals 
-                WHERE resolved = 1 
-                ORDER BY timestamp DESC 
-                LIMIT ?
-            ''', (window_size,))
-            results = cursor.fetchall()
-            
+        try:
+            response = self.supabase.table("quantitative_ledger")\
+                .select("is_correct")\
+                .eq("resolved", True)\
+                .order("timestamp", desc=True)\
+                .limit(window_size)\
+                .execute()
+
+            results = response.data if response else []
             total_resolved = len(results)
+            
             if total_resolved == 0:
                 return 0.0, 0
 
-            correct_predictions = sum(row[0] for row in results)
+            correct_predictions = sum(1 for row in results if row.get("is_correct") is True)
             accuracy = correct_predictions / total_resolved
             return accuracy, total_resolved
+
+        except Exception as e:
+            logger.error(f"❌ ENGINE ACCURACY METRIC EVALUATION EXCEPTION: {e}")
+            return 0.0, 0

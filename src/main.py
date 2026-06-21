@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # Core & Feature Modules
 from core.memory import MemoryBank
-from core.fsm import SystemStateMachine
+from core.fsm import SystemStateMachine, TradingState
 from features.adaptive_engine import AdaptiveFeatureEngine
 from portfolio.risk_manager import InstitutionalRiskVault
 from execution.sor import SmartOrderRouter
@@ -207,14 +207,18 @@ class DistributedQuantEngine:
                 if resolved_count > 0:
                     logger.info(f"✅ Resolved {resolved_count} historical ghost trades for {symbol}.")
 
-                # Feature Engine calculation (ATR dynamic fetch later used in Signal Lifecycle)
+                # 🚀 UPGRADE: Fetch dynamic regime to feed the FSM State Logic
+                feature_engine = self.feature_engines.get(symbol)
+                market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
+
+                # Feature Engine calculation
                 self.current_atrs[symbol] = current_price * 0.0045
                 
-                # Compute rolling accuracy with actual resolved data
+                # Compute rolling accuracy with actual resolved data and pass regime context
                 rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
-                self.fsm.process_state_transition(rolling_acc, total_resolved)
+                self.fsm.process_state_transition(rolling_acc, total_resolved, market_regime)
                 
-                logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Resolved Pool: {total_resolved}")
+                logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Regime: {market_regime}")
                 
                 # Safely pull live context features from screener memory
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
@@ -255,6 +259,7 @@ class DistributedQuantEngine:
 
         z_obi = features["adaptive_obi_z"]
         mid_price = features["mid_price"]
+        market_regime = features.get("market_regime", "RANGING")
 
         current_time = time.time()
         if (current_time - self.last_execution_timestamps.get(symbol, 0)) < self.execution_cooldown_period:
@@ -262,24 +267,32 @@ class DistributedQuantEngine:
 
         trade_direction = None
         
-        # 🚀 BREAKING DETECTED LOCK: FSM Calibration Override (BULLETPROOFED)
-        is_active = self.fsm.current_state.value == "ACTIVE_TRADING"
+        # 🚀 UPGRADE: Regime-Aware Signal Generation and FSM verification
+        is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
+        
         if self.test_mode or not is_active:
+            # Ghost trading thresholds
             if z_obi >= 1.5:  
                 trade_direction = "BUY"
             elif z_obi <= -1.5:
                 trade_direction = "SELL"
         else:
-            # Hardened Production Rules
             regime = self.macro_regimes.get(symbol, "HOLD")
-            if regime == "BUY" and z_obi >= 2.0:
-                trade_direction = "BUY"  
-            elif regime == "SELL" and z_obi <= -2.0:
-                trade_direction = "SELL" 
+            if market_regime == "TRENDING":
+                if regime == "BUY" and z_obi >= 2.0:
+                    trade_direction = "BUY"  
+                elif regime == "SELL" and z_obi <= -2.0:
+                    trade_direction = "SELL" 
+            else:
+                # In a RANGING regime, we trigger entries aggressively off the order book imbalance
+                if regime == "BUY" and z_obi >= 1.5:
+                    trade_direction = "BUY"
+                elif regime == "SELL" and z_obi <= -1.5:
+                    trade_direction = "SELL"
 
         if trade_direction:
             self.last_execution_timestamps[symbol] = current_time
-            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Macro: {self.macro_regimes.get(symbol, 'HOLD')} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
+            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Macro: {self.macro_regimes.get(symbol, 'HOLD')} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
             # Delegate execution routing entirely to the orchestration lifecycle loop
             asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price))
 
@@ -438,7 +451,7 @@ class DistributedQuantEngine:
     # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS
     # ==========================================
     async def run_system_heartbeat(self):
-        """Prints a periodic health check and sends an hourly financial report to Telegram."""
+        """Prints a periodic health check and sends an hourly comprehensive financial forensic report to Telegram."""
         start_time = time.time()
         loop_counter = 0
         
@@ -452,19 +465,73 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 60 == 0:
+                # 1. Fetch live metrics from our ledger & current account balance
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=50)
                 state = self.fsm.current_state.value
+                current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 
+                # Calculate real drawdown percentage relative to initial micro baseline ($7.80)
+                initial_baseline = 7.80
+                drawdown_pct = max(0.0, (initial_baseline - current_vault_balance) / initial_baseline)
+                
+                # Build an institutional visual performance tracker bar matrix
+                bar_length = 10
+                filled_blocks = int(drawdown_pct * bar_length)
+                filled_blocks = min(bar_length, filled_blocks)
+                drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
+
+                # 2. 🔬 PHASE 2 ADVANCEMENT: FORENSIC REGIME ANALYSIS FROM SUPABASE
+                try:
+                    # Query Supabase via official client API to pull resolved trade history
+                    response = self.memory.supabase.table("quantitative_ledger")\
+                        .select("market_regime, net_pnl")\
+                        .eq("resolved", True)\
+                        .execute()
+                    
+                    data = response.data if response else []
+                    net_pnl = sum(float(row.get("net_pnl", 0.0)) for row in data)
+                    
+                    regime_stats = {}
+                    for row in data:
+                        regime = row.get("market_regime", "UNKNOWN")
+                        pnl = float(row.get("net_pnl", 0.0))
+                        if regime not in regime_stats:
+                            regime_stats[regime] = {"count": 0, "pnl": 0.0}
+                        regime_stats[regime]["count"] += 1
+                        regime_stats[regime]["pnl"] += pnl
+                        
+                    regime_breakdown_text = ""
+                    for regime, stats in regime_stats.items():
+                        icon = "🕸️" if regime == "RANGING" else "🚀"
+                        regime_breakdown_text += f"• {icon} <b>{regime}:</b> <code>{stats['count']} trades</code> | <code>{stats['pnl']:+.4f} USDT</code>\n"
+                        
+                    if not regime_breakdown_text:
+                        regime_breakdown_text = "• <i>No resolved metrics recorded in this epoch yet.</i>\n"
+                        
+                except Exception as db_err:
+                    logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
+                    net_pnl = 0.0
+                    regime_breakdown_text = "• ⚠️ <i>Supabase ledger context temporarily loading...</i>\n"
+
+                # 3. Shape the unified wealth optimization pulse string
                 report = (
-                    f"📊 <b>QUANT SWARM HOURLY REPORT</b>\n"
+                    f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏱ <b>Uptime:</b> <code>{uptime_hours:.2f} hrs</code>\n"
-                    f"🎛 <b>FSM State:</b> <code>{state}</code>\n"
-                    f"🎯 <b>Macro Accuracy:</b> <code>{accuracy:.2%}</code>\n"
-                    f"🏊‍♂️ <b>Resolved Validation Pool:</b> <code>{pool_size}</code>\n"
+                    f"⏱ <b>Engine Run Uptime:</b> <code>{uptime_hours:.2f} Hours</code>\n"
+                    f"🎛 <b>FSM State Gear:</b> <code>{state}</code>\n"
+                    f"🎯 <b>Rolling Edge Accuracy:</b> <code>{accuracy:.2%}</code>\n"
+                    f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool_size} Resolved</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📡 <b>Active Nodes:</b> <code>{len(self.asset_basket)} Assets</code>\n"
-                    f"🤖 <b>AI Router:</b> <code>DeepSeek V4 (Native)</code>"
+                    f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
+                    f"📈 <b>Net Realized Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
+                    f"📉 <b>Drawdown Profile Status:</b> <code>{drawdown_pct:.2%}</code>\n"
+                    f"🎚 <b>Risk Horizon Bar:</b>\n<code>[{drawdown_bar}]</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔬 <b>FORENSIC REGIME PROFILE:</b>\n"
+                    f"{regime_breakdown_text}"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📡 <b>Operational Swarm Nodes:</b> <code>{len(self.asset_basket)} Active Threads</code>\n"
+                    f"🧠 <b>AI Inference Framework:</b> <code>DeepSeek V4 (Native Cloud)</code>"
                 )
                 asyncio.create_task(self.telegram.send_html_report(report))
 
@@ -472,23 +539,35 @@ class DistributedQuantEngine:
     # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
     
-    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int):
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0):
         """
-        ⚡ UPGRADE 3: ACCUMULATE TAKER FEES TO DEFEND AGAINST NET DEGRADATION
+        ⚡ PHASE 3 UPGRADE: DYNAMIC TARGET STRETCHING & FEE ACCUMULATION
         Computes hard boundary price variables offset dynamically to clean out exchange drag.
+        Stretches the Take-Profit boundaries exponentially during massive institutional volatility spikes.
         """
         # Bybit Linear Perpetual fee model = ~0.055% taker on entry and exit
         fee_drag_factor = 0.00055 * 2 * leverage
         fee_buffer = entry_price * fee_drag_factor
         
-        # Deploy institutional asymmetric multiplication (1.5x SL vs 2.5x TP)
+        # 🚀 DYNAMIC TARGET STRETCHING LOGIC
+        if vol_z >= 3.0:
+            tp_multiplier = 4.5
+            logger.info(f"📈 EXTREME VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
+        elif vol_z >= 1.5:
+            tp_multiplier = 3.0
+            logger.info(f"📊 ELEVATED VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
+        else:
+            tp_multiplier = 2.0
+            logger.debug(f"📉 STANDARD VOLATILITY (Z: {vol_z:.2f}). Compressing TP to {tp_multiplier}x ATR.")
+            
+        sl_multiplier = 1.5
+        
         if side.upper() == "BUY":
-            initial_sl = entry_price - (1.5 * atr)
-            # Add the fee offset to ensure the net payout fulfills target metrics
-            target_tp = entry_price + (2.5 * atr) + fee_buffer
+            initial_sl = entry_price - (sl_multiplier * atr)
+            target_tp = entry_price + (tp_multiplier * atr) + fee_buffer
         else:  
-            initial_sl = entry_price + (1.5 * atr)
-            target_tp = entry_price - (2.5 * atr) - fee_buffer
+            initial_sl = entry_price + (sl_multiplier * atr)
+            target_tp = entry_price - (tp_multiplier * atr) - fee_buffer
             
         return round(initial_sl, 4), round(target_tp, 4)
 
@@ -514,7 +593,8 @@ class DistributedQuantEngine:
             # 🟢 UPGRADE 1: DYNAMIC ATTAINMENT OF VOLATILITY MATRICES (REAL ATR)
             # ====================================================================
             feature_engine = self.feature_engines.get(symbol)
-            
+            market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
+
             # Extract historical rolling metrics processed via your local thread engines
             if feature_engine and hasattr(feature_engine, 'get_computed_atr') and feature_engine.get_computed_atr():
                 atr = feature_engine.get_computed_atr()
@@ -524,10 +604,19 @@ class DistributedQuantEngine:
                 atr = current_price * 0.015
             
             self.current_atrs[symbol] = atr
-            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence)
+
+            # 🚀 UPGRADE: Commit advanced metrics to quantitative ledger
+            metrics = self.screener_metrics.get(symbol, {})
+            features_dict = {
+                "market_regime": market_regime,
+                "adaptive_obi_z": 0.0, 
+                "liquidity_density_ratio": metrics.get("vol_mult", 1.0),
+                "bid_ask_spread": 0.0
+            }
+            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
-            # 🛡️ UPGRADE: Bulletproof explicit state check (Ignores buggy FSM flags)
-            is_active = self.fsm.current_state.value == "ACTIVE_TRADING"
+            # 🛡️ UPGRADE: Regime-Aware Live State Validation
+            is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             if not self.test_mode and not is_active:
                 logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 self.active_positions_lock.discard(symbol)
@@ -539,10 +628,11 @@ class DistributedQuantEngine:
                 return 
 
             balance = await self.executor.get_wallet_balance_usdt()
+            # 🚀 UPGRADE: Feed the market regime into the Risk Vault
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance, win_rate=self.historical_win_rate,
                 win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
-                current_price=current_price, ai_confidence=confidence 
+                current_price=current_price, ai_confidence=confidence, market_regime=market_regime
             )
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
@@ -565,11 +655,11 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
             
-            # Process brackets with automated fee drag calculation offsets
-            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage)
+            # 🚀 PHASE 3 UPGRADE: Pass live Volatility Z-score to stretch the bracket targets
+            vol_z = metrics.get("vol_z", 0.0)
+            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z)
             
             # 🛡️ UPGRADE: LIVE LIQUIDITY GUARD (Prevents low-volume slippage)
-            metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             if vol_mult < 0.6: # If live volume drops below 60% of the average
                 logger.warning(f"❌ TRADE SKIPPED // {symbol} volume dangerously low (vol_mult: {vol_mult:.2f}). Slippage risk too high.")
@@ -585,16 +675,26 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # Pull lookahead order book metadata layers to feed Upgrade 2
+            # Pull lookahead order book metadata layers
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
                 current_depth = feature_engine.get_orderbook_snapshot()
 
-            execution_success = await self.sor.execute_iceberg_block(
-                symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
-                current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                depth_snapshot=current_depth
-            )
+            # ============================================================
+            # 🚀 UPGRADE: MULTI-REGIME ORDER ROUTING
+            # ============================================================
+            if market_regime == "TRENDING":
+                execution_success = await self.sor.execute_iceberg_block(
+                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
+                    depth_snapshot=current_depth
+                )
+            else:
+                execution_success = await self.sor.execute_mean_reversion_bracket(
+                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
+                    depth_snapshot=current_depth
+                )
             
             if not execution_success:
                 logger.error(f"❌ SIGNAL EXECUTION ABORTED // Capital safely retained for {symbol}.")
@@ -607,6 +707,7 @@ class DistributedQuantEngine:
             alert_text = (
                 f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
                 f"• Node: {symbol} | {direction}\n"
+                f"• Market Regime: {market_regime}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
                 f"• Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
                 f"🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}"
@@ -614,91 +715,103 @@ class DistributedQuantEngine:
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
             # ============================================================
-            # 🚀 UPGRADE 5: DYNAMIC STEP-TRAILING ENGINE (10/10 EXIT LOGIC)
+            # 🚀 PHASE 3 UPGRADE: ASYNCHRONOUS FIRE-AND-FORGET TRACKER
             # ============================================================
-            polling_interval = 5  
+            # Spin the 10/10 trailing exit loop off into an isolated daemon.
+            # This instantly unblocks the orchestrator, dropping latency down to absolute zero.
+            asyncio.create_task(self._position_lifecycle_daemon(
+                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine
+            ))
             
-            # Trailing Stop Configuration Parameters
-            current_hard_stop = initial_sl
-            best_price_reached = current_price
-            
-            # Only start trailing after 1.0 ATR in pure profit
-            activation_distance = atr * 1.0  
-            # Keep the stop 1.5 ATR behind the best price (breathing room)
-            trail_distance = atr * 1.5       
-            # Only hit the API if the new stop is at least 0.2 ATR better (prevents API bans)
-            min_step_update = atr * 0.2      
-
-            while True:
-                await asyncio.sleep(polling_interval)
-                
-                # 1. Check official exchange settlement tracking layers first
-                settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=45)
-                if settlement.get("closed"):
-                    logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
-                    message = (
-                        f"🔔 <b>TRADE POSITION CLOSED</b> 🔔\n\n"
-                        f"<b>Asset:</b> {settlement['symbol']} | {settlement['outcome']}\n"
-                        f"<b>Net PnL:</b> {settlement['pnl']} USDT\n"
-                        f"<b>Entry Price:</b> {settlement['entry']} → <b>Exit:</b> {settlement['exit']}"
-                    )
-                    asyncio.create_task(self.telegram.send_html_report(message))
-                    self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
-                    
-                    # 🔓 RELEASE LOCK ON POSITION CLOSURE
-                    self.active_positions_lock.discard(symbol)
-                    break
-                
-                # 2. Advanced Step-Trailing Evaluation
-                live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
-                
-                if live_mid:
-                    # Trailing Logic for BUY (Long) Positions
-                    if direction == "BUY":
-                        # Record the highest high we've seen
-                        if live_mid > best_price_reached:
-                            best_price_reached = live_mid
-                            
-                        # If we have reached the activation threshold (1 ATR in profit)
-                        if best_price_reached >= (current_price + activation_distance):
-                            proposed_stop = best_price_reached - trail_distance
-                            
-                            # Only update if the new stop is a significant step UP from the current stop
-                            if proposed_stop > (current_hard_stop + min_step_update):
-                                amend_success = await asyncio.to_thread(
-                                    self.executor.client.set_trading_stop,
-                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(proposed_stop, 4))
-                                )
-                                if amend_success:
-                                    current_hard_stop = proposed_stop
-                                    logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(proposed_stop, 4)}")
-                                    
-                    # Trailing Logic for SELL (Short) Positions
-                    elif direction == "SELL":
-                        # Record the lowest low we've seen
-                        if live_mid < best_price_reached:
-                            best_price_reached = live_mid
-                            
-                        # If we have reached the activation threshold (1 ATR in profit downwards)
-                        if best_price_reached <= (current_price - activation_distance):
-                            proposed_stop = best_price_reached + trail_distance
-                            
-                            # Only update if the new stop is a significant step DOWN from the current stop
-                            if proposed_stop < (current_hard_stop - min_step_update):
-                                amend_success = await asyncio.to_thread(
-                                    self.executor.client.set_trading_stop,
-                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(proposed_stop, 4))
-                                )
-                                if amend_success:
-                                    current_hard_stop = proposed_stop
-                                    logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(proposed_stop, 4)}")
-                                
             return True
 
         except Exception as e:
             logger.error(f"Distributed swarm execution routing failed for {symbol}: {e}")
             self.active_positions_lock.discard(symbol)
             return False
+
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine):
+        """
+        🚀 ASYNCHRONOUS BACKGROUND WORKER (10/10 EXIT LOGIC)
+        Trails stops dynamically and handles position closure natively without blocking main engine threads.
+        """
+        logger.info(f"👻 FIRE-AND-FORGET TRACKER ARMED // Daemon injected for {symbol}")
+        polling_interval = 4  
+        
+        current_hard_stop = initial_sl
+        peak_observed_price = current_price
+        
+        activation_threshold = atr * 1.0  
+        trailing_leash = atr * 2.0        
+        minimum_api_step = atr * 0.4      
+
+        while True:
+            await asyncio.sleep(polling_interval)
+            
+            # 1. Check official exchange settlement tracking layers first
+            settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
+            if settlement.get("closed"):
+                logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
+                
+                net_pnl = float(settlement.get('pnl', 0.0))
+                entry_px = float(settlement.get('entry', current_price))
+                exit_px = float(settlement.get('exit', current_price))
+                slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
+                
+                report_message = (
+                    f"🔔 <b>EXCHANGE EXECUTION TERMINATION ALERT</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📈 <b>Asset Node:</b> <code>{symbol}</code>\n"
+                    f"📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n"
+                    f"💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
+                    f"⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n"
+                    f"⚙️ <b>Execution Trailing Method:</b> <code>Dynamic ATR Step-Leash</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                asyncio.create_task(self.telegram.send_html_report(report_message))
+                
+                self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
+                self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                
+                # 🔓 RELEASE LOCK ON POSITION CLOSURE
+                self.active_positions_lock.discard(symbol)
+                break
+            
+            # 2. Advanced Step-Trailing Evaluation
+            live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
+            
+            if live_mid:
+                # Trailing Logic for BUY (Long) Positions
+                if direction == "BUY":
+                    if live_mid > peak_observed_price:
+                        peak_observed_price = live_mid
+                        
+                    if peak_observed_price >= (current_price + activation_threshold):
+                        target_stop = peak_observed_price - trailing_leash
+                        if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
+                            amend_success = await asyncio.to_thread(
+                                self.executor.client.set_trading_stop,
+                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
+                            )
+                            if amend_success:
+                                current_hard_stop = target_stop
+                                logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
+                                
+                # Trailing Logic for SELL (Short) Positions
+                elif direction == "SELL":
+                    if live_mid < peak_observed_price:
+                        peak_observed_price = live_mid
+                        
+                    if peak_observed_price <= (current_price - activation_threshold):
+                        target_stop = peak_observed_price + trailing_leash
+                        if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
+                            amend_success = await asyncio.to_thread(
+                                self.executor.client.set_trading_stop,
+                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
+                            )
+                            if amend_success:
+                                current_hard_stop = target_stop
+                                logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER

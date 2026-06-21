@@ -8,126 +8,134 @@ from services.bybit_v5 import BybitUnifiedExecutor
 logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
-    def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0015):
+    def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0050):
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
 
+    def _clean_lot_size(self, qty: float, target_symbol: str) -> float:
+        """Enforces strict asset lot precision guidelines to eradicate order size rounding leaks."""
+        if any(target_symbol.startswith(token) for token in ["BTC", "ETH"]):
+            return round(qty, 3)
+        elif any(target_symbol.startswith(token) for token in ["SOL", "AVAX", "NEAR", "WLD", "XRP", "HYPE", "RE", "SPCX", "ZEC"]):
+            return round(qty, 2)
+        return round(qty, 1)
+
+    def _format_price_precision(self, price: float, target_symbol: str) -> float:
+        """Dynamically rounds target boundary prices to prevent decimal step rejections."""
+        if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
+            return round(price, 2)
+        elif target_symbol.startswith("SOL") or target_symbol.startswith("AVAX") or target_symbol.startswith("ZEC"):
+            return round(price, 3)
+        if price < 1.0:
+            return round(price, 4)
+        return round(price, 2)
+
     async def execute_iceberg_block(
-        self, 
-        symbol: str, 
-        direction: str, 
-        total_qty: float, 
-        current_mid_price: float,
-        stop_loss: float = None,
-        take_profit: float = None,
-        **kwargs
+        self, symbol: str, direction: str, total_qty: float, current_mid_price: float,
+        stop_loss: float = None, take_profit: float = None, **kwargs
     ) -> bool:
         """
-        Deconstructs massive order footprints into localized randomized slices.
-        Contextually routes tranches as a single block if value approaches exchange floor thresholds.
+        🚀 OFFENSIVE MODE: TRENDING MARKETS
+        Aggressive market-order block execution to guarantee fill during explosive breakouts.
         """
-        # ====================================================================
-        # 🛡️ SPREAD GUARD: PREVENT SLIPPAGE ON HOLLOW ORDER BOOKS
-        # ====================================================================
         depth_snapshot = kwargs.get("depth_snapshot", {})
         if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
             try:
                 best_bid = float(depth_snapshot["bids"][0][0])
                 best_ask = float(depth_snapshot["asks"][0][0])
                 live_spread = (best_ask - best_bid) / best_bid
-                
-                # Halt instantly if structural order book friction exceeds our safety cap
                 if live_spread > self.max_slippage_pct:
-                    logger.warning(
-                        f"❌ EXECUTION BLOCK BY SPREAD RADAR // {symbol} "
-                        f"Spread too wide: {live_spread:.4%} (Max Cap: {self.max_slippage_pct:.4%}). Capital protected."
-                    )
+                    logger.warning(f"❌ SPREAD VIOLATION // {symbol} Market Friction: {live_spread:.4%} > Safety Limit: {self.max_slippage_pct:.4%}.")
                     return False
             except (IndexError, ValueError, TypeError) as e:
-                logger.debug(f"Depth profile parsing skipped or incomplete for {symbol}: {e}")
+                logger.debug(f"Depth parsing bypassed for {symbol}: {e}")
 
-        logger.info(f"SOR INITIALIZED // Target: {symbol} | Direction: {direction} | Block Size: {total_qty}")
-        
-        allocated_qty = 0.0
+        cleaned_qty = self._clean_lot_size(total_qty, symbol)
+        if (cleaned_qty * current_mid_price) < 5.0:
+            cleaned_qty = self._clean_lot_size(5.1 / current_mid_price, symbol)
 
-        def _format_lot_size(qty: float, target_symbol: str) -> str:
-            """Formats the quantity to comply with strict exchange lot sizes to prevent API bans."""
-            if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
-                return f"{qty:.3f}"
-            elif target_symbol.startswith("AVAX") or target_symbol.startswith("NEAR") or target_symbol.startswith("SOL") or target_symbol.startswith("WLD"):
-                return f"{qty:.1f}"
-            elif target_symbol.startswith("XLM") or target_symbol.startswith("ONDO") or target_symbol.startswith("ESPORTS") or target_symbol.startswith("XRP"):
-                return f"{qty:.1f}"
-            else:
-                return f"{qty:.1f}"
+        logger.info(f"🚀 TRENDING ROUTER ONLINE // Target: {symbol} | Dir: {direction} | Qty: {cleaned_qty}")
 
-        def _format_price_precision(price: float, target_symbol: str) -> float:
-            """Dynamically rounds target boundary prices to prevent decimal step rejections."""
-            if target_symbol.startswith("BTC") or target_symbol.startswith("ETH"):
-                return round(price, 2)
-            elif target_symbol.startswith("SOL") or target_symbol.startswith("AVAX"):
-                return round(price, 3)
-            
-            if price < 1.0:
-                return round(price, 4)
-            return round(price, 2)
+        try:
+            # Standard Market Order Dispatch
+            order_id = await self.executor.dispatch_market_order(
+                symbol=symbol,
+                direction=direction,
+                qty=cleaned_qty,
+                tp=self._format_price_precision(take_profit, symbol) if take_profit else 0.0,
+                sl=self._format_price_precision(stop_loss, symbol) if stop_loss else 0.0
+            )
+            if order_id:
+                logger.critical(f"🎯 BREAKOUT BLOCK FILLED // Ticket: {order_id[:12]}...")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Critical execution fault inside SOR market block allocation: {e}")
+            return False
 
-        # Institutional slicing loop execution sequence
-        while allocated_qty < total_qty:
-            remaining_qty = total_qty - allocated_qty
-            remaining_notional = remaining_qty * current_mid_price
-            
-            # 🛡️ MICRO-ACCOUNT GROUNDING GATEWAY
-            # If remaining dollar value is close to or under Bybit's floor limit ($5.00),
-            # override the iceberg slicing completely and deploy 100% of the block as a single tranche.
-            if remaining_notional <= 6.0:
-                tranche_pct = 1.0
-                logger.info(f"📦 NOTIONAL FLOOR PROTECTION // Order value (${remaining_notional:.2f} USDT) close to exchange minimums. Slicing bypassed for safe block routing.")
-            else:
-                tranche_pct = random.uniform(0.10, 0.25)
-            
-            raw_tranche_qty = min(total_qty * tranche_pct, remaining_qty)
-            
-            formatted_qty_str = _format_lot_size(raw_tranche_qty, symbol)
-            tranche_qty = float(formatted_qty_str)
 
-            if tranche_qty <= 0.0:
-                formatted_qty_str = _format_lot_size(remaining_qty, symbol)
-                tranche_qty = float(formatted_qty_str)
-                if tranche_qty <= 0.0:
-                    break
+    async def execute_mean_reversion_bracket(
+        self, symbol: str, direction: str, total_qty: float, current_mid_price: float,
+        stop_loss: float = None, take_profit: float = None, **kwargs
+    ) -> bool:
+        """
+        🛡️ ACCUMULATION MODE: RANGING MARKETS
+        Passive Limit Order execution designed to capture the spread and buy support/sell resistance.
+        """
+        depth_snapshot = kwargs.get("depth_snapshot", {})
+        limit_entry_price = current_mid_price
 
+        # Extract the absolute top of the order book to place our passive limit order
+        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
             try:
-                # Format safety brackets contextually utilizing caller engine variables directly
-                final_tp = _format_price_precision(take_profit, symbol) if take_profit else 0.0
-                final_sl = _format_price_precision(stop_loss, symbol) if stop_loss else 0.0
+                best_bid = float(depth_snapshot["bids"][0][0])
+                best_ask = float(depth_snapshot["asks"][0][0])
+                
+                # If buying, sit exactly on the best bid (Maker). If selling, sit on best ask.
+                if direction.upper() == "BUY":
+                    limit_entry_price = best_bid
+                else:
+                    limit_entry_price = best_ask
+            except (IndexError, ValueError, TypeError):
+                pass
 
-                # Dispatch execution slice downstream
-                order_id = await self.executor.dispatch_market_order(
+        cleaned_qty = self._clean_lot_size(total_qty, symbol)
+        if (cleaned_qty * limit_entry_price) < 5.0:
+            cleaned_qty = self._clean_lot_size(5.1 / limit_entry_price, symbol)
+            
+        limit_entry_price = self._format_price_precision(limit_entry_price, symbol)
+
+        logger.info(f"🕸️ MEAN REVERSION ROUTER ONLINE // Target: {symbol} | Passive Entry Limit: {limit_entry_price}")
+
+        try:
+            # We attempt to dispatch a passive limit order to avoid taker fees. 
+            # If your executor doesn't have a specific limit dispatch yet, this uses the raw client.
+            if hasattr(self.executor, 'dispatch_limit_order'):
+                order_id = await self.executor.dispatch_limit_order(
                     symbol=symbol,
                     direction=direction,
-                    qty=tranche_qty,
-                    tp=final_tp,
-                    sl=final_sl
+                    qty=cleaned_qty,
+                    price=limit_entry_price,
+                    tp=self._format_price_precision(take_profit, symbol) if take_profit else 0.0,
+                    sl=self._format_price_precision(stop_loss, symbol) if stop_loss else 0.0
                 )
+            else:
+                # Fallback directly to Bybit client if dispatch_limit_order is not defined in bybit_v5.py
+                side = "Buy" if direction.upper() == "BUY" else "Sell"
+                order_response = await asyncio.to_thread(
+                    self.executor.client.place_order,
+                    category="linear", symbol=symbol, side=side, orderType="Limit", 
+                    qty=str(cleaned_qty), price=str(limit_entry_price),
+                    takeProfit=str(self._format_price_precision(take_profit, symbol)),
+                    stopLoss=str(self._format_price_precision(stop_loss, symbol)),
+                    timeInForce="PostOnly" # Ensures we ONLY pay maker fees
+                )
+                order_id = order_response.get("result", {}).get("orderId")
 
-                if order_id:
-                    allocated_qty += tranche_qty
-                    logger.info(f"TRANCHE FILLED // Qty: {tranche_qty} | Progress: {allocated_qty / total_qty:.2%}")
-                else:
-                    logger.error("Tranche routing rejected at exchange interface. Aborting loop waterfall.")
-                    return True if allocated_qty > 0 else False
-
-            except Exception as e:
-                logger.error(f"Critical execution failure during SOR slicing routine: {e}")
-                return True if allocated_qty > 0 else False
-
-            # Mask architectural order patterns with microsecond delays
-            if allocated_qty < total_qty:
-                await asyncio.sleep(random.uniform(0.15, 0.65))
-
-        if allocated_qty > 0:
-            logger.critical(f"SOR BLOCK EXECUTION COMPLETION SUCCESSFUL // Final Size: {allocated_qty} {symbol}")
-            return True
-            
-        return False
+            if order_id:
+                logger.critical(f"🕸️ PASSIVE LIMIT NET DEPLOYED // Ticket: {order_id[:12]}...")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Critical execution fault inside SOR limit block allocation: {e}")
+            return False

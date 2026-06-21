@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import json
+import time
 import logging
 from typing import Dict, Any, Callable, Coroutine, List
 
@@ -26,6 +27,9 @@ class HighVelocityMultiFeed:
         
         self.ws_url = "wss://stream.bybit.com/v5/public/linear"
         self.is_running = False
+        
+        # 🛡️ UPGRADE: Timestamp tracker for the Resiliency Watchdog
+        self.last_msg_timestamp = time.time()
 
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
@@ -48,13 +52,45 @@ class HighVelocityMultiFeed:
             try:
                 logger.info(f"Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
                 async with aiohttp.ClientSession() as session:
+                    # 🛡️ UPGRADE: We keep the basic aiohttp heartbeat, but we will add an explicit Application Watchdog
                     async with session.ws_connect(self.ws_url, heartbeat=20.0) as ws:
+                        
+                        # 🚀 PHASE 4 ADVANCEMENT: THE RESILIENCY WATCHDOG
+                        # This internal task guarantees the socket never turns into a "Zombie Connection".
+                        async def connection_watchdog():
+                            while not ws.closed and self.is_running:
+                                await asyncio.sleep(20)
+                                try:
+                                    # Ping the Bybit server explicitly
+                                    await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
+                                    
+                                    # Check if the connection has flatlined silently
+                                    if time.time() - self.last_msg_timestamp > 45.0:
+                                        logger.error("🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
+                                        await ws.close()
+                                        break
+                                except Exception as e:
+                                    logger.debug(f"Watchdog ping failed dynamically: {e}")
+                                    break
+                                    
+                        watchdog_task = asyncio.create_task(connection_watchdog())
+
                         await ws.send_str(json.dumps(subscription_request))
                         logger.info(f"Successfully multiplexed topics for tracking matrix: {self.basket}")
+                        
+                        self.last_msg_timestamp = time.time()
 
                         async for msg in ws:
+                            # 🛡️ UPGRADE: Reset the watchdog timer every time ANY data arrives
+                            self.last_msg_timestamp = time.time()
+                            
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 payload = json.loads(msg.data)
+                                
+                                # Intercept and ignore Application Pongs
+                                if payload.get("op") == "pong" or payload.get("ret_msg") == "pong":
+                                    continue
+                                    
                                 topic: str = payload.get("topic", "")
                                 data = payload.get("data")
 
@@ -77,6 +113,10 @@ class HighVelocityMultiFeed:
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 logger.warning("Multiplexed WebSocket transport socket severed. Initializing recovery link.")
                                 break
+                                
+                        # Clean up the watchdog when the socket loop drops
+                        watchdog_task.cancel()
+                        
             except Exception as e:
                 logger.error(f"Critical connection failure caught in multiplex ingestion loop: {e}")
                 

@@ -6,6 +6,35 @@ from pybit.unified_trading import HTTP
 
 logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
+class TokenBucketRateLimiter:
+    """
+    🚀 PHASE 4 ADVANCEMENT: TOKEN-BUCKET RATE LIMITER
+    Prevents HTTP 429 Too Many Requests bans by actively throttling outbound API calls 
+    to strictly respect the exchange's private endpoint throughput limits.
+    """
+    def __init__(self, capacity: int = 10, fill_rate: float = 5.0):
+        self.capacity = float(capacity)
+        self.tokens = float(capacity)
+        self.fill_rate = fill_rate  # Tokens regenerated per second
+        self.last_fill_time = time.time()
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        while True:
+            async with self.lock:
+                now = time.time()
+                elapsed = now - self.last_fill_time
+                # Regenerate tokens based on time elapsed
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
+                self.last_fill_time = now
+
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+            # Backoff sleep to prevent CPU spinning while waiting for token regeneration
+            await asyncio.sleep(0.05)
+
+
 class BybitUnifiedExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         # Instantiate the official V5 client
@@ -14,10 +43,14 @@ class BybitUnifiedExecutor:
             api_key=api_key,
             api_secret=api_secret
         )
+        
+        # 🛡️ UPGRADE: Initialize the global API rate limiter (10 burst, 5 per sec sustained)
+        self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
 
     async def get_wallet_balance_usdt(self) -> float:
         """Fetches available margin balance from the Unified Trading Account."""
         try:
+            await self.rate_limiter.acquire()
             # Shift synchronous network call to a background thread pool
             response = await asyncio.to_thread(
                 self.client.get_wallet_balance,
@@ -41,6 +74,7 @@ class BybitUnifiedExecutor:
         """
         import re 
         try:
+            await self.rate_limiter.acquire()
             await asyncio.to_thread(
                 self.client.set_leverage,
                 category="linear",
@@ -71,6 +105,7 @@ class BybitUnifiedExecutor:
                         logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
                         
                         # Immediately retry the exchange request with the safely capped maximum
+                        await self.rate_limiter.acquire()
                         await asyncio.to_thread(
                             self.client.set_leverage,
                             category="linear",
@@ -92,6 +127,7 @@ class BybitUnifiedExecutor:
         Acts as the engine's autonomous global satellite radar.
         """
         try:
+            await self.rate_limiter.acquire()
             # 1. Fetch 24-hour statistics for all tickers on the exchange via thread pool
             response = await asyncio.to_thread(
                 self.client.get_tickers,
@@ -145,6 +181,7 @@ class BybitUnifiedExecutor:
         side = "Buy" if direction == "BUY" else "Sell"
         
         try:
+            await self.rate_limiter.acquire()
             # Order payload parameters matching string schemas for the V5 specification
             order_payload = await asyncio.to_thread(
                 self.client.place_order,
@@ -168,12 +205,45 @@ class BybitUnifiedExecutor:
             logger.error(f"Order routing execution failed at exchange interface level: {e}")
             return ""
 
+    async def dispatch_limit_order(self, symbol: str, direction: str, qty: float, price: float, tp: float, sl: float) -> str:
+        """
+        🚀 PHASE 1 UPGRADE (INTEGRATION): 
+        Signs and executes passive Post-Only Limit Orders for Mean Reversion regimes to capture the spread.
+        """
+        side = "Buy" if direction == "BUY" else "Sell"
+        
+        try:
+            await self.rate_limiter.acquire()
+            order_payload = await asyncio.to_thread(
+                self.client.place_order,
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Limit",
+                qty=str(qty),
+                price=str(price),
+                takeProfit=str(tp),
+                stopLoss=str(sl),
+                tpslMode="Full",
+                timeInForce="PostOnly", # Forces the order to be a maker, avoiding taker fees
+                positionIdx=0
+            )
+            
+            order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
+            logger.critical(f"🕸️ PASSIVE LIMIT NET DEPLOYED // ID: {order_id} | Side: {side} | Qty: {qty} @ {price}")
+            return order_id
+            
+        except Exception as e:
+            logger.error(f"Limit order routing execution failed at exchange interface level: {e}")
+            return ""
+
     async def check_recent_settlement(self, symbol: str, lookback_seconds: int = 60) -> Dict[str, Any]:
         """
         Queries the exchange's closed PnL ledger to see if a bracket order executed.
         Returns formatted trade metrics if a trade closed within the lookback window.
         """
         try:
+            await self.rate_limiter.acquire()
             response = await asyncio.to_thread(
                 self.client.get_closed_pnl,
                 category="linear",

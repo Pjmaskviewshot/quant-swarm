@@ -20,6 +20,42 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
         self._orderbook_snapshot = {"bids": [], "asks": []}
 
+    def detect_market_regime(self) -> str:
+        """
+        🚀 UPGRADE 2: LIGHTWEIGHT STATISTICAL REGIME CLASSIFIER
+        Uses Kaufman's Efficiency Ratio (ER) and Volatility Squeeze metrics to 
+        mathematically classify the market state without heavy ML dependencies.
+        """
+        # Prioritize 5m timeframe for structural clarity, fallback to 1m
+        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 15 else "1m"
+
+        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 15:
+            candles = list(self.timeframes[target_tf])[-15:]
+            closes = np.array([float(c["close"]) for c in candles])
+
+            # 1. Kaufman's Efficiency Ratio (ER)
+            # ER = Directional Change / Sum of Absolute Changes (Noise)
+            directional_change = abs(closes[-1] - closes[0])
+            absolute_changes = np.sum(np.abs(np.diff(closes)))
+
+            efficiency_ratio = directional_change / absolute_changes if absolute_changes > 0 else 0.0
+
+            # 2. Volatility Contraction / Bollinger Band Squeeze
+            sma = np.mean(closes)
+            std_dev = np.std(closes)
+            # Approximate Bollinger Band Width percentage
+            bb_width = (4 * std_dev) / sma if sma > 0 else 0.0
+
+            # 3. Regime Matrix Logic
+            # If the market is too noisy (ER < 0.35) or too tightly compressed (BBW < 0.4%)
+            if efficiency_ratio < 0.35 or bb_width < 0.004:
+                return "RANGING"
+            else:
+                return "TRENDING"
+                
+        # Defensive fallback: assume ranging to protect capital if data is warming up
+        return "RANGING"
+
     def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]]) -> Dict[str, Any]:
         """
         Consumes raw level 2 structural updates.
@@ -68,7 +104,9 @@ class AdaptiveFeatureEngine:
                 "raw_obi": round(obi, 4),
                 "adaptive_obi_z": round(obi_z_score, 4),
                 "micro_volatility_z": round(self._calculate_spread_volatility_z(), 4),
-                "liquidity_density_ratio": round(v_b / v_a if v_a > 0 else 1.0, 4)
+                "liquidity_density_ratio": round(v_b / v_a if v_a > 0 else 1.0, 4),
+                # 🚀 UPGRADE: Inject the calculated regime directly into the feature payload
+                "market_regime": self.detect_market_regime()
             }
 
             return features
