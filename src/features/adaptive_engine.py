@@ -27,10 +27,12 @@ class AdaptiveFeatureEngine:
         mathematically classify the market state without heavy ML dependencies.
         """
         # Prioritize 5m timeframe for structural clarity, fallback to 1m
-        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 15 else "1m"
+        # Wait for at least 45 candles before making a judgment
+        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 45 else "1m"
 
-        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 15:
-            candles = list(self.timeframes[target_tf])[-15:]
+        # 🚀 THE BRUTAL FIX: EXTENDED LOOKBACK TO 45 CANDLES (~3.75 HOURS)
+        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 45:
+            candles = list(self.timeframes[target_tf])[-45:]
             closes = np.array([float(c["close"]) for c in candles])
 
             # 1. Kaufman's Efficiency Ratio (ER)
