@@ -31,7 +31,7 @@ class InstitutionalRiskVault:
         # ====================================================================
         # 1. CAPITAL HARVESTING VAULT BASELINE
         # Any profits generated above this threshold are locked away from active margin calculations.
-        self.harvesting_baseline_usdt = 25.0
+        self.harvesting_baseline_usdt = 100.0
         
         # 2. CROSS-ASSET CORRELATION MATRIX GROUPS
         # Map highly covariant tickers to prevent simultaneous exposure to macro flash-crashes.
