@@ -733,11 +733,14 @@ class DistributedQuantEngine:
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine):
         """
-        🚀 ASYNCHRONOUS BACKGROUND WORKER (10/10 EXIT LOGIC)
-        Trails stops dynamically and handles position closure natively without blocking main engine threads.
+        🚀 HARDENED BACKGROUND DAEMON WITH GRIDLOCK PREVENTION
+        Tracks order fill states, dynamically trails stops, and automatically frees up 
+        portfolio exposure if limit orders remain untriggered.
         """
-        logger.info(f"👻 FIRE-AND-FORGET TRACKER ARMED // Daemon injected for {symbol}")
+        logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
         polling_interval = 4  
+        start_time = time.time()
+        order_filled = False
         
         current_hard_stop = initial_sl
         peak_observed_price = current_price
@@ -749,70 +752,100 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(polling_interval)
             
-            # 1. Check official exchange settlement tracking layers first
-            settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
-            if settlement.get("closed"):
-                logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
-                
-                net_pnl = float(settlement.get('pnl', 0.0))
-                entry_px = float(settlement.get('entry', current_price))
-                exit_px = float(settlement.get('exit', current_price))
-                slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
-                
-                report_message = (
-                    f"🔔 <b>EXCHANGE EXECUTION TERMINATION ALERT</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 <b>Asset Node:</b> <code>{symbol}</code>\n"
-                    f"📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n"
-                    f"💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
-                    f"⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n"
-                    f"⚙️ <b>Execution Trailing Method:</b> <code>Dynamic ATR Step-Leash</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━"
+            # 1. 🛡️ REAL-TIME POSITION VERIFIER LAYER
+            try:
+                pos_response = await asyncio.to_thread(
+                    self.executor.client.get_positions,
+                    category="linear", symbol=symbol
                 )
-                asyncio.create_task(self.telegram.send_html_report(report_message))
+                positions = pos_response.get("result", {}).get("list", [])
+                has_active_position = False
                 
-                self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
+                if positions:
+                    size = float(positions[0].get("size", 0.0))
+                    if size > 0:
+                        has_active_position = True
+                        order_filled = True 
+            except Exception as e:
+                logger.error(f"Failed to verify live position matrix status for {symbol}: {e}")
+                has_active_position = False
+
+            # 2. ⏳ THE GRIDLOCK BREAKER: 3-MINUTE UNFILLED TIMEOUT
+            if not order_filled and (time.time() - start_time) > 180:
+                logger.warning(f"⏳ LIMIT TIMEOUT // {symbol} order remained untriggered for 3 minutes. Purging...")
+                try:
+                    await asyncio.to_thread(
+                        self.executor.client.cancel_all_orders,
+                        category="linear", symbol=symbol
+                    )
+                except Exception as e:
+                    logger.error(f"Order cleanup pipeline failed for {symbol}: {e}")
+                
                 self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
-                
-                # 🔓 RELEASE LOCK ON POSITION CLOSURE
                 self.active_positions_lock.discard(symbol)
+                logger.critical(f"🔓 PORTFOLIO UNLOCKED // Stale exposure dissolved for {symbol}. Hunting lines re-armed.")
                 break
+
+            # 3. POSITION CLOSURE EXECUTION PIPELINE
+            if order_filled and not has_active_position:
+                settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
+                if settlement.get("closed"):
+                    logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
+                    
+                    net_pnl = float(settlement.get('pnl', 0.0))
+                    entry_px = float(settlement.get('entry', current_price))
+                    exit_px = float(settlement.get('exit', current_price))
+                    slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
+                    
+                    report_message = (
+                        f"🔔 <b>EXCHANGE EXECUTION TERMINATION ALERT</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📈 <b>Asset Node:</b> <code>{symbol}</code>\n"
+                        f"📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n"
+                        f"💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
+                        f"⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n"
+                        f"⚙️ <b>Execution Trailing Method:</b> <code>Dynamic ATR Step-Leash</code>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    asyncio.create_task(self.telegram.send_html_report(report_message))
+                    
+                    self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
+                    self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                    self.active_positions_lock.discard(symbol)
+                    break
             
-            # 2. Advanced Step-Trailing Evaluation
-            live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
-            
-            if live_mid:
-                # Trailing Logic for BUY (Long) Positions
-                if direction == "BUY":
-                    if live_mid > peak_observed_price:
-                        peak_observed_price = live_mid
-                        
-                    if peak_observed_price >= (current_price + activation_threshold):
-                        target_stop = peak_observed_price - trailing_leash
-                        if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
-                            amend_success = await asyncio.to_thread(
-                                self.executor.client.set_trading_stop,
-                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
-                            )
-                            if amend_success:
-                                current_hard_stop = target_stop
-                                logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
-                                
-                # Trailing Logic for SELL (Short) Positions
-                elif direction == "SELL":
-                    if live_mid < peak_observed_price:
-                        peak_observed_price = live_mid
-                        
-                    if peak_observed_price <= (current_price - activation_threshold):
-                        target_stop = peak_observed_price + trailing_leash
-                        if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
-                            amend_success = await asyncio.to_thread(
-                                self.executor.client.set_trading_stop,
-                                category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
-                            )
-                            if amend_success:
-                                current_hard_stop = target_stop
-                                logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
+            # 4. ACTIVE STEP-TRAILING MATRIX EVALUATION
+            if has_active_position:
+                live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
+                
+                if live_mid:
+                    if direction == "BUY":
+                        if live_mid > peak_observed_price:
+                            peak_observed_price = live_mid
+                        if peak_observed_price >= (current_price + activation_threshold):
+                            target_stop = peak_observed_price - trailing_leash
+                            if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
+                                amend_success = await asyncio.to_thread(
+                                    self.executor.client.set_trading_stop,
+                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
+                                )
+                                if amend_success:
+                                    current_hard_stop = target_stop
+                                    logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
+                                    
+                    elif direction == "SELL":
+                        if live_mid < peak_observed_price:
+                            peak_observed_price = live_mid
+                        if peak_observed_price <= (current_price - activation_threshold):
+                            target_stop = peak_observed_price + trailing_leash
+                            if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
+                                amend_success = await asyncio.to_thread(
+                                    self.executor.client.set_trading_stop,
+                                    category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))
+                                )
+                                if amend_success:
+                                    current_hard_stop = target_stop
+                                    logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
