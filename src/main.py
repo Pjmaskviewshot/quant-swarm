@@ -74,8 +74,7 @@ class DistributedQuantEngine:
         # 🛡️ POSITION LOCK DEPLOYMENT MATRIX
         self.active_positions_lock = set()
         
-        # 🛡️ THE CURE: INSTITUTIONAL COOLDOWN (15 Minutes)
-        # Replaces the old 60-second limit that caused hyperactive scalping.
+        # Fallback global cooldown (Overridden dynamically per asset in execution loop)
         self.execution_cooldown_period = 10.0 if self.test_mode else 900.0  
         
         self.historical_win_rate = 0.58
@@ -90,6 +89,55 @@ class DistributedQuantEngine:
         
         # 🛡️ UPGRADE: Relaxed spread guard to 0.5% for volatile altcoins
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+
+    # ====================================================================
+    # 🧠 NEW: ADAPTIVE REGIME ATTENUATOR (RANGING MARKET OPTIMIZATION)
+    # ====================================================================
+    def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
+        """
+        Dynamically scales execution barriers, cooldown vectors, and position risk
+        based on mathematical volatility compression and regime classification.
+        """
+        base_cooldown = 900.0  # Base 15 minutes
+        base_z_threshold = 2.5
+        
+        vol_mult = float(metrics.get("vol_mult", 1.0))
+        
+        optimized_params = {
+            "cooldown_period": base_cooldown,
+            "z_score_threshold": base_z_threshold,
+            "position_scaling": 1.0,
+            "sl_multiplier": 1.5,
+            "tp_multiplier": 2.0,
+            "execution_verdict": True
+        }
+
+        if market_regime == "RANGING":
+            # 1. Volatility Compression Factor
+            compression_factor = max(1.0, 2.0 - vol_mult)
+            
+            # 2. Dynamic Cooldown Expansion (Up to 45 mins in dead markets)
+            optimized_params["cooldown_period"] = min(2700.0, base_cooldown * (compression_factor ** 2))
+            
+            # 3. Z-Score Barrier Dilation (Requires stronger signal in chop)
+            optimized_params["z_score_threshold"] = min(3.5, base_z_threshold * compression_factor)
+            
+            # 4. Capital Fractionation (Scale down position size during chop)
+            optimized_params["position_scaling"] = max(0.25, 1.0 / compression_factor)
+            
+            # 5. Asymmetric Bracket Realignment
+            optimized_params["sl_multiplier"] = 2.0  # Wider stops to survive wicks
+            optimized_params["tp_multiplier"] = 1.0  # Tighter targets for quick scalps
+            
+            # 6. Low Volatility Circuit Breaker
+            if vol_mult < 0.6:
+                optimized_params["execution_verdict"] = False
+
+        elif market_regime == "TRENDING":
+            optimized_params["sl_multiplier"] = 1.5
+            optimized_params["tp_multiplier"] = 3.0  # Let profits run during clear trends
+            
+        return optimized_params
 
     # ==========================================
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
@@ -210,7 +258,6 @@ class DistributedQuantEngine:
                 if resolved_count > 0:
                     logger.info(f"✅ Resolved {resolved_count} historical ghost trades for {symbol}.")
 
-                # 🚀 UPGRADE: Fetch dynamic regime to feed the FSM State Logic
                 feature_engine = self.feature_engines.get(symbol)
                 market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
 
@@ -264,24 +311,29 @@ class DistributedQuantEngine:
         mid_price = features["mid_price"]
         market_regime = features.get("market_regime", "RANGING")
 
+        # 🚀 INTEGRATION: Fetch metrics early to feed the adaptive attenuator
+        metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
+        
+        # 🚀 INTEGRATION: Calculate dynamic parameters based on current regime
+        optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics)
+
+        # 🛡️ Structural Circuit Breaker
+        if not optimization["execution_verdict"]:
+            return
+
+        # 🚀 INTEGRATION: Dynamic Cooldown Evaluation
         current_time = time.time()
-        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < self.execution_cooldown_period:
+        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < optimization["cooldown_period"]:
             return
 
         trade_direction = None
-        
-        # ============================================================
-        # 🚀 THE CURE: MICROSTRUCTURE NOISE & SPOOFING FILTERS
-        # ============================================================
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
         # 1. Institutional Volume Verification
-        # Checks if live traded volume is at least 50% above the rolling average.
-        metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
         has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.5
         
-        # 2. Extreme Z-Score Threshold (Filters out 99% of order book noise)
-        extreme_z_threshold = 2.5
+        # 2. Dynamic Extreme Z-Score Threshold
+        extreme_z_threshold = optimization["z_score_threshold"]
 
         if self.test_mode or not is_active:
             # Ghost trading thresholds (Calibration mode)
@@ -297,7 +349,6 @@ class DistributedQuantEngine:
                 elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
                     trade_direction = "SELL" 
             else:
-                # In a RANGING regime, we require the exact same extreme threshold + volume backing
                 if regime == "BUY" and z_obi >= extreme_z_threshold and has_institutional_volume:
                     trade_direction = "BUY"
                 elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
@@ -305,9 +356,10 @@ class DistributedQuantEngine:
 
         if trade_direction:
             self.last_execution_timestamps[symbol] = current_time
-            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Macro: {self.macro_regimes.get(symbol, 'HOLD')} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Mid: {mid_price}")
-            # Delegate execution routing entirely to the orchestration lifecycle loop
-            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price))
+            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Dynamic Z-Target: {extreme_z_threshold:.2f}")
+            
+            # 🚀 INTEGRATION: Pass the optimization dictionary down into the lifecycle
+            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization))
 
     # ==========================================
     # THREAD 3: LIGHTWEIGHT BASKET TRACKER
@@ -464,7 +516,6 @@ class DistributedQuantEngine:
     # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS
     # ==========================================
     async def run_system_heartbeat(self):
-        """Prints a periodic health check and sends an hourly comprehensive financial forensic report to Telegram."""
         start_time = time.time()
         loop_counter = 0
         
@@ -478,24 +529,19 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 60 == 0:
-                # 1. Fetch live metrics from our ledger & current account balance
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=50)
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 
-                # Calculate real drawdown percentage relative to initial micro baseline ($7.80)
                 initial_baseline = 7.80
                 drawdown_pct = max(0.0, (initial_baseline - current_vault_balance) / initial_baseline)
                 
-                # Build an institutional visual performance tracker bar matrix
                 bar_length = 10
                 filled_blocks = int(drawdown_pct * bar_length)
                 filled_blocks = min(bar_length, filled_blocks)
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
 
-                # 2. 🔬 PHASE 2 ADVANCEMENT: FORENSIC REGIME ANALYSIS FROM SUPABASE
                 try:
-                    # Query Supabase via official client API to pull resolved trade history
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl")\
                         .eq("resolved", True)\
@@ -526,7 +572,6 @@ class DistributedQuantEngine:
                     net_pnl = 0.0
                     regime_breakdown_text = "• ⚠️ <i>Supabase ledger context temporarily loading...</i>\n"
 
-                # 3. Shape the unified wealth optimization pulse string
                 report = (
                     f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -552,28 +597,27 @@ class DistributedQuantEngine:
     # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
     
-    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0):
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None):
         """
         ⚡ PHASE 3 UPGRADE: DYNAMIC TARGET STRETCHING & FEE ACCUMULATION
-        Computes hard boundary price variables offset dynamically to clean out exchange drag.
-        Stretches the Take-Profit boundaries exponentially during massive institutional volatility spikes.
         """
-        # Bybit Linear Perpetual fee model = ~0.055% taker on entry and exit
+        if optimization is None:
+            optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
+            
         fee_drag_factor = 0.00055 * 2 * leverage
         fee_buffer = entry_price * fee_drag_factor
         
-        # 🚀 DYNAMIC TARGET STRETCHING LOGIC
+        # 🚀 INTEGRATION: Apply Optimized Multipliers
+        tp_multiplier = optimization["tp_multiplier"]
+        sl_multiplier = optimization["sl_multiplier"]
+        
+        # Exponential stretch for high volume spikes
         if vol_z >= 3.0:
-            tp_multiplier = 4.5
+            tp_multiplier = max(tp_multiplier, 4.5)
             logger.info(f"📈 EXTREME VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
         elif vol_z >= 1.5:
-            tp_multiplier = 3.0
+            tp_multiplier = max(tp_multiplier, 3.0)
             logger.info(f"📊 ELEVATED VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
-        else:
-            tp_multiplier = 2.0
-            logger.debug(f"📉 STANDARD VOLATILITY (Z: {vol_z:.2f}). Compressing TP to {tp_multiplier}x ATR.")
-            
-        sl_multiplier = 1.5
         
         if side.upper() == "BUY":
             initial_sl = entry_price - (sl_multiplier * atr)
@@ -584,11 +628,13 @@ class DistributedQuantEngine:
             
         return round(initial_sl, 4), round(target_tp, 4)
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None):
         """
         Manages the complete lifecycle of a trading signal with concurrent overlap locks active.
         """
-        # 🛡️ THE POSITION OVERLAP GUARD LOCK CHECK
+        if optimization is None:
+            optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
+            
         if symbol in self.active_positions_lock:
             logger.info(f"🛑 OVERLAP PREVENTED // Already actively trading {symbol}. Signal safely bypassed.")
             return False
@@ -596,29 +642,21 @@ class DistributedQuantEngine:
         logger.info(f"🚦 PROCESSING SIGNAL // Symbol: {symbol} | Direction: {direction}")
         
         try:
-            # Engage structural position barrier
             self.active_positions_lock.add(symbol)
-            
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
             
-            # ====================================================================
-            # 🟢 UPGRADE 1: DYNAMIC ATTAINMENT OF VOLATILITY MATRICES (REAL ATR)
-            # ====================================================================
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
 
-            # Extract historical rolling metrics processed via your local thread engines
             if feature_engine and hasattr(feature_engine, 'get_computed_atr') and feature_engine.get_computed_atr():
                 atr = feature_engine.get_computed_atr()
                 logger.info(f"🎯 Scaled Volatility Engine Engaged // Real ATR for {symbol}: {atr:.4f}")
             else:
-                # 🛡️ UPGRADE: Widened fallback ATR from 0.45% to 1.5% to prevent whipsaws
                 atr = current_price * 0.015
             
             self.current_atrs[symbol] = atr
 
-            # 🚀 UPGRADE: Commit advanced metrics to quantitative ledger
             metrics = self.screener_metrics.get(symbol, {})
             features_dict = {
                 "symbol": symbol,
@@ -629,12 +667,8 @@ class DistributedQuantEngine:
             }
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
-            # ====================================================================
-            # 🛡️ HARDENED ACCURACY SHIELD: IMMUTABLE CAPITAL PROTECTION LAYER
-            # ====================================================================
             rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
 
-            # Force ghost-trading if we are in calibration or if live win-rate falls below institutional edge
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.65
 
@@ -652,7 +686,6 @@ class DistributedQuantEngine:
                 return 
 
             balance = await self.executor.get_wallet_balance_usdt()
-            # 🚀 UPGRADE: Feed the market regime into the Risk Vault
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance, win_rate=self.historical_win_rate,
                 win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
@@ -664,12 +697,18 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
 
+            # 🚀 INTEGRATION: Apply dynamic position scaling, respecting exchange minimums
+            scaled_allocation = risk_matrix["allocated_value_usdt"] * optimization["position_scaling"]
+            final_allocation = max(self.risk_vault.exchange_min_notional, scaled_allocation)
+            risk_matrix["allocated_value_usdt"] = final_allocation
+            risk_matrix["size"] = final_allocation / current_price
+
             if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
                 logger.warning(f"Global portfolio safety boundary breached for {symbol}.")
                 self.active_positions_lock.discard(symbol)
                 return
 
-            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Notional Size: {risk_matrix['allocated_value_usdt']} USDT.")
+            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Scaled Notional Size: {risk_matrix['allocated_value_usdt']:.2f} USDT.")
             
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
@@ -679,34 +718,27 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
             
-            # 🚀 PHASE 3 UPGRADE: Pass live Volatility Z-score to stretch the bracket targets
             vol_z = metrics.get("vol_z", 0.0)
-            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z)
+            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z, optimization)
             
-            # 🛡️ UPGRADE: LIVE LIQUIDITY GUARD (Prevents low-volume slippage)
             vol_mult = metrics.get("vol_mult", 1.0)
-            if vol_mult < 0.6: # If live volume drops below 60% of the average
+            if vol_mult < 0.6: 
                 logger.warning(f"❌ TRADE SKIPPED // {symbol} volume dangerously low (vol_mult: {vol_mult:.2f}). Slippage risk too high.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🛡️ UPGRADE: PROFIT VS FEE CHECK (Cost of Capital EV Engine)
             expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
-            spread_cost = current_price * 0.006  # Estimated 0.6% total friction for entry/exit
+            spread_cost = current_price * 0.006  
             
             if expected_profit < (spread_cost * 2):
                 logger.warning(f"❌ TRADE SKIPPED // {symbol} profit margin too tight to clear exchange friction.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # Pull lookahead order book metadata layers
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
                 current_depth = feature_engine.get_orderbook_snapshot()
 
-            # ============================================================
-            # 🚀 UPGRADE: MULTI-REGIME ORDER ROUTING
-            # ============================================================
             if market_regime == "TRENDING":
                 execution_success = await self.sor.execute_iceberg_block(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
@@ -733,16 +765,11 @@ class DistributedQuantEngine:
                 f"• Node: {symbol} | {direction}\n"
                 f"• Market Regime: {market_regime}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
-                f"• Notional Value: ${risk_matrix['allocated_value_usdt']} USDT\n"
+                f"• Notional Value: ${risk_matrix['allocated_value_usdt']:.2f} USDT\n"
                 f"🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}"
             )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
-            # ============================================================
-            # 🚀 PHASE 3 UPGRADE: ASYNCHRONOUS FIRE-AND-FORGET TRACKER
-            # ============================================================
-            # Spin the 10/10 trailing exit loop off into an isolated daemon.
-            # This instantly unblocks the orchestrator, dropping latency down to absolute zero.
             asyncio.create_task(self._position_lifecycle_daemon(
                 symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine
             ))
@@ -755,11 +782,6 @@ class DistributedQuantEngine:
             return False
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine):
-        """
-        🚀 HARDENED BACKGROUND DAEMON WITH GRIDLOCK PREVENTION
-        Tracks order fill states, dynamically trails stops, and automatically frees up 
-        portfolio exposure if limit orders remain untriggered.
-        """
         logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
         polling_interval = 4  
         start_time = time.time()
@@ -775,7 +797,6 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(polling_interval)
             
-            # 1. 🛡️ REAL-TIME POSITION VERIFIER LAYER
             try:
                 pos_response = await asyncio.to_thread(
                     self.executor.client.get_positions,
@@ -793,7 +814,6 @@ class DistributedQuantEngine:
                 logger.error(f"Failed to verify live position matrix status for {symbol}: {e}")
                 has_active_position = False
 
-            # 2. ⏳ THE GRIDLOCK BREAKER: 3-MINUTE UNFILLED TIMEOUT
             if not order_filled and (time.time() - start_time) > 180:
                 logger.warning(f"⏳ LIMIT TIMEOUT // {symbol} order remained untriggered for 3 minutes. Purging...")
                 try:
@@ -809,7 +829,6 @@ class DistributedQuantEngine:
                 logger.critical(f"🔓 PORTFOLIO UNLOCKED // Stale exposure dissolved for {symbol}. Hunting lines re-armed.")
                 break
 
-            # 3. POSITION CLOSURE EXECUTION PIPELINE
             if order_filled and not has_active_position:
                 settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
                 if settlement.get("closed"):
@@ -837,7 +856,6 @@ class DistributedQuantEngine:
                     self.active_positions_lock.discard(symbol)
                     break
             
-            # 4. ACTIVE STEP-TRAILING MATRIX EVALUATION
             if has_active_position:
                 live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
                 
