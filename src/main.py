@@ -91,53 +91,51 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     # ====================================================================
-    # 🧠 NEW: ADAPTIVE REGIME ATTENUATOR (RANGING MARKET OPTIMIZATION)
+    # 🧠 THE TRUE INSTITUTIONAL REGIME ATTENUATOR
     # ====================================================================
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
         """
-        Dynamically scales execution barriers, cooldown vectors, and position risk
-        based on mathematical volatility compression and regime classification.
+        Organically scales execution barriers and cooldowns based strictly on volume.
+        Maintains absolute mathematical rigor to ensure training data is valid.
         """
-        base_cooldown = 900.0  # Base 15 minutes
-        base_z_threshold = 2.5
-        
         vol_mult = float(metrics.get("vol_mult", 1.0))
-        
-        optimized_params = {
-            "cooldown_period": base_cooldown,
-            "z_score_threshold": base_z_threshold,
+
+        # The Institutional Baseline (Used when market volume is exactly average)
+        optimized = {
+            "cooldown_period": 300.0,      # 5 minute baseline
+            "z_score_threshold": 2.0,      # 95th percentile baseline
             "position_scaling": 1.0,
             "sl_multiplier": 1.5,
             "tp_multiplier": 2.0,
             "execution_verdict": True
         }
 
+        # 🌊 FLUID MARKET BREATHING (The Math Upgrade)
         if market_regime == "RANGING":
-            # 1. Volatility Compression Factor
-            compression_factor = max(1.0, 2.0 - vol_mult)
+            # We calculate a 'compression penalty'. If volume drops below 1.5x, the penalty increases.
+            # If volume is dead (0.5x), the penalty is 1.0. If volume is surging (1.5x), penalty is 0.0.
+            compression_penalty = max(0.0, 1.5 - vol_mult)
             
-            # 2. Dynamic Cooldown Expansion (Up to 45 mins in dead markets)
-            optimized_params["cooldown_period"] = min(2700.0, base_cooldown * (compression_factor ** 2))
+            # The Z-score and Cooldown scale continuously with the market's pulse.
+            # Dead market = 3.5 Z-Score, 15 min cooldown. Active market = 2.0 Z-score, 5 min cooldown.
+            optimized["z_score_threshold"] = 2.0 + (compression_penalty * 1.5)
+            optimized["cooldown_period"] = 300.0 + (compression_penalty * 600.0)
             
-            # 3. Z-Score Barrier Dilation (Requires stronger signal in chop)
-            optimized_params["z_score_threshold"] = min(3.5, base_z_threshold * compression_factor)
+            # Chop Optimization: Wider stops to survive wicks, tighter profits to capture mean reversion
+            optimized["sl_multiplier"] = 2.0 
+            optimized["tp_multiplier"] = 1.5 
             
-            # 4. Capital Fractionation (Scale down position size during chop)
-            optimized_params["position_scaling"] = max(0.25, 1.0 / compression_factor)
-            
-            # 5. Asymmetric Bracket Realignment
-            optimized_params["sl_multiplier"] = 2.0  # Wider stops to survive wicks
-            optimized_params["tp_multiplier"] = 1.0  # Tighter targets for quick scalps
-            
-            # 6. Low Volatility Circuit Breaker
+            # Total Liquidity Blackout (Do not trade if volume is less than 60% of average)
             if vol_mult < 0.6:
-                optimized_params["execution_verdict"] = False
-
-        elif market_regime == "TRENDING":
-            optimized_params["sl_multiplier"] = 1.5
-            optimized_params["tp_multiplier"] = 3.0  # Let profits run during clear trends
+                optimized["execution_verdict"] = False
             
-        return optimized_params
+        elif market_regime == "TRENDING":
+            # In a trend, strike fast and let profits ride
+            optimized["z_score_threshold"] = 2.0
+            optimized["cooldown_period"] = 120.0  
+            optimized["tp_multiplier"] = 3.0     
+            
+        return optimized
 
     # ==========================================
     # THREAD 1A: THE MACRO COMMANDER (BATCHER)
@@ -667,8 +665,12 @@ class DistributedQuantEngine:
             }
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
+            # ====================================================================
+            # 🛡️ THE IRON SHIELD: ABSOLUTE CAPITAL PROTECTION
+            # ====================================================================
             rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
 
+            # We ONLY deploy live capital if we have mathematically proven our edge.
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.65
 
@@ -677,13 +679,14 @@ class DistributedQuantEngine:
                     f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
                     f"Accuracy: {rolling_acc:.2%} (Floor: 65%) | State: {self.fsm.current_state.value}"
                 )
+                # We drop out of live execution here, but the data is still logged to Supabase.
                 self.active_positions_lock.discard(symbol)
-                return
+                return True
             
             if self.test_mode:
                 logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
                 self.active_positions_lock.discard(symbol)
-                return 
+                return True 
 
             balance = await self.executor.get_wallet_balance_usdt()
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
@@ -695,7 +698,7 @@ class DistributedQuantEngine:
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
                 logger.warning(f"Execution canceled for {symbol}. Kelly criteria failed.")
                 self.active_positions_lock.discard(symbol)
-                return
+                return False
 
             # 🚀 INTEGRATION: Apply dynamic position scaling, respecting exchange minimums
             scaled_allocation = risk_matrix["allocated_value_usdt"] * optimization["position_scaling"]
@@ -706,7 +709,7 @@ class DistributedQuantEngine:
             if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
                 logger.warning(f"Global portfolio safety boundary breached for {symbol}.")
                 self.active_positions_lock.discard(symbol)
-                return
+                return False
 
             logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Scaled Notional Size: {risk_matrix['allocated_value_usdt']:.2f} USDT.")
             
@@ -716,7 +719,7 @@ class DistributedQuantEngine:
             if not leverage_success:
                 logger.error(f"Execution aborted. Failed to set required leverage.")
                 self.active_positions_lock.discard(symbol)
-                return
+                return False
             
             vol_z = metrics.get("vol_z", 0.0)
             initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z, optimization)
