@@ -303,9 +303,9 @@ class DistributedQuantEngine:
         trade_direction = None
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
-        # STRICT Institutional Rules across both Ghost and Live
+        # STRICT Institutional Rules across both Ghost and Live (Adjusted volume to 1.2x)
         effective_z_threshold = optimization["z_score_threshold"]
-        has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.5
+        has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.2
 
         if self.test_mode or not is_active:
             if z_obi >= effective_z_threshold and has_institutional_volume:  
@@ -533,8 +533,8 @@ class DistributedQuantEngine:
                         std_return = np.std(returns) if len(returns) > 0 else 1e-6
                         vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
                         
-                        # 🎯 THE PURE MATH FILTER - UNCOMPROMISED
-                        if vol_mult >= 1.5 and vol_z >= 2.0:
+                        # 🎯 THE PURE MATH FILTER - UNCOMPROMISED (Adjusted volume to 1.2x)
+                        if vol_mult >= 1.2 and vol_z >= 2.0:
                             direction = "BUY" if returns[-1] < 0 else "SELL"
                             logger.critical(f"🦇 [SHADOW HIT] {symbol} | Vol: {vol_mult:.2f}x | Z: {vol_z:.2f}")
                             
