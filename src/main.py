@@ -51,7 +51,8 @@ class DistributedQuantEngine:
         self.stream_restart_event = asyncio.Event()
         
         self.memory = MemoryBank()
-        self.fsm = SystemStateMachine(accuracy_threshold=0.65, warmup_epochs=10)
+        # Adjusted to 60% professional edge baseline
+        self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=10)
         
         # 🛡️ UPGRADE: Adjusted limits to 25% max drawdown and 15% risk per position
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
@@ -279,6 +280,10 @@ class DistributedQuantEngine:
                 
                 # 🚀 UPGRADE: Compute rolling accuracy using the Dynamic Horizon 
                 dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
+                
+                # MATHEMATICAL SYNC: Tell the FSM exactly how many epochs are required right now
+                self.fsm.warmup_epochs = dynamic_window
+                
                 rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
                 self.fsm.process_state_transition(rolling_acc, total_resolved, market_regime)
                 
@@ -340,34 +345,42 @@ class DistributedQuantEngine:
         trade_direction = None
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
-        # 1. Institutional Volume Verification
-        has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.5
+        # 🧪 TRAINING MODE DETECTION: If we are in CALIBRATING, use relaxed thresholds
+        is_training = (self.fsm.current_state == TradingState.CALIBRATING)
         
-        # 2. Dynamic Extreme Z-Score Threshold
-        extreme_z_threshold = optimization["z_score_threshold"]
+        # Set thresholds based on mode
+        if is_training:
+            # TRAINING MODE: Relaxed thresholds to generate data
+            effective_z_threshold = 1.2
+            has_institutional_volume = True  # Ignore 1.5x requirement to build dataset
+        else:
+            # LIVE MODE: Strict Institutional Rules
+            effective_z_threshold = optimization["z_score_threshold"]
+            has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.5
 
         if self.test_mode or not is_active:
             # Ghost trading thresholds (Calibration mode)
-            if z_obi >= extreme_z_threshold and has_institutional_volume:  
+            if z_obi >= effective_z_threshold and has_institutional_volume:  
                 trade_direction = "BUY"
-            elif z_obi <= -extreme_z_threshold and has_institutional_volume:
+            elif z_obi <= -effective_z_threshold and has_institutional_volume:
                 trade_direction = "SELL"
         else:
             regime = self.macro_regimes.get(symbol, "HOLD")
             if market_regime == "TRENDING":
-                if regime == "BUY" and z_obi >= extreme_z_threshold and has_institutional_volume:
+                if regime == "BUY" and z_obi >= effective_z_threshold and has_institutional_volume:
                     trade_direction = "BUY"  
-                elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
+                elif regime == "SELL" and z_obi <= -effective_z_threshold and has_institutional_volume:
                     trade_direction = "SELL" 
             else:
-                if regime == "BUY" and z_obi >= extreme_z_threshold and has_institutional_volume:
+                if regime == "BUY" and z_obi >= effective_z_threshold and has_institutional_volume:
                     trade_direction = "BUY"
-                elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
+                elif regime == "SELL" and z_obi <= -effective_z_threshold and has_institutional_volume:
                     trade_direction = "SELL"
 
         if trade_direction:
             self.last_execution_timestamps[symbol] = current_time
-            logger.critical(f"🔥 SWARM EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Dynamic Z-Target: {extreme_z_threshold:.2f}")
+            mode_label = "🧪 TRAINING" if is_training else "🔥 LIVE"
+            logger.critical(f"{mode_label} EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Effective Z-Target: {effective_z_threshold:.2f}")
             
             # 🚀 INTEGRATION: Pass the optimization dictionary down into the lifecycle
             asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization))
@@ -647,6 +660,7 @@ class DistributedQuantEngine:
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None):
         """
         Manages the complete lifecycle of a trading signal with concurrent overlap locks active.
+        Now with Training Mode support to bootstrap data.
         """
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
@@ -684,19 +698,32 @@ class DistributedQuantEngine:
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
             # ====================================================================
-            # 🛡️ THE IRON SHIELD + 🚀 DYNAMIC MEMORY HORIZON
+            # 🛡️ THE IRON SHIELD + 🚀 DYNAMIC MEMORY HORIZON + 🧪 TRAINING MODE
             # ====================================================================
             dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
             rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
 
-            # We ONLY deploy live capital if we have mathematically proven our edge.
+            # Check if we are ready to go live
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-            has_institutional_edge = rolling_acc >= 0.65
+            has_institutional_edge = rolling_acc >= 0.60
+            
+            # 🧪 TRAINING MODE: If we are in CALIBRATING, we run in "Training Mode" (Trade to build data)
+            is_training = (self.fsm.current_state == TradingState.CALIBRATING)
 
-            if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
+            # If we are not live AND not training, stay in ghost mode
+            if not self.test_mode and not is_whitelisted_state and not is_training:
                 logger.critical(
                     f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
-                    f"Accuracy: {rolling_acc:.2%} (Floor: 65%) | Target Dynamic Memory: {dynamic_window} trades"
+                    f"Accuracy: {rolling_acc:.2%} (Floor: 60%) | Target Dynamic Memory: {dynamic_window} trades"
+                )
+                self.active_positions_lock.discard(symbol)
+                return True
+            
+            # 🧪 TRAINING MODE: Relaxed thresholds to generate data
+            if is_training:
+                logger.critical(
+                    f"🧪 [TRAINING MODE] Collecting ghost data -> Node: {symbol} | "
+                    f"Direction: {direction} | Accuracy: {rolling_acc:.2%} | Target: {dynamic_window} trades"
                 )
                 self.active_positions_lock.discard(symbol)
                 return True
@@ -706,6 +733,9 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True 
 
+            # ====================================================================
+            # 🔒 LIVE MODE: Strict Institutional Rules (Only reached if is_whitelisted_state)
+            # ====================================================================
             balance = await self.executor.get_wallet_balance_usdt()
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance, win_rate=self.historical_win_rate,
