@@ -550,7 +550,7 @@ class DistributedQuantEngine:
                             }
                             
                             self.memory.commit_prediction(
-                                f"shadow-{uuid.uuid4().hex[:8]}", 
+                                str(uuid.uuid4()),  # 🚀 FIX: Valid UUID explicitly enforced
                                 time.time(), 
                                 current_price, 
                                 direction, 
@@ -892,6 +892,7 @@ class DistributedQuantEngine:
                     logger.critical(f"🏁 POSITION TERMINATION DETECTED // Symbol: {symbol}")
                     net_pnl = float(settlement.get('pnl', 0.0))
                     entry_px = float(settlement.get('entry', current_price))
+                    exit_px = float(settlement.get('exit', current_price))
                     slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
                     
                     report_message = (
