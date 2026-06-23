@@ -74,7 +74,10 @@ class DistributedQuantEngine:
         # 🛡️ POSITION LOCK DEPLOYMENT MATRIX
         self.active_positions_lock = set()
         
-        self.execution_cooldown_period = 10.0 if self.test_mode else 60.0  
+        # 🛡️ THE CURE: INSTITUTIONAL COOLDOWN (15 Minutes)
+        # Replaces the old 60-second limit that caused hyperactive scalping.
+        self.execution_cooldown_period = 10.0 if self.test_mode else 900.0  
+        
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
 
@@ -267,27 +270,37 @@ class DistributedQuantEngine:
 
         trade_direction = None
         
-        # 🚀 UPGRADE: Regime-Aware Signal Generation and FSM verification
+        # ============================================================
+        # 🚀 THE CURE: MICROSTRUCTURE NOISE & SPOOFING FILTERS
+        # ============================================================
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
+        # 1. Institutional Volume Verification
+        # Checks if live traded volume is at least 50% above the rolling average.
+        metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
+        has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.5
+        
+        # 2. Extreme Z-Score Threshold (Filters out 99% of order book noise)
+        extreme_z_threshold = 2.5
+
         if self.test_mode or not is_active:
-            # Ghost trading thresholds
-            if z_obi >= 1.5:  
+            # Ghost trading thresholds (Calibration mode)
+            if z_obi >= extreme_z_threshold and has_institutional_volume:  
                 trade_direction = "BUY"
-            elif z_obi <= -1.5:
+            elif z_obi <= -extreme_z_threshold and has_institutional_volume:
                 trade_direction = "SELL"
         else:
             regime = self.macro_regimes.get(symbol, "HOLD")
             if market_regime == "TRENDING":
-                if regime == "BUY" and z_obi >= 2.0:
+                if regime == "BUY" and z_obi >= extreme_z_threshold and has_institutional_volume:
                     trade_direction = "BUY"  
-                elif regime == "SELL" and z_obi <= -2.0:
+                elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
                     trade_direction = "SELL" 
             else:
-                # In a RANGING regime, we trigger entries aggressively off the order book imbalance
-                if regime == "BUY" and z_obi >= 1.5:
+                # In a RANGING regime, we require the exact same extreme threshold + volume backing
+                if regime == "BUY" and z_obi >= extreme_z_threshold and has_institutional_volume:
                     trade_direction = "BUY"
-                elif regime == "SELL" and z_obi <= -1.5:
+                elif regime == "SELL" and z_obi <= -extreme_z_threshold and has_institutional_volume:
                     trade_direction = "SELL"
 
         if trade_direction:
@@ -616,10 +629,20 @@ class DistributedQuantEngine:
             }
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
-            # 🛡️ UPGRADE: Regime-Aware Live State Validation
-            is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-            if not self.test_mode and not is_active:
-                logger.info(f"👻 [CALIBRATION] Ghost trade saved to database -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
+            # ====================================================================
+            # 🛡️ HARDENED ACCURACY SHIELD: IMMUTABLE CAPITAL PROTECTION LAYER
+            # ====================================================================
+            rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
+
+            # Force ghost-trading if we are in calibration or if live win-rate falls below institutional edge
+            is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
+            has_institutional_edge = rolling_acc >= 0.65
+
+            if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
+                logger.critical(
+                    f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
+                    f"Accuracy: {rolling_acc:.2%} (Floor: 65%) | State: {self.fsm.current_state.value}"
+                )
                 self.active_positions_lock.discard(symbol)
                 return
             
