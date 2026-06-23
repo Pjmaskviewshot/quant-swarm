@@ -91,6 +91,21 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     # ====================================================================
+    # 🧠 UPGRADE 1: THE ADAPTIVE MEMORY HORIZON (Exponential Scaling)
+    # ====================================================================
+    def compute_dynamic_memory_window(self, vol_mult: float) -> int:
+        """
+        Calculates how many trades the FSM needs to prove edge.
+        Uses quadratic compression to aggressively shrink the window to 10
+        during parabolic volume events, instantly unlocking live capital.
+        """
+        # Sigmoid-like response to volume
+        normalized = min(2.0, vol_mult) / 2.0
+        compressed = 1.0 - (normalized * normalized * 0.8)  # Quadratic compression
+        target_window = int(50 * max(0.2, compressed))
+        return max(10, min(50, target_window))
+
+    # ====================================================================
     # 🧠 THE TRUE INSTITUTIONAL REGIME ATTENUATOR
     # ====================================================================
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
@@ -112,12 +127,9 @@ class DistributedQuantEngine:
 
         # 🌊 FLUID MARKET BREATHING (The Math Upgrade)
         if market_regime == "RANGING":
-            # We calculate a 'compression penalty'. If volume drops below 1.5x, the penalty increases.
-            # If volume is dead (0.5x), the penalty is 1.0. If volume is surging (1.5x), penalty is 0.0.
             compression_penalty = max(0.0, 1.5 - vol_mult)
             
             # The Z-score and Cooldown scale continuously with the market's pulse.
-            # Dead market = 3.5 Z-Score, 15 min cooldown. Active market = 2.0 Z-score, 5 min cooldown.
             optimized["z_score_threshold"] = 2.0 + (compression_penalty * 1.5)
             optimized["cooldown_period"] = 300.0 + (compression_penalty * 600.0)
             
@@ -125,7 +137,7 @@ class DistributedQuantEngine:
             optimized["sl_multiplier"] = 2.0 
             optimized["tp_multiplier"] = 1.5 
             
-            # Total Liquidity Blackout (Do not trade if volume is less than 60% of average)
+            # Total Liquidity Blackout
             if vol_mult < 0.6:
                 optimized["execution_verdict"] = False
             
@@ -262,14 +274,15 @@ class DistributedQuantEngine:
                 # Feature Engine calculation
                 self.current_atrs[symbol] = current_price * 0.0045
                 
-                # Compute rolling accuracy with actual resolved data and pass regime context
-                rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
-                self.fsm.process_state_transition(rolling_acc, total_resolved, market_regime)
-                
-                logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Regime: {market_regime}")
-                
                 # Safely pull live context features from screener memory
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
+                
+                # 🚀 UPGRADE: Compute rolling accuracy using the Dynamic Horizon 
+                dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
+                rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
+                self.fsm.process_state_transition(rolling_acc, total_resolved, market_regime)
+                
+                logger.info(f"📊 FSM STATUS: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%} | Window Target: {dynamic_window}")
 
                 # Drop data into the BATCH QUEUE
                 self.pending_macro_payloads[symbol] = {
@@ -527,7 +540,7 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 60 == 0:
-                accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=50)
+                accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=30)
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 
@@ -570,12 +583,17 @@ class DistributedQuantEngine:
                     net_pnl = 0.0
                     regime_breakdown_text = "• ⚠️ <i>Supabase ledger context temporarily loading...</i>\n"
 
+                # 🚀 HEARTBEAT TRANSPARENCY: Display the Active Memory Horizon
+                avg_vol_mult = np.mean([m.get("vol_mult", 1.0) for m in self.screener_metrics.values()]) if self.screener_metrics else 1.0
+                avg_dynamic_window = self.compute_dynamic_memory_window(avg_vol_mult)
+
                 report = (
                     f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Engine Run Uptime:</b> <code>{uptime_hours:.2f} Hours</code>\n"
                     f"🎛 <b>FSM State Gear:</b> <code>{state}</code>\n"
                     f"🎯 <b>Rolling Edge Accuracy:</b> <code>{accuracy:.2%}</code>\n"
+                    f"📏 <b>Active Memory Horizon:</b> <code>{avg_dynamic_window} Trades Required</code>\n"
                     f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool_size} Resolved</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
@@ -666,9 +684,10 @@ class DistributedQuantEngine:
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
             # ====================================================================
-            # 🛡️ THE IRON SHIELD: ABSOLUTE CAPITAL PROTECTION
+            # 🛡️ THE IRON SHIELD + 🚀 DYNAMIC MEMORY HORIZON
             # ====================================================================
-            rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=50)
+            dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
+            rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
 
             # We ONLY deploy live capital if we have mathematically proven our edge.
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
@@ -677,9 +696,8 @@ class DistributedQuantEngine:
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
                 logger.critical(
                     f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
-                    f"Accuracy: {rolling_acc:.2%} (Floor: 65%) | State: {self.fsm.current_state.value}"
+                    f"Accuracy: {rolling_acc:.2%} (Floor: 65%) | Target Dynamic Memory: {dynamic_window} trades"
                 )
-                # We drop out of live execution here, but the data is still logged to Supabase.
                 self.active_positions_lock.discard(symbol)
                 return True
             
@@ -700,7 +718,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 INTEGRATION: Apply dynamic position scaling, respecting exchange minimums
             scaled_allocation = risk_matrix["allocated_value_usdt"] * optimization["position_scaling"]
             final_allocation = max(self.risk_vault.exchange_min_notional, scaled_allocation)
             risk_matrix["allocated_value_usdt"] = final_allocation
@@ -794,7 +811,6 @@ class DistributedQuantEngine:
         peak_observed_price = current_price
         
         activation_threshold = atr * 1.0  
-        trailing_leash = atr * 2.0        
         minimum_api_step = atr * 0.4      
 
         while True:
@@ -849,7 +865,7 @@ class DistributedQuantEngine:
                         f"📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n"
                         f"💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
                         f"⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n"
-                        f"⚙️ <b>Execution Trailing Method:</b> <code>Dynamic ATR Step-Leash</code>\n"
+                        f"⚙️ <b>Execution Trailing Method:</b> <code>Kinetic Asymmetric Lock</code>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━"
                     )
                     asyncio.create_task(self.telegram.send_html_report(report_message))
@@ -863,11 +879,27 @@ class DistributedQuantEngine:
                 live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
                 
                 if live_mid:
+                    # ============================================================
+                    # 🚀 UPGRADE 2: KINETIC TAKE-PROFIT SHIFTING (Greed Engine)
+                    # ============================================================
+                    profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
+                    
+                    if profit_distance >= (atr * 2.5):
+                        # Tier 3: Extreme Profit Extraction
+                        active_leash = atr * 0.5
+                    elif profit_distance >= (atr * 1.5):
+                        # Tier 2: Capital Preservation (Break-even Lock)
+                        active_leash = atr * 1.0
+                    else:
+                        # Tier 1: Wide Breathing Room
+                        active_leash = atr * 2.0
+
                     if direction == "BUY":
                         if live_mid > peak_observed_price:
                             peak_observed_price = live_mid
+                        
                         if peak_observed_price >= (current_price + activation_threshold):
-                            target_stop = peak_observed_price - trailing_leash
+                            target_stop = peak_observed_price - active_leash
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
                                 amend_success = await asyncio.to_thread(
                                     self.executor.client.set_trading_stop,
@@ -875,13 +907,14 @@ class DistributedQuantEngine:
                                 )
                                 if amend_success:
                                     current_hard_stop = target_stop
-                                    logger.info(f"📈 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
+                                    logger.info(f"📈 KINETIC STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)} | Active Leash: {round(active_leash, 4)}")
                                     
                     elif direction == "SELL":
                         if live_mid < peak_observed_price:
                             peak_observed_price = live_mid
+                        
                         if peak_observed_price <= (current_price - activation_threshold):
-                            target_stop = peak_observed_price + trailing_leash
+                            target_stop = peak_observed_price + active_leash
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
                                 amend_success = await asyncio.to_thread(
                                     self.executor.client.set_trading_stop,
@@ -889,7 +922,7 @@ class DistributedQuantEngine:
                                 )
                                 if amend_success:
                                     current_hard_stop = target_stop
-                                    logger.info(f"📉 TRAILING STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)}")
+                                    logger.info(f"📉 KINETIC STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)} | Active Leash: {round(active_leash, 4)}")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
