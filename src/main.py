@@ -611,17 +611,28 @@ class DistributedQuantEngine:
             loop_counter += 1
             uptime_hours = (time.time() - start_time) / 3600
             
-            # 🚀 GLOBAL DB RESOLUTION: The only thread permitted to execute resolutions.
-            # Using the safe, existing memory method to avoid breaking missing functions
-            try:
-                age_cutoff = time.time() - 3600 # 1-Hour Decay Fix applied
-                for sym in self.asset_basket:
-                    history = self.screener_memory.get(sym, {"prices": []})
-                    if history["prices"]:
-                        latest_px = history["prices"][-1]
-                        self.memory.resolve_historical_predictions(current_price=latest_px, age_cutoff=age_cutoff)
-            except Exception as e:
-                logger.debug(f"Global resolution error: {e}")
+            # 🚀 1. BATCHED DB RESOLUTION: Reduces DB network strangulation from 15 requests to 1
+            if loop_counter % 60 == 0:
+                try:
+                    logger.info("⚡ Executing unified database resolution sweep across asset array...")
+                    age_cutoff_time = time.time() - 3600 # 1-Hour Decay Fix applied globally
+                    
+                    # Consolidate all assets that have active price streams
+                    valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
+                    
+                    if valid_assets:
+                        # Construct mapped dict for current prices to avoid internal lookup delays
+                        current_prices = {sym: self.screener_memory[sym]["prices"][-1] for sym in valid_assets}
+                        
+                        # Direct, singular call to the memory unit using batched execution
+                        await asyncio.to_thread(
+                            self.memory.resolve_batch_historical_predictions,
+                            assets=valid_assets,
+                            current_prices=current_prices,
+                            age_cutoff=age_cutoff_time
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Failed to execute batched prediction validation: {str(e)}")
 
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
