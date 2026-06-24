@@ -137,7 +137,8 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            compression_penalty = max(0.0, 1.5 - vol_mult)
+            # 🚀 ALIGNMENT FIX: 1.2 perfectly matches the 1.2x volume threshold so live trades are not starved
+            compression_penalty = max(0.0, 1.2 - vol_mult)
             optimized["z_score_threshold"] = 2.0 + (compression_penalty * 1.5)
             optimized["cooldown_period"] = 300.0 + (compression_penalty * 600.0)
             optimized["sl_multiplier"] = 2.0 
@@ -465,7 +466,7 @@ class DistributedQuantEngine:
         return "TRENDING" if er >= 0.35 and bb_width >= 0.004 else "RANGING"
 
     async def _resolve_shadow_trades(self):
-        """Resolves shadow ghost trades after 5 minutes to feed the FSM"""
+        """Resolves shadow ghost trades after 1 hour to feed the FSM"""
         # 🚀 THE DECAY FIX: Hardcoded to 1 Hour (3600s) to allow 15m timeframes to naturally resolve
         for symbol, data in list(self.shadow_resolution_tracker.items()):
             if time.time() - data["timestamp"] > 3600:
@@ -611,6 +612,7 @@ class DistributedQuantEngine:
             uptime_hours = (time.time() - start_time) / 3600
             
             # 🚀 GLOBAL DB RESOLUTION: The only thread permitted to execute resolutions.
+            # Using the safe, existing memory method to avoid breaking missing functions
             try:
                 age_cutoff = time.time() - 3600 # 1-Hour Decay Fix applied
                 for sym in self.asset_basket:
@@ -740,7 +742,10 @@ class DistributedQuantEngine:
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
-        if symbol in self.active_positions_lock: return False
+        if symbol in self.active_positions_lock: 
+            logger.warning(f"🔒 Guard execution bypass [{symbol}]: Signal ignored to prevent position stacking collision.")
+            return False
+            
         self.active_positions_lock.add(symbol)
         
         try:
