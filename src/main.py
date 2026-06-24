@@ -137,16 +137,14 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            # 🚀 ALIGNMENT FIX: 1.2 perfectly matches the 1.2x volume threshold so live trades are not starved
-            compression_penalty = max(0.0, 1.2 - vol_mult)
-            optimized["z_score_threshold"] = 2.0 + (compression_penalty * 1.5)
-            optimized["cooldown_period"] = 300.0 + (compression_penalty * 600.0)
+            optimized["z_score_threshold"] = 2.0 
+            optimized["cooldown_period"] = 300.0 
             optimized["sl_multiplier"] = 2.0 
             optimized["tp_multiplier"] = 1.5 
-            if vol_mult < 0.6:
+            if vol_mult < 0.5: # 🛡️ Lowered floor to 0.5x to prevent blocking the Velocity Gate
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
-            optimized["z_score_threshold"] = 2.0
+            optimized["z_score_threshold"] = 1.8 
             optimized["cooldown_period"] = 120.0  
             optimized["tp_multiplier"] = 3.0     
             
@@ -296,31 +294,33 @@ class DistributedQuantEngine:
         if (current_time - self.last_execution_timestamps.get(symbol, 0)) < optimization["cooldown_period"]:
             return
 
+        effective_z_threshold = optimization["z_score_threshold"]
+        vol_mult = metrics.get("vol_mult", 1.0)
+
+        # 🚀 GATE 1: THE VELOCITY STRIKE (Leading Indicator)
+        # Price has violently broken standard deviation. We only need baseline volume (0.8x) to confirm it is not a fake-out.
+        gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8)
+
+        # 🚀 GATE 2: THE ACCUMULATION GRIND (Lagging Indicator)
+        # Massive institutional volume (1.5x) is pouring into the order book. Price hasn't violently snapped yet, so we lower the Z-score requirement to 1.2.
+        gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.2)
+
+        has_pure_edge = gate_1_velocity or gate_2_accumulation
+
         trade_direction = None
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-        
-        effective_z_threshold = optimization["z_score_threshold"]
-        has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.2
 
         if self.test_mode or not is_active:
-            if z_obi >= effective_z_threshold and has_institutional_volume:  
-                trade_direction = "BUY"
-            elif z_obi <= -effective_z_threshold and has_institutional_volume:
-                trade_direction = "SELL"
+            if has_pure_edge:  
+                trade_direction = "BUY" if z_obi > 0 else "SELL"
         else:
             # 🚀 ASYMMETRIC VETO MODEL
-            # Mathematical entries are inherently trusted unless explicitly overridden by a strong Macro bias.
             regime = self.macro_regimes.get(symbol, "HOLD")
-            if market_regime == "TRENDING":
-                if z_obi >= effective_z_threshold and has_institutional_volume and regime != "SELL":  
+            if has_pure_edge:
+                if z_obi > 0 and regime != "SELL":  
                     trade_direction = "BUY"
-                elif z_obi <= -effective_z_threshold and has_institutional_volume and regime != "BUY":
+                elif z_obi < 0 and regime != "BUY":
                     trade_direction = "SELL" 
-            else:
-                if z_obi >= effective_z_threshold and has_institutional_volume and regime != "SELL":
-                    trade_direction = "BUY"
-                elif z_obi <= -effective_z_threshold and has_institutional_volume and regime != "BUY":
-                    trade_direction = "SELL"
 
         if trade_direction:
             self.last_execution_timestamps[symbol] = current_time
@@ -467,7 +467,6 @@ class DistributedQuantEngine:
 
     async def _resolve_shadow_trades(self):
         """Resolves shadow ghost trades after 1 hour to feed the FSM"""
-        # 🚀 THE DECAY FIX: Hardcoded to 1 Hour (3600s) to allow 15m timeframes to naturally resolve
         for symbol, data in list(self.shadow_resolution_tracker.items()):
             if time.time() - data["timestamp"] > 3600:
                 try:
@@ -537,8 +536,11 @@ class DistributedQuantEngine:
                         std_return = np.std(returns) if len(returns) > 0 else 1e-6
                         vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
                         
-                        # 🎯 THE PURE MATH FILTER - UNCOMPROMISED (Adjusted volume to 1.2x)
-                        if vol_mult >= 1.2 and vol_z >= 2.0:
+                        # 🚀 DUAL-GATE ALPHA TRIGGER INTEGRATION
+                        gate_1_shadow = (vol_z >= 2.0) and (vol_mult >= 0.8)
+                        gate_2_shadow = (vol_mult >= 1.5) and (vol_z >= 1.2)
+                        
+                        if gate_1_shadow or gate_2_shadow:
                             direction = "BUY" if returns[-1] < 0 else "SELL"
                             logger.critical(f"🦇 [SHADOW HIT] {symbol} | Vol: {vol_mult:.2f}x | Z: {vol_z:.2f}")
                             
@@ -554,7 +556,7 @@ class DistributedQuantEngine:
                             }
                             
                             self.memory.commit_prediction(
-                                str(uuid.uuid4()),  # 🚀 FIX: Valid UUID explicitly enforced
+                                str(uuid.uuid4()),  
                                 time.time(), 
                                 current_price, 
                                 direction, 
@@ -572,7 +574,7 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.debug(f"Shadow scan failed for {symbol}: {e}")
                     
-                    await asyncio.sleep(0.3) # Rate limit protection
+                    await asyncio.sleep(0.5) # 🚀 UPGRADED: Throttled to completely bypass Bybit 10006 Rate Limits
                 await asyncio.sleep(1) # Batch pause
             
             # Resolve pending shadow trades
