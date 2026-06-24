@@ -56,10 +56,12 @@ class DistributedQuantEngine:
         self.stream_restart_event = asyncio.Event()
         
         self.memory = MemoryBank()
-        # Adjusted to 60% professional edge baseline
-        self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=10)
         
-        # 🛡️ UPGRADE: Adjusted limits to 25% max drawdown and 15% risk per position
+        # 🚀 UPGRADE 2: Enforce a strict professional horizon limit base
+        self.min_horizon_floor = 150
+        self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=self.min_horizon_floor)
+        
+        # 🛡️ Adjusted limits to 25% max drawdown and 15% risk per position
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
@@ -87,11 +89,10 @@ class DistributedQuantEngine:
         self.historical_win_loss_ratio = 1.65
 
         # 🚀 THE SINGLETON CACHE: Stops event loop strangulation. 
-        # Workers read this local dict instantly instead of querying Supabase.
         self.global_state_cache = {
             "rolling_accuracy": 0.50,
             "total_resolved": 0,
-            "dynamic_window": 40,
+            "dynamic_window": self.min_horizon_floor,
             "last_updated": 0.0
         }
 
@@ -109,13 +110,13 @@ class DistributedQuantEngine:
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
         """
         Calculates how many trades the FSM needs to prove edge.
-        Uses quadratic compression to aggressively shrink the window to 10
-        during parabolic volume events, instantly unlocking live capital.
+        Uses quadratic compression to aggressively shrink the window during
+        parabolic volume events, but respects the new minimum horizon floor.
         """
         normalized = min(2.0, vol_mult) / 2.0
-        compressed = 1.0 - (normalized * normalized * 0.8)  # Quadratic compression
-        target_window = int(50 * max(0.2, compressed))
-        return max(10, min(50, target_window))
+        compressed = 1.0 - (normalized * normalized * 0.5)
+        target_window = int(250 * max(0.4, compressed))
+        return max(self.min_horizon_floor, min(300, target_window))
 
     # ====================================================================
     # 🧠 THE TRUE INSTITUTIONAL REGIME ATTENUATOR
@@ -129,7 +130,7 @@ class DistributedQuantEngine:
 
         optimized = {
             "cooldown_period": 300.0,
-            "z_score_threshold": 2.0,
+            "z_score_threshold": 2.2, # Baseline target hardened to suppress chop
             "position_scaling": 1.0,
             "sl_multiplier": 1.5,
             "tp_multiplier": 2.0,
@@ -137,16 +138,16 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 2.0 
+            optimized["z_score_threshold"] = 2.4 # Strict micro-structure filtering for ranging markets
             optimized["cooldown_period"] = 300.0 
-            optimized["sl_multiplier"] = 2.0 
+            optimized["sl_multiplier"] = 1.8 
             optimized["tp_multiplier"] = 1.5 
             if vol_mult < 0.5: # 🛡️ Lowered floor to 0.5x to prevent blocking the Velocity Gate
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
-            optimized["z_score_threshold"] = 1.8 
+            optimized["z_score_threshold"] = 1.9 
             optimized["cooldown_period"] = 120.0  
-            optimized["tp_multiplier"] = 3.0     
+            optimized["tp_multiplier"] = 2.5     
             
         return optimized
 
@@ -302,8 +303,8 @@ class DistributedQuantEngine:
         gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8)
 
         # 🚀 GATE 2: THE ACCUMULATION GRIND (Lagging Indicator)
-        # Massive institutional volume (1.5x) is pouring into the order book. Price hasn't violently snapped yet, so we lower the Z-score requirement to 1.2.
-        gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.2)
+        # Massive institutional volume (1.5x) is pouring into the order book. Price hasn't violently snapped yet, so we lower the Z-score requirement.
+        gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.4)
 
         has_pure_edge = gate_1_velocity or gate_2_accumulation
 
@@ -465,27 +466,6 @@ class DistributedQuantEngine:
         
         return "TRENDING" if er >= 0.35 and bb_width >= 0.004 else "RANGING"
 
-    async def _resolve_shadow_trades(self):
-        """Resolves shadow ghost trades after 1 hour to feed the FSM"""
-        for symbol, data in list(self.shadow_resolution_tracker.items()):
-            if time.time() - data["timestamp"] > 3600:
-                try:
-                    klines = await asyncio.to_thread(
-                        self.executor.client.get_kline,
-                        category="linear", symbol=symbol, interval="1", limit=2
-                    )
-                    if klines and "result" in klines and "list" in klines["result"] and len(klines["result"]["list"]) > 0:
-                        current_price = float(klines["result"]["list"][0][4])
-                        resolved = self.memory.resolve_historical_predictions(
-                            current_price=current_price,
-                            age_cutoff=time.time() - 3600
-                        )
-                        if resolved > 0:
-                            logger.info(f"🦇 Resolved {resolved} shadow trades for {symbol}")
-                            del self.shadow_resolution_tracker[symbol]
-                except Exception as e:
-                    logger.debug(f"Shadow resolution failed for {symbol}: {e}")
-
     async def run_shadow_swarm_scanner(self):
         """
         🦇 SHADOW SWARM: Scans 85+ assets for pure 2.0+ Z-Score setups
@@ -537,8 +517,8 @@ class DistributedQuantEngine:
                         vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
                         
                         # 🚀 DUAL-GATE ALPHA TRIGGER INTEGRATION
-                        gate_1_shadow = (vol_z >= 2.0) and (vol_mult >= 0.8)
-                        gate_2_shadow = (vol_mult >= 1.5) and (vol_z >= 1.2)
+                        gate_1_shadow = (vol_z >= 2.2) and (vol_mult >= 0.8)
+                        gate_2_shadow = (vol_mult >= 1.5) and (vol_z >= 1.4)
                         
                         if gate_1_shadow or gate_2_shadow:
                             direction = "BUY" if returns[-1] < 0 else "SELL"
@@ -566,19 +546,12 @@ class DistributedQuantEngine:
                             
                             # Update trackers
                             self.shadow_cooldown[symbol] = time.time()
-                            self.shadow_resolution_tracker[symbol] = {
-                                "price": current_price,
-                                "timestamp": time.time()
-                            }
                             
                     except Exception as e:
                         logger.debug(f"Shadow scan failed for {symbol}: {e}")
                     
                     await asyncio.sleep(0.5) # 🚀 UPGRADED: Throttled to completely bypass Bybit 10006 Rate Limits
                 await asyncio.sleep(1) # Batch pause
-            
-            # Resolve pending shadow trades
-            await self._resolve_shadow_trades()
 
     # ==========================================
     # THREAD 6: HIGH-VELOCITY NETWORK CONNECTOR
@@ -626,10 +599,15 @@ class DistributedQuantEngine:
                         # Construct mapped dict for current prices to avoid internal lookup delays
                         current_prices = {sym: self.screener_memory[sym]["prices"][-1] for sym in valid_assets}
                         
+                        # Cross reference shadow matrix space as well to capture full coverage
+                        for s, data in self.shadow_cooldown.items():
+                            if s not in current_prices: 
+                                current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])[-1]
+                        
                         # Direct, singular call to the memory unit using batched execution
                         await asyncio.to_thread(
                             self.memory.resolve_batch_historical_predictions,
-                            assets=valid_assets,
+                            assets=list(current_prices.keys()),
                             current_prices=current_prices,
                             age_cutoff=age_cutoff_time
                         )
@@ -652,11 +630,10 @@ class DistributedQuantEngine:
                 
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
-                # 🛡️ FSM REGRESSION GATE
-                is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-                if is_active and accuracy < 0.60:
-                    logger.critical(f"📉 EDGE DECAY BREAKOUT ({accuracy:.2%}). Demoting system back to CALIBRATING state.")
+                # 🛡️ FSM REGRESSION GATE (OVERRIDE ACTIVATED)
+                if accuracy < 0.60:
                     self.fsm.current_state = TradingState.CALIBRATING
+                    logger.critical(f"📉 EDGE DECAY OVERRIDE: Accuracy {accuracy:.2%} is below 60% floor. Engine locked to CALIBRATING.")
                 else:
                     self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
 

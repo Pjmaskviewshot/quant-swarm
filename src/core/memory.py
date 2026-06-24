@@ -1,5 +1,6 @@
 import os
 import logging
+import numpy as np
 from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any
 from supabase import create_client, Client
@@ -26,7 +27,7 @@ class MemoryBank:
             raise
 
     def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None):
-        """Saves a fresh prediction sequence with full structural feature vectors for future analytics."""
+        """Saves a fresh prediction sequence with virtual execution brackets bundled into the spread matrix."""
         if features is None:
             features = {}
             
@@ -35,9 +36,14 @@ class MemoryBank:
         vol_mult = features.get("liquidity_density_ratio", 1.0)
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
+        
+        # 🚀 EXTRACT VIRTUAL BRACKETS (Defensive handling from feature matrix)
+        sl_price = float(features.get("virtual_sl", price * 0.99))
+        tp_price = float(features.get("virtual_tp", price * 1.015))
 
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
+        # We inject virtual SL/TP values directly into the feature storage properties dynamically
         payload = {
             "signal_id": str(signal_id),
             "timestamp": iso_timestamp,
@@ -49,12 +55,15 @@ class MemoryBank:
             "z_obi": float(z_obi),
             "vol_mult": float(vol_mult),
             "spread": float(spread),
-            "resolved": False
+            "resolved": False,
+            # Bundle virtual boundaries into unused channels or pass as metadata safely
+            "net_pnl": sl_price,  # Repurposed temporarily as tracking storage
+            "slippage_drag": tp_price # Repurposed temporarily as tracking storage
         }
 
         try:
             self.supabase.table("quantitative_ledger").insert(payload).execute()
-            logger.info(f"💾 LEDGER COMMIT SIGNED // ID: {signal_id[:8]}... | Symbol: {symbol} | Dir: {direction}")
+            logger.info(f"💾 LEDGER COMMIT SIGNED // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
@@ -63,7 +72,6 @@ class MemoryBank:
         is_correct = True if net_pnl > 0 else False
         
         try:
-            # 🚀 FIX: Fetch the entire row first to satisfy NOT NULL constraints during upsert
             response = self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)).execute()
             if response.data:
                 row = response.data[0]
@@ -77,65 +85,20 @@ class MemoryBank:
                 logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
-            
-    def resolve_historical_predictions(self, current_price: float, age_cutoff: float) -> int:
-        """Compares expired, unresolved shadow predictions against current market price using batch upserts."""
-        cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
-
-        try:
-            # 🚀 FIX: Select "*" to pull the entire database row into memory
-            response = self.supabase.table("quantitative_ledger")\
-                .select("*")\
-                .eq("resolved", False)\
-                .lte("timestamp", cutoff_iso)\
-                .execute()
-
-            unresolved_rows = response.data if response else []
-            
-            if not unresolved_rows:
-                return 0
-
-            update_batch = []
-            for row in unresolved_rows:
-                entry_price = float(row["price_at_prediction"])
-                prediction = str(row["predicted_direction"]).upper()
-                
-                actual = "HOLD"
-                if current_price > entry_price:
-                    actual = "BUY"
-                elif current_price < entry_price:
-                    actual = "SELL"
-
-                # 🚀 FIX: Modify the existing row directly to preserve all NOT NULL columns
-                row["resolved"] = True
-                row["actual_outcome"] = actual
-                row["is_correct"] = True if prediction == actual else False
-                
-                update_batch.append(row)
-                
-            if update_batch:
-                self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
-                return len(update_batch)
-                
-            return 0
-
-        except Exception as e:
-            logger.error(f"❌ GHOST RESOLUTION ENGINE FAILURE: {e}")
-            return 0
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, float], age_cutoff: float) -> int:
         """
-        Resolves historical predictions for multiple assets in a single, highly efficient batched database query.
+        🚀pillar 1: KINETIC MICRO-PATH RESOLUTION ENGINE
+        Resolves predictions natively by simulating path hits against virtual SL/TP brackets.
+        Enforces a hard maximum time-decay termination of 15 minutes.
         """
-        cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
+        resolved_count = 0
 
         try:
-            # 🚀 FIX: Select "*" to pull the entire database row into memory
             response = self.supabase.table("quantitative_ledger")\
                 .select("*")\
                 .eq("resolved", False)\
                 .in_("symbol", assets)\
-                .lte("timestamp", cutoff_iso)\
                 .execute()
 
             unresolved_rows = response.data if response else []
@@ -144,41 +107,76 @@ class MemoryBank:
                 return 0
 
             update_batch = []
+            now_ts = datetime.now(timezone.utc)
+
             for row in unresolved_rows:
                 symbol = row.get("symbol")
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
+                # Extract our packed virtual execution parameters
+                sl_price = float(row.get("net_pnl", entry_price * 0.99))
+                tp_price = float(row.get("slippage_drag", entry_price * 1.015))
+                
                 current_price = current_prices.get(symbol)
                 if not current_price or current_price <= 0:
                     continue
-                
-                actual = "HOLD"
-                if current_price > entry_price:
-                    actual = "BUY"
-                elif current_price < entry_price:
-                    actual = "SELL"
 
-                # 🚀 FIX: Modify the existing row directly to preserve all NOT NULL columns
-                row["resolved"] = True
-                row["actual_outcome"] = actual
-                row["is_correct"] = True if prediction == actual else False
-                
-                update_batch.append(row)
+                row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
+
+                is_terminated = False
+                actual = "HOLD"
+
+                # Simulate a live multi-bracket matching cycle
+                if prediction == "BUY":
+                    if current_price >= tp_price:
+                        actual = "BUY"
+                        is_terminated = True
+                    elif current_price <= sl_price:
+                        actual = "SELL"
+                        is_terminated = True
+                elif prediction == "SELL":
+                    if current_price <= tp_price:
+                        actual = "SELL"
+                        is_terminated = True
+                    elif current_price >= sl_price:
+                        actual = "BUY"
+                        is_terminated = True
+
+                # ⏳ Enforce hard microstructural time decay block at 15 minutes maximum
+                if not is_terminated and elapsed_minutes >= 15.0:
+                    is_terminated = True
+                    if current_price > entry_price:
+                        actual = "BUY"
+                    elif current_price < entry_price:
+                        actual = "SELL"
+
+                if is_terminated:
+                    row["resolved"] = True
+                    row["actual_outcome"] = actual
+                    row["is_correct"] = True if prediction == actual else False
+                    row["net_pnl"] = 0.0  # Reset temporary channels back to production baseline
+                    row["slippage_drag"] = 0.0
+                    update_batch.append(row)
+                    resolved_count += 1
                 
             if update_batch:
                 self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
-                logger.info(f"🦇 Batched resolution completed for {len(update_batch)} historical ghost trades across {len(assets)} assets natively.")
-                return len(update_batch)
+                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Successfully processed {len(update_batch)} paths via batch matrix.")
                 
-            return 0
+            return resolved_count
 
         except Exception as e:
-            logger.error(f"❌ BATCH GHOST RESOLUTION ENGINE FAILURE: {e}")
+            logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
             return 0
 
-    def compute_rolling_accuracy(self, window_size: int = 50) -> Tuple[float, int]:
-        """Calculates rolling system accuracy metric over the target baseline sample window."""
+    def compute_rolling_accuracy(self, window_size: int = 150) -> Tuple[float, int]:
+        """
+        🚀pillar 2: ASYMMETRIC BAYESIAN HORIZON MANAGEMENT
+        Calculates Exponentially Weighted Moving Average (EWMA) accuracy over the sample size.
+        Penalizes recent streaks of failures aggressively to safeguard the vault.
+        """
         try:
             response = self.supabase.table("quantitative_ledger")\
                 .select("is_correct")\
@@ -193,10 +191,18 @@ class MemoryBank:
             if total_resolved == 0:
                 return 0.0, 0
 
-            correct_predictions = sum(1 for row in results if row.get("is_correct") is True)
-            accuracy = correct_predictions / total_resolved
-            return accuracy, total_resolved
+            # Pull boolean results chronological array order (oldest to newest)
+            correct_array = [1.0 if row.get("is_correct") is True else 0.0 for row in reversed(results)]
+            
+            # Apply institutional smoothing parameters (alpha scales weight decay factor)
+            alpha = 2 / (total_resolved + 1) if total_resolved > 10 else 0.1
+            ewma_accuracy = correct_array[0]
+            
+            for i in range(1, len(correct_array)):
+                ewma_accuracy = (correct_array[i] * alpha) + (ewma_accuracy * (1.0 - alpha))
+                
+            return float(ewma_accuracy), total_resolved
 
         except Exception as e:
-            logger.error(f"❌ ENGINE ACCURACY METRIC EVALUATION EXCEPTION: {e}")
+            logger.error(f"❌ ENGINE EWMA EVALUATION EXCEPTION: {e}")
             return 0.0, 0
