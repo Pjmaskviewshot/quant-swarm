@@ -86,14 +86,21 @@ class DistributedQuantEngine:
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
 
+        # 🚀 THE SINGLETON CACHE: Stops event loop strangulation. 
+        # Workers read this local dict instantly instead of querying Supabase.
+        self.global_state_cache = {
+            "rolling_accuracy": 0.50,
+            "total_resolved": 0,
+            "dynamic_window": 40,
+            "last_updated": 0.0
+        }
+
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
         self.ai_router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=os.getenv("DEEPSEEK_API_KEY"))
         self.macro_data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY"))
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
-        
-        # 🛡️ UPGRADE: Relaxed spread guard to 0.5% for volatile altcoins
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     # ====================================================================
@@ -239,25 +246,13 @@ class DistributedQuantEngine:
                     continue
                 
                 current_price = context["current_price"]
-                age_cutoff = time.time() - 300
-                resolved_count = self.memory.resolve_historical_predictions(
-                    current_price=current_price,
-                    age_cutoff=age_cutoff
-                )
-                
-                if resolved_count > 0:
-                    logger.info(f"✅ Resolved {resolved_count} historical ghost trades for {symbol}.")
-
                 feature_engine = self.feature_engines.get(symbol)
-                market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
                 self.current_atrs[symbol] = current_price * 0.0045
                 
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
-                dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
-                self.fsm.warmup_epochs = dynamic_window
                 
-                rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
-                self.fsm.process_state_transition(rolling_acc, total_resolved, market_regime)
+                # 🚀 SHIELD CACHE FIX: No database queries are permitted here. Reads instantly from memory.
+                rolling_acc = self.global_state_cache.get("rolling_accuracy", 0.50)
                 
                 self.pending_macro_payloads[symbol] = {
                     "asset": symbol,
@@ -303,7 +298,6 @@ class DistributedQuantEngine:
         trade_direction = None
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
-        # STRICT Institutional Rules across both Ghost and Live (Adjusted volume to 1.2x)
         effective_z_threshold = optimization["z_score_threshold"]
         has_institutional_volume = metrics.get("vol_mult", 1.0) >= 1.2
 
@@ -313,16 +307,18 @@ class DistributedQuantEngine:
             elif z_obi <= -effective_z_threshold and has_institutional_volume:
                 trade_direction = "SELL"
         else:
+            # 🚀 ASYMMETRIC VETO MODEL
+            # Mathematical entries are inherently trusted unless explicitly overridden by a strong Macro bias.
             regime = self.macro_regimes.get(symbol, "HOLD")
             if market_regime == "TRENDING":
-                if regime == "BUY" and z_obi >= effective_z_threshold and has_institutional_volume:  
+                if z_obi >= effective_z_threshold and has_institutional_volume and regime != "SELL":  
                     trade_direction = "BUY"
-                elif regime == "SELL" and z_obi <= -effective_z_threshold and has_institutional_volume:
+                elif z_obi <= -effective_z_threshold and has_institutional_volume and regime != "BUY":
                     trade_direction = "SELL" 
             else:
-                if regime == "BUY" and z_obi >= effective_z_threshold and has_institutional_volume:
+                if z_obi >= effective_z_threshold and has_institutional_volume and regime != "SELL":
                     trade_direction = "BUY"
-                elif regime == "SELL" and z_obi <= -effective_z_threshold and has_institutional_volume:
+                elif z_obi <= -effective_z_threshold and has_institutional_volume and regime != "BUY":
                     trade_direction = "SELL"
 
         if trade_direction:
@@ -409,6 +405,12 @@ class DistributedQuantEngine:
             self.asset_basket = full_market[:15]
             self.shadow_basket = full_market[15:]
             
+            # 🚀 FALLBACK PROTECTION: Ensure shadow basket never runs dry
+            if len(self.shadow_basket) < 10:
+                fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
+                self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
+                logger.warning(f"⚠️ Appended fallback shadow basket to ensure data volume.")
+            
             new_feature_engines, new_screener_memory, new_macro_regimes = {}, {}, {}
             new_macro_confidences, new_current_atrs, new_last_execs, new_screener_metrics = {}, {}, {}, {}
             
@@ -464,8 +466,9 @@ class DistributedQuantEngine:
 
     async def _resolve_shadow_trades(self):
         """Resolves shadow ghost trades after 5 minutes to feed the FSM"""
+        # 🚀 THE DECAY FIX: Hardcoded to 1 Hour (3600s) to allow 15m timeframes to naturally resolve
         for symbol, data in list(self.shadow_resolution_tracker.items()):
-            if time.time() - data["timestamp"] > 300:
+            if time.time() - data["timestamp"] > 3600:
                 try:
                     klines = await asyncio.to_thread(
                         self.executor.client.get_kline,
@@ -475,7 +478,7 @@ class DistributedQuantEngine:
                         current_price = float(klines["result"]["list"][0][4])
                         resolved = self.memory.resolve_historical_predictions(
                             current_price=current_price,
-                            age_cutoff=time.time() - 300
+                            age_cutoff=time.time() - 3600
                         )
                         if resolved > 0:
                             logger.info(f"🦇 Resolved {resolved} shadow trades for {symbol}")
@@ -596,7 +599,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(2)
 
     # ==========================================
-    # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS
+    # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS (THE GLOBAL COMMANDER)
     # ==========================================
     async def run_system_heartbeat(self):
         start_time = time.time()
@@ -606,13 +609,42 @@ class DistributedQuantEngine:
             await asyncio.sleep(60) 
             loop_counter += 1
             uptime_hours = (time.time() - start_time) / 3600
+            
+            # 🚀 GLOBAL DB RESOLUTION: The only thread permitted to execute resolutions.
+            try:
+                age_cutoff = time.time() - 3600 # 1-Hour Decay Fix applied
+                for sym in self.asset_basket:
+                    history = self.screener_memory.get(sym, {"prices": []})
+                    if history["prices"]:
+                        latest_px = history["prices"][-1]
+                        self.memory.resolve_historical_predictions(current_price=latest_px, age_cutoff=age_cutoff)
+            except Exception as e:
+                logger.debug(f"Global resolution error: {e}")
+
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 60 == 0:
                 avg_vol_mult = np.mean([m.get("vol_mult", 1.0) for m in self.screener_metrics.values()]) if self.screener_metrics else 1.0
                 avg_dynamic_window = self.compute_dynamic_memory_window(avg_vol_mult)
                 
+                # 🚀 SINGLETON CACHE ASSIGNMENT
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=avg_dynamic_window)
+                
+                self.global_state_cache["rolling_accuracy"] = accuracy
+                self.global_state_cache["total_resolved"] = pool_size
+                self.global_state_cache["dynamic_window"] = avg_dynamic_window
+                self.global_state_cache["last_updated"] = time.time()
+                
+                self.fsm.warmup_epochs = avg_dynamic_window
+                
+                # 🛡️ FSM REGRESSION GATE
+                is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
+                if is_active and accuracy < 0.60:
+                    logger.critical(f"📉 EDGE DECAY BREAKOUT ({accuracy:.2%}). Demoting system back to CALIBRATING state.")
+                    self.fsm.current_state = TradingState.CALIBRATING
+                else:
+                    self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
+
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 
@@ -731,8 +763,8 @@ class DistributedQuantEngine:
             
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
             
-            dynamic_window = self.compute_dynamic_memory_window(metrics.get("vol_mult", 1.0))
-            rolling_acc, total_resolved = self.memory.compute_rolling_accuracy(window_size=dynamic_window)
+            rolling_acc = self.global_state_cache["rolling_accuracy"]
+            dynamic_window = self.global_state_cache["dynamic_window"]
 
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
