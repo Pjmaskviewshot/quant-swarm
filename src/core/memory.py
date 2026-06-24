@@ -10,9 +10,7 @@ class MemoryBank:
     def __init__(self, db_path: str = None):
         """
         Initializes the Cloud-Native Supabase Analytics Engine connection layer.
-        Accepts an optional db_path parameter to preserve interface compatibility with main.py.
         """
-        # Retrieve configuration details from the host environment
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         
@@ -32,20 +30,18 @@ class MemoryBank:
         if features is None:
             features = {}
             
-        # Parse feature metrics with defensive fallback bounds
         market_regime = features.get("market_regime", "UNKNOWN")
         z_obi = features.get("adaptive_obi_z", 0.0)
         vol_mult = features.get("liquidity_density_ratio", 1.0)
         spread = features.get("bid_ask_spread", 0.0)
-        symbol = features.get("symbol", "UNKNOWN") # Use symbol from feature payload fallback
+        symbol = features.get("symbol", "UNKNOWN")
 
-        # Map the incoming Unix Epoch float cleanly into a standardized ISO-8601 string for PostgreSQL TIMESTAMPTZ
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
         payload = {
             "signal_id": str(signal_id),
             "timestamp": iso_timestamp,
-            "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN", # Guard clause filled downstream by engine orchestration
+            "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN",
             "predicted_direction": str(direction).upper(),
             "price_at_prediction": float(price),
             "ai_confidence": float(confidence),
@@ -63,31 +59,33 @@ class MemoryBank:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
     def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str):
-        """ Updates a live trade signal with actual financial execution data for deep post-trade analytics. """
+        """ Updates a live trade signal with actual financial execution data. """
         is_correct = True if net_pnl > 0 else False
         
-        update_payload = {
-            "signal_id": str(signal_id),  # Required for targeting
-            "resolved": True,
-            "actual_outcome": str(outcome),
-            "net_pnl": float(net_pnl),
-            "slippage_drag": float(slippage),
-            "is_correct": is_correct
-        }
-
         try:
-            self.supabase.table("quantitative_ledger").upsert(update_payload).execute()
-            logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
+            # 🚀 FIX: Fetch the entire row first to satisfy NOT NULL constraints during upsert
+            response = self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)).execute()
+            if response.data:
+                row = response.data[0]
+                row["resolved"] = True
+                row["actual_outcome"] = str(outcome)
+                row["net_pnl"] = float(net_pnl)
+                row["slippage_drag"] = float(slippage)
+                row["is_correct"] = is_correct
+                
+                self.supabase.table("quantitative_ledger").upsert(row).execute()
+                logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
             
     def resolve_historical_predictions(self, current_price: float, age_cutoff: float) -> int:
-        """Compares expired, unresolved ghost predictions against current market price using batch upserts."""
+        """Compares expired, unresolved shadow predictions against current market price using batch upserts."""
         cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
 
         try:
+            # 🚀 FIX: Select "*" to pull the entire database row into memory
             response = self.supabase.table("quantitative_ledger")\
-                .select("signal_id, price_at_prediction, predicted_direction")\
+                .select("*")\
                 .eq("resolved", False)\
                 .lte("timestamp", cutoff_iso)\
                 .execute()
@@ -99,7 +97,6 @@ class MemoryBank:
 
             update_batch = []
             for row in unresolved_rows:
-                sig_id = row["signal_id"]
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
@@ -109,14 +106,12 @@ class MemoryBank:
                 elif current_price < entry_price:
                     actual = "SELL"
 
-                is_correct = True if prediction == actual else False
+                # 🚀 FIX: Modify the existing row directly to preserve all NOT NULL columns
+                row["resolved"] = True
+                row["actual_outcome"] = actual
+                row["is_correct"] = True if prediction == actual else False
                 
-                update_batch.append({
-                    "signal_id": sig_id,
-                    "resolved": True,
-                    "actual_outcome": actual,
-                    "is_correct": is_correct
-                })
+                update_batch.append(row)
                 
             if update_batch:
                 self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
@@ -131,13 +126,13 @@ class MemoryBank:
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, float], age_cutoff: float) -> int:
         """
         Resolves historical predictions for multiple assets in a single, highly efficient batched database query.
-        Prevents cross-contamination of asset prices and eliminates network strangulation.
         """
         cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
 
         try:
+            # 🚀 FIX: Select "*" to pull the entire database row into memory
             response = self.supabase.table("quantitative_ledger")\
-                .select("signal_id, symbol, price_at_prediction, predicted_direction")\
+                .select("*")\
                 .eq("resolved", False)\
                 .in_("symbol", assets)\
                 .lte("timestamp", cutoff_iso)\
@@ -150,7 +145,6 @@ class MemoryBank:
 
             update_batch = []
             for row in unresolved_rows:
-                sig_id = row["signal_id"]
                 symbol = row.get("symbol")
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
@@ -165,14 +159,12 @@ class MemoryBank:
                 elif current_price < entry_price:
                     actual = "SELL"
 
-                is_correct = True if prediction == actual else False
+                # 🚀 FIX: Modify the existing row directly to preserve all NOT NULL columns
+                row["resolved"] = True
+                row["actual_outcome"] = actual
+                row["is_correct"] = True if prediction == actual else False
                 
-                update_batch.append({
-                    "signal_id": sig_id,
-                    "resolved": True,
-                    "actual_outcome": actual,
-                    "is_correct": is_correct
-                })
+                update_batch.append(row)
                 
             if update_batch:
                 self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
