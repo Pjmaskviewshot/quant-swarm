@@ -67,6 +67,7 @@ class MemoryBank:
         is_correct = True if net_pnl > 0 else False
         
         update_payload = {
+            "signal_id": str(signal_id),  # Required for targeting
             "resolved": True,
             "actual_outcome": str(outcome),
             "net_pnl": float(net_pnl),
@@ -75,22 +76,16 @@ class MemoryBank:
         }
 
         try:
-            self.supabase.table("quantitative_ledger")\
-                .update(update_payload)\
-                .eq("signal_id", str(signal_id))\
-                .execute()
+            self.supabase.table("quantitative_ledger").upsert(update_payload).execute()
             logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
             
     def resolve_historical_predictions(self, current_price: float, age_cutoff: float) -> int:
-        """Compares expired, unresolved ghost predictions against current market price."""
-        # Convert Unix cutoff timestamp to match PostgreSQL timezone structures
+        """Compares expired, unresolved ghost predictions against current market price using batch upserts."""
         cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
-        resolved_count = 0
 
         try:
-            # Query unresolved records that have aged past the horizon limit window
             response = self.supabase.table("quantitative_ledger")\
                 .select("signal_id, price_at_prediction, predicted_direction")\
                 .eq("resolved", False)\
@@ -102,6 +97,7 @@ class MemoryBank:
             if not unresolved_rows:
                 return 0
 
+            update_batch = []
             for row in unresolved_rows:
                 sig_id = row["signal_id"]
                 entry_price = float(row["price_at_prediction"])
@@ -115,15 +111,18 @@ class MemoryBank:
 
                 is_correct = True if prediction == actual else False
                 
-                self.supabase.table("quantitative_ledger").update({
+                update_batch.append({
+                    "signal_id": sig_id,
                     "resolved": True,
                     "actual_outcome": actual,
                     "is_correct": is_correct
-                }).eq("signal_id", sig_id).execute()
+                })
                 
-                resolved_count += 1
+            if update_batch:
+                self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
+                return len(update_batch)
                 
-            return resolved_count
+            return 0
 
         except Exception as e:
             logger.error(f"❌ GHOST RESOLUTION ENGINE FAILURE: {e}")
@@ -135,10 +134,8 @@ class MemoryBank:
         Prevents cross-contamination of asset prices and eliminates network strangulation.
         """
         cutoff_iso = datetime.fromtimestamp(age_cutoff, tz=timezone.utc).isoformat()
-        resolved_count = 0
 
         try:
-            # Single network call to fetch all aged, unresolved trades for the active basket
             response = self.supabase.table("quantitative_ledger")\
                 .select("signal_id, symbol, price_at_prediction, predicted_direction")\
                 .eq("resolved", False)\
@@ -151,15 +148,14 @@ class MemoryBank:
             if not unresolved_rows:
                 return 0
 
+            update_batch = []
             for row in unresolved_rows:
                 sig_id = row["signal_id"]
                 symbol = row.get("symbol")
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
-                # Fetch the exact mapped price for this specific asset
                 current_price = current_prices.get(symbol)
-                
                 if not current_price or current_price <= 0:
                     continue
                 
@@ -171,18 +167,19 @@ class MemoryBank:
 
                 is_correct = True if prediction == actual else False
                 
-                self.supabase.table("quantitative_ledger").update({
+                update_batch.append({
+                    "signal_id": sig_id,
                     "resolved": True,
                     "actual_outcome": actual,
                     "is_correct": is_correct
-                }).eq("signal_id", sig_id).execute()
+                })
                 
-                resolved_count += 1
+            if update_batch:
+                self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
+                logger.info(f"🦇 Batched resolution completed for {len(update_batch)} historical ghost trades across {len(assets)} assets natively.")
+                return len(update_batch)
                 
-            if resolved_count > 0:
-                logger.info(f"🦇 Resolved {resolved_count} historical ghost trades across {len(assets)} assets natively.")
-                
-            return resolved_count
+            return 0
 
         except Exception as e:
             logger.error(f"❌ BATCH GHOST RESOLUTION ENGINE FAILURE: {e}")
