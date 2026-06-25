@@ -59,7 +59,7 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         
         # 🚀 UPGRADE 2: Enforce a strict professional horizon limit base
-        self.min_horizon_floor = 45
+        self.min_horizon_floor = 150
         self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=self.min_horizon_floor)
         
         # 🛡️ Adjusted limits to 25% max drawdown and 15% risk per position
