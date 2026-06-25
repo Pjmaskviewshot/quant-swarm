@@ -14,7 +14,8 @@ class HighVelocityMultiFeed:
         intervals: List[str], 
         orderbook_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]], 
         screener_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
-        kline_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]
+        kline_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
+        engine_reference: Any = None # 🚀 TFI UPGRADE: Added reference to the main engine to route Trade ticks
     ):
         # Format the basket matrix natively
         self.basket = [symbol.upper() for symbol in basket]
@@ -24,6 +25,7 @@ class HighVelocityMultiFeed:
         self.orderbook_callback = orderbook_callback
         self.screener_callback = screener_callback
         self.kline_callback = kline_callback
+        self.engine_reference = engine_reference
         
         self.ws_url = "wss://stream.bybit.com/v5/public/linear"
         self.is_running = False
@@ -40,6 +42,7 @@ class HighVelocityMultiFeed:
         for symbol in self.basket:
             args_payload.append(f"tickers.{symbol}")       # Lightweight Screener Feed
             args_payload.append(f"orderbook.50.{symbol}")  # Heavy Microstructure Feed
+            args_payload.append(f"publicTrade.{symbol}")   # 🚀 TFI UPGRADE: Heavy Market Execution Feed (The Tape)
             for interval in self.intervals:
                 args_payload.append(f"kline.{interval}.{symbol}") # Multi-Timeframe Momentum Feed
 
@@ -88,7 +91,7 @@ class HighVelocityMultiFeed:
                                 payload = json.loads(msg.data)
                                 
                                 # Intercept and ignore Application Pongs
-                                if payload.get("op") == "pong" or payload.get("ret_msg") == "pong":
+                                if payload.get("op") == "ping" or payload.get("ret_msg") == "pong":
                                     continue
                                     
                                 topic: str = payload.get("topic", "")
@@ -109,7 +112,15 @@ class HighVelocityMultiFeed:
                                         "symbol": topic.split(".")[2],
                                         "candle_data": data[0]
                                     })
-                                    
+                                # 🚀 TFI UPGRADE: Route the live execution prints to the Tape Reader
+                                elif topic.startswith("publicTrade"):
+                                    symbol = topic.split(".")[-1]
+                                    if self.engine_reference and hasattr(self.engine_reference, "feature_engines"):
+                                        feature_engine = self.engine_reference.feature_engines.get(symbol)
+                                        if feature_engine:
+                                            # Pipe the aggressive market trades directly into the feature engine
+                                            feature_engine.push_trade_tick(data)
+                                            
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 logger.warning("Multiplexed WebSocket transport socket severed. Initializing recovery link.")
                                 break

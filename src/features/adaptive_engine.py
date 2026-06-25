@@ -12,6 +12,9 @@ class AdaptiveFeatureEngine:
         self.obi_history = deque(maxlen=memory_window_short)
         self.spread_history = deque(maxlen=memory_window_short)
         
+        # 🚀 TFI UPGRADE: Rolling memory for Aggressive Trade Flow Imbalance
+        self.tfi_history = deque(maxlen=memory_window_short)
+        
         # Multi-Timeframe micro-aggregates (1m, 5m, 15m)
         self.timeframes = {"1m": deque(maxlen=60), "5m": deque(maxlen=300), "15m": deque(maxlen=900)}
         self.long_window = memory_window_long
@@ -62,6 +65,32 @@ class AdaptiveFeatureEngine:
         # Defensive fallback: assume ranging to protect capital if data is warming up
         return "RANGING"
 
+    def push_trade_tick(self, trades: List[Dict[str, Any]]):
+        """
+        🚀 TFI UPGRADE: Aggressive Trade Flow Imbalance (The Tape Reader)
+        Ingests real-time market execution prints to calculate actual aggression.
+        """
+        if not trades:
+            return
+
+        buy_vol = 0.0
+        sell_vol = 0.0
+
+        for trade in trades:
+            # Bybit trade sides: "Buy" = Aggressive buyer crossed the spread
+            # "Sell" = Aggressive seller crossed the spread
+            side = trade.get("S") 
+            qty = float(trade.get("v", 0.0))
+            
+            if side == "Buy":
+                buy_vol += qty
+            elif side == "Sell":
+                sell_vol += qty
+
+        # Calculate Trade Flow Imbalance (-1.0 to 1.0)
+        tfi = (buy_vol - sell_vol) / (buy_vol + sell_vol) if (buy_vol + sell_vol) > 0 else 0.0
+        self.tfi_history.append(tfi)
+
     def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]]) -> Dict[str, Any]:
         """
         Consumes raw level 2 structural updates.
@@ -111,12 +140,26 @@ class AdaptiveFeatureEngine:
                 obi_z_score = (obi - mean_obi) / std_obi if std_obi > 0 else 0.0
 
             # 🚀 MIEG UPGRADE: Microstructure Imbalance Exhaustion Gate Evaluation
-            # Checks if extreme buying/selling clusters are rolling over toward zero
             mieg_confirmed = False
-            if obi_z_score >= 2.4 and obi < prev_obi:
-                mieg_confirmed = True  # Overbought peak has physically rolled over (Short Entry Armed)
-            elif obi_z_score <= -2.4 and obi > prev_obi:
-                mieg_confirmed = True  # Oversold trough has physically bottomed out (Long Entry Armed)
+            
+            # 🚀 TFI UPGRADE: Retrieve the latest aggressive trade flow ratio
+            current_tfi = self.tfi_history[-1] if len(self.tfi_history) > 0 else 0.0
+
+            # 🛑 OVERBOUGHT REVERSAL (Short Setup)
+            # 1. Order book was heavily bid (z >= 2.4)
+            # 2. Limit buying pressure is physically exhausting (obi < prev_obi)
+            # 3. Aggressive market sellers are actually hitting the tape (current_tfi < -0.2)
+            if obi_z_score >= 2.4 and obi < prev_obi and current_tfi < -0.2:
+                mieg_confirmed = True  
+                # logger.debug(f"📉 TFI CONFIRMED: Exhaustion met aggressive selling. TFI: {current_tfi:.2f}")
+
+            # 🟢 OVERSOLD REVERSAL (Long Setup)
+            # 1. Order book was heavily offered (z <= -2.4)
+            # 2. Limit selling pressure is physically exhausting (obi > prev_obi)
+            # 3. Aggressive market buyers are actually hitting the tape (current_tfi > 0.2)
+            elif obi_z_score <= -2.4 and obi > prev_obi and current_tfi > 0.2:
+                mieg_confirmed = True  
+                # logger.debug(f"📈 TFI CONFIRMED: Exhaustion met aggressive buying. TFI: {current_tfi:.2f}")
 
             # 4. Machine Learning Feature Matrix Payload Extraction
             features = {

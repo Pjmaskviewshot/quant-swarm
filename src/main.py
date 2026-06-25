@@ -593,7 +593,8 @@ class DistributedQuantEngine:
                 intervals=intervals_matrix,
                 orderbook_callback=self.handle_incoming_orderbook_tick,
                 screener_callback=self.handle_incoming_basket_screener_update,
-                kline_callback=self.handle_incoming_kline_update
+                kline_callback=self.handle_incoming_kline_update,
+                engine_reference=self  # 🚀 TFI UPGRADE: Pass 'self' so the feed can route Trade ticks
             )
             
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
