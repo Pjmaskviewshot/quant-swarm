@@ -7,6 +7,7 @@ import uuid
 import traceback
 import random
 import numpy as np
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any
 from dotenv import load_dotenv
 
@@ -82,6 +83,9 @@ class DistributedQuantEngine:
         # 🛡️ POSITION LOCK DEPLOYMENT MATRIX
         self.active_positions_lock = set()
         
+        # 🚀 TICK SIZE MATRIX
+        self.tick_sizes: Dict[str, float] = {}
+        
         # Fallback global cooldown (Overridden dynamically per asset in execution loop)
         self.execution_cooldown_period = 10.0 if self.test_mode else 900.0  
         
@@ -103,6 +107,23 @@ class DistributedQuantEngine:
         
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+
+    async def _fetch_exchange_tick_sizes(self):
+        """
+        🚀 INSTITUTIONAL UPGRADE: Fetches the absolute source of truth for 
+        price precision directly from Bybit's matching engine.
+        """
+        try:
+            logger.info("📡 Fetching global tick size matrix from Bybit matching engine...")
+            info = await asyncio.to_thread(self.executor.client.get_instruments_info, category="linear")
+            data = info.get("result", {}).get("list", [])
+            for item in data:
+                sym = item.get("symbol")
+                tick_str = item.get("priceFilter", {}).get("tickSize", "0.0001")
+                self.tick_sizes[sym] = float(tick_str)
+            logger.info(f"✅ Master Tick Size Matrix loaded for {len(self.tick_sizes)} derivatives.")
+        except Exception as e:
+            logger.error(f"Failed to fetch global tick sizes: {e}")
 
     # ====================================================================
     # 🧠 UPGRADE 1: THE ADAPTIVE MEMORY HORIZON (Exponential Scaling)
@@ -139,9 +160,9 @@ class DistributedQuantEngine:
 
         if market_regime == "RANGING":
             optimized["z_score_threshold"] = 2.4 # Strict micro-structure filtering for ranging markets
-            optimized["cooldown_period"] = 300.0 
-            optimized["sl_multiplier"] = 1.8 
-            optimized["tp_multiplier"] = 1.5 
+            optimized["cooldown_period"] = 900.0 # 🚀 Slow down: 15-minute cooldown prevents fee churn
+            optimized["sl_multiplier"] = 1.2     # 🚀 Tighten the leash: Cut losses instantly
+            optimized["tp_multiplier"] = 1.6     # 🚀 Positive R:R: You make more when you win
             if vol_mult < 0.5: # 🛡️ Lowered floor to 0.5x to prevent blocking the Velocity Gate
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
@@ -400,6 +421,9 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(14400) 
             logger.info("🌍 GLOBAL SATELLITE SCAN INITIATED. Querying Bybit endpoints for volatility targets...")
+            
+            # 🚀 Update the global tick size matrix dynamically
+            await self._fetch_exchange_tick_sizes()
             
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
             
@@ -705,7 +729,8 @@ class DistributedQuantEngine:
     # ==========================================
     # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
-    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None):
+    # 🚀 Update the parameters to include tick_size
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
         if optimization is None:
             optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
@@ -729,7 +754,23 @@ class DistributedQuantEngine:
             initial_sl = entry_price + (sl_multiplier * atr)
             target_tp = entry_price - (tp_multiplier * atr) - fee_buffer
             
-        return round(initial_sl, 4), round(target_tp, 4)
+        # ====================================================================
+        # 🚀 INSTITUTIONAL FIX: Exact Tick Size Quantization
+        # Maps the mathematical bracket perfectly to the exchange's required grid
+        # ====================================================================
+        tick_dec = Decimal(str(tick_size))
+        sl_dec = Decimal(str(initial_sl))
+        tp_dec = Decimal(str(target_tp))
+        
+        # Divide by tick step, round to nearest integer, multiply by tick step
+        snapped_sl = (sl_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
+        snapped_tp = (tp_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
+        
+        # Final formatting cleanup to ensure Bybit's API parser accepts it natively
+        final_sl = float(snapped_sl.quantize(tick_dec))
+        final_tp = float(snapped_tp.quantize(tick_dec))
+        
+        return final_sl, final_tp
 
     # 🚀 THE MASTER FIX: Add real_spread to the function signature
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0):
@@ -816,7 +857,13 @@ class DistributedQuantEngine:
                 return False
             
             vol_z = metrics.get("vol_z", 0.0)
-            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z, optimization)
+            
+            # 🚀 Fetch the exact legal tick step for this specific coin
+            tick_size = self.tick_sizes.get(symbol, 0.0001) 
+            
+            initial_sl, target_tp = self.calculate_initial_bracket(
+                current_price, atr, direction, target_leverage, vol_z, optimization, tick_size
+            )
             
             # =========================================================================
             # 🚀 INSTITUTIONAL UPGRADE: Dynamic Total Cost of Execution (TCE) Model
@@ -991,6 +1038,9 @@ class DistributedQuantEngine:
     async def run_engine_forever(self):
         logger.critical("LAUNCHING DISTRIBUTED QUANT SWARM DAEMON DEPLOYMENTS...")
         logger.info("🌍 Booting up Global Satellite Radar to execute asset tracking optimization matrix...")
+        
+        # 🚀 Fetch the global tick size matrix before launching workers
+        await self._fetch_exchange_tick_sizes()
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
         if boot_basket and len(boot_basket) >= 15:
