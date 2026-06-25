@@ -187,7 +187,7 @@ class AdaptiveFeatureEngine:
         # Try to use 5m candles first, fallback to 1m
         target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 10 else "1m"
         
-        if target_tf in self.timeframes && len(self.timeframes[target_tf]) > 10:
+        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 10:
             candles = list(self.timeframes[target_tf])
             
             # Simple ATR approximation using max of High-Low, High-PrevClose, Low-PrevClose
