@@ -94,6 +94,9 @@ class AdaptiveFeatureEngine:
             
             obi = (v_b - v_a) / (v_b + v_a) if (v_b + v_a) > 0 else 0.0
 
+            # 🚀 MIEG UPGRADE: Capture the previous tick's imbalance baseline before appending
+            prev_obi = self.obi_history[-1] if len(self.obi_history) > 0 else obi
+
             # Update structural historical data vaults
             self.obi_history.append(obi)
             self.spread_history.append(raw_spread)  # Keep raw spread here to preserve raw volatility flags
@@ -107,16 +110,25 @@ class AdaptiveFeatureEngine:
                 # Prevent zero-division wrap errors in static markets
                 obi_z_score = (obi - mean_obi) / std_obi if std_obi > 0 else 0.0
 
+            # 🚀 MIEG UPGRADE: Microstructure Imbalance Exhaustion Gate Evaluation
+            # Checks if extreme buying/selling clusters are rolling over toward zero
+            mieg_confirmed = False
+            if obi_z_score >= 2.4 and obi < prev_obi:
+                mieg_confirmed = True  # Overbought peak has physically rolled over (Short Entry Armed)
+            elif obi_z_score <= -2.4 and obi > prev_obi:
+                mieg_confirmed = True  # Oversold trough has physically bottomed out (Long Entry Armed)
+
             # 4. Machine Learning Feature Matrix Payload Extraction
             features = {
                 "valid": True,
                 "timestamp": time.time(),
                 "mid_price": mid_price,
                 "raw_spread": round(raw_spread, 6),
-                # 🚀 Pass the SMOOTHED spread as the core execution metric to avoid execution lock
                 "bid_ask_spread": round(self.ema_spread, 6),
                 "raw_obi": round(obi, 4),
                 "adaptive_obi_z": round(obi_z_score, 4),
+                # 🚀 Pass the zero-lag exhaustion gate validation status to the orchestrator loop
+                "mieg_confirmed": mieg_confirmed,
                 "micro_volatility_z": round(self._calculate_spread_volatility_z(), 4),
                 "liquidity_density_ratio": round(v_b / v_a if v_a > 0 else 1.0, 4),
                 "market_regime": self.detect_market_regime()
@@ -175,7 +187,7 @@ class AdaptiveFeatureEngine:
         # Try to use 5m candles first, fallback to 1m
         target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 10 else "1m"
         
-        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 10:
+        if target_tf in self.timeframes && len(self.timeframes[target_tf]) > 10:
             candles = list(self.timeframes[target_tf])
             
             # Simple ATR approximation using max of High-Low, High-PrevClose, Low-PrevClose

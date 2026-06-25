@@ -322,10 +322,12 @@ class DistributedQuantEngine:
         effective_z_threshold = optimization["z_score_threshold"]
         vol_mult = metrics.get("vol_mult", 1.0)
 
-        # 🚀 GATE 1: THE VELOCITY STRIKE (Leading Indicator)
-        gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8)
+        # 🚀 GATE 1: THE VELOCITY STRIKE (Upgraded with Institutional Jitter Exhaustion)
+        # Demands that price is extreme AND the order book cascade has physically paused/reversed
+        mieg_confirmed = features.get("mieg_confirmed", False)
+        gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8) and mieg_confirmed
 
-        # 🚀 GATE 2: THE ACCUMULATION GRIND (Lagging Indicator)
+        # 🚀 GATE 2: THE ACCUMULATION GRIND (Unchanged to maintain baseline trading volume)
         gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.4)
 
         has_pure_edge = gate_1_velocity or gate_2_accumulation
