@@ -16,13 +16,17 @@ class AdaptiveFeatureEngine:
         self.timeframes = {"1m": deque(maxlen=60), "5m": deque(maxlen=300), "15m": deque(maxlen=900)}
         self.long_window = memory_window_long
         
-        # 🛡️ UPGRADE: State trackers for FSM and execution pipeline
+        # 🛡️ State trackers for FSM and execution pipeline
         self._latest_mid = 0.0
         self._orderbook_snapshot = {"bids": [], "asks": []}
+        
+        # 🚀 INSTITUTIONAL UPGRADE: Low-pass Filter for Order Book Jitter
+        self.ema_spread = 0.0
+        self.spread_alpha = 0.15  # Slower adjustment locks out microsecond flash spikes
 
     def detect_market_regime(self) -> str:
         """
-        🚀 UPGRADE 2: LIGHTWEIGHT STATISTICAL REGIME CLASSIFIER
+        🚀 LIGHTWEIGHT STATISTICAL REGIME CLASSIFIER
         Uses Kaufman's Efficiency Ratio (ER) and Volatility Squeeze metrics to 
         mathematically classify the market state without heavy ML dependencies.
         """
@@ -30,7 +34,7 @@ class AdaptiveFeatureEngine:
         # Wait for at least 45 candles before making a judgment
         target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 45 else "1m"
 
-        # 🚀 THE BRUTAL FIX: EXTENDED LOOKBACK TO 45 CANDLES (~3.75 HOURS)
+        # EXTENDED LOOKBACK TO 45 CANDLES (~3.75 HOURS)
         if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 45:
             candles = list(self.timeframes[target_tf])[-45:]
             closes = np.array([float(c["close"]) for c in candles])
@@ -71,9 +75,15 @@ class AdaptiveFeatureEngine:
             best_bid = float(bids[0][0])
             best_ask = float(asks[0][0])
             mid_price = (best_bid + best_ask) / 2.0
-            bid_ask_spread = best_ask - best_bid
+            raw_spread = best_ask - best_bid
             
-            # 🛡️ UPGRADE: Store latest tick data for orchestrator access
+            # 🚀 INSTITUTIONAL UPGRADE: Smooth Raw Spread via EMA to Filter Websocket Jitter
+            if self.ema_spread == 0.0:
+                self.ema_spread = raw_spread
+            else:
+                self.ema_spread = (raw_spread * self.spread_alpha) + (self.ema_spread * (1.0 - self.spread_alpha))
+            
+            # 🛡️ Store latest tick data for orchestrator access
             self._latest_mid = mid_price
             self._orderbook_snapshot = {"bids": bids[:5], "asks": asks[:5]}
 
@@ -86,7 +96,7 @@ class AdaptiveFeatureEngine:
 
             # Update structural historical data vaults
             self.obi_history.append(obi)
-            self.spread_history.append(bid_ask_spread)
+            self.spread_history.append(raw_spread)  # Keep raw spread here to preserve raw volatility flags
 
             # 3. Adaptive Threshold Engine (Dynamic Z-Score Generation)
             obi_z_score = 0.0
@@ -102,12 +112,13 @@ class AdaptiveFeatureEngine:
                 "valid": True,
                 "timestamp": time.time(),
                 "mid_price": mid_price,
-                "bid_ask_spread": bid_ask_spread,
+                "raw_spread": round(raw_spread, 6),
+                # 🚀 Pass the SMOOTHED spread as the core execution metric to avoid execution lock
+                "bid_ask_spread": round(self.ema_spread, 6),
                 "raw_obi": round(obi, 4),
                 "adaptive_obi_z": round(obi_z_score, 4),
                 "micro_volatility_z": round(self._calculate_spread_volatility_z(), 4),
                 "liquidity_density_ratio": round(v_b / v_a if v_a > 0 else 1.0, 4),
-                # 🚀 UPGRADE: Inject the calculated regime directly into the feature payload
                 "market_regime": self.detect_market_regime()
             }
 
@@ -140,7 +151,7 @@ class AdaptiveFeatureEngine:
         return momentum_matrix
 
     def _calculate_spread_volatility_z(self) -> float:
-        """Measures high-frequency spread expansion to detect impending toxicity events."""
+        """Measures high-frequency raw spread expansion to detect impending toxicity events."""
         if len(self.spread_history) < 10:
             return 0.0
         spreads = np.array(self.spread_history)
@@ -148,7 +159,7 @@ class AdaptiveFeatureEngine:
         return float((current_spread - np.mean(spreads)) / (np.std(spreads) + 1e-6))
 
     # =================================================================
-    # 🛡️ UPGRADE: NEW EXPOSED METHODS FOR ORCHESTRATOR COMMUNICATION
+    # 🛡️ EXPOSED METHODS FOR ORCHESTRATOR COMMUNICATION
     # =================================================================
 
     def get_latest_mid(self) -> float:
@@ -180,4 +191,4 @@ class AdaptiveFeatureEngine:
             if tr_values:
                 return sum(tr_values) / len(tr_values)
                 
-        return 0.0 # Will trigger the safety fallback in main.py if not enough data
+        return 0.0  # Will trigger the safety fallback in main.py if not enough data

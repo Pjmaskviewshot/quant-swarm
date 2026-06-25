@@ -285,6 +285,9 @@ class DistributedQuantEngine:
         z_obi = features["adaptive_obi_z"]
         mid_price = features["mid_price"]
         market_regime = features.get("market_regime", "RANGING")
+        
+        # 🚀 EXTRACT REAL EMA SPREAD FROM FEATURE ENGINE
+        real_spread = features.get("bid_ask_spread", mid_price * 0.0005)
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
         optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics)
@@ -299,11 +302,9 @@ class DistributedQuantEngine:
         vol_mult = metrics.get("vol_mult", 1.0)
 
         # 🚀 GATE 1: THE VELOCITY STRIKE (Leading Indicator)
-        # Price has violently broken standard deviation. We only need baseline volume (0.8x) to confirm it is not a fake-out.
         gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8)
 
         # 🚀 GATE 2: THE ACCUMULATION GRIND (Lagging Indicator)
-        # Massive institutional volume (1.5x) is pouring into the order book. Price hasn't violently snapped yet, so we lower the Z-score requirement.
         gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.4)
 
         has_pure_edge = gate_1_velocity or gate_2_accumulation
@@ -327,7 +328,9 @@ class DistributedQuantEngine:
             self.last_execution_timestamps[symbol] = current_time
             mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
             logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Dynamic Target: {effective_z_threshold:.2f}")
-            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization))
+            
+            # 🚀 PASS REAL SPREAD TO SIGNAL LIFECYCLE
+            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
 
     # ==========================================
     # THREAD 3: LIGHTWEIGHT BASKET TRACKER
@@ -728,7 +731,8 @@ class DistributedQuantEngine:
             
         return round(initial_sl, 4), round(target_tp, 4)
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None):
+    # 🚀 THE MASTER FIX: Add real_spread to the function signature
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0):
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
@@ -748,12 +752,14 @@ class DistributedQuantEngine:
             self.current_atrs[symbol] = atr
 
             metrics = self.screener_metrics.get(symbol, {})
+            vol_mult = metrics.get("vol_mult", 1.0)
+            
             features_dict = {
                 "symbol": symbol,
                 "market_regime": market_regime,
                 "adaptive_obi_z": 0.0, 
-                "liquidity_density_ratio": metrics.get("vol_mult", 1.0),
-                "bid_ask_spread": 0.0
+                "liquidity_density_ratio": vol_mult,
+                "bid_ask_spread": real_spread # 🚀 Save the real spread to the database
             }
             
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
@@ -812,19 +818,30 @@ class DistributedQuantEngine:
             vol_z = metrics.get("vol_z", 0.0)
             initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z, optimization)
             
-            vol_mult = metrics.get("vol_mult", 1.0)
-            if vol_mult < 0.6: 
-                logger.warning(f"❌ TRADE SKIPPED // {symbol} volume dangerously low (vol_mult: {vol_mult:.2f}). Slippage risk too high.")
+            # =========================================================================
+            # 🚀 INSTITUTIONAL UPGRADE: Dynamic Total Cost of Execution (TCE) Model
+            # =========================================================================
+            if vol_mult < 0.3: 
+                logger.warning(f"❌ TRADE SKIPPED // {symbol} volume critically low ({vol_mult:.2f}x). Halting to prevent liquidity trap.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
+            # Bybit 0.055% maker/taker fee is already buffered inside target_tp
             expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
-            spread_cost = current_price * 0.006  
             
-            if expected_profit < (spread_cost * 2):
-                logger.warning(f"❌ TRADE SKIPPED // {symbol} profit margin too tight to clear exchange friction.")
+            # Ensure real_spread has a safe minimum boundary (1 basis point) to prevent divide-by-zero math errors
+            safe_spread = max(real_spread, current_price * 0.0001) 
+            
+            # 🚀 The Master Formula: Slippage penalty expands geometrically when volume dries up
+            # If volume is 2.0x, penalty is half the spread. If volume is 0.5x, penalty is double the spread.
+            slippage_penalty = safe_spread * (1.0 / max(0.4, vol_mult))
+            total_friction = safe_spread + slippage_penalty
+            
+            if expected_profit < total_friction:
+                logger.warning(f"❌ TRADE SKIPPED // {symbol} Expected profit ({expected_profit:.4f}) cannot clear dynamic structural friction ({total_friction:.4f}). Spread: {safe_spread/current_price:.3%} | Vol: {vol_mult:.2f}x")
                 self.active_positions_lock.discard(symbol)
                 return False
+            # =========================================================================
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
