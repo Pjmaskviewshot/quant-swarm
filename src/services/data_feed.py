@@ -24,15 +24,11 @@ class AsynchronousDataFeed:
                 # Safely unpack the news even if the klines task failed
                 news_context = news_headlines if not isinstance(news_headlines, Exception) else "Macro narrative feed unavailable."
                 
-                # If Bybit failed to return candles, gracefully return an empty structural snapshot
+                # 🚀 CIRCUIT BREAKER ACTIVATED: If klines is empty or failed, return None.
+                # This explicitly forces main.py to sleep for 30 seconds and stops the 10006 DDoS loop.
                 if isinstance(klines, Exception) or not klines:
-                    logger.error(f"Failed to fetch market data array for {symbol}. Returning neutral baseline.")
-                    return {
-                        "symbol": symbol,
-                        "current_price": 0.0,
-                        "raw_klines": [],
-                        "news_context": news_context
-                    }
+                    logger.warning(f"Market data absent for {symbol}. Dropping asset from current cycle to protect API limits.")
+                    return None
                     
                 current_price = float(klines[0][4])  # Latest structural close candle boundary
                 
@@ -58,28 +54,42 @@ class AsynchronousDataFeed:
         for attempt in range(3): # Try 3 times before giving up
             try:
                 async with session.get(self.bybit_base_url, params=params, timeout=10.0) as response:
-                    # Handle Bybit rate limits gracefully
-                    if response.status == 429:
-                        logger.warning(f"Bybit Rate Limit (429) on {symbol}. Retrying...")
-                        await asyncio.sleep(2)
+                    # Handle Bybit HTTP rate limits gracefully
+                    if response.status in [429, 403]:
+                        logger.warning(f"Bybit HTTP Rate Limit ({response.status}) on {symbol}. Heavy backoff initiated...")
+                        await asyncio.sleep(5)
                         continue
                         
                     response.raise_for_status()
                     payload = await response.json()
                     
-                    # Safely check if 'result' and 'list' actually exist in the dictionary
-                    if payload.get("retCode") == 0 and "result" in payload and "list" in payload["result"]:
-                        return payload["result"]["list"]
+                    if payload.get("retCode") == 0:
+                        data_list = payload.get("result", {}).get("list", [])
+                        
+                        if len(data_list) > 0:
+                            return data_list
+                        else:
+                            # 🚀 CIRCUIT BREAKER: Asset is likely new/delisted and has no candle data. 
+                            # Do not retry. Break immediately to prevent infinite API hammering.
+                            logger.warning(f"Bybit returned an empty structural array for {symbol}. Circuit breaker triggered.")
+                            return []
                     else:
-                        logger.warning(f"Bybit returned an empty/malformed historical array for {symbol}. Retrying...")
+                        ret_code = payload.get("retCode")
+                        # 🚀 INTERNAL RATE LIMIT BREAKER: Catch JSON-level 10006 limits
+                        if ret_code in [10006, 10002]:
+                            logger.error(f"Bybit API JSON Rate Limit ({ret_code}) hit for {symbol}. Forcing thread sleep.")
+                            await asyncio.sleep(5)
+                            return []
+                            
+                        logger.warning(f"Bybit payload error {ret_code} for {symbol}. Retrying...")
                         
             except Exception as e:
                 logger.error(f"Failed to fetch klines for {symbol} on attempt {attempt + 1}: {e}")
             
             await asyncio.sleep(2) # Wait 2 seconds before retrying
             
-        # 🔴 CRITICAL FALLBACK: If Bybit completely fails, return a safe, flat baseline
-        logger.critical(f"All historical data retries exhausted for {symbol}. Injecting neutral baseline.")
+        # 🔴 CRITICAL FALLBACK: If Bybit completely fails, return empty array to trigger main.py sleep
+        logger.critical(f"All historical data retries exhausted for {symbol}. Returning empty to force cooldown.")
         return []
 
     async def _get_finnhub_news(self, session: aiohttp.ClientSession) -> str:
