@@ -11,36 +11,49 @@ class AsynchronousDataFeed:
         self.bybit_base_url = "https://api.bybit.com/v5/market/kline"
         self.finnhub_url = "https://finnhub.io/api/v1/news"
 
-    async def fetch_market_snapshot(self, symbol: str, interval: str) -> Optional[Dict[str, Any]]:
-        """Concurrently pools external pricing pipelines and narrative flows with safe fallbacks."""
-        async with aiohttp.ClientSession() as session:
-            try:
-                # Dispatches concurrent network requests to minimize blocking
-                market_task = self._get_bybit_klines(session, symbol, interval)
-                news_task = self._get_finnhub_news(session)
-                
-                klines, news_headlines = await asyncio.gather(market_task, news_task, return_exceptions=True)
-                
-                # Safely unpack the news even if the klines task failed
-                news_context = news_headlines if not isinstance(news_headlines, Exception) else "Macro narrative feed unavailable."
-                
-                # 🚀 CIRCUIT BREAKER ACTIVATED: If klines is empty or failed, return None.
-                # This explicitly forces main.py to sleep for 30 seconds and stops the 10006 DDoS loop.
-                if isinstance(klines, Exception) or not klines:
-                    logger.warning(f"Market data absent for {symbol}. Dropping asset from current cycle to protect API limits.")
-                    return None
-                    
-                current_price = float(klines[0][4])  # Latest structural close candle boundary
-                
-                return {
-                    "symbol": symbol,
-                    "current_price": current_price,
-                    "raw_klines": klines,
-                    "news_context": news_context
-                }
-            except Exception as e:
-                logger.error(f"Systemic ingestion pipeline fault: {e}")
+    async def fetch_market_snapshot(
+        self, 
+        symbol: str, 
+        interval: str, 
+        session: Optional[aiohttp.ClientSession] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Pools external pricing pipelines concurrently. Supports session injection 
+        to leverage persistent TCP connection pooling across swarm nodes.
+        """
+        if session and not session.closed:
+            return await self._execute_snapshot(session, symbol, interval)
+        
+        # Fallback context manager if no master session is injected
+        async with aiohttp.ClientSession() as ephemeral_session:
+            return await self._execute_snapshot(ephemeral_session, symbol, interval)
+
+    async def _execute_snapshot(self, session: aiohttp.ClientSession, symbol: str, interval: str) -> Optional[Dict[str, Any]]:
+        """Internal execution core for compiling market and narrative arrays."""
+        try:
+            market_task = self._get_bybit_klines(session, symbol, interval)
+            news_task = self._get_finnhub_news(session)
+            
+            klines, news_headlines = await asyncio.gather(market_task, news_task, return_exceptions=True)
+            
+            news_context = news_headlines if not isinstance(news_headlines, Exception) else "Macro narrative feed unavailable."
+            
+            # CIRCUIT BREAKER: Force quick-fail on empty data arrays to protect API limits
+            if isinstance(klines, Exception) or not klines:
+                logger.warning(f"Market data absent for {symbol}. Dropping asset from current cycle to protect API limits.")
                 return None
+                
+            current_price = float(klines[0][4])
+            
+            return {
+                "symbol": symbol,
+                "current_price": current_price,
+                "raw_klines": klines,
+                "news_context": news_context
+            }
+        except Exception as e:
+            logger.error(f"Systemic ingestion pipeline fault: {e}")
+            return None
 
     async def _get_bybit_klines(self, session: aiohttp.ClientSession, symbol: str, interval: str) -> List[List[str]]:
         """Fetches historical data to build the baseline, with strict error fallbacks."""
@@ -51,10 +64,9 @@ class AsynchronousDataFeed:
             "limit": "30"
         }
         
-        for attempt in range(3): # Try 3 times before giving up
+        for attempt in range(3):
             try:
                 async with session.get(self.bybit_base_url, params=params, timeout=10.0) as response:
-                    # Handle Bybit HTTP rate limits gracefully
                     if response.status in [429, 403]:
                         logger.warning(f"Bybit HTTP Rate Limit ({response.status}) on {symbol}. Heavy backoff initiated...")
                         await asyncio.sleep(5)
@@ -65,17 +77,14 @@ class AsynchronousDataFeed:
                     
                     if payload.get("retCode") == 0:
                         data_list = payload.get("result", {}).get("list", [])
-                        
                         if len(data_list) > 0:
                             return data_list
                         else:
-                            # 🚀 CIRCUIT BREAKER: Asset is likely new/delisted and has no candle data. 
-                            # Do not retry. Break immediately to prevent infinite API hammering.
+                            # CIRCUIT BREAKER: Immediate break on empty historical arrays
                             logger.warning(f"Bybit returned an empty structural array for {symbol}. Circuit breaker triggered.")
                             return []
                     else:
                         ret_code = payload.get("retCode")
-                        # 🚀 INTERNAL RATE LIMIT BREAKER: Catch JSON-level 10006 limits
                         if ret_code in [10006, 10002]:
                             logger.error(f"Bybit API JSON Rate Limit ({ret_code}) hit for {symbol}. Forcing thread sleep.")
                             await asyncio.sleep(5)
@@ -86,9 +95,8 @@ class AsynchronousDataFeed:
             except Exception as e:
                 logger.error(f"Failed to fetch klines for {symbol} on attempt {attempt + 1}: {e}")
             
-            await asyncio.sleep(2) # Wait 2 seconds before retrying
+            await asyncio.sleep(2)
             
-        # 🔴 CRITICAL FALLBACK: If Bybit completely fails, return empty array to trigger main.py sleep
         logger.critical(f"All historical data retries exhausted for {symbol}. Returning empty to force cooldown.")
         return []
 
@@ -104,7 +112,6 @@ class AsynchronousDataFeed:
                     if response.status != 200:
                         return "Macro narrative feed unavailable."
                     data = await response.json()
-                    # Extract and compress the 4 latest structural headlines
                     headlines = [item.get("headline", "") for item in data[:4] if item.get("headline")]
                     return " | ".join(headlines)
             except Exception:
