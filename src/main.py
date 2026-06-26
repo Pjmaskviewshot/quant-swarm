@@ -161,14 +161,14 @@ class DistributedQuantEngine:
         if market_regime == "RANGING":
             optimized["z_score_threshold"] = 2.4 # Strict micro-structure filtering for ranging markets
             optimized["cooldown_period"] = 900.0 # 🚀 Slow down: 15-minute cooldown prevents fee churn
-            optimized["sl_multiplier"] = 1.2     # 🚀 Tighten the leash: Cut losses instantly
-            optimized["tp_multiplier"] = 1.6     # 🚀 Positive R:R: You make more when you win
+            optimized["sl_multiplier"] = 1.2    # 🚀 Tighten the leash: Cut losses instantly
+            optimized["tp_multiplier"] = 1.6    # 🚀 Positive R:R: You make more when you win
             if vol_mult < 0.5: # 🛡️ Lowered floor to 0.5x to prevent blocking the Velocity Gate
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
             optimized["z_score_threshold"] = 1.9 
             optimized["cooldown_period"] = 120.0  
-            optimized["tp_multiplier"] = 2.5     
+            optimized["tp_multiplier"] = 2.5    
             
         return optimized
 
@@ -184,25 +184,42 @@ class DistributedQuantEngine:
                 
             batch_payload = dict(self.pending_macro_payloads)
             try:
+                # ---------------------------------------------------------
+                # 🛑 LOCAL PRE-FILTER: Protect API Context Window
+                # ---------------------------------------------------------
+                is_market_active = False
+                for sym, data in batch_payload.items():
+                    # We check the locally calculated volatility Z-score
+                    if abs(data.get("volatility_z_score", 0.0)) >= 2.0:
+                        is_market_active = True
+                        break
+
+                if not is_market_active:
+                    logger.info("💤 COMMANDER: Matrix is flat (|Z| < 2.0). API bypassed to save execution costs.")
+                    for symbol in batch_payload.keys():
+                        self.macro_regimes[symbol] = "HOLD"
+                        self.macro_confidences[symbol] = 0.0
+                    continue # Skip the rest of the loop, wait another 60 seconds
+
+                # ---------------------------------------------------------
+                # 🟢 MARKET IS ACTIVE: Build Payload and Route to Cloud
+                # ---------------------------------------------------------
                 global_news = "No significant macro shifts detected."
                 if len(batch_payload) > 0:
                     first_sym = list(batch_payload.keys())[0]
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
 
-                compressed_matrix = ""
-                for sym, data in batch_payload.items():
-                    compressed_matrix += f"[{sym}] P:{data['price']:.4f} ATR:{data['atr_volatility']:.4f} V_Mult:{data['volume_multiplier']}x Z_Vol:{data['volatility_z_score']} ACC:{data['rolling_system_accuracy']} | "
-                    
-                llm_payload = {
-                    "GLOBAL_MACRO_CONTEXT": global_news,
-                    "QUANTITATIVE_ASSET_MATRIX": compressed_matrix
-                }
-                
+                # Inject the global news into the batch payload so the AI sees it
+                for sym in batch_payload:
+                    batch_payload[sym]["global_macro_news"] = global_news
+
+                # We send the raw dictionary down to the router so it can be 
+                # processed as a pure JSON object, eliminating string formatting issues.
                 try:
-                    logger.info(f"🚀 Routing SINGLE Macro-Batch ({len(batch_payload)} assets) to DeepSeek API...")
+                    logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to DeepSeek API...")
                     verdict_matrix = await asyncio.wait_for(
-                        self.ai_router.extract_market_verdict(llm_payload),
+                        self.ai_router.extract_market_verdict(batch_payload),
                         timeout=30.0 
                     )
                     
