@@ -633,11 +633,12 @@ class DistributedQuantEngine:
             loop_counter += 1
             uptime_hours = (time.time() - start_time) / 3600
             
-            # 🚀 1. BATCHED DB RESOLUTION: Reduces DB network strangulation from 15 requests to 1
-            if loop_counter % 60 == 0:
+            # 🚀 1. HIGH-FREQUENCY KINETIC SWEEP: Runs every 5 mins instead of 60
+            if loop_counter % 5 == 0:
                 try:
-                    logger.info("⚡ Executing unified database resolution sweep across asset array...")
-                    age_cutoff_time = time.time() - 3600 # 1-Hour Decay Fix applied globally
+                    logger.info("⚡ Executing high-frequency database resolution sweep...")
+                    # Trades are allowed to breathe for 1 hour max, but TP/SL breaches are caught within 5 mins
+                    age_cutoff_time = time.time() - 3600 
                     
                     # Consolidate all assets that have active price streams
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
@@ -663,7 +664,8 @@ class DistributedQuantEngine:
 
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
-            if loop_counter % 60 == 0:
+            # 🚀 2. DYNAMIC FSM RECALCULATION: Re-arms the engine every 5 mins
+            if loop_counter % 5 == 0:
                 avg_vol_mult = np.mean([m.get("vol_mult", 1.0) for m in self.screener_metrics.values()]) if self.screener_metrics else 1.0
                 avg_dynamic_window = self.compute_dynamic_memory_window(avg_vol_mult)
                 
@@ -684,8 +686,15 @@ class DistributedQuantEngine:
                 else:
                     self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
 
+            # 🚀 3. TELEGRAM DIAGNOSTICS: Sends report every 30 mins to avoid spam
+            if loop_counter % 30 == 0:
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
+                
+                # Safely pull live metrics from the 5-minute cache
+                acc = self.global_state_cache.get("rolling_accuracy", 0.0)
+                dyn_win = self.global_state_cache.get("dynamic_window", self.min_horizon_floor)
+                pool = self.global_state_cache.get("total_resolved", 0)
                 
                 initial_baseline = 7.80
                 drawdown_pct = max(0.0, (initial_baseline - current_vault_balance) / initial_baseline)
@@ -729,9 +738,9 @@ class DistributedQuantEngine:
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Engine Run Uptime:</b> <code>{uptime_hours:.2f} Hours</code>\n"
                     f"🎛 <b>FSM State Gear:</b> <code>{state}</code>\n"
-                    f"🎯 <b>Rolling Edge Accuracy:</b> <code>{accuracy:.2%}</code>\n"
-                    f"📏 <b>Active Memory Horizon:</b> <code>{avg_dynamic_window} Trades Required</code>\n"
-                    f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool_size} Resolved</code>\n"
+                    f"🎯 <b>Rolling Edge Accuracy:</b> <code>{acc:.2%}</code>\n"
+                    f"📏 <b>Active Memory Horizon:</b> <code>{dyn_win} Trades Required</code>\n"
+                    f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool} Resolved</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
                     f"📈 <b>Net Realized Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
