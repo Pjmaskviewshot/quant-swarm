@@ -49,7 +49,8 @@ class ResilientAIRouter:
         # If every single asset has an absolute Z-score < 2.0, skip the AI entirely.
         is_market_active = False
         for ticker, data in batched_payload.items():
-            z_score = data.get("z_score", 0.0)
+            # 🚀 BUG FIX: Corrected key mapping to match the payload from main.py
+            z_score = data.get("volatility_z_score", 0.0)
             if abs(z_score) >= 2.0:
                 is_market_active = True
                 break
