@@ -150,10 +150,11 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 2.1 # 📉 Lowered from 2.4: Stops Statistical Starvation
+            optimized["z_score_threshold"] = 2.1 
             optimized["cooldown_period"] = 900.0 
-            optimized["sl_multiplier"] = 2.0     # 🛡️ Widened from 1.2: Stops Spread Suffocation
-            optimized["tp_multiplier"] = 3.0     # 📈 Scaled from 1.6: Maintains a profitable 1:1.5 Risk/Reward
+            optimized["position_scaling"] = 1.0  # 🚀 RESTORED: Sizing is now handled dynamically by OpEx Math 
+            optimized["sl_multiplier"] = 2.0     
+            optimized["tp_multiplier"] = 3.0     
             if vol_mult < 0.5: 
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
@@ -267,7 +268,6 @@ class DistributedQuantEngine:
                 current_price = context["current_price"]
                 feature_engine = self.feature_engines.get(symbol)
                 
-                # 🚀 Align terminal display with our new minimum structural floor
                 self.current_atrs[symbol] = current_price * 0.0125
                 
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
@@ -811,8 +811,35 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            scaled_allocation = risk_matrix["allocated_value_usdt"] * optimization["position_scaling"]
-            final_allocation = max(self.risk_vault.exchange_min_notional, scaled_allocation)
+            # =========================================================================
+            # 🚀 INSTITUTIONAL UPGRADE: OpEx-Aware Dynamic Position Sizing (Fixed-Cost Hurdle)
+            # =========================================================================
+            # 1. Calculate realistic Risk/Reward percentages (Kinetic Trailing Activation is at 1.0x ATR)
+            conservative_win_pct = (1.0 * atr) / current_price
+            stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
+            
+            # 2. The exact Notional Size required to yield a minimum $0.26 API operating cost on a Trailing Win
+            api_opex_target = 0.26
+            opex_required_notional = api_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
+            
+            # 3. Calculate the Absolute Maximum Notional before hitting Portfolio Ruin
+            max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
+            absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
+            
+            base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
+            
+            # 4. Merge Kelly, OpEx Hurdle, Exchange Minimums, and strict Risk Maximums
+            min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
+            dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
+            final_allocation = min(dynamic_allocation, absolute_max_notional)
+            
+            # 5. PHYSICAL WALLET CHECK: Ensure we don't request more margin than we have
+            target_leverage = risk_matrix.get("recommended_leverage", 1)
+            margin_required = final_allocation / target_leverage
+            if margin_required > (balance * 0.90): # Leave 10% buffer
+                logger.warning(f"⚠️ OpEx scaling capped. Required margin ({margin_required:.2f}) exceeds physical wallet ({balance:.2f}). Optimizing...")
+                final_allocation = (balance * 0.90) * target_leverage
+            
             risk_matrix["allocated_value_usdt"] = final_allocation
             risk_matrix["size"] = final_allocation / current_price
 
@@ -821,9 +848,8 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Scaled Notional Size: {risk_matrix['allocated_value_usdt']:.2f} USDT.")
+            logger.critical(f"🎯 RISK CLEARANCE GRANTED // Node: {symbol} | Optimal Sizing: {risk_matrix['allocated_value_usdt']:.2f} USDT (OpEx Targeted).")
             
-            target_leverage = risk_matrix.get("recommended_leverage", 1)
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             
             if not leverage_success:
