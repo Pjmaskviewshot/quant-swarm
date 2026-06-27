@@ -129,11 +129,6 @@ class DistributedQuantEngine:
     # 🧠 UPGRADE 1: THE ADAPTIVE MEMORY HORIZON (Exponential Scaling)
     # ====================================================================
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
-        """
-        Calculates how many trades the FSM needs to prove edge.
-        Uses quadratic compression to aggressively shrink the window during
-        parabolic volume events, but respects the new minimum horizon floor.
-        """
         normalized = min(2.0, vol_mult) / 2.0
         compressed = 1.0 - (normalized * normalized * 0.5)
         target_window = int(250 * max(0.4, compressed))
@@ -143,15 +138,11 @@ class DistributedQuantEngine:
     # 🧠 THE TRUE INSTITUTIONAL REGIME ATTENUATOR
     # ====================================================================
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
-        """
-        Organically scales execution barriers and cooldowns based strictly on volume.
-        Maintains absolute mathematical rigor to ensure training data is valid.
-        """
         vol_mult = float(metrics.get("vol_mult", 1.0))
 
         optimized = {
             "cooldown_period": 300.0,
-            "z_score_threshold": 2.2, # Baseline target hardened to suppress chop
+            "z_score_threshold": 2.2, 
             "position_scaling": 1.0,
             "sl_multiplier": 1.5,
             "tp_multiplier": 2.0,
@@ -159,11 +150,11 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 2.4 # Strict micro-structure filtering for ranging markets
-            optimized["cooldown_period"] = 900.0 # 🚀 Slow down: 15-minute cooldown prevents fee churn
-            optimized["sl_multiplier"] = 1.2    # 🚀 Tighten the leash: Cut losses instantly
-            optimized["tp_multiplier"] = 1.6    # 🚀 Positive R:R: You make more when you win
-            if vol_mult < 0.5: # 🛡️ Lowered floor to 0.5x to prevent blocking the Velocity Gate
+            optimized["z_score_threshold"] = 2.1 # 📉 Lowered from 2.4: Stops Statistical Starvation
+            optimized["cooldown_period"] = 900.0 
+            optimized["sl_multiplier"] = 2.0     # 🛡️ Widened from 1.2: Stops Spread Suffocation
+            optimized["tp_multiplier"] = 3.0     # 📈 Scaled from 1.6: Maintains a profitable 1:1.5 Risk/Reward
+            if vol_mult < 0.5: 
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
             optimized["z_score_threshold"] = 1.9 
@@ -184,12 +175,8 @@ class DistributedQuantEngine:
                 
             batch_payload = dict(self.pending_macro_payloads)
             try:
-                # ---------------------------------------------------------
-                # 🛑 LOCAL PRE-FILTER: Protect API Context Window
-                # ---------------------------------------------------------
                 is_market_active = False
                 for sym, data in batch_payload.items():
-                    # We check the locally calculated volatility Z-score
                     if abs(data.get("volatility_z_score", 0.0)) >= 2.0:
                         is_market_active = True
                         break
@@ -199,23 +186,17 @@ class DistributedQuantEngine:
                     for symbol in batch_payload.keys():
                         self.macro_regimes[symbol] = "HOLD"
                         self.macro_confidences[symbol] = 0.0
-                    continue # Skip the rest of the loop, wait another 60 seconds
+                    continue 
 
-                # ---------------------------------------------------------
-                # 🟢 MARKET IS ACTIVE: Build Payload and Route to Cloud
-                # ---------------------------------------------------------
                 global_news = "No significant macro shifts detected."
                 if len(batch_payload) > 0:
                     first_sym = list(batch_payload.keys())[0]
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
 
-                # Inject the global news into the batch payload so the AI sees it
                 for sym in batch_payload:
                     batch_payload[sym]["global_macro_news"] = global_news
 
-                # We send the raw dictionary down to the router so it can be 
-                # processed as a pure JSON object, eliminating string formatting issues.
                 try:
                     logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to DeepSeek API...")
                     verdict_matrix = await asyncio.wait_for(
@@ -285,11 +266,12 @@ class DistributedQuantEngine:
                 
                 current_price = context["current_price"]
                 feature_engine = self.feature_engines.get(symbol)
-                self.current_atrs[symbol] = current_price * 0.0045
+                
+                # 🚀 Align terminal display with our new minimum structural floor
+                self.current_atrs[symbol] = current_price * 0.0125
                 
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
                 
-                # 🚀 SHIELD CACHE FIX: No database queries are permitted here. Reads instantly from memory.
                 rolling_acc = self.global_state_cache.get("rolling_accuracy", 0.50)
                 
                 self.pending_macro_payloads[symbol] = {
@@ -324,7 +306,6 @@ class DistributedQuantEngine:
         mid_price = features["mid_price"]
         market_regime = features.get("market_regime", "RANGING")
         
-        # 🚀 EXTRACT REAL EMA SPREAD FROM FEATURE ENGINE
         real_spread = features.get("bid_ask_spread", mid_price * 0.0005)
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
@@ -339,12 +320,9 @@ class DistributedQuantEngine:
         effective_z_threshold = optimization["z_score_threshold"]
         vol_mult = metrics.get("vol_mult", 1.0)
 
-        # 🚀 GATE 1: THE VELOCITY STRIKE (Upgraded with Institutional Jitter Exhaustion)
-        # Demands that price is extreme AND the order book cascade has physically paused/reversed
         mieg_confirmed = features.get("mieg_confirmed", False)
         gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8) and mieg_confirmed
 
-        # 🚀 GATE 2: THE ACCUMULATION GRIND (Unchanged to maintain baseline trading volume)
         gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.4)
 
         has_pure_edge = gate_1_velocity or gate_2_accumulation
@@ -356,7 +334,6 @@ class DistributedQuantEngine:
             if has_pure_edge:  
                 trade_direction = "BUY" if z_obi > 0 else "SELL"
         else:
-            # 🚀 ASYMMETRIC VETO MODEL
             regime = self.macro_regimes.get(symbol, "HOLD")
             if has_pure_edge:
                 if z_obi > 0 and regime != "SELL":  
@@ -369,7 +346,6 @@ class DistributedQuantEngine:
             mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
             logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Dynamic Target: {effective_z_threshold:.2f}")
             
-            # 🚀 PASS REAL SPREAD TO SIGNAL LIFECYCLE
             asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
 
     # ==========================================
@@ -441,7 +417,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(14400) 
             logger.info("🌍 GLOBAL SATELLITE SCAN INITIATED. Querying Bybit endpoints for volatility targets...")
             
-            # 🚀 Update the global tick size matrix dynamically
             await self._fetch_exchange_tick_sizes()
             
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
@@ -453,7 +428,6 @@ class DistributedQuantEngine:
             self.asset_basket = full_market[:15]
             self.shadow_basket = full_market[15:]
             
-            # 🚀 FALLBACK PROTECTION: Ensure shadow basket never runs dry
             if len(self.shadow_basket) < 10:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
                 self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
@@ -499,7 +473,6 @@ class DistributedQuantEngine:
     # 👻 NEW THREAD: THE SHADOW SWARM SCANNER
     # ==========================================
     def _detect_shadow_regime(self, closes: np.ndarray) -> str:
-        """Lightweight regime detection for shadow assets to maintain data purity"""
         if len(closes) < 30:
             return "RANGING"
         directional_change = abs(closes[-1] - closes[0])
@@ -513,31 +486,24 @@ class DistributedQuantEngine:
         return "TRENDING" if er >= 0.35 and bb_width >= 0.004 else "RANGING"
 
     async def run_shadow_swarm_scanner(self):
-        """
-        🦇 SHADOW SWARM: Scans 85+ assets for pure 2.0+ Z-Score setups
-        Feeds the FSM with uncompromised, institutional-grade data
-        """
         logger.critical("🦇 SHADOW SWARM ONLINE. Hunting for pure data across extended universe...")
         
         while True:
-            await asyncio.sleep(120) # 2 minute scan cycle
+            await asyncio.sleep(120) 
             
             if not self.shadow_basket:
                 continue
                 
-            # Process in batches to respect rate limits
             BATCH_SIZE = 10
             for i in range(0, len(self.shadow_basket), BATCH_SIZE):
                 batch = self.shadow_basket[i:i+BATCH_SIZE]
                 
                 for symbol in batch:
                     try:
-                        # Cooldown check
                         if symbol in self.shadow_cooldown:
                             if time.time() - self.shadow_cooldown[symbol] < 300:
                                 continue
                                 
-                        # Fetch 15m candles
                         klines = await asyncio.to_thread(
                             self.executor.client.get_kline,
                             category="linear", symbol=symbol, interval="15", limit=60
@@ -556,13 +522,11 @@ class DistributedQuantEngine:
                         avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else 1.0
                         vol_mult = current_vol / avg_vol if avg_vol > 0 else 1.0
                         
-                        # Volatility Z-Score
                         returns = np.diff(np.log(closes))
                         mean_return = np.mean(returns) if len(returns) > 0 else 0.0
                         std_return = np.std(returns) if len(returns) > 0 else 1e-6
                         vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
                         
-                        # 🚀 DUAL-GATE ALPHA TRIGGER INTEGRATION
                         gate_1_shadow = (vol_z >= 2.2) and (vol_mult >= 0.8)
                         gate_2_shadow = (vol_mult >= 1.5) and (vol_z >= 1.4)
                         
@@ -570,7 +534,6 @@ class DistributedQuantEngine:
                             direction = "BUY" if returns[-1] < 0 else "SELL"
                             logger.critical(f"🦇 [SHADOW HIT] {symbol} | Vol: {vol_mult:.2f}x | Z: {vol_z:.2f}")
                             
-                            # Detect regime for accuracy tracking
                             market_regime = self._detect_shadow_regime(closes)
                             
                             features_dict = {
@@ -590,14 +553,13 @@ class DistributedQuantEngine:
                                 features_dict
                             )
                             
-                            # Update trackers
                             self.shadow_cooldown[symbol] = time.time()
                             
                     except Exception as e:
                         logger.debug(f"Shadow scan failed for {symbol}: {e}")
                     
-                    await asyncio.sleep(0.5) # 🚀 UPGRADED: Throttled to completely bypass Bybit 10006 Rate Limits
-                await asyncio.sleep(1) # Batch pause
+                    await asyncio.sleep(0.5) 
+                await asyncio.sleep(1) 
 
     # ==========================================
     # THREAD 6: HIGH-VELOCITY NETWORK CONNECTOR
@@ -611,7 +573,7 @@ class DistributedQuantEngine:
                 orderbook_callback=self.handle_incoming_orderbook_tick,
                 screener_callback=self.handle_incoming_basket_screener_update,
                 kline_callback=self.handle_incoming_kline_update,
-                engine_reference=self  # 🚀 TFI UPGRADE: Pass 'self' so the feed can route Trade ticks
+                engine_reference=self  
             )
             
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
@@ -633,26 +595,20 @@ class DistributedQuantEngine:
             loop_counter += 1
             uptime_hours = (time.time() - start_time) / 3600
             
-            # 🚀 1. HIGH-FREQUENCY KINETIC SWEEP: Runs every 5 mins instead of 60
             if loop_counter % 5 == 0:
                 try:
                     logger.info("⚡ Executing high-frequency database resolution sweep...")
-                    # Trades are allowed to breathe for 1 hour max, but TP/SL breaches are caught within 5 mins
                     age_cutoff_time = time.time() - 3600 
                     
-                    # Consolidate all assets that have active price streams
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
                     if valid_assets:
-                        # Construct mapped dict for current prices to avoid internal lookup delays
                         current_prices = {sym: self.screener_memory[sym]["prices"][-1] for sym in valid_assets}
                         
-                        # Cross reference shadow matrix space as well to capture full coverage
                         for s, data in self.shadow_cooldown.items():
                             if s not in current_prices: 
                                 current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])[-1]
                         
-                        # Direct, singular call to the memory unit using batched execution
                         await asyncio.to_thread(
                             self.memory.resolve_batch_historical_predictions,
                             assets=list(current_prices.keys()),
@@ -664,12 +620,10 @@ class DistributedQuantEngine:
 
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
-            # 🚀 2. DYNAMIC FSM RECALCULATION: Re-arms the engine every 5 mins
             if loop_counter % 5 == 0:
                 avg_vol_mult = np.mean([m.get("vol_mult", 1.0) for m in self.screener_metrics.values()]) if self.screener_metrics else 1.0
                 avg_dynamic_window = self.compute_dynamic_memory_window(avg_vol_mult)
                 
-                # 🚀 SINGLETON CACHE ASSIGNMENT
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=avg_dynamic_window)
                 
                 self.global_state_cache["rolling_accuracy"] = accuracy
@@ -679,19 +633,16 @@ class DistributedQuantEngine:
                 
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
-                # 🛡️ FSM REGRESSION GATE (OVERRIDE ACTIVATED)
                 if accuracy < 0.60:
                     self.fsm.current_state = TradingState.CALIBRATING
                     logger.critical(f"📉 EDGE DECAY OVERRIDE: Accuracy {accuracy:.2%} is below 60% floor. Engine locked to CALIBRATING.")
                 else:
                     self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
 
-            # 🚀 3. TELEGRAM DIAGNOSTICS: Sends report every 30 mins to avoid spam
             if loop_counter % 30 == 0:
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 
-                # Safely pull live metrics from the 5-minute cache
                 acc = self.global_state_cache.get("rolling_accuracy", 0.0)
                 dyn_win = self.global_state_cache.get("dynamic_window", self.min_horizon_floor)
                 pool = self.global_state_cache.get("total_resolved", 0)
@@ -758,7 +709,6 @@ class DistributedQuantEngine:
     # ==========================================
     # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
     # ==========================================
-    # 🚀 Update the parameters to include tick_size
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
         if optimization is None:
             optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
@@ -783,25 +733,18 @@ class DistributedQuantEngine:
             initial_sl = entry_price + (sl_multiplier * atr)
             target_tp = entry_price - (tp_multiplier * atr) - fee_buffer
             
-        # ====================================================================
-        # 🚀 INSTITUTIONAL FIX: Exact Tick Size Quantization
-        # Maps the mathematical bracket perfectly to the exchange's required grid
-        # ====================================================================
         tick_dec = Decimal(str(tick_size))
         sl_dec = Decimal(str(initial_sl))
         tp_dec = Decimal(str(target_tp))
         
-        # Divide by tick step, round to nearest integer, multiply by tick step
         snapped_sl = (sl_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
         snapped_tp = (tp_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
         
-        # Final formatting cleanup to ensure Bybit's API parser accepts it natively
         final_sl = float(snapped_sl.quantize(tick_dec))
         final_tp = float(snapped_tp.quantize(tick_dec))
         
         return final_sl, final_tp
 
-    # 🚀 THE MASTER FIX: Add real_spread to the function signature
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0):
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
@@ -818,7 +761,10 @@ class DistributedQuantEngine:
             
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
-            atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else current_price * 0.015
+            
+            raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else current_price * 0.015
+            
+            atr = max(raw_atr, current_price * 0.0125) 
             self.current_atrs[symbol] = atr
 
             metrics = self.screener_metrics.get(symbol, {})
@@ -829,7 +775,7 @@ class DistributedQuantEngine:
                 "market_regime": market_regime,
                 "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult,
-                "bid_ask_spread": real_spread # 🚀 Save the real spread to the database
+                "bid_ask_spread": real_spread 
             }
             
             self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict)
@@ -887,29 +833,21 @@ class DistributedQuantEngine:
             
             vol_z = metrics.get("vol_z", 0.0)
             
-            # 🚀 Fetch the exact legal tick step for this specific coin
             tick_size = self.tick_sizes.get(symbol, 0.0001) 
             
             initial_sl, target_tp = self.calculate_initial_bracket(
                 current_price, atr, direction, target_leverage, vol_z, optimization, tick_size
             )
             
-            # =========================================================================
-            # 🚀 INSTITUTIONAL UPGRADE: Dynamic Total Cost of Execution (TCE) Model
-            # =========================================================================
             if vol_mult < 0.3: 
                 logger.warning(f"❌ TRADE SKIPPED // {symbol} volume critically low ({vol_mult:.2f}x). Halting to prevent liquidity trap.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # Bybit 0.055% maker/taker fee is already buffered inside target_tp
             expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
             
-            # Ensure real_spread has a safe minimum boundary (1 basis point) to prevent divide-by-zero math errors
             safe_spread = max(real_spread, current_price * 0.0001) 
             
-            # 🚀 The Master Formula: Slippage penalty expands geometrically when volume dries up
-            # If volume is 2.0x, penalty is half the spread. If volume is 0.5x, penalty is double the spread.
             slippage_penalty = safe_spread * (1.0 / max(0.4, vol_mult))
             total_friction = safe_spread + slippage_penalty
             
@@ -917,7 +855,6 @@ class DistributedQuantEngine:
                 logger.warning(f"❌ TRADE SKIPPED // {symbol} Expected profit ({expected_profit:.4f}) cannot clear dynamic structural friction ({total_friction:.4f}). Spread: {safe_spread/current_price:.3%} | Vol: {vol_mult:.2f}x")
                 self.active_positions_lock.discard(symbol)
                 return False
-            # =========================================================================
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -927,13 +864,13 @@ class DistributedQuantEngine:
                 execution_success = await self.sor.execute_iceberg_block(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult
+                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine
                 )
             else:
                 execution_success = await self.sor.execute_mean_reversion_bracket(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult
+                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine
                 )
             
             if not execution_success:
@@ -1068,7 +1005,6 @@ class DistributedQuantEngine:
         logger.critical("LAUNCHING DISTRIBUTED QUANT SWARM DAEMON DEPLOYMENTS...")
         logger.info("🌍 Booting up Global Satellite Radar to execute asset tracking optimization matrix...")
         
-        # 🚀 Fetch the global tick size matrix before launching workers
         await self._fetch_exchange_tick_sizes()
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)

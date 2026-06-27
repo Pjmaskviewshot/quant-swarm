@@ -3,6 +3,7 @@ import logging
 import math
 import time
 from typing import Dict, Any
+from decimal import Decimal, ROUND_HALF_UP
 from services.bybit_v5 import BybitUnifiedExecutor
 
 logger = logging.getLogger("QUANT_CORE.SOR")
@@ -123,13 +124,13 @@ class SmartOrderRouter:
             logger.error(f"⚠️ Network/API Exception during Flash Strike for {symbol}: {e}")
             return False
 
-    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, timeout: int = 60):
+    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, timeout: int = 60):
         """
         🛡️ DYNAMIC MAKER-PEGGING (The Order Chase)
         Places PostOnly limit orders and constantly amends them to the top of the book.
         Ensures 0% Taker Fees and protects against stale limit traps.
         """
-        logger.info(f"🛡️ MAKER-PEGGING INITIATED // {symbol}. Chasing top of the book to secure Maker liquidity.")
+        logger.info(f"🛡️ MAKER-PEGGING INITIATED // {symbol}. Chasing top of the book via Zero-Latency Local RAM.")
         
         start_time = time.time()
         current_order_id = None
@@ -141,16 +142,27 @@ class SmartOrderRouter:
 
         while time.time() - start_time < timeout:
             try:
-                # 1. Fetch live top of book
-                ob_response = await asyncio.to_thread(self.executor.client.get_orderbook, category="linear", symbol=symbol)
-                ob_data = ob_response.get("result", {})
+                # 🚀 1. ZERO-LATENCY RAM CHECK: Fetch live top of book from memory
+                best_bid, best_ask = 0.0, 0.0
                 
-                try:
-                    best_bid = float(ob_data.get("b", [[0]])[0][0])
-                    best_ask = float(ob_data.get("a", [[0]])[0][0])
-                except (IndexError, ValueError):
-                    await asyncio.sleep(1.5)
-                    continue
+                if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
+                    ob_data = feature_engine.get_orderbook_snapshot()
+                    try:
+                        best_bid = float(ob_data.get("bids", [[0]])[0][0])
+                        best_ask = float(ob_data.get("asks", [[0]])[0][0])
+                    except (IndexError, ValueError):
+                        await asyncio.sleep(1.5)
+                        continue
+                else:
+                    # Fallback to REST only if memory fails
+                    ob_response = await asyncio.to_thread(self.executor.client.get_orderbook, category="linear", symbol=symbol)
+                    ob_data = ob_response.get("result", {})
+                    try:
+                        best_bid = float(ob_data.get("b", [[0]])[0][0])
+                        best_ask = float(ob_data.get("a", [[0]])[0][0])
+                    except (IndexError, ValueError):
+                        await asyncio.sleep(1.5)
+                        continue
                 
                 target_price = best_bid if direction.upper() == "BUY" else best_ask
                 
@@ -236,12 +248,13 @@ class SmartOrderRouter:
         # Allow fallback to kwargs just in case the execution routing from main changes
         v_z = kwargs.get("vol_z", vol_z)
         v_m = kwargs.get("vol_mult", vol_mult)
+        fe = kwargs.get("feature_engine") # 🚀 Extracts local RAM from Main
 
         # The Mathematical Flash Gate
         if abs(v_z) >= 3.0 and v_m >= 2.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
-            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit)
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=fe)
 
     async def execute_mean_reversion_bracket(
         self, symbol: str, direction: str, total_qty: float, current_mid_price: float,
@@ -254,9 +267,10 @@ class SmartOrderRouter:
 
         v_z = kwargs.get("vol_z", vol_z)
         v_m = kwargs.get("vol_mult", vol_mult)
+        fe = kwargs.get("feature_engine") # 🚀 Extracts local RAM from Main
 
         # The Mathematical Flash Gate
         if abs(v_z) >= 3.0 and v_m >= 2.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
-            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit)
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=fe)
