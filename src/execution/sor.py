@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import time
 from typing import Dict, Any
 from services.bybit_v5 import BybitUnifiedExecutor
 
@@ -78,97 +79,184 @@ class SmartOrderRouter:
         
         return round(stepped_price, precision)
 
+    async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float):
+        """
+        ⚡ THE FLASH STRIKE
+        IOC (Immediate-Or-Cancel) for violent Z-OBI anomalies.
+        Crosses the spread to guarantee instant execution before price escapes.
+        """
+        logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} is experiencing severe structural fracture. Crossing spread with IOC.")
+        
+        slip_buffer = current_mid_price * self.max_slippage_pct
+        exec_price = current_mid_price + slip_buffer if direction.upper() == "BUY" else current_mid_price - slip_buffer
+        
+        cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
+        final_price = self._format_dynamic_price(exec_price, symbol)
+        final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
+        final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
+        
+        side = "Buy" if direction.upper() == "BUY" else "Sell"
+
+        try:
+            response = await asyncio.to_thread(
+                self.executor.client.place_order,
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Limit", 
+                qty=str(cleaned_qty), 
+                price=str(final_price), 
+                timeInForce="IOC", 
+                stopLoss=str(final_sl) if final_sl else None,
+                takeProfit=str(final_tp) if final_tp else None
+            )
+            
+            if response.get("retCode") == 0:
+                order_id = response.get("result", {}).get("orderId", "UNKNOWN")
+                logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled instantly on extreme volatility. ID: {order_id}")
+                return True
+            else:
+                logger.error(f"❌ Flash Strike failed or rejected by exchange: {response.get('retMsg')}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"⚠️ Network/API Exception during Flash Strike for {symbol}: {e}")
+            return False
+
+    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, timeout: int = 60):
+        """
+        🛡️ DYNAMIC MAKER-PEGGING (The Order Chase)
+        Places PostOnly limit orders and constantly amends them to the top of the book.
+        Ensures 0% Taker Fees and protects against stale limit traps.
+        """
+        logger.info(f"🛡️ MAKER-PEGGING INITIATED // {symbol}. Chasing top of the book to secure Maker liquidity.")
+        
+        start_time = time.time()
+        current_order_id = None
+        
+        side = "Buy" if direction.upper() == "BUY" else "Sell"
+        
+        final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
+        final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
+
+        while time.time() - start_time < timeout:
+            try:
+                # 1. Fetch live top of book
+                ob_response = await asyncio.to_thread(self.executor.client.get_orderbook, category="linear", symbol=symbol)
+                ob_data = ob_response.get("result", {})
+                
+                try:
+                    best_bid = float(ob_data.get("b", [[0]])[0][0])
+                    best_ask = float(ob_data.get("a", [[0]])[0][0])
+                except (IndexError, ValueError):
+                    await asyncio.sleep(1.5)
+                    continue
+                
+                target_price = best_bid if direction.upper() == "BUY" else best_ask
+                
+                cleaned_qty = self._apply_dynamic_exchange_limits(qty, target_price, symbol)
+                final_target_price = self._format_dynamic_price(target_price, symbol)
+                
+                # 2. Place order if we don't have one active
+                if not current_order_id:
+                    place_response = await asyncio.to_thread(
+                        self.executor.client.place_order,
+                        category="linear", symbol=symbol, side=side, orderType="Limit",
+                        qty=str(cleaned_qty), price=str(final_target_price), timeInForce="PostOnly", 
+                        stopLoss=str(final_sl) if final_sl else None, 
+                        takeProfit=str(final_tp) if final_tp else None
+                    )
+                    if place_response.get("retCode") == 0:
+                        current_order_id = place_response["result"]["orderId"]
+                    else:
+                        # Rejection likely means PostOnly crossed the spread. Loop will retry instantly.
+                        await asyncio.sleep(0.5)
+                        continue
+                
+                # 3. Assess and Amend Order
+                if current_order_id:
+                    status_response = await asyncio.to_thread(
+                        self.executor.client.get_open_orders,
+                        category="linear", symbol=symbol, orderId=current_order_id
+                    )
+                    order_list = status_response.get("result", {}).get("list", [])
+                    
+                    if not order_list:
+                        # Order is gone from open orders. Check if it became a live position.
+                        pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                        pos_size = float(pos_response.get("result", {}).get("list", [{}])[0].get("size", 0))
+                        if pos_size > 0:
+                            logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely at optimal Maker fees.")
+                            return True
+                        else:
+                            current_order_id = None 
+                            continue
+                            
+                    order_info = order_list[0]
+                    order_status = order_info.get("orderStatus")
+                    current_peg_price = float(order_info.get("price"))
+                    
+                    if order_status in ["Filled"]:
+                        logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely at optimal Maker fees.")
+                        return True
+                    elif order_status in ["Cancelled", "Rejected"]:
+                        current_order_id = None 
+                    elif order_status in ["New", "PartiallyFilled"]:
+                        # 4. The Chase: If the book moved away, pull our order and move it to the new top
+                        if final_target_price != current_peg_price:
+                            await asyncio.to_thread(
+                                self.executor.client.amend_order,
+                                category="linear", symbol=symbol, orderId=current_order_id,
+                                price=str(final_target_price)
+                            )
+
+            except Exception as e:
+                logger.debug(f"Maker peg cycle variance for {symbol}: {e}")
+                
+            await asyncio.sleep(1.5) 
+
+        # 5. Stale Timeout: If market escaped completely, cancel and surrender
+        if current_order_id:
+            logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
+            try:
+                await asyncio.to_thread(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
+            except Exception:
+                pass
+        return False
+
     async def execute_iceberg_block(
         self, symbol: str, direction: str, total_qty: float, current_mid_price: float,
-        stop_loss: float = None, take_profit: float = None, **kwargs
+        stop_loss: float = None, take_profit: float = None, vol_z: float = 0.0, vol_mult: float = 1.0, **kwargs
     ) -> bool:
         """
         🚀 OFFENSIVE MODE: TRENDING MARKETS
         """
-        # 🛡️ Download constraints from Bybit before calculating sizes
         await self._fetch_exchange_limits(symbol)
 
-        depth_snapshot = kwargs.get("depth_snapshot", {})
-        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
-            try:
-                best_bid = float(depth_snapshot["bids"][0][0])
-                best_ask = float(depth_snapshot["asks"][0][0])
-                live_spread = (best_ask - best_bid) / best_bid
-                if live_spread > self.max_slippage_pct:
-                    logger.warning(f"❌ SPREAD VIOLATION // {symbol} Friction: {live_spread:.4%} > {self.max_slippage_pct:.4%}.")
-                    return False
-            except (IndexError, ValueError, TypeError):
-                pass
+        # Allow fallback to kwargs just in case the execution routing from main changes
+        v_z = kwargs.get("vol_z", vol_z)
+        v_m = kwargs.get("vol_mult", vol_mult)
 
-        # 🚀 Route through the dynamic exchange enforcer
-        cleaned_qty = self._apply_dynamic_exchange_limits(total_qty, current_mid_price, symbol)
-
-        logger.info(f"🚀 TRENDING ROUTER ONLINE // Target: {symbol} | Dir: {direction} | Qty: {cleaned_qty}")
-
-        try:
-            order_id = await self.executor.dispatch_market_order(
-                symbol=symbol, direction=direction, qty=cleaned_qty,
-                tp=self._format_dynamic_price(take_profit, symbol) if take_profit else 0.0,
-                sl=self._format_dynamic_price(stop_loss, symbol) if stop_loss else 0.0
-            )
-            if order_id:
-                logger.critical(f"🎯 BREAKOUT BLOCK FILLED // Ticket: {order_id[:12]}...")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Critical execution fault inside SOR market block allocation: {e}")
-            return False
+        # The Mathematical Flash Gate
+        if abs(v_z) >= 3.0 and v_m >= 2.5:
+            return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
+        else:
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit)
 
     async def execute_mean_reversion_bracket(
         self, symbol: str, direction: str, total_qty: float, current_mid_price: float,
-        stop_loss: float = None, take_profit: float = None, **kwargs
+        stop_loss: float = None, take_profit: float = None, vol_z: float = 0.0, vol_mult: float = 1.0, **kwargs
     ) -> bool:
         """
         🛡️ ACCUMULATION MODE: RANGING MARKETS
         """
-        # 🛡️ Download constraints from Bybit before calculating sizes
         await self._fetch_exchange_limits(symbol)
 
-        depth_snapshot = kwargs.get("depth_snapshot", {})
-        limit_entry_price = current_mid_price
+        v_z = kwargs.get("vol_z", vol_z)
+        v_m = kwargs.get("vol_mult", vol_mult)
 
-        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
-            try:
-                best_bid = float(depth_snapshot["bids"][0][0])
-                best_ask = float(depth_snapshot["asks"][0][0])
-                limit_entry_price = best_bid if direction.upper() == "BUY" else best_ask
-            except (IndexError, ValueError, TypeError):
-                pass
-
-        # 🚀 Route through the dynamic exchange enforcer
-        cleaned_qty = self._apply_dynamic_exchange_limits(total_qty, limit_entry_price, symbol)
-        limit_entry_price = self._format_dynamic_price(limit_entry_price, symbol)
-
-        logger.info(f"🕸️ MEAN REVERSION ROUTER ONLINE // Target: {symbol} | Limit: {limit_entry_price} | Qty: {cleaned_qty}")
-
-        try:
-            if hasattr(self.executor, 'dispatch_limit_order'):
-                order_id = await self.executor.dispatch_limit_order(
-                    symbol=symbol, direction=direction, qty=cleaned_qty, price=limit_entry_price,
-                    tp=self._format_dynamic_price(take_profit, symbol) if take_profit else 0.0,
-                    sl=self._format_dynamic_price(stop_loss, symbol) if stop_loss else 0.0
-                )
-            else:
-                side = "Buy" if direction.upper() == "BUY" else "Sell"
-                order_response = await asyncio.to_thread(
-                    self.executor.client.place_order,
-                    category="linear", symbol=symbol, side=side, orderType="Limit", 
-                    qty=str(cleaned_qty), price=str(limit_entry_price),
-                    takeProfit=str(self._format_dynamic_price(take_profit, symbol)),
-                    stopLoss=str(self._format_dynamic_price(stop_loss, symbol)),
-                    timeInForce="PostOnly" 
-                )
-                order_id = order_response.get("result", {}).get("orderId")
-
-            if order_id:
-                logger.critical(f"🕸️ PASSIVE LIMIT NET DEPLOYED // Ticket: {order_id[:12]}...")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Critical execution fault inside SOR limit block allocation: {e}")
-            return False
+        # The Mathematical Flash Gate
+        if abs(v_z) >= 3.0 and v_m >= 2.5:
+            return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
+        else:
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit)

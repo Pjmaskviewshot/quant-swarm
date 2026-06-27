@@ -927,13 +927,13 @@ class DistributedQuantEngine:
                 execution_success = await self.sor.execute_iceberg_block(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth
+                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult
                 )
             else:
                 execution_success = await self.sor.execute_mean_reversion_bracket(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth
+                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult
                 )
             
             if not execution_success:
