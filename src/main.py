@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import math
 import asyncio
 import logging
 import uuid
@@ -812,26 +813,35 @@ class DistributedQuantEngine:
                 return False
 
             # =========================================================================
-            # 🚀 INSTITUTIONAL UPGRADE: OpEx-Aware Dynamic Position Sizing (Fixed-Cost Hurdle)
+            # 🚀 INSTITUTIONAL UPGRADE: Asymptotic OpEx-Aware Position Sizing
             # =========================================================================
             # 1. Calculate realistic Risk/Reward percentages (Kinetic Trailing Activation is at 1.0x ATR)
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             
-            # 2. The exact Notional Size required to yield a minimum $0.26 API operating cost on a Trailing Win
-            api_opex_target = 0.26
-            opex_required_notional = api_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
+            # 2. Asymptotic Cost Amortization (The Math Upgrade)
+            # Smoothly dampens the fixed-cost target for micro-accounts to prevent generating 
+            # a position size that violates concentration boundaries.
+            base_opex_target = 0.26
+            amortization_weight = math.tanh(balance / 45.0) 
+            active_opex_target = base_opex_target * amortization_weight
             
-            # 3. Calculate the Absolute Maximum Notional before hitting Portfolio Ruin
+            opex_required_notional = active_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
+            
+            # 3. Calculate strict institutional portfolio limits locally to guarantee compliance
+            max_concentration_notional = balance * 1.45 # Hard clip slightly under the vault's 1.5x boundary
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
             
+            # Upper ceiling is the absolute minimum of our safety models
+            safety_ceiling = min(absolute_max_notional, max_concentration_notional)
+            
             base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
             
-            # 4. Merge Kelly, OpEx Hurdle, Exchange Minimums, and strict Risk Maximums
+            # 4. Synthesize allocations smoothly
             min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
             dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
-            final_allocation = min(dynamic_allocation, absolute_max_notional)
+            final_allocation = min(dynamic_allocation, safety_ceiling)
             
             # 5. PHYSICAL WALLET CHECK: Ensure we don't request more margin than we have
             target_leverage = risk_matrix.get("recommended_leverage", 1)
