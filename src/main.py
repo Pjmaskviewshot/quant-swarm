@@ -205,7 +205,6 @@ class DistributedQuantEngine:
 
                 # =========================================================================
                 # 🚀 UPGRADE 5: INSTITUTIONAL PAYLOAD DE-DUPLICATION (TOKEN COMPRESSION)
-                # We extract the news once to prevent Attention Dilution and eliminate 413 errors.
                 # =========================================================================
                 global_news = "No significant macro shifts detected."
                 if len(batch_payload) > 0:
@@ -213,12 +212,10 @@ class DistributedQuantEngine:
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
 
-                # Clean the bloated duplicated strings out of the individual assets
                 for sym in batch_payload:
                     batch_payload[sym].pop("macro_news_stream", None)
                     batch_payload[sym].pop("global_macro_news", None)
 
-                # Wrap the clean payload with the single news string at the root level
                 final_ai_payload = {
                     "GLOBAL_MACRO_NEWS": global_news,
                     "ASSET_MATRIX": batch_payload
@@ -227,19 +224,22 @@ class DistributedQuantEngine:
                 try:
                     logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to Cascade Circuit Breaker...")
                     
-                    # 🚀 UPGRADE 6: 60-Second Commander Timeout
-                    # This guarantees that if Groq fails, the NVIDIA NIM failover has enough time to execute.
                     verdict_matrix = await asyncio.wait_for(
                         self.ai_router.extract_market_verdict(final_ai_payload),
                         timeout=60.0 
                     )
                     
                     if isinstance(verdict_matrix, dict):
-                        for symbol, data in verdict_matrix.items():
-                            if symbol in self.asset_basket and isinstance(data, dict):
-                                self.macro_regimes[symbol] = data.get("direction", "HOLD")
-                                self.macro_confidences[symbol] = data.get("confidence", 0.0)
-                                logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                        # 🚀 BUG FIX 1: The String/Dict Parsing Error
+                        # We must extract the ASSET_MATRIX if the AI returned it nested, otherwise iterate over the keys safely.
+                        target_dict = verdict_matrix.get("ASSET_MATRIX", verdict_matrix)
+                        
+                        if isinstance(target_dict, dict):
+                            for symbol, data in target_dict.items():
+                                if symbol in self.asset_basket and isinstance(data, dict):
+                                    self.macro_regimes[symbol] = data.get("direction", "HOLD")
+                                    self.macro_confidences[symbol] = data.get("confidence", 0.0)
+                                    logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
                                 
                 except asyncio.TimeoutError:
                     logger.error("⏳ COMMANDER TIMEOUT on Single Batch.")
@@ -640,8 +640,9 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.debug(f"Shadow scan failed for {symbol}: {e}")
                     
-                    await asyncio.sleep(0.5) 
-                await asyncio.sleep(1) 
+                    # 🚀 BUG FIX 2: Relieve the REST API pressure from the Shadow Swarm
+                    await asyncio.sleep(1.5) 
+                await asyncio.sleep(2) 
 
     async def stream_manager_loop(self):
         while True:
