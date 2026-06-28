@@ -72,6 +72,10 @@ class DistributedQuantEngine:
         self.active_positions_lock = set()
         self.tick_sizes: Dict[str, float] = {}
         
+        # 🚀 UPGRADE 7: GLOBAL NEWS CACHE
+        self.global_macro_news_cache: str = "No significant macro shifts detected."
+        self.last_news_fetch: float = 0.0
+        
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
 
@@ -181,10 +185,29 @@ class DistributedQuantEngine:
             
         return optimized
 
+    async def _update_global_news_cache(self):
+        """Fetches macro news for BTC only to save Finnhub rate limits."""
+        current_time = time.time()
+        if current_time - self.last_news_fetch > 300: # Update every 5 minutes
+            try:
+                context = await asyncio.wait_for(
+                    self.macro_data_feed.fetch_market_snapshot("BTCUSDT", self.timeframe),
+                    timeout=8.0
+                )
+                if context and "news_context" in context:
+                    self.global_macro_news_cache = context["news_context"]
+                self.last_news_fetch = current_time
+            except Exception as e:
+                logger.debug(f"Silent background fail on news fetch: {e}")
+
     async def run_macro_commander(self):
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
         while True:
             await asyncio.sleep(60) 
+            
+            # Keep the news cache fresh
+            await self._update_global_news_cache()
+            
             if not self.pending_macro_payloads:
                 continue
                 
@@ -203,21 +226,8 @@ class DistributedQuantEngine:
                         self.macro_confidences[symbol] = 0.0
                     continue 
 
-                # =========================================================================
-                # 🚀 UPGRADE 5: INSTITUTIONAL PAYLOAD DE-DUPLICATION (TOKEN COMPRESSION)
-                # =========================================================================
-                global_news = "No significant macro shifts detected."
-                if len(batch_payload) > 0:
-                    first_sym = list(batch_payload.keys())[0]
-                    if "macro_news_stream" in batch_payload[first_sym]:
-                        global_news = batch_payload[first_sym]["macro_news_stream"]
-
-                for sym in batch_payload:
-                    batch_payload[sym].pop("macro_news_stream", None)
-                    batch_payload[sym].pop("global_macro_news", None)
-
                 final_ai_payload = {
-                    "GLOBAL_MACRO_NEWS": global_news,
+                    "GLOBAL_MACRO_NEWS": self.global_macro_news_cache,
                     "ASSET_MATRIX": batch_payload
                 }
 
@@ -230,8 +240,6 @@ class DistributedQuantEngine:
                     )
                     
                     if isinstance(verdict_matrix, dict):
-                        # 🚀 BUG FIX 1: The String/Dict Parsing Error
-                        # We must extract the ASSET_MATRIX if the AI returned it nested, otherwise iterate over the keys safely.
                         target_dict = verdict_matrix.get("ASSET_MATRIX", verdict_matrix)
                         
                         if isinstance(target_dict, dict):
@@ -283,34 +291,29 @@ class DistributedQuantEngine:
         
         while True:
             try:
-                context = await asyncio.wait_for(
-                    self.macro_data_feed.fetch_market_snapshot(symbol, self.timeframe),
-                    timeout=8.0
-                )
-                if not context:
-                    await asyncio.sleep(30)
-                    continue
+                # 🚀 UPGRADE: Skip Finnhub API for altcoins entirely. 
+                # We only need the price, which we can get directly from Bybit websocket memory,
+                # but for architecture stability we will gently fetch Bybit REST klines if memory is empty.
+                history = self.screener_memory.get(symbol, {}).get("prices", [])
+                current_price = history[-1] if history else 0.0
                 
-                current_price = context["current_price"]
+                if current_price == 0.0:
+                    # Emergency REST fallback if websocket hasn't painted yet
+                    klines = await asyncio.to_thread(self.executor.client.get_kline, category="linear", symbol=symbol, interval="15", limit=1)
+                    current_price = float(klines.get("result", {}).get("list", [[0.0, 0.0, 0.0, 0.0, 0.0]])[0][4])
+
                 feature_engine = self.feature_engines.get(symbol)
-                
                 self.current_atrs[symbol] = current_price * 0.0125
-                
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
-                
                 rolling_acc = self.global_state_cache.get("rolling_accuracy", 0.50)
                 
                 self.pending_macro_payloads[symbol] = {
-                    "asset": symbol,
                     "price": current_price,
                     "atr_volatility": self.current_atrs[symbol],
                     "volume_multiplier": round(metrics.get("vol_mult", 1.0), 2),
                     "volatility_z_score": round(metrics.get("vol_z", 0.0), 2),
-                    "macro_news_stream": context["news_context"],
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
-            except asyncio.TimeoutError:
-                logger.error(f"⏳ DATA WORKER TIMEOUT: API hung on {symbol}. Loop will retry.")
             except Exception as e:
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
@@ -427,7 +430,6 @@ class DistributedQuantEngine:
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
         logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | OBI-Z: {z_obi:.2f} | Price-Z: {price_z_score:.2f}")
         
-        # 🚀 BUG FIX 2 (Execution side): Pass absolute vol_z to execution brackets
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
         
@@ -468,7 +470,6 @@ class DistributedQuantEngine:
         std_return = np.std(returns) if len(returns) > 0 else 1e-6
         current_return = returns[-1] if len(returns) > 0 else 0.0
         
-        # 🚀 BUG FIX 2: Removed abs() so the AI can mathematically see flash crashes (negative Z-scores)
         volatility_z = (current_return - mean_return) / std_return if std_return > 0 else 0.0
 
         self.screener_metrics[symbol] = {
@@ -499,17 +500,13 @@ class DistributedQuantEngine:
             
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
             
-            # Widen check to 25
             if len(full_market) < 25:
                 logger.warning("Dynamic satellite scan returned insufficient asset velocity metrics. Maintaining current tracking universe.")
                 continue
                 
-            # 🚀 BUG FIX 1: The BTC Blindfold
-            # Force BTCUSDT into the primary basket so the Gravity Shield always has live WebSocket data
             if "BTCUSDT" in full_market:
                 full_market.remove("BTCUSDT")
                 
-            # 🚀 WIDENED NET: 1 Macro Shield (BTC) + 24 Altcoin Hunters = 25 Total
             self.asset_basket = ["BTCUSDT"] + full_market[:24] 
             self.shadow_basket = full_market[24:]
             
@@ -640,7 +637,6 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.debug(f"Shadow scan failed for {symbol}: {e}")
                     
-                    # 🚀 BUG FIX 2: Relieve the REST API pressure from the Shadow Swarm
                     await asyncio.sleep(1.5) 
                 await asyncio.sleep(2) 
 
