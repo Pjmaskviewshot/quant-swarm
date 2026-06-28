@@ -49,7 +49,6 @@ class DistributedQuantEngine:
         
         self.shadow_basket: List[str] = []
         self.shadow_cooldown: Dict[str, float] = {}
-        self.shadow_resolution_tracker: Dict[str, Dict[str, Any]] = {}
         
         self.stream_restart_event = asyncio.Event()
         
@@ -72,8 +71,6 @@ class DistributedQuantEngine:
         self.active_workers: Dict[str, asyncio.Task] = {}
         self.active_positions_lock = set()
         self.tick_sizes: Dict[str, float] = {}
-        
-        self.execution_cooldown_period = 10.0 if self.test_mode else 900.0  
         
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
@@ -216,7 +213,7 @@ class DistributedQuantEngine:
                     batch_payload[sym]["global_macro_news"] = global_news
 
                 try:
-                    logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to DeepSeek API...")
+                    logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to Cascade Circuit Breaker...")
                     verdict_matrix = await asyncio.wait_for(
                         self.ai_router.extract_market_verdict(batch_payload),
                         timeout=30.0 
@@ -487,7 +484,8 @@ class DistributedQuantEngine:
             
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
             
-            if len(full_market) < 15:
+            # Widen check to 25
+            if len(full_market) < 25:
                 logger.warning("Dynamic satellite scan returned insufficient asset velocity metrics. Maintaining current tracking universe.")
                 continue
                 
@@ -496,8 +494,9 @@ class DistributedQuantEngine:
             if "BTCUSDT" in full_market:
                 full_market.remove("BTCUSDT")
                 
-            self.asset_basket = ["BTCUSDT"] + full_market[:14] # Always track BTC + Top 14 Alts
-            self.shadow_basket = full_market[14:]
+            # 🚀 WIDENED NET: 1 Macro Shield (BTC) + 24 Altcoin Hunters = 25 Total
+            self.asset_basket = ["BTCUSDT"] + full_market[:24] 
+            self.shadow_basket = full_market[24:]
             
             if len(self.shadow_basket) < 10:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
@@ -1095,13 +1094,17 @@ class DistributedQuantEngine:
         await self.synchronize_exchange_state()
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
-        if boot_basket and len(boot_basket) >= 15:
+        
+        # Widen check to 25
+        if boot_basket and len(boot_basket) >= 25:
             # 🚀 BUG FIX 1: The BTC Blindfold (Bootloader Level)
             if "BTCUSDT" in boot_basket:
                 boot_basket.remove("BTCUSDT")
-            self.asset_basket = ["BTCUSDT"] + boot_basket[:14]
+                
+            # 🚀 WIDENED NET: 1 Macro Shield (BTC) + 24 Altcoin Hunters = 25 Total
+            self.asset_basket = ["BTCUSDT"] + boot_basket[:24]
+            self.shadow_basket = boot_basket[24:]
             
-            self.shadow_basket = boot_basket[14:]
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
