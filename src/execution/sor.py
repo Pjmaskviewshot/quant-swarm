@@ -89,7 +89,17 @@ class SmartOrderRouter:
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} is experiencing severe structural fracture. Crossing spread with IOC.")
         
         slip_buffer = current_mid_price * self.max_slippage_pct
-        exec_price = current_mid_price + slip_buffer if direction.upper() == "BUY" else current_mid_price - slip_buffer
+        
+        # 🚀 INSTITUTIONAL FIX: PRICE PROTECTION CLAMP
+        # Even on a market execution, we set a hard deviation limit so a hollow order book doesn't ruin the entry.
+        max_deviation = current_mid_price * 0.015 # Hard cap at 1.5% slippage
+        
+        if direction.upper() == "BUY":
+            target_price = current_mid_price + slip_buffer
+            exec_price = min(target_price, current_mid_price + max_deviation)
+        else:
+            target_price = current_mid_price - slip_buffer
+            exec_price = max(target_price, current_mid_price - max_deviation)
         
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
         final_price = self._format_dynamic_price(exec_price, symbol)

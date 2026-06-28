@@ -203,20 +203,35 @@ class DistributedQuantEngine:
                         self.macro_confidences[symbol] = 0.0
                     continue 
 
+                # =========================================================================
+                # 🚀 UPGRADE 5: INSTITUTIONAL PAYLOAD DE-DUPLICATION (TOKEN COMPRESSION)
+                # We extract the news once to prevent Attention Dilution and eliminate 413 errors.
+                # =========================================================================
                 global_news = "No significant macro shifts detected."
                 if len(batch_payload) > 0:
                     first_sym = list(batch_payload.keys())[0]
                     if "macro_news_stream" in batch_payload[first_sym]:
                         global_news = batch_payload[first_sym]["macro_news_stream"]
 
+                # Clean the bloated duplicated strings out of the individual assets
                 for sym in batch_payload:
-                    batch_payload[sym]["global_macro_news"] = global_news
+                    batch_payload[sym].pop("macro_news_stream", None)
+                    batch_payload[sym].pop("global_macro_news", None)
+
+                # Wrap the clean payload with the single news string at the root level
+                final_ai_payload = {
+                    "GLOBAL_MACRO_NEWS": global_news,
+                    "ASSET_MATRIX": batch_payload
+                }
 
                 try:
                     logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to Cascade Circuit Breaker...")
+                    
+                    # 🚀 UPGRADE 6: 60-Second Commander Timeout
+                    # This guarantees that if Groq fails, the NVIDIA NIM failover has enough time to execute.
                     verdict_matrix = await asyncio.wait_for(
-                        self.ai_router.extract_market_verdict(batch_payload),
-                        timeout=30.0 
+                        self.ai_router.extract_market_verdict(final_ai_payload),
+                        timeout=60.0 
                     )
                     
                     if isinstance(verdict_matrix, dict):
