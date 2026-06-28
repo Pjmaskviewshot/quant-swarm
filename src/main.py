@@ -37,9 +37,6 @@ class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
-        # ====================================================================
-        # 🟢 LIVE PRODUCTION MODE ACTIVE
-        # ====================================================================
         self.test_mode = False 
         
         if self.test_mode:
@@ -50,7 +47,6 @@ class DistributedQuantEngine:
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         
-        # 🚀 THE SHADOW SWARM: Massive surface area to feed the FSM
         self.shadow_basket: List[str] = []
         self.shadow_cooldown: Dict[str, float] = {}
         self.shadow_resolution_tracker: Dict[str, Dict[str, Any]] = {}
@@ -59,11 +55,9 @@ class DistributedQuantEngine:
         
         self.memory = MemoryBank()
         
-        # 🚀 UPGRADE 2: Enforce a strict professional horizon limit base
         self.min_horizon_floor = 150
         self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=self.min_horizon_floor)
         
-        # 🛡️ Adjusted limits to 25% max drawdown and 15% risk per position
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
@@ -73,27 +67,17 @@ class DistributedQuantEngine:
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
         
-        # 📊 LIVE METRICS STORAGE: Holds real context to feed the AI Router
         self.screener_metrics: Dict[str, Dict[str, float]] = {s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket}
-        
-        # 📦 BATCHING QUEUE: Holds data from the workers until the Commander is ready
         self.pending_macro_payloads: Dict[str, dict] = {}
-        
         self.active_workers: Dict[str, asyncio.Task] = {}
-        
-        # 🛡️ POSITION LOCK DEPLOYMENT MATRIX
         self.active_positions_lock = set()
-        
-        # 🚀 TICK SIZE MATRIX
         self.tick_sizes: Dict[str, float] = {}
         
-        # Fallback global cooldown (Overridden dynamically per asset in execution loop)
         self.execution_cooldown_period = 10.0 if self.test_mode else 900.0  
         
         self.historical_win_rate = 0.58
         self.historical_win_loss_ratio = 1.65
 
-        # 🚀 THE SINGLETON CACHE: Stops event loop strangulation. 
         self.global_state_cache = {
             "rolling_accuracy": 0.50,
             "total_resolved": 0,
@@ -110,10 +94,6 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     async def _fetch_exchange_tick_sizes(self):
-        """
-        🚀 INSTITUTIONAL UPGRADE: Fetches the absolute source of truth for 
-        price precision directly from Bybit's matching engine.
-        """
         try:
             logger.info("📡 Fetching global tick size matrix from Bybit matching engine...")
             info = await asyncio.to_thread(self.executor.client.get_instruments_info, category="linear")
@@ -126,14 +106,7 @@ class DistributedQuantEngine:
         except Exception as e:
             logger.error(f"Failed to fetch global tick sizes: {e}")
 
-    # ====================================================================
-    # 🚀 NEW: THE STATE RECOVERY BOOTLOADER
-    # ====================================================================
     async def synchronize_exchange_state(self):
-        """
-        Queries Bybit for any orphaned open positions upon container restart and re-attaches 
-        the background tracking daemons so nothing is ever lost in a blackout.
-        """
         try:
             logger.info("📡 SYNCING EXCHANGE STATE: Scanning for orphaned live positions...")
             pos_response = await asyncio.to_thread(
@@ -178,18 +151,12 @@ class DistributedQuantEngine:
         except Exception as e:
             logger.error(f"❌ Failed to synchronize exchange state on boot: {e}")
 
-    # ====================================================================
-    # 🧠 UPGRADE 1: THE ADAPTIVE MEMORY HORIZON (Exponential Scaling)
-    # ====================================================================
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
         normalized = min(2.0, vol_mult) / 2.0
         compressed = 1.0 - (normalized * normalized * 0.5)
         target_window = int(250 * max(0.4, compressed))
         return max(self.min_horizon_floor, min(300, target_window))
 
-    # ====================================================================
-    # 🧠 THE TRUE INSTITUTIONAL REGIME ATTENUATOR
-    # ====================================================================
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
         vol_mult = float(metrics.get("vol_mult", 1.0))
 
@@ -217,9 +184,6 @@ class DistributedQuantEngine:
             
         return optimized
 
-    # ==========================================
-    # THREAD 1A: THE MACRO COMMANDER (BATCHER)
-    # ==========================================
     async def run_macro_commander(self):
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
         while True:
@@ -273,9 +237,6 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"⚠️ COMMANDER FATAL ERROR: Failed to process payload: {e}")
 
-    # ==========================================
-    # THREAD 1B: THE IMMORTAL WATCHDOG
-    # ==========================================
     async def run_macro_regime_loop(self):
         logger.critical("🐺 IMMORTAL WATCHDOG ONLINE. Deploying Swarm Data Gatherers...")
         for symbol in self.asset_basket:
@@ -343,9 +304,6 @@ class DistributedQuantEngine:
                 
             await asyncio.sleep(random.uniform(45.0, 75.0))
 
-    # ==========================================
-    # THREAD 2: FAST MICROSTRUCTURE PIPELINE
-    # ==========================================
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
         if symbol not in self.asset_basket: return
@@ -380,10 +338,6 @@ class DistributedQuantEngine:
 
         mieg_confirmed = features.get("mieg_confirmed", False)
 
-        # =========================================================================
-        # 🚀 UPGRADE 3: THE ANTI-SPOOFING DUAL Z-MATRIX
-        # Cross-verifies the Orderbook flow against actual Price Deviation.
-        # =========================================================================
         history = self.screener_memory.get(symbol, {}).get("prices", [])
         if len(history) < 20: return 
         
@@ -392,7 +346,7 @@ class DistributedQuantEngine:
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
-        # 🛡️ LIQUIDITY SPREAD CHECK: If spread > 0.25%, Market Makers have pulled liquidity.
+        # 🛡️ LIQUIDITY SPREAD CHECK
         spread_pct = real_spread / mid_price
         if spread_pct > 0.0025:
             return 
@@ -400,13 +354,11 @@ class DistributedQuantEngine:
         trade_direction = None
         has_pure_edge = False
         
-        # 🟢 BUY LOGIC: Orderbook shows heavy buying AND asset is statistically oversold.
         if z_obi >= effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
             if price_z_score <= -1.0: 
                 has_pure_edge = True
                 trade_direction = "BUY"
                 
-        # 🔴 SELL LOGIC: Orderbook shows heavy selling AND asset is statistically overbought.
         elif z_obi <= -effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
             if price_z_score >= 1.0: 
                 has_pure_edge = True
@@ -422,26 +374,43 @@ class DistributedQuantEngine:
             if trade_direction == "SELL" and regime == "BUY": return 
 
         # =========================================================================
-        # 🚀 UPGRADE 4: THE GLOBAL GRAVITY SHIELD (BTC BETA INTERCEPT)
-        # Prevent stepping in front of macroeconomic momentum.
+        # 🚀 UPGRADE 4: THE DYNAMIC GRAVITY SHIELD (PEARSON DECOUPLING INTERCEPT)
+        # Prevent stepping in front of macroeconomic momentum UNLESS the asset is decoupled.
         # =========================================================================
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
-            if len(btc_history) >= 20:
-                btc_array = np.array(btc_history)
-                btc_mean = np.mean(btc_array)
-                btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
-                btc_z_score = (btc_history[-1] - btc_mean) / btc_std
+            alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
+            
+            if len(btc_history) >= 20 and len(alt_history) >= 20:
+                btc_array = np.array(btc_history[-20:])
+                alt_array = np.array(alt_history[-20:])
                 
-                # 🛡️ BTC is crashing. Block all altcoin Buys.
-                if trade_direction == "BUY" and btc_z_score <= -1.2:
-                    logger.warning(f"🛡️ GRAVITY SHIELD ACTIVATED // Blocked BUY on {symbol}. BTC is actively dumping (Z: {btc_z_score:.2f}).")
-                    return
+                btc_returns = np.diff(np.log(btc_array))
+                alt_returns = np.diff(np.log(alt_array))
                 
-                # 🛡️ BTC is going parabolic. Block all altcoin Sells.
-                if trade_direction == "SELL" and btc_z_score >= 1.2:
-                    logger.warning(f"🛡️ GRAVITY SHIELD ACTIVATED // Blocked SELL on {symbol}. BTC is going parabolic (Z: {btc_z_score:.2f}).")
-                    return
+                if len(btc_returns) > 1 and np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
+                    correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
+                    if math.isnan(correlation): correlation = 0.0
+                    
+                    btc_mean = np.mean(btc_array)
+                    btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
+                    btc_z_score = (btc_array[-1] - btc_mean) / btc_std
+                    
+                    # 🛡️ BTC is actively dumping.
+                    if btc_z_score <= -1.2:
+                        if trade_direction == "BUY" and correlation > 0.3:
+                            logger.warning(f"🛡️ GRAVITY SHIELD // Blocked BUY on {symbol}. Correlated to BTC dump (Z: {btc_z_score:.2f} | Corr: {correlation:.2f}).")
+                            return
+                        elif trade_direction == "BUY" and correlation <= 0.3:
+                            logger.info(f"🔓 DECOUPLING DETECTED // Allowing BUY on {symbol}. Asset is defying BTC gravity (Corr: {correlation:.2f}).")
+                    
+                    # 🛡️ BTC is going parabolic.
+                    if btc_z_score >= 1.2:
+                        if trade_direction == "SELL" and correlation > 0.3:
+                            logger.warning(f"🛡️ GRAVITY SHIELD // Blocked SELL on {symbol}. Correlated to BTC pump (Z: {btc_z_score:.2f} | Corr: {correlation:.2f}).")
+                            return
+                        elif trade_direction == "SELL" and correlation <= 0.3:
+                            logger.info(f"🔓 DECOUPLING DETECTED // Allowing SELL on {symbol}. Asset is defying BTC gravity (Corr: {correlation:.2f}).")
 
         self.last_execution_timestamps[symbol] = current_time
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
@@ -449,9 +418,6 @@ class DistributedQuantEngine:
         
         asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
 
-    # ==========================================
-    # THREAD 3: LIGHTWEIGHT BASKET TRACKER
-    # ==========================================
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
         if not symbol or symbol not in self.asset_basket: return
@@ -493,9 +459,6 @@ class DistributedQuantEngine:
             "vol_z": float(volatility_z)
         }
 
-    # ==========================================
-    # THREAD 4: KLINE AGGREGATION PIPELINE
-    # ==========================================
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
         if symbol not in self.asset_basket: return
@@ -510,9 +473,6 @@ class DistributedQuantEngine:
             volume=float(candle.get("volume", 0))
         )
 
-    # ==========================================
-    # THREAD 5: THE GLOBAL SATELLITE RADAR
-    # ==========================================
     async def run_universe_refresher(self):
         while True:
             await asyncio.sleep(14400) 
@@ -570,9 +530,6 @@ class DistributedQuantEngine:
             
             self.stream_restart_event.set()
 
-    # ==========================================
-    # 👻 NEW THREAD: THE SHADOW SWARM SCANNER
-    # ==========================================
     def _detect_shadow_regime(self, closes: np.ndarray) -> str:
         if len(closes) < 30:
             return "RANGING"
@@ -662,9 +619,6 @@ class DistributedQuantEngine:
                     await asyncio.sleep(0.5) 
                 await asyncio.sleep(1) 
 
-    # ==========================================
-    # THREAD 6: HIGH-VELOCITY NETWORK CONNECTOR
-    # ==========================================
     async def stream_manager_loop(self):
         while True:
             intervals_matrix = ["1", "5", "15"]
@@ -684,9 +638,6 @@ class DistributedQuantEngine:
             logger.info("♻️ Structural data multiplexers systematically torn down to process hot-universe mutation.")
             await asyncio.sleep(2)
 
-    # ==========================================
-    # THREAD 7: SYSTEM HEARTBEAT & DIAGNOSTICS (THE GLOBAL COMMANDER)
-    # ==========================================
     async def run_system_heartbeat(self):
         start_time = time.time()
         loop_counter = 0
@@ -807,9 +758,6 @@ class DistributedQuantEngine:
                 )
                 asyncio.create_task(self.telegram.send_html_report(report))
 
-    # ==========================================
-    # CORE ORCHESTRATOR: END-TO-END TRADE LIFECYCLE
-    # ==========================================
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
         if optimization is None:
             optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
@@ -912,9 +860,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # =========================================================================
-            # 🚀 INSTITUTIONAL UPGRADE: Asymptotic OpEx-Aware Position Sizing
-            # =========================================================================
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             
