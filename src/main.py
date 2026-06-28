@@ -438,14 +438,22 @@ class DistributedQuantEngine:
         if price_str is None or volume_str is None: return
 
         current_price = float(price_str)
-        current_volume = float(volume_str)
+        current_turnover = float(volume_str)
 
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "volumes": []}
+            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_turnover": current_turnover}
 
         history = self.screener_memory[symbol]
+        
+        # 🚀 DELTA TURNOVER VOLUME FIX: Calculate real-time tick volume, not the 24-hour sum
+        last_turnover = history.get("last_turnover", current_turnover)
+        tick_volume = current_turnover - last_turnover
+        
+        if tick_volume < 0: tick_volume = 0.0 
+        history["last_turnover"] = current_turnover
+
         history["prices"].append(current_price)
-        history["volumes"].append(current_volume)
+        history["volumes"].append(tick_volume)
 
         if len(history["prices"]) > 60:
             history["prices"].pop(0)
@@ -456,26 +464,24 @@ class DistributedQuantEngine:
         prices_array = np.array(history["prices"])
         volumes_array = np.array(history["volumes"])
 
-        mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else 1.0
-        volume_multiplier = current_volume / mean_volume if mean_volume > 0 else 1.0
-
-        # =========================================================================
-        # 🚀 INSTITUTIONAL UPGRADE: COMPOSITE KINETIC MOMENTUM
-        # Blends Log Returns (Velocity) with Price Z-Score (Distance)
-        # =========================================================================
+        # Prevent micro-trade distortion by establishing a $100 baseline
+        baseline_tick_turnover = 100.0  
+        mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else baseline_tick_turnover
+        mean_volume = max(mean_volume, baseline_tick_turnover)
         
-        # 1. VELOCITY (Rate of Change / Log Returns)
+        # Exact real-time flow multiplier
+        volume_multiplier = tick_volume / mean_volume
+
+        # Composite Kinetic Momentum (Velocity + Distance)
         returns = np.diff(np.log(prices_array))
         mean_return = np.mean(returns) if len(returns) > 0 else 0.0
         std_return = np.std(returns) if len(returns) > 0 else 1e-6
         vel_z = (returns[-1] - mean_return) / std_return if len(returns) > 0 else 0.0
 
-        # 2. DISTANCE (Absolute Price Deviation)
         mean_price = np.mean(prices_array)
         std_price = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         dist_z = (current_price - mean_price) / std_price
 
-        # 3. COMPOSITE BLEND (50% Speed + 50% Distance)
         volatility_z = (vel_z * 0.5) + (dist_z * 0.5)
 
         self.screener_metrics[symbol] = {
@@ -734,7 +740,6 @@ class DistributedQuantEngine:
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
 
                 try:
-                    # 🚀 BUG FIX: Convert Unix float to clean ISO 8601 string matching Supabase TIMESTAMPTZ
                     session_start_iso = datetime.datetime.fromtimestamp(start_time, datetime.timezone.utc).isoformat()
                     
                     response = self.memory.supabase.table("quantitative_ledger")\
@@ -763,10 +768,9 @@ class DistributedQuantEngine:
                     if not regime_breakdown_text:
                         regime_breakdown_text = "• <i>No resolved metrics recorded in this session yet.</i>\n"
                         
-                    # 🚀 DETAILS UPGRADE 1: FETCH LAST 3 COMPLETED TRANSACTIONS
                     recent_trades_text = ""
                     if data:
-                        sorted_data = data[-3:]  # Take the freshest 3 entries from the session
+                        sorted_data = data[-3:]  
                         for t in sorted_data:
                             outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "❌"
                             recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n"
@@ -779,7 +783,6 @@ class DistributedQuantEngine:
                     regime_breakdown_text = "• ⚠️ <i>Supabase ledger context error.</i>\n"
                     recent_trades_text = "• <i>Unavailable</i>\n"
 
-                # 🚀 DETAILS UPGRADE 2: LIVE TOP MOMENTUM DIAGNOSTIC MATRIX
                 diagnostic_nodes = []
                 try:
                     sorted_metrics = sorted(
