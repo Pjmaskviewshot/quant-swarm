@@ -72,7 +72,6 @@ class DistributedQuantEngine:
         self.active_positions_lock = set()
         self.tick_sizes: Dict[str, float] = {}
         
-        # 🚀 UPGRADE 7: GLOBAL NEWS CACHE
         self.global_macro_news_cache: str = "No significant macro shifts detected."
         self.last_news_fetch: float = 0.0
         
@@ -170,25 +169,25 @@ class DistributedQuantEngine:
             "execution_verdict": True
         }
 
+        # 🚀 UNLOCK 1: LOWERED BASE THRESHOLDS FOR FASTER ENTRY
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 2.1 
-            optimized["cooldown_period"] = 900.0 
+            optimized["z_score_threshold"] = 1.8 
+            optimized["cooldown_period"] = 300.0 
             optimized["position_scaling"] = 1.0  
             optimized["sl_multiplier"] = 2.0     
             optimized["tp_multiplier"] = 3.0     
-            if vol_mult < 0.5: 
+            if vol_mult < 0.4: 
                 optimized["execution_verdict"] = False
         elif market_regime == "TRENDING":
-            optimized["z_score_threshold"] = 1.9 
-            optimized["cooldown_period"] = 120.0  
+            optimized["z_score_threshold"] = 1.6 
+            optimized["cooldown_period"] = 60.0  
             optimized["tp_multiplier"] = 2.5    
             
         return optimized
 
     async def _update_global_news_cache(self):
-        """Fetches macro news for BTC only to save Finnhub rate limits."""
         current_time = time.time()
-        if current_time - self.last_news_fetch > 300: # Update every 5 minutes
+        if current_time - self.last_news_fetch > 300: 
             try:
                 context = await asyncio.wait_for(
                     self.macro_data_feed.fetch_market_snapshot("BTCUSDT", self.timeframe),
@@ -205,7 +204,6 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(60) 
             
-            # Keep the news cache fresh
             await self._update_global_news_cache()
             
             if not self.pending_macro_payloads:
@@ -225,6 +223,10 @@ class DistributedQuantEngine:
                         self.macro_regimes[symbol] = "HOLD"
                         self.macro_confidences[symbol] = 0.0
                     continue 
+
+                for sym in batch_payload:
+                    batch_payload[sym].pop("macro_news_stream", None)
+                    batch_payload[sym].pop("global_macro_news", None)
 
                 final_ai_payload = {
                     "GLOBAL_MACRO_NEWS": self.global_macro_news_cache,
@@ -291,14 +293,10 @@ class DistributedQuantEngine:
         
         while True:
             try:
-                # 🚀 UPGRADE: Skip Finnhub API for altcoins entirely. 
-                # We only need the price, which we can get directly from Bybit websocket memory,
-                # but for architecture stability we will gently fetch Bybit REST klines if memory is empty.
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
                 current_price = history[-1] if history else 0.0
                 
                 if current_price == 0.0:
-                    # Emergency REST fallback if websocket hasn't painted yet
                     klines = await asyncio.to_thread(self.executor.client.get_kline, category="linear", symbol=symbol, interval="15", limit=1)
                     current_price = float(klines.get("result", {}).get("list", [[0.0, 0.0, 0.0, 0.0, 0.0]])[0][4])
 
@@ -347,9 +345,9 @@ class DistributedQuantEngine:
         vol_mult = metrics.get("vol_mult", 1.0)
         regime = self.macro_regimes.get(symbol, "HOLD")
 
-        # 🚀 AI VETO OVERRIDE: Demand extreme confirmation to ignore DeepSeek
+        # 🚀 UNLOCK 2: MINIMIZED AI VETO PENALTY TO ALLOW FASTER ENTRIES
         if regime == "HOLD":
-            effective_z_threshold += 0.6
+            effective_z_threshold += 0.25
 
         mieg_confirmed = features.get("mieg_confirmed", False)
 
@@ -388,9 +386,6 @@ class DistributedQuantEngine:
             if trade_direction == "BUY" and regime == "SELL": return 
             if trade_direction == "SELL" and regime == "BUY": return 
 
-        # =========================================================================
-        # 🚀 UPGRADE 4: THE DYNAMIC GRAVITY SHIELD (PEARSON DECOUPLING INTERCEPT)
-        # =========================================================================
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
             alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
@@ -465,12 +460,10 @@ class DistributedQuantEngine:
         mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else 1.0
         volume_multiplier = current_volume / mean_volume if mean_volume > 0 else 1.0
 
-        returns = np.diff(np.log(prices_array))
-        mean_return = np.mean(returns) if len(returns) > 0 else 0.0
-        std_return = np.std(returns) if len(returns) > 0 else 1e-6
-        current_return = returns[-1] if len(returns) > 0 else 0.0
-        
-        volatility_z = (current_return - mean_return) / std_return if std_return > 0 else 0.0
+        # 🚀 UNLOCK 3: PRICE-SPACE MOMENTUM (Catches sustained multi-hour pumps)
+        mean_price = np.mean(prices_array)
+        std_price = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
+        volatility_z = (current_price - mean_price) / std_price
 
         self.screener_metrics[symbol] = {
             "vol_mult": float(volume_multiplier),
@@ -493,8 +486,9 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         while True:
-            await asyncio.sleep(14400) 
-            logger.info("🌍 GLOBAL SATELLITE SCAN INITIATED. Querying Bybit endpoints for volatility targets...")
+            # 🚀 UNLOCK 4: ROTATE BASKET EVERY 30 MINUTES (Down from 4 hours)
+            await asyncio.sleep(1800) 
+            logger.info("🌍 FAST SATELLITE ROTATION INITIATED. Querying Bybit for dynamic momentum shifts...")
             
             await self._fetch_exchange_tick_sizes()
             
@@ -671,7 +665,8 @@ class DistributedQuantEngine:
             if loop_counter % 5 == 0:
                 try:
                     logger.info("⚡ Executing high-frequency database resolution sweep...")
-                    age_cutoff_time = time.time() - 3600 
+                    # 🚀 UNLOCK 5: 30-MINUTE RESOLUTION SWEEP (Down from 1 hour)
+                    age_cutoff_time = time.time() - 1800 
                     
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
@@ -731,6 +726,7 @@ class DistributedQuantEngine:
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl")\
                         .eq("resolved", True)\
+                        .gte("timestamp", start_time)\
                         .execute()
                     
                     data = response.data if response else []
@@ -751,7 +747,7 @@ class DistributedQuantEngine:
                         regime_breakdown_text += f"• {icon} <b>{regime}:</b> <code>{stats['count']} trades</code> | <code>{stats['pnl']:+.4f} USDT</code>\n"
                         
                     if not regime_breakdown_text:
-                        regime_breakdown_text = "• <i>No resolved metrics recorded in this epoch yet.</i>\n"
+                        regime_breakdown_text = "• <i>No resolved metrics recorded in this session yet.</i>\n"
                 except Exception as db_err:
                     logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
                     net_pnl = 0.0
@@ -856,13 +852,21 @@ class DistributedQuantEngine:
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
             
+            # 🚀 UNLOCK 6: THE GOLDEN ALPHA OVERRIDE
+            # If the market gives us a mathematically perfect 3-sigma setup, we take it with live capital
+            # even if the bot is locked in CALIBRATING mode.
+            is_golden_setup = vol_z_abs >= 2.8 and vol_mult >= 1.5
+            
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
-                logger.critical(
-                    f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
-                    f"Accuracy: {rolling_acc:.2%} (Floor: 60%) | Target Dynamic Memory: {dynamic_window} trades"
-                )
-                self.active_positions_lock.discard(symbol)
-                return True
+                if is_golden_setup:
+                    logger.critical(f"🌟 [GOLDEN ALPHA OVERRIDE] FSM is Calibrating, but {symbol} is a severe 3-Sigma event. Bypassing shield for live execution.")
+                else:
+                    logger.critical(
+                        f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol} | "
+                        f"Accuracy: {rolling_acc:.2%} (Floor: 60%) | Target Dynamic Memory: {dynamic_window} trades"
+                    )
+                    self.active_positions_lock.discard(symbol)
+                    return True
             
             if self.test_mode:
                 logger.critical(f"🧪 [SIMULATION SUCCESS] Ghost trade committed -> Node: {symbol} | ID: {signal_id[:8]} | Dir: {direction}")
@@ -881,9 +885,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # =========================================================================
-            # 🚀 INSTITUTIONAL UPGRADE: Asymptotic OpEx-Aware Position Sizing
-            # =========================================================================
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             
@@ -1102,18 +1103,14 @@ class DistributedQuantEngine:
         
         await self._fetch_exchange_tick_sizes()
         
-        # 🚀 THE BOOTLOADER RECOVERY HOOK 
         await self.synchronize_exchange_state()
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
         
-        # Widen check to 25
         if boot_basket and len(boot_basket) >= 25:
-            # 🚀 BUG FIX 1: The BTC Blindfold (Bootloader Level)
             if "BTCUSDT" in boot_basket:
                 boot_basket.remove("BTCUSDT")
                 
-            # 🚀 WIDENED NET: 1 Macro Shield (BTC) + 24 Altcoin Hunters = 25 Total
             self.asset_basket = ["BTCUSDT"] + boot_basket[:24]
             self.shadow_basket = boot_basket[24:]
             
