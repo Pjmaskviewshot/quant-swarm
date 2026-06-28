@@ -82,19 +82,24 @@ class ResilientAIRouter:
         Implements Local Pre-Filtering and Context Caching to maximize API runway.
         """
         
+        # 🚀 BUG FIX: Safely extract the ASSET_MATRIX to avoid parsing the GLOBAL_MACRO_NEWS string
+        assets_data = batched_payload.get("ASSET_MATRIX", batched_payload)
+        
         # ---------------------------------------------------------
         # 🛑 1. CONDITIONAL PRE-FILTER (Local Math Check)
         # ---------------------------------------------------------
         is_market_active = False
-        for ticker, data in batched_payload.items():
-            z_score = data.get("volatility_z_score", 0.0)
-            if abs(z_score) >= 2.0:
-                is_market_active = True
-                break
+        for ticker, data in assets_data.items():
+            # Ensure we are only looking at valid dictionary objects, not text strings
+            if isinstance(data, dict):
+                z_score = data.get("volatility_z_score", 0.0)
+                if abs(z_score) >= 2.0:
+                    is_market_active = True
+                    break
         
         if not is_market_active:
             logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 2.0). Skipping AI matrix to save rate limits.")
-            return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in batched_payload.keys()}
+            return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
 
         logger.info("🚨 Local Pre-Filter: Structural Anomaly Detected. Waking up AI Cascade Matrix...")
 
@@ -137,7 +142,7 @@ class ResilientAIRouter:
             
             if not provider:
                 logger.error("⚠️ ALL AI NODES ON COOLDOWN. Returning emergency HOLD matrix.")
-                return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in batched_payload.keys()}
+                return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
 
             logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
             
@@ -160,8 +165,8 @@ class ResilientAIRouter:
                 logger.warning(f"⚠️ {provider['name']} Failed: {e}")
                 
                 # Dynamic Penalty Box Logic
-                if "rate limit" in error_str or "429" in error_str:
-                    penalty = 60.0
+                if "rate limit" in error_str or "429" in error_str or "413" in error_str:
+                    penalty = 30.0
                 elif "timeout" in error_str:
                     penalty = 15.0
                 elif "connection" in error_str or "network" in error_str:
@@ -173,4 +178,4 @@ class ResilientAIRouter:
                 logger.info(f"🔄 Rotating to next provider. {provider['name']} placed in penalty box for {penalty}s.")
 
         logger.critical("🛑 Systemic AI Network Blackout. All Cascade providers failed.")
-        return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in batched_payload.keys()}
+        return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
