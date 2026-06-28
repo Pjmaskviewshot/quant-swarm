@@ -375,7 +375,6 @@ class DistributedQuantEngine:
 
         # =========================================================================
         # 🚀 UPGRADE 4: THE DYNAMIC GRAVITY SHIELD (PEARSON DECOUPLING INTERCEPT)
-        # Prevent stepping in front of macroeconomic momentum UNLESS the asset is decoupled.
         # =========================================================================
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
@@ -416,7 +415,11 @@ class DistributedQuantEngine:
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
         logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | OBI-Z: {z_obi:.2f} | Price-Z: {price_z_score:.2f}")
         
-        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
+        # 🚀 BUG FIX 2 (Execution side): Pass absolute vol_z to execution brackets
+        raw_vol_z = metrics.get("vol_z", 0.0)
+        vol_z_abs = abs(raw_vol_z)
+        
+        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs))
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
@@ -452,7 +455,9 @@ class DistributedQuantEngine:
         mean_return = np.mean(returns) if len(returns) > 0 else 0.0
         std_return = np.std(returns) if len(returns) > 0 else 1e-6
         current_return = returns[-1] if len(returns) > 0 else 0.0
-        volatility_z = abs((current_return - mean_return) / std_return) if std_return > 0 else 0.0
+        
+        # 🚀 BUG FIX 2: Removed abs() so the AI can mathematically see flash crashes (negative Z-scores)
+        volatility_z = (current_return - mean_return) / std_return if std_return > 0 else 0.0
 
         self.screener_metrics[symbol] = {
             "vol_mult": float(volume_multiplier),
@@ -486,8 +491,13 @@ class DistributedQuantEngine:
                 logger.warning("Dynamic satellite scan returned insufficient asset velocity metrics. Maintaining current tracking universe.")
                 continue
                 
-            self.asset_basket = full_market[:15]
-            self.shadow_basket = full_market[15:]
+            # 🚀 BUG FIX 1: The BTC Blindfold
+            # Force BTCUSDT into the primary basket so the Gravity Shield always has live WebSocket data
+            if "BTCUSDT" in full_market:
+                full_market.remove("BTCUSDT")
+                
+            self.asset_basket = ["BTCUSDT"] + full_market[:14] # Always track BTC + Top 14 Alts
+            self.shadow_basket = full_market[14:]
             
             if len(self.shadow_basket) < 10:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
@@ -794,7 +804,7 @@ class DistributedQuantEngine:
         
         return final_sl, final_tp
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0):
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
@@ -860,6 +870,9 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
+            # =========================================================================
+            # 🚀 INSTITUTIONAL UPGRADE: Asymptotic OpEx-Aware Position Sizing
+            # =========================================================================
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             
@@ -904,12 +917,10 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            vol_z = metrics.get("vol_z", 0.0)
-            
             tick_size = self.tick_sizes.get(symbol, 0.0001) 
             
             initial_sl, target_tp = self.calculate_initial_bracket(
-                current_price, atr, direction, target_leverage, vol_z, optimization, tick_size
+                current_price, atr, direction, target_leverage, vol_z_abs, optimization, tick_size
             )
             
             if vol_mult < 0.3: 
@@ -937,13 +948,13 @@ class DistributedQuantEngine:
                 execution_success = await self.sor.execute_iceberg_block(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine
+                    depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
                 )
             else:
                 execution_success = await self.sor.execute_mean_reversion_bracket(
                     symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
-                    depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine
+                    depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
                 )
             
             if not execution_success:
@@ -1085,8 +1096,12 @@ class DistributedQuantEngine:
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
         if boot_basket and len(boot_basket) >= 15:
-            self.asset_basket = boot_basket[:15]
-            self.shadow_basket = boot_basket[15:]
+            # 🚀 BUG FIX 1: The BTC Blindfold (Bootloader Level)
+            if "BTCUSDT" in boot_basket:
+                boot_basket.remove("BTCUSDT")
+            self.asset_basket = ["BTCUSDT"] + boot_basket[:14]
+            
+            self.shadow_basket = boot_basket[14:]
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
