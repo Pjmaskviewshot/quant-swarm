@@ -127,6 +127,58 @@ class DistributedQuantEngine:
             logger.error(f"Failed to fetch global tick sizes: {e}")
 
     # ====================================================================
+    # 🚀 NEW: THE STATE RECOVERY BOOTLOADER
+    # ====================================================================
+    async def synchronize_exchange_state(self):
+        """
+        Queries Bybit for any orphaned open positions upon container restart and re-attaches 
+        the background tracking daemons so nothing is ever lost in a blackout.
+        """
+        try:
+            logger.info("📡 SYNCING EXCHANGE STATE: Scanning for orphaned live positions...")
+            pos_response = await asyncio.to_thread(
+                self.executor.client.get_positions,
+                category="linear",
+                settleCoin="USDT"
+            )
+            
+            positions = pos_response.get("result", {}).get("list", [])
+            active_orphans = [p for p in positions if float(p.get("size", 0.0)) > 0]
+            
+            if not active_orphans:
+                logger.info("✅ EXCHANGE STATE CLEAN: No orphaned positions detected.")
+                return
+
+            logger.critical(f"⚠️ RECOVERY ENGAGED: Found {len(active_orphans)} active trades left open during container blackout.")
+            
+            for pos in active_orphans:
+                symbol = pos["symbol"]
+                qty = float(pos["size"])
+                entry_price = float(pos["avgPrice"])
+                side = pos["side"]
+                direction = "BUY" if side.upper() == "BUY" else "SELL"
+                current_sl = float(pos.get("stopLoss", 0.0))
+                
+                if current_sl == 0.0:
+                    current_sl = entry_price * 0.95 if direction == "BUY" else entry_price * 1.05
+
+                logger.critical(f"⚕️ RESURRECTING DAEMON FOR {symbol} | Dir: {direction} | Qty: {qty} | Entry: {entry_price}")
+                
+                self.active_positions_lock.add(symbol)
+                
+                atr = entry_price * 0.0125
+                risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty}
+                feature_engine = self.feature_engines.get(symbol)
+                signal_id = f"RECOVERY-{str(uuid.uuid4())[:8]}" 
+                
+                asyncio.create_task(self._position_lifecycle_daemon(
+                    symbol, signal_id, direction, entry_price, current_sl, atr, risk_matrix, feature_engine
+                ))
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to synchronize exchange state on boot: {e}")
+
+    # ====================================================================
     # 🧠 UPGRADE 1: THE ADAPTIVE MEMORY HORIZON (Exponential Scaling)
     # ====================================================================
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
@@ -153,7 +205,7 @@ class DistributedQuantEngine:
         if market_regime == "RANGING":
             optimized["z_score_threshold"] = 2.1 
             optimized["cooldown_period"] = 900.0 
-            optimized["position_scaling"] = 1.0  # 🚀 RESTORED: Sizing is now handled dynamically by OpEx Math 
+            optimized["position_scaling"] = 1.0  
             optimized["sl_multiplier"] = 2.0     
             optimized["tp_multiplier"] = 3.0     
             if vol_mult < 0.5: 
@@ -320,34 +372,82 @@ class DistributedQuantEngine:
 
         effective_z_threshold = optimization["z_score_threshold"]
         vol_mult = metrics.get("vol_mult", 1.0)
+        regime = self.macro_regimes.get(symbol, "HOLD")
+
+        # 🚀 AI VETO OVERRIDE: Demand extreme confirmation to ignore DeepSeek
+        if regime == "HOLD":
+            effective_z_threshold += 0.6
 
         mieg_confirmed = features.get("mieg_confirmed", False)
-        gate_1_velocity = (abs(z_obi) >= effective_z_threshold) and (vol_mult >= 0.8) and mieg_confirmed
 
-        gate_2_accumulation = (vol_mult >= 1.5) and (abs(z_obi) >= 1.4)
-
-        has_pure_edge = gate_1_velocity or gate_2_accumulation
-
+        # =========================================================================
+        # 🚀 UPGRADE 3: THE ANTI-SPOOFING DUAL Z-MATRIX
+        # Cross-verifies the Orderbook flow against actual Price Deviation.
+        # =========================================================================
+        history = self.screener_memory.get(symbol, {}).get("prices", [])
+        if len(history) < 20: return 
+        
+        prices_array = np.array(history)
+        local_mean = np.mean(prices_array)
+        local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
+        price_z_score = (mid_price - local_mean) / local_std
+        
+        # 🛡️ LIQUIDITY SPREAD CHECK: If spread > 0.25%, Market Makers have pulled liquidity.
+        spread_pct = real_spread / mid_price
+        if spread_pct > 0.0025:
+            return 
+            
         trade_direction = None
+        has_pure_edge = False
+        
+        # 🟢 BUY LOGIC: Orderbook shows heavy buying AND asset is statistically oversold.
+        if z_obi >= effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+            if price_z_score <= -1.0: 
+                has_pure_edge = True
+                trade_direction = "BUY"
+                
+        # 🔴 SELL LOGIC: Orderbook shows heavy selling AND asset is statistically overbought.
+        elif z_obi <= -effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+            if price_z_score >= 1.0: 
+                has_pure_edge = True
+                trade_direction = "SELL"
+
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
 
-        if self.test_mode or not is_active:
-            if has_pure_edge:  
-                trade_direction = "BUY" if z_obi > 0 else "SELL"
-        else:
-            regime = self.macro_regimes.get(symbol, "HOLD")
-            if has_pure_edge:
-                if z_obi > 0 and regime != "SELL":  
-                    trade_direction = "BUY"
-                elif z_obi < 0 and regime != "BUY":
-                    trade_direction = "SELL" 
+        if not has_pure_edge:
+            return
 
-        if trade_direction:
-            self.last_execution_timestamps[symbol] = current_time
-            mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
-            logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z-OBI: {z_obi:.2f} | Dynamic Target: {effective_z_threshold:.2f}")
-            
-            asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
+        if not self.test_mode and is_active:
+            if trade_direction == "BUY" and regime == "SELL": return 
+            if trade_direction == "SELL" and regime == "BUY": return 
+
+        # =========================================================================
+        # 🚀 UPGRADE 4: THE GLOBAL GRAVITY SHIELD (BTC BETA INTERCEPT)
+        # Prevent stepping in front of macroeconomic momentum.
+        # =========================================================================
+        if symbol != "BTCUSDT" and trade_direction:
+            btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
+            if len(btc_history) >= 20:
+                btc_array = np.array(btc_history)
+                btc_mean = np.mean(btc_array)
+                btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
+                btc_z_score = (btc_history[-1] - btc_mean) / btc_std
+                
+                # 🛡️ BTC is crashing. Block all altcoin Buys.
+                if trade_direction == "BUY" and btc_z_score <= -1.2:
+                    logger.warning(f"🛡️ GRAVITY SHIELD ACTIVATED // Blocked BUY on {symbol}. BTC is actively dumping (Z: {btc_z_score:.2f}).")
+                    return
+                
+                # 🛡️ BTC is going parabolic. Block all altcoin Sells.
+                if trade_direction == "SELL" and btc_z_score >= 1.2:
+                    logger.warning(f"🛡️ GRAVITY SHIELD ACTIVATED // Blocked SELL on {symbol}. BTC is going parabolic (Z: {btc_z_score:.2f}).")
+                    return
+
+        self.last_execution_timestamps[symbol] = current_time
+        mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
+        logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | OBI-Z: {z_obi:.2f} | Price-Z: {price_z_score:.2f}")
+        
+        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread))
 
     # ==========================================
     # THREAD 3: LIGHTWEIGHT BASKET TRACKER
@@ -815,38 +915,30 @@ class DistributedQuantEngine:
             # =========================================================================
             # 🚀 INSTITUTIONAL UPGRADE: Asymptotic OpEx-Aware Position Sizing
             # =========================================================================
-            # 1. Calculate realistic Risk/Reward percentages (Kinetic Trailing Activation is at 1.0x ATR)
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             
-            # 2. Asymptotic Cost Amortization (The Math Upgrade)
-            # Smoothly dampens the fixed-cost target for micro-accounts to prevent generating 
-            # a position size that violates concentration boundaries.
             base_opex_target = 0.26
             amortization_weight = math.tanh(balance / 45.0) 
             active_opex_target = base_opex_target * amortization_weight
             
             opex_required_notional = active_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
             
-            # 3. Calculate strict institutional portfolio limits locally to guarantee compliance
-            max_concentration_notional = balance * 1.45 # Hard clip slightly under the vault's 1.5x boundary
+            max_concentration_notional = balance * 1.45 
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
             
-            # Upper ceiling is the absolute minimum of our safety models
             safety_ceiling = min(absolute_max_notional, max_concentration_notional)
             
             base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
             
-            # 4. Synthesize allocations smoothly
             min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
             dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
             final_allocation = min(dynamic_allocation, safety_ceiling)
             
-            # 5. PHYSICAL WALLET CHECK: Ensure we don't request more margin than we have
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             margin_required = final_allocation / target_leverage
-            if margin_required > (balance * 0.90): # Leave 10% buffer
+            if margin_required > (balance * 0.90): 
                 logger.warning(f"⚠️ OpEx scaling capped. Required margin ({margin_required:.2f}) exceeds physical wallet ({balance:.2f}). Optimizing...")
                 final_allocation = (balance * 0.90) * target_leverage
             
@@ -1042,6 +1134,9 @@ class DistributedQuantEngine:
         logger.info("🌍 Booting up Global Satellite Radar to execute asset tracking optimization matrix...")
         
         await self._fetch_exchange_tick_sizes()
+        
+        # 🚀 THE BOOTLOADER RECOVERY HOOK 
+        await self.synchronize_exchange_state()
         
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
         if boot_basket and len(boot_basket) >= 15:
