@@ -7,6 +7,7 @@ import logging
 import uuid
 import traceback
 import random
+import datetime
 import numpy as np
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any
@@ -169,7 +170,6 @@ class DistributedQuantEngine:
             "execution_verdict": True
         }
 
-        # 🚀 UNLOCK 1: LOWERED BASE THRESHOLDS FOR FASTER ENTRY
         if market_regime == "RANGING":
             optimized["z_score_threshold"] = 1.8 
             optimized["cooldown_period"] = 300.0 
@@ -345,7 +345,6 @@ class DistributedQuantEngine:
         vol_mult = metrics.get("vol_mult", 1.0)
         regime = self.macro_regimes.get(symbol, "HOLD")
 
-        # 🚀 UNLOCK 2: MINIMIZED AI VETO PENALTY TO ALLOW FASTER ENTRIES
         if regime == "HOLD":
             effective_z_threshold += 0.25
 
@@ -460,10 +459,24 @@ class DistributedQuantEngine:
         mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else 1.0
         volume_multiplier = current_volume / mean_volume if mean_volume > 0 else 1.0
 
-        # 🚀 UNLOCK 3: PRICE-SPACE MOMENTUM (Catches sustained multi-hour pumps)
+        # =========================================================================
+        # 🚀 INSTITUTIONAL UPGRADE: COMPOSITE KINETIC MOMENTUM
+        # Blends Log Returns (Velocity) with Price Z-Score (Distance)
+        # =========================================================================
+        
+        # 1. VELOCITY (Rate of Change / Log Returns)
+        returns = np.diff(np.log(prices_array))
+        mean_return = np.mean(returns) if len(returns) > 0 else 0.0
+        std_return = np.std(returns) if len(returns) > 0 else 1e-6
+        vel_z = (returns[-1] - mean_return) / std_return if len(returns) > 0 else 0.0
+
+        # 2. DISTANCE (Absolute Price Deviation)
         mean_price = np.mean(prices_array)
         std_price = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
-        volatility_z = (current_price - mean_price) / std_price
+        dist_z = (current_price - mean_price) / std_price
+
+        # 3. COMPOSITE BLEND (50% Speed + 50% Distance)
+        volatility_z = (vel_z * 0.5) + (dist_z * 0.5)
 
         self.screener_metrics[symbol] = {
             "vol_mult": float(volume_multiplier),
@@ -486,7 +499,6 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         while True:
-            # 🚀 UNLOCK 4: ROTATE BASKET EVERY 30 MINUTES (Down from 4 hours)
             await asyncio.sleep(1800) 
             logger.info("🌍 FAST SATELLITE ROTATION INITIATED. Querying Bybit for dynamic momentum shifts...")
             
@@ -665,7 +677,6 @@ class DistributedQuantEngine:
             if loop_counter % 5 == 0:
                 try:
                     logger.info("⚡ Executing high-frequency database resolution sweep...")
-                    # 🚀 UNLOCK 5: 30-MINUTE RESOLUTION SWEEP (Down from 1 hour)
                     age_cutoff_time = time.time() - 1800 
                     
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
@@ -723,10 +734,13 @@ class DistributedQuantEngine:
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
 
                 try:
+                    # 🚀 BUG FIX: Convert Unix float to clean ISO 8601 string matching Supabase TIMESTAMPTZ
+                    session_start_iso = datetime.datetime.fromtimestamp(start_time, datetime.timezone.utc).isoformat()
+                    
                     response = self.memory.supabase.table("quantitative_ledger")\
-                        .select("market_regime, net_pnl")\
+                        .select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome")\
                         .eq("resolved", True)\
-                        .gte("timestamp", start_time)\
+                        .gte("timestamp", session_start_iso)\
                         .execute()
                     
                     data = response.data if response else []
@@ -748,10 +762,38 @@ class DistributedQuantEngine:
                         
                     if not regime_breakdown_text:
                         regime_breakdown_text = "• <i>No resolved metrics recorded in this session yet.</i>\n"
+                        
+                    # 🚀 DETAILS UPGRADE 1: FETCH LAST 3 COMPLETED TRANSACTIONS
+                    recent_trades_text = ""
+                    if data:
+                        sorted_data = data[-3:]  # Take the freshest 3 entries from the session
+                        for t in sorted_data:
+                            outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "❌"
+                            recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n"
+                    else:
+                        recent_trades_text = "• <i>Waiting for first session maturity cycle...</i>\n"
+
                 except Exception as db_err:
                     logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
                     net_pnl = 0.0
-                    regime_breakdown_text = "• ⚠️ <i>Supabase ledger context temporarily loading...</i>\n"
+                    regime_breakdown_text = "• ⚠️ <i>Supabase ledger context error.</i>\n"
+                    recent_trades_text = "• <i>Unavailable</i>\n"
+
+                # 🚀 DETAILS UPGRADE 2: LIVE TOP MOMENTUM DIAGNOSTIC MATRIX
+                diagnostic_nodes = []
+                try:
+                    sorted_metrics = sorted(
+                        self.screener_metrics.items(),
+                        key=lambda x: abs(x[1].get("vol_z", 0.0)),
+                        reverse=True
+                    )[:3]
+                    for ticker, metrics in sorted_metrics:
+                        bias = self.macro_regimes.get(ticker, "HOLD")
+                        diagnostic_nodes.append(f"• 📡 <b>{ticker}</b> | Z: <code>{metrics.get('vol_z', 0.0):+.2f}</code> | Vol: <code>{metrics.get('vol_mult', 1.0):.2f}x</code> | Bias: <code>{bias}</code>")
+                except Exception as diag_err:
+                    diagnostic_nodes = ["• <i>Diagnostic matrix initializing...</i>"]
+
+                diagnostic_block = "\n".join(diagnostic_nodes)
 
                 report = (
                     f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
@@ -763,15 +805,20 @@ class DistributedQuantEngine:
                     f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool} Resolved</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
-                    f"📈 <b>Net Realized Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
+                    f"📈 <b>Session Net Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
                     f"📉 <b>Drawdown Profile Status:</b> <code>{drawdown_pct:.2%}</code>\n"
                     f"🎚 <b>Risk Horizon Bar:</b>\n<code>[{drawdown_bar}]</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔬 <b>FORENSIC REGIME PROFILE:</b>\n"
+                    f"🔬 <b>SESSION REGIME PROFILE:</b>\n"
                     f"{regime_breakdown_text}"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📡 <b>Operational Swarm Nodes:</b> <code>{len(self.asset_basket)} Live | {len(self.shadow_basket)} Shadow</code>\n"
-                    f"🧠 <b>AI Inference Framework:</b> <code>DeepSeek V4 (Native Cloud)</code>"
+                    f"🔥 <b>LIVE HIGHEST-MOMENTUM MOVERS:</b>\n"
+                    f"{diagnostic_block}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🏁 <b>RECENT SESSION RESOLUTIONS:</b>\n"
+                    f"{recent_trades_text}"
+                    f"📡 <b>Nodes:</b> <code>{len(self.asset_basket)} Live</code> | <code>{len(self.shadow_basket)} Shadow</code>\n"
+                    f"🧠 <b>AI Core:</b> <code>Groq Hardened Cascade [Limm压缩 Mode]</code>"
                 )
                 asyncio.create_task(self.telegram.send_html_report(report))
 
@@ -852,9 +899,6 @@ class DistributedQuantEngine:
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
             
-            # 🚀 UNLOCK 6: THE GOLDEN ALPHA OVERRIDE
-            # If the market gives us a mathematically perfect 3-sigma setup, we take it with live capital
-            # even if the bot is locked in CALIBRATING mode.
             is_golden_setup = vol_z_abs >= 2.8 and vol_mult >= 1.5
             
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
