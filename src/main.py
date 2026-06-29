@@ -84,6 +84,7 @@ class DistributedQuantEngine:
             "total_resolved": 0,
             "dynamic_window": self.min_horizon_floor,
             "last_updated": 0.0
+            # wallet_baseline dynamically injected during heartbeat
         }
 
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
@@ -141,7 +142,7 @@ class DistributedQuantEngine:
                 self.active_positions_lock.add(symbol)
                 
                 atr = entry_price * 0.0125
-                risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty}
+                risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 8}
                 feature_engine = self.feature_engines.get(symbol)
                 signal_id = f"RECOVERY-{str(uuid.uuid4())[:8]}" 
                 
@@ -153,10 +154,7 @@ class DistributedQuantEngine:
             logger.error(f"❌ Failed to synchronize exchange state on boot: {e}")
 
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
-        normalized = min(2.0, vol_mult) / 2.0
-        compressed = 1.0 - (normalized * normalized * 0.5)
-        target_window = int(250 * max(0.4, compressed))
-        return max(self.min_horizon_floor, min(300, target_window))
+        return 250
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
         vol_mult = float(metrics.get("vol_mult", 1.0))
@@ -178,10 +176,17 @@ class DistributedQuantEngine:
             optimized["tp_multiplier"] = 3.0     
             if vol_mult < 0.4: 
                 optimized["execution_verdict"] = False
+            if vol_mult >= 3.0:
+                optimized["sl_multiplier"] = 3.5  
+                optimized["tp_multiplier"] = 5.0
         elif market_regime == "TRENDING":
             optimized["z_score_threshold"] = 1.6 
             optimized["cooldown_period"] = 60.0  
-            optimized["tp_multiplier"] = 2.5    
+            optimized["sl_multiplier"] = 1.5
+            optimized["tp_multiplier"] = 2.5
+            if vol_mult >= 3.0:
+                optimized["sl_multiplier"] = 3.0
+                optimized["tp_multiplier"] = 4.5
             
         return optimized
 
@@ -363,7 +368,6 @@ class DistributedQuantEngine:
         if spread_pct > 0.0025:
             return 
             
-        # 🚀 BUG FIX 2: Relaxed Golden Alpha Override for Parabolic Strikes
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
         is_golden_setup = vol_z_abs >= 2.4 and vol_mult >= 1.2
@@ -415,7 +419,6 @@ class DistributedQuantEngine:
                     btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
                     btc_z_score = (btc_array[-1] - btc_mean) / btc_std
                     
-                    # 🛡️ BTC is actively dumping.
                     if btc_z_score <= -1.2:
                         if trade_direction == "BUY" and correlation > 0.3:
                             logger.warning(f"🛡️ GRAVITY SHIELD // Blocked BUY on {symbol}. Correlated to BTC dump (Z: {btc_z_score:.2f} | Corr: {correlation:.2f}).")
@@ -423,7 +426,6 @@ class DistributedQuantEngine:
                         elif trade_direction == "BUY" and correlation <= 0.3:
                             logger.info(f"🔓 DECOUPLING DETECTED // Allowing BUY on {symbol}. Asset is defying BTC gravity (Corr: {correlation:.2f}).")
                     
-                    # 🛡️ BTC is going parabolic.
                     if btc_z_score >= 1.2:
                         if trade_direction == "SELL" and correlation > 0.3:
                             logger.warning(f"🛡️ GRAVITY SHIELD // Blocked SELL on {symbol}. Correlated to BTC pump (Z: {btc_z_score:.2f} | Corr: {correlation:.2f}).")
@@ -710,7 +712,6 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 5 == 0:
-                # 🚀 BUG FIX 3: Hard-Locked Memory Horizon to stabilize FSM Accuracy jumps
                 avg_dynamic_window = 250
                 
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=avg_dynamic_window)
@@ -736,8 +737,23 @@ class DistributedQuantEngine:
                 dyn_win = self.global_state_cache.get("dynamic_window", self.min_horizon_floor)
                 pool = self.global_state_cache.get("total_resolved", 0)
                 
-                initial_baseline = 7.80
-                drawdown_pct = max(0.0, (initial_baseline - current_vault_balance) / initial_baseline)
+                # 🚀 UPGRADE: Dynamic Wallet Baseline Auto-Calibration
+                if "wallet_baseline" not in self.global_state_cache:
+                    self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
+                
+                baseline = self.global_state_cache["wallet_baseline"]
+                
+                # If we made a massive profit, raise the high-water mark
+                if current_vault_balance > baseline:
+                    self.global_state_cache["wallet_baseline"] = current_vault_balance
+                    baseline = current_vault_balance
+                # If balance drops by more than 25% instantly (Manual Withdrawal), reset it so bot doesn't panic
+                elif current_vault_balance < (baseline * 0.75): 
+                    logger.critical(f"💸 MANUAL WITHDRAWAL DETECTED. Auto-Calibrating FSM Baseline from {baseline:.2f} to {current_vault_balance:.2f} USDT")
+                    self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
+                    baseline = self.global_state_cache["wallet_baseline"]
+                    
+                drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
                 bar_length = 10
                 filled_blocks = min(bar_length, int(drawdown_pct * bar_length))
@@ -746,7 +762,6 @@ class DistributedQuantEngine:
                 try:
                     session_start_iso = datetime.datetime.fromtimestamp(start_time, datetime.timezone.utc).isoformat()
                     
-                    # 🚀 BUG FIX 4: Explicit .order() added to prevent stale Ghost Trades stuck in DB feed
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome")\
                         .eq("resolved", True)\
@@ -778,8 +793,13 @@ class DistributedQuantEngine:
                     if data:
                         sorted_data = data[-5:]  
                         for t in sorted_data:
-                            outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "❌"
-                            recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n"
+                            pnl_val = float(t.get('net_pnl', 0))
+                            if pnl_val == 0.0:
+                                outcome_icon = "👻"
+                            else:
+                                outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "🔴"
+                            
+                            recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {pnl_val:+.4f}\n"
                     else:
                         recent_trades_text = "• <i>Waiting for first session maturity cycle...</i>\n"
 
@@ -1038,8 +1058,9 @@ class DistributedQuantEngine:
             )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
+            # Pass target_leverage to daemon to calculate exact fee offsets
             asyncio.create_task(self._position_lifecycle_daemon(
-                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine
+                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage
             ))
             
             return True
@@ -1049,7 +1070,7 @@ class DistributedQuantEngine:
             self.active_positions_lock.discard(symbol)
             return False
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8):
         logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
         polling_interval = 4  
         start_time = time.time()
@@ -1070,7 +1091,6 @@ class DistributedQuantEngine:
                 positions = pos_response.get("result", {}).get("list", [])
                 has_active_position = False
                 
-                # 🚀 BUG FIX 1: Iterating through both sides of Hedge Mode to ensure size is captured
                 if positions:
                     for p in positions:
                         if float(p.get("size", 0.0)) > 0:
@@ -1120,34 +1140,68 @@ class DistributedQuantEngine:
                     break
             
             if has_active_position:
+                trade_duration = time.time() - start_time
                 live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
+                
                 if live_mid:
                     profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
-                    if profit_distance >= (atr * 2.5):
-                        active_leash = atr * 0.5   
-                    elif profit_distance >= (atr * 1.5):
-                        active_leash = atr * 1.0   
+                    
+                    # 1. Base Leash Logic (Kinetic Distance)
+                    if profit_distance >= (atr * 3.0):
+                        active_leash = atr * 1.5   
+                    elif profit_distance >= (atr * 2.0):
+                        active_leash = atr * 1.8   
+                    elif profit_distance >= (atr * 1.0):
+                        active_leash = atr * 2.2   
                     else:
-                        active_leash = atr * 2.0   
+                        active_leash = atr * 2.5   
+
+                    # 🚀 UPGRADE 1: Alpha Decay (Time-Stop)
+                    # If trade is stuck going nowhere for > 45 mins (2700s), slash the leash to protect capital.
+                    if trade_duration > 2700 and profit_distance < (atr * 1.0):
+                        active_leash = min(active_leash, atr * 0.75) 
+
+                    # Exact fee computation required to lock in a completely risk-free scratch trade
+                    fee_offset = current_price * (0.00055 * 2 * target_leverage)
 
                     if direction == "BUY":
                         if live_mid > peak_observed_price: peak_observed_price = live_mid
-                        if peak_observed_price >= (current_price + activation_threshold):
-                            target_stop = peak_observed_price - active_leash
+                        
+                        # 🚀 UPGRADE 2: Hard Break-Even Accelerator
+                        # If price hits +0.8 ATR, physically lock the Stop Loss above entry price + exchange fees.
+                        if peak_observed_price >= (current_price + (atr * 0.8)):
+                            minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
+                        else:
+                            minimum_safe_stop = 0.0
+
+                        if peak_observed_price >= (current_price + activation_threshold) or minimum_safe_stop > 0:
+                            # Use max() to ensure Stop Loss NEVER drops back down once Break-Even is achieved
+                            target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
+                            
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
                                 amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
                                 if amend_success:
                                     current_hard_stop = target_stop
-                                    logger.info(f"📈 KINETIC STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)} | Active Leash: {round(active_leash, 4)}")
+                                    logger.info(f"📈 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
+                                    
                     elif direction == "SELL":
                         if live_mid < peak_observed_price: peak_observed_price = live_mid
-                        if peak_observed_price <= (current_price - activation_threshold):
-                            target_stop = peak_observed_price + active_leash
+                        
+                        # 🚀 UPGRADE 2: Hard Break-Even Accelerator
+                        if peak_observed_price <= (current_price - (atr * 0.8)):
+                            minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
+                        else:
+                            minimum_safe_stop = float('inf')
+
+                        if peak_observed_price <= (current_price - activation_threshold) or minimum_safe_stop != float('inf'):
+                            # Use min() to ensure Stop Loss NEVER creeps back up once Break-Even is achieved
+                            target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
+                            
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
                                 amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
                                 if amend_success:
                                     current_hard_stop = target_stop
-                                    logger.info(f"📉 KINETIC STOP ADVANCED for {symbol} // New Stop: {round(target_stop, 4)} | Active Leash: {round(active_leash, 4)}")
+                                    logger.info(f"📉 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
