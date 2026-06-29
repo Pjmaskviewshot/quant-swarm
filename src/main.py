@@ -363,6 +363,11 @@ class DistributedQuantEngine:
         if spread_pct > 0.0025:
             return 
             
+        # 🚀 BUG FIX 2: Relaxed Golden Alpha Override for Parabolic Strikes
+        raw_vol_z = metrics.get("vol_z", 0.0)
+        vol_z_abs = abs(raw_vol_z)
+        is_golden_setup = vol_z_abs >= 2.4 and vol_mult >= 1.2
+            
         trade_direction = None
         has_pure_edge = False
         
@@ -375,6 +380,12 @@ class DistributedQuantEngine:
             if price_z_score >= 1.0: 
                 has_pure_edge = True
                 trade_direction = "SELL"
+                
+        # 🚀 FORCED PARABOLIC STRIKE: Instantly engage Bybit massive movers
+        if is_golden_setup and not has_pure_edge:
+            has_pure_edge = True
+            trade_direction = "BUY" if price_z_score >= 0.0 else "SELL"
+            logger.critical(f"⚡ [PARABOLIC STRIKE TRIGGERED] {symbol} bypassing tape confirmation. Z: {vol_z_abs:.2f} | Vol: {vol_mult:.2f}")
 
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
 
@@ -382,8 +393,8 @@ class DistributedQuantEngine:
             return
 
         if not self.test_mode and is_active:
-            if trade_direction == "BUY" and regime == "SELL": return 
-            if trade_direction == "SELL" and regime == "BUY": return 
+            if trade_direction == "BUY" and regime == "SELL" and not is_golden_setup: return 
+            if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup: return 
 
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
@@ -424,10 +435,7 @@ class DistributedQuantEngine:
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
         logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | OBI-Z: {z_obi:.2f} | Price-Z: {price_z_score:.2f}")
         
-        raw_vol_z = metrics.get("vol_z", 0.0)
-        vol_z_abs = abs(raw_vol_z)
-        
-        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs))
+        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, is_golden_setup))
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
@@ -445,7 +453,6 @@ class DistributedQuantEngine:
 
         history = self.screener_memory[symbol]
         
-        # 🚀 DELTA TURNOVER VOLUME FIX: Calculate real-time tick volume, not the 24-hour sum
         last_turnover = history.get("last_turnover", current_turnover)
         tick_volume = current_turnover - last_turnover
         
@@ -464,15 +471,12 @@ class DistributedQuantEngine:
         prices_array = np.array(history["prices"])
         volumes_array = np.array(history["volumes"])
 
-        # Prevent micro-trade distortion by establishing a $100 baseline
         baseline_tick_turnover = 100.0  
         mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else baseline_tick_turnover
         mean_volume = max(mean_volume, baseline_tick_turnover)
         
-        # Exact real-time flow multiplier
         volume_multiplier = tick_volume / mean_volume
 
-        # Composite Kinetic Momentum (Velocity + Distance)
         returns = np.diff(np.log(prices_array))
         mean_return = np.mean(returns) if len(returns) > 0 else 0.0
         std_return = np.std(returns) if len(returns) > 0 else 1e-6
@@ -706,8 +710,8 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours. AI Queue: {len(self.pending_macro_payloads)} assets ready.")
 
             if loop_counter % 5 == 0:
-                avg_vol_mult = np.mean([m.get("vol_mult", 1.0) for m in self.screener_metrics.values()]) if self.screener_metrics else 1.0
-                avg_dynamic_window = self.compute_dynamic_memory_window(avg_vol_mult)
+                # 🚀 BUG FIX 3: Hard-Locked Memory Horizon to stabilize FSM Accuracy jumps
+                avg_dynamic_window = 250
                 
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=avg_dynamic_window)
                 
@@ -742,10 +746,12 @@ class DistributedQuantEngine:
                 try:
                     session_start_iso = datetime.datetime.fromtimestamp(start_time, datetime.timezone.utc).isoformat()
                     
+                    # 🚀 BUG FIX 4: Explicit .order() added to prevent stale Ghost Trades stuck in DB feed
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome")\
                         .eq("resolved", True)\
                         .gte("timestamp", session_start_iso)\
+                        .order("timestamp", desc=False)\
                         .execute()
                     
                     data = response.data if response else []
@@ -770,7 +776,7 @@ class DistributedQuantEngine:
                         
                     recent_trades_text = ""
                     if data:
-                        sorted_data = data[-3:]  
+                        sorted_data = data[-5:]  
                         for t in sorted_data:
                             outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "❌"
                             recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n"
@@ -861,7 +867,7 @@ class DistributedQuantEngine:
         
         return final_sl, final_tp
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, is_golden_setup: bool = False):
         if optimization is None:
             optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
@@ -901,8 +907,6 @@ class DistributedQuantEngine:
 
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
-            
-            is_golden_setup = vol_z_abs >= 2.8 and vol_mult >= 1.5
             
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
                 if is_golden_setup:
@@ -1065,11 +1069,15 @@ class DistributedQuantEngine:
                 )
                 positions = pos_response.get("result", {}).get("list", [])
                 has_active_position = False
+                
+                # 🚀 BUG FIX 1: Iterating through both sides of Hedge Mode to ensure size is captured
                 if positions:
-                    size = float(positions[0].get("size", 0.0))
-                    if size > 0:
-                        has_active_position = True
-                        order_filled = True 
+                    for p in positions:
+                        if float(p.get("size", 0.0)) > 0:
+                            has_active_position = True
+                            order_filled = True 
+                            break
+                            
             except Exception as e:
                 logger.error(f"Failed to verify live position matrix status for {symbol}: {e}")
                 has_active_position = False
