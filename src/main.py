@@ -353,7 +353,16 @@ class DistributedQuantEngine:
         if regime == "HOLD":
             effective_z_threshold += 0.25
 
-        mieg_confirmed = features.get("mieg_confirmed", False)
+        # 🚀 THE INSTITUTIONAL FIX: ADAPTIVE MIEG OVERRIDE
+        # Instead of relying on the hardcoded 2.4 threshold in the feature engine,
+        # we dynamically recalculate tape exhaustion using your adaptive FSM thresholds.
+        fe = self.feature_engines[symbol]
+        current_obi = fe.obi_history[-1] if len(fe.obi_history) > 0 else 0.0
+        prev_obi = fe.obi_history[-2] if len(fe.obi_history) > 1 else current_obi
+        current_tfi = fe.tfi_history[-1] if len(fe.tfi_history) > 0 else 0.0
+
+        adaptive_mieg_long = (z_obi <= -effective_z_threshold) and (current_obi > prev_obi) and (current_tfi > 0.2)
+        adaptive_mieg_short = (z_obi >= effective_z_threshold) and (current_obi < prev_obi) and (current_tfi < -0.2)
 
         history = self.screener_memory.get(symbol, {}).get("prices", [])
         if len(history) < 20: return 
@@ -375,16 +384,17 @@ class DistributedQuantEngine:
         trade_direction = None
         has_pure_edge = False
         
-        # 🚀 CROSSED-WIRE FIX: Engine correctly targets oversold/overbought exhaustion
-        if z_obi <= -effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+        # 🟢 LONG SETUP: Orderbook offered, limit selling exhausting, aggressive market buyers entering
+        if z_obi <= -effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_long:
             if price_z_score <= -1.0: 
                 has_pure_edge = True
-                trade_direction = "BUY" # ✅ Buying the oversold bounce
+                trade_direction = "BUY"
                 
-        elif z_obi >= effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+        # 🛑 SHORT SETUP: Orderbook bidded, limit buying exhausting, aggressive market sellers entering
+        elif z_obi >= effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_short:
             if price_z_score >= 1.0: 
                 has_pure_edge = True
-                trade_direction = "SELL" # ✅ Shorting the overbought drop
+                trade_direction = "SELL"
                 
         # 🚀 FORCED PARABOLIC STRIKE: Instantly engage Bybit massive movers
         if is_golden_setup and not has_pure_edge and market_regime == "TRENDING":
