@@ -375,18 +375,19 @@ class DistributedQuantEngine:
         trade_direction = None
         has_pure_edge = False
         
-        if z_obi >= effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+        # 🚀 CROSSED-WIRE FIX: Engine correctly targets oversold/overbought exhaustion
+        if z_obi <= -effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
             if price_z_score <= -1.0: 
                 has_pure_edge = True
-                trade_direction = "BUY"
+                trade_direction = "BUY" # ✅ Buying the oversold bounce
                 
-        elif z_obi <= -effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
+        elif z_obi >= effective_z_threshold and vol_mult >= 1.0 and mieg_confirmed:
             if price_z_score >= 1.0: 
                 has_pure_edge = True
-                trade_direction = "SELL"
+                trade_direction = "SELL" # ✅ Shorting the overbought drop
                 
         # 🚀 FORCED PARABOLIC STRIKE: Instantly engage Bybit massive movers
-        if is_golden_setup and not has_pure_edge:
+        if is_golden_setup and not has_pure_edge and market_regime == "TRENDING":
             has_pure_edge = True
             trade_direction = "BUY" if price_z_score >= 0.0 else "SELL"
             logger.critical(f"⚡ [PARABOLIC STRIKE TRIGGERED] {symbol} bypassing tape confirmation. Z: {vol_z_abs:.2f} | Vol: {vol_mult:.2f}")
@@ -525,8 +526,21 @@ class DistributedQuantEngine:
             if "BTCUSDT" in full_market:
                 full_market.remove("BTCUSDT")
                 
-            self.asset_basket = ["BTCUSDT"] + full_market[:24] 
-            self.shadow_basket = full_market[24:]
+            # 🛡️ TRAILING STOP AMNESIA PATCH
+            # Retain any symbol currently holding an active position to prevent orphaned trades
+            new_core_basket = ["BTCUSDT"]
+            
+            for locked_sym in self.active_positions_lock:
+                if locked_sym not in new_core_basket:
+                    new_core_basket.append(locked_sym)
+                    logger.info(f"🛡️ AMNESIA LOCK PREVENTED: Retaining {locked_sym} in core matrix due to active capital exposure.")
+
+            for sym in full_market:
+                if sym not in new_core_basket and len(new_core_basket) < 25:
+                    new_core_basket.append(sym)
+                    
+            self.asset_basket = new_core_basket
+            self.shadow_basket = [s for s in full_market if s not in self.asset_basket]
             
             if len(self.shadow_basket) < 10:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
@@ -694,11 +708,12 @@ class DistributedQuantEngine:
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
                     if valid_assets:
-                        current_prices = {sym: self.screener_memory[sym]["prices"][-1] for sym in valid_assets}
+                        # 🚀 PHANTOM ACCURACY PATCH: Passing the full price trajectory array to MemoryBank
+                        current_prices = {sym: self.screener_memory[sym]["prices"] for sym in valid_assets}
                         
                         for s, data in self.shadow_cooldown.items():
                             if s not in current_prices: 
-                                current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])[-1]
+                                current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])
                         
                         await asyncio.to_thread(
                             self.memory.resolve_batch_historical_predictions,
@@ -1157,7 +1172,6 @@ class DistributedQuantEngine:
                         active_leash = atr * 2.5   
 
                     # 🚀 UPGRADE 1: Alpha Decay (Time-Stop)
-                    # If trade is stuck going nowhere for > 45 mins (2700s), slash the leash to protect capital.
                     if trade_duration > 2700 and profit_distance < (atr * 1.0):
                         active_leash = min(active_leash, atr * 0.75) 
 
@@ -1168,14 +1182,12 @@ class DistributedQuantEngine:
                         if live_mid > peak_observed_price: peak_observed_price = live_mid
                         
                         # 🚀 UPGRADE 2: Hard Break-Even Accelerator
-                        # If price hits +0.8 ATR, physically lock the Stop Loss above entry price + exchange fees.
                         if peak_observed_price >= (current_price + (atr * 0.8)):
                             minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
                         else:
                             minimum_safe_stop = 0.0
 
                         if peak_observed_price >= (current_price + activation_threshold) or minimum_safe_stop > 0:
-                            # Use max() to ensure Stop Loss NEVER drops back down once Break-Even is achieved
                             target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
                             
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
@@ -1194,7 +1206,6 @@ class DistributedQuantEngine:
                             minimum_safe_stop = float('inf')
 
                         if peak_observed_price <= (current_price - activation_threshold) or minimum_safe_stop != float('inf'):
-                            # Use min() to ensure Stop Loss NEVER creeps back up once Break-Even is achieved
                             target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
                             
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:

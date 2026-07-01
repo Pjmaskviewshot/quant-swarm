@@ -29,41 +29,44 @@ class AdaptiveFeatureEngine:
 
     def detect_market_regime(self) -> str:
         """
-        🚀 LIGHTWEIGHT STATISTICAL REGIME CLASSIFIER
-        Uses Kaufman's Efficiency Ratio (ER) and Volatility Squeeze metrics to 
-        mathematically classify the market state without heavy ML dependencies.
+        🚀 DYNAMIC STATISTICAL REGIME CLASSIFIER (COLD-BOOT RESILIENT)
+        Uses Kaufman's Efficiency Ratio (ER) and Volatility Squeeze metrics.
+        Dynamically scales the lookback window so the bot doesn't fly blind upon boot.
         """
-        # Prioritize 5m timeframe for structural clarity, fallback to 1m
-        # Wait for at least 45 candles before making a judgment
-        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 45 else "1m"
+        # 1. Tiered Data Degradation: Use 5m if we have decent data, fallback to 1m, or hard fail.
+        if len(self.timeframes["5m"]) >= 10:
+            candles = list(self.timeframes["5m"])
+        elif len(self.timeframes["1m"]) >= 5:
+            candles = list(self.timeframes["1m"])
+        else:
+            return "RANGING"  # Absolute cold-boot fallback (less than 5 minutes of data)
 
-        # EXTENDED LOOKBACK TO 45 CANDLES (~3.75 HOURS)
-        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 45:
-            candles = list(self.timeframes[target_tf])[-45:]
-            closes = np.array([float(c["close"]) for c in candles])
+        # 2. Extract closes up to the maximum optimal window (45 candles)
+        lookback = min(len(candles), 45)
+        recent_candles = candles[-lookback:]
+        closes = np.array([float(c["close"]) for c in recent_candles])
 
-            # 1. Kaufman's Efficiency Ratio (ER)
-            # ER = Directional Change / Sum of Absolute Changes (Noise)
-            directional_change = abs(closes[-1] - closes[0])
-            absolute_changes = np.sum(np.abs(np.diff(closes)))
+        # 3. Kaufman's Efficiency Ratio (ER)
+        directional_change = abs(closes[-1] - closes[0])
+        absolute_changes = np.sum(np.abs(np.diff(closes)))
+        
+        efficiency_ratio = directional_change / absolute_changes if absolute_changes > 0 else 0.0
 
-            efficiency_ratio = directional_change / absolute_changes if absolute_changes > 0 else 0.0
+        # 4. Volatility Contraction / Bollinger Band Squeeze
+        sma = np.mean(closes)
+        std_dev = np.std(closes)
+        bb_width = (4 * std_dev) / sma if sma > 0 else 0.0
 
-            # 2. Volatility Contraction / Bollinger Band Squeeze
-            sma = np.mean(closes)
-            std_dev = np.std(closes)
-            # Approximate Bollinger Band Width percentage
-            bb_width = (4 * std_dev) / sma if sma > 0 else 0.0
+        # 🚀 COLD-BOOT CALIBRATION: If we are operating on a small sample size, 
+        # we require much stronger mathematical proof to declare a trend.
+        er_threshold = 0.35 if lookback >= 45 else 0.45
+        bb_threshold = 0.004 if lookback >= 45 else 0.006
 
-            # 3. Regime Matrix Logic
-            # If the market is too noisy (ER < 0.35) or too tightly compressed (BBW < 0.4%)
-            if efficiency_ratio < 0.35 or bb_width < 0.004:
-                return "RANGING"
-            else:
-                return "TRENDING"
-                
-        # Defensive fallback: assume ranging to protect capital if data is warming up
-        return "RANGING"
+        # 5. Regime Matrix Logic
+        if efficiency_ratio < er_threshold or bb_width < bb_threshold:
+            return "RANGING"
+        else:
+            return "TRENDING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
         """
@@ -146,20 +149,12 @@ class AdaptiveFeatureEngine:
             current_tfi = self.tfi_history[-1] if len(self.tfi_history) > 0 else 0.0
 
             # 🛑 OVERBOUGHT REVERSAL (Short Setup)
-            # 1. Order book was heavily bid (z >= 2.4)
-            # 2. Limit buying pressure is physically exhausting (obi < prev_obi)
-            # 3. Aggressive market sellers are actually hitting the tape (current_tfi < -0.2)
             if obi_z_score >= 2.4 and obi < prev_obi and current_tfi < -0.2:
                 mieg_confirmed = True  
-                # logger.debug(f"📉 TFI CONFIRMED: Exhaustion met aggressive selling. TFI: {current_tfi:.2f}")
 
             # 🟢 OVERSOLD REVERSAL (Long Setup)
-            # 1. Order book was heavily offered (z <= -2.4)
-            # 2. Limit selling pressure is physically exhausting (obi > prev_obi)
-            # 3. Aggressive market buyers are actually hitting the tape (current_tfi > 0.2)
             elif obi_z_score <= -2.4 and obi > prev_obi and current_tfi > 0.2:
                 mieg_confirmed = True  
-                # logger.debug(f"📈 TFI CONFIRMED: Exhaustion met aggressive buying. TFI: {current_tfi:.2f}")
 
             # 4. Machine Learning Feature Matrix Payload Extraction
             features = {
@@ -170,7 +165,6 @@ class AdaptiveFeatureEngine:
                 "bid_ask_spread": round(self.ema_spread, 6),
                 "raw_obi": round(obi, 4),
                 "adaptive_obi_z": round(obi_z_score, 4),
-                # 🚀 Pass the zero-lag exhaustion gate validation status to the orchestrator loop
                 "mieg_confirmed": mieg_confirmed,
                 "micro_volatility_z": round(self._calculate_spread_volatility_z(), 4),
                 "liquidity_density_ratio": round(v_b / v_a if v_a > 0 else 1.0, 4),
@@ -221,29 +215,33 @@ class AdaptiveFeatureEngine:
         """Returns the most recent mid-price from the fast websocket stream."""
         return getattr(self, '_latest_mid', 0.0)
 
+    def get_computed_atr(self) -> float:
+        """
+        Calculates dynamic True Range based on available candles.
+        Cold-boot resilient: requires only 3 candles to begin generating safe volatility parameters.
+        """
+        # Tiered Data Degradation for Volatility
+        if len(self.timeframes["5m"]) >= 3:
+            candles = list(self.timeframes["5m"])
+        elif len(self.timeframes["1m"]) >= 3:
+            candles = list(self.timeframes["1m"])
+        else:
+            return 0.0  # Failsafe: Triggers default ATR in main.py
+
+        tr_values = []
+        for i in range(1, len(candles)):
+            high = float(candles[i].get("high", 0))
+            low = float(candles[i].get("low", 0))
+            prev_close = float(candles[i-1].get("close", 0))
+            
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_values.append(tr)
+            
+        if tr_values:
+            return sum(tr_values) / len(tr_values)
+            
+        return 0.0
+
     def get_orderbook_snapshot(self) -> Dict[str, List]:
         """Returns the current order book snapshot for Iceberg execution."""
         return getattr(self, '_orderbook_snapshot', {"bids": [], "asks": []})
-
-    def get_computed_atr(self) -> float:
-        """Calculates dynamic True Range based on recent 1m or 5m candles."""
-        # Try to use 5m candles first, fallback to 1m
-        target_tf = "5m" if "5m" in self.timeframes and len(self.timeframes["5m"]) > 10 else "1m"
-        
-        if target_tf in self.timeframes and len(self.timeframes[target_tf]) > 10:
-            candles = list(self.timeframes[target_tf])
-            
-            # Simple ATR approximation using max of High-Low, High-PrevClose, Low-PrevClose
-            tr_values = []
-            for i in range(1, len(candles)):
-                high = float(candles[i].get("high", 0))
-                low = float(candles[i].get("low", 0))
-                prev_close = float(candles[i-1].get("close", 0))
-                
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                tr_values.append(tr)
-                
-            if tr_values:
-                return sum(tr_values) / len(tr_values)
-                
-        return 0.0  # Will trigger the safety fallback in main.py if not enough data

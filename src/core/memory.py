@@ -86,10 +86,11 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
-    def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, float], age_cutoff: float) -> int:
+    def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
         """
-        🚀pillar 1: KINETIC MICRO-PATH RESOLUTION ENGINE
-        Resolves predictions natively by simulating path hits against virtual SL/TP brackets.
+        🚀pillar 1: KINETIC PATH-TRAVERSAL RESOLUTION ENGINE
+        Resolves predictions by scanning the high-frequency price sequences to catch inside-candle bracket hits.
+        Accepts raw floats, explicit OHLC path bounds dictionaries, or chronological list arrays.
         Enforces a hard maximum time-decay termination of 15 minutes.
         """
         resolved_count = 0
@@ -118,8 +119,25 @@ class MemoryBank:
                 sl_price = float(row.get("net_pnl", entry_price * 0.99))
                 tp_price = float(row.get("slippage_drag", entry_price * 1.015))
                 
-                current_price = current_prices.get(symbol)
-                if not current_price or current_price <= 0:
+                p_data = current_prices.get(symbol)
+                if p_data is None:
+                    continue
+
+                # Dynamic Data Parsing Strategy (Supports Floats, Dicts, or Sequence Lists)
+                if isinstance(p_data, dict):
+                    current_price = float(p_data.get("close", p_data.get("current", entry_price)))
+                    price_sequence = p_data.get("sequence", [current_price])
+                elif isinstance(p_data, (list, np.ndarray)):
+                    if len(p_data) == 0:
+                        continue
+                    price_sequence = [float(p) for p in p_data]
+                    current_price = price_sequence[-1]
+                else:
+                    # Fallback for standard backwards compatible float tracking
+                    current_price = float(p_data)
+                    price_sequence = [current_price]
+
+                if current_price <= 0:
                     continue
 
                 row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
@@ -128,21 +146,26 @@ class MemoryBank:
                 is_terminated = False
                 actual = "HOLD"
 
-                # Simulate a live multi-bracket matching cycle
-                if prediction == "BUY":
-                    if current_price >= tp_price:
-                        actual = "BUY"
-                        is_terminated = True
-                    elif current_price <= sl_price:
-                        actual = "SELL"
-                        is_terminated = True
-                elif prediction == "SELL":
-                    if current_price <= tp_price:
-                        actual = "SELL"
-                        is_terminated = True
-                    elif current_price >= sl_price:
-                        actual = "BUY"
-                        is_terminated = True
+                # Chronological microstructural path verification loop
+                for p in price_sequence:
+                    if prediction == "BUY":
+                        if p >= tp_price:
+                            actual = "BUY"
+                            is_terminated = True
+                            break
+                        elif p <= sl_price:
+                            actual = "SELL"
+                            is_terminated = True
+                            break
+                    elif prediction == "SELL":
+                        if p <= tp_price:
+                            actual = "SELL"
+                            is_terminated = True
+                            break
+                        elif p >= sl_price:
+                            actual = "BUY"
+                            is_terminated = True
+                            break
 
                 # ⏳ Enforce hard microstructural time decay block at 15 minutes maximum
                 if not is_terminated and elapsed_minutes >= 15.0:
@@ -163,7 +186,7 @@ class MemoryBank:
                 
             if update_batch:
                 self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
-                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Successfully processed {len(update_batch)} paths via batch matrix.")
+                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Successfully processed {len(update_batch)} paths via sequential verification matrix.")
                 
             return resolved_count
 
