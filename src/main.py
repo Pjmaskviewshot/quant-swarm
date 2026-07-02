@@ -160,7 +160,7 @@ class DistributedQuantEngine:
         vol_mult = float(metrics.get("vol_mult", 1.0))
 
         optimized = {
-            "cooldown_period": 300.0,
+            "cooldown_period": 900.0,
             "z_score_threshold": 2.2, 
             "position_scaling": 1.0,
             "sl_multiplier": 1.5,
@@ -169,24 +169,30 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
+            # 🚀 FIX 1: Mean Reversion Target Matrix
+            # Ranging markets bounce between bands. We must take profit at the mean (1.25 ATR), 
+            # NOT shoot for the moon (3.0 ATR) while leaving our Stop Loss wide.
             optimized["z_score_threshold"] = 1.8 
-            optimized["cooldown_period"] = 300.0 
+            optimized["cooldown_period"] = 1200.0  # 🚀 FIX 2: 20-minute Hysteresis Cooldown to prevent whipsaws
             optimized["position_scaling"] = 1.0  
             optimized["sl_multiplier"] = 2.0     
-            optimized["tp_multiplier"] = 3.0     
+            optimized["tp_multiplier"] = 1.25    # <-- The mathematical key to ranging profits
             if vol_mult < 0.4: 
                 optimized["execution_verdict"] = False
             if vol_mult >= 3.0:
-                optimized["sl_multiplier"] = 3.5  
-                optimized["tp_multiplier"] = 5.0
+                optimized["sl_multiplier"] = 2.5  
+                optimized["tp_multiplier"] = 1.75
+                
         elif market_regime == "TRENDING":
+            # 🚀 FIX 3: Breakout Matrix
+            # Trending markets run hard. Keep trailing stops tight, but let Take Profits run massive.
             optimized["z_score_threshold"] = 1.6 
-            optimized["cooldown_period"] = 60.0  
+            optimized["cooldown_period"] = 300.0  # 5-minute cooldown (trend velocity is fast)
             optimized["sl_multiplier"] = 1.5
-            optimized["tp_multiplier"] = 2.5
+            optimized["tp_multiplier"] = 3.5      # Let winners run
             if vol_mult >= 3.0:
-                optimized["sl_multiplier"] = 3.0
-                optimized["tp_multiplier"] = 4.5
+                optimized["sl_multiplier"] = 2.0
+                optimized["tp_multiplier"] = 5.0
             
         return optimized
 
@@ -783,12 +789,14 @@ class DistributedQuantEngine:
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
 
                 try:
-                    session_start_iso = datetime.datetime.fromtimestamp(start_time, datetime.timezone.utc).isoformat()
+                    # 🚀 UPGRADE: True Calendar-Day Reporting (Survives Restarts)
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                     
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome")\
                         .eq("resolved", True)\
-                        .gte("timestamp", session_start_iso)\
+                        .gte("timestamp", today_start_iso)\
                         .order("timestamp", desc=False)\
                         .execute()
                     
@@ -810,7 +818,7 @@ class DistributedQuantEngine:
                         regime_breakdown_text += f"• {icon} <b>{regime}:</b> <code>{stats['count']} trades</code> | <code>{stats['pnl']:+.4f} USDT</code>\n"
                         
                     if not regime_breakdown_text:
-                        regime_breakdown_text = "• <i>No resolved metrics recorded in this session yet.</i>\n"
+                        regime_breakdown_text = "• <i>No resolved metrics recorded today yet.</i>\n"
                         
                     recent_trades_text = ""
                     if data:
@@ -824,7 +832,7 @@ class DistributedQuantEngine:
                             
                             recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {pnl_val:+.4f}\n"
                     else:
-                        recent_trades_text = "• <i>Waiting for first session maturity cycle...</i>\n"
+                        recent_trades_text = "• <i>Waiting for first maturity cycle...</i>\n"
 
                 except Exception as db_err:
                     logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
@@ -857,11 +865,11 @@ class DistributedQuantEngine:
                     f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool} Resolved</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
-                    f"📈 <b>Session Net Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
+                    f"📈 <b>24H Calendar Net Return:</b> <code>{net_pnl:+.4f} USDT</code>\n"
                     f"📉 <b>Drawdown Profile Status:</b> <code>{drawdown_pct:.2%}</code>\n"
                     f"🎚 <b>Risk Horizon Bar:</b>\n<code>[{drawdown_bar}]</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔬 <b>SESSION REGIME PROFILE:</b>\n"
+                    f"🔬 <b>DAILY REGIME PROFILE:</b>\n"
                     f"{regime_breakdown_text}"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🔥 <b>LIVE HIGHEST-MOMENTUM MOVERS:</b>\n"

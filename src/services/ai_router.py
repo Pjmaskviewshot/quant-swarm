@@ -3,6 +3,8 @@ import time
 import json
 import logging
 import httpx
+import asyncio
+from datetime import datetime, timezone
 from typing import Dict, Any, List
 from openai import AsyncOpenAI
 
@@ -36,13 +38,13 @@ class ResilientAIRouter:
                 "cooldown_until": 0.0
             })
 
-        # 2. NVIDIA NIM: Running DeepSeek V4-Flash (The Upgraded Institutional Failover)
+        # 2. NVIDIA NIM: Running Moonshot Kimi K2.6 (Institutional Heavy-Lifter)
         for i, key in enumerate(nv_keys):
             if key:
                 self.providers.append({
-                    "name": f"NVIDIA_NIM_DEEPSEEK_{i+1}",
+                    "name": f"NVIDIA_NIM_KIMI_{i+1}",
                     "client": AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key, http_client=self.custom_http_client, max_retries=0),
-                    "model": "deepseek-ai/deepseek-v4-flash",
+                    "model": "moonshotai/kimi-k2.6",
                     "cooldown_until": 0.0
                 })
 
@@ -60,11 +62,30 @@ class ResilientAIRouter:
         else:
             logger.info(f"✅ Cascade Matrix initialized with {len(self.providers)} failover nodes (Hardened Network Mode Active)")
 
-    def _get_next_healthy_provider(self):
-        """Scans the matrix sequentially and retrieves the first API key that is not on a blackout cooldown."""
+    def _is_deepseek_surge_pricing_active(self) -> bool:
+        """
+        Evaluates UTC time to check if DeepSeek's 2x Surge Pricing is currently active.
+        Starts Mid-July 2026. Peak 1: 01:00-04:00 UTC. Peak 2: 06:00-10:00 UTC.
+        """
+        current_utc = datetime.now(timezone.utc)
+        
+        # 🚀 Do not activate the shield if it is before mid-July 2026
+        if current_utc < datetime(2026, 7, 15, tzinfo=timezone.utc):
+            return False
+            
+        h = current_utc.hour
+        return (1 <= h < 4) or (6 <= h < 10)
+
+    def _get_next_healthy_provider(self, allow_surge: bool = False):
+        """Scans the matrix. Skips nodes on cooldown or nodes blocked by surge pricing (unless allow_surge is True)."""
         current_time = time.time()
+        surge_active = self._is_deepseek_surge_pricing_active()
+        
         for p in self.providers:
             if current_time >= p["cooldown_until"]:
+                # 🛑 THE SHIELD: Block DeepSeek during 2x pricing hours UNLESS we are desperate
+                if "DEEPSEEK" in p["name"] and surge_active and not allow_surge:
+                    continue
                 return p
         return None
 
@@ -79,10 +100,8 @@ class ResilientAIRouter:
     async def extract_market_verdict(self, batched_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Orchestrates structured intent extraction via Cascade Matrix.
-        Implements Local Pre-Filtering and Context Caching to maximize API runway.
+        Implements Relentless Retries. We do not surrender to rate limits.
         """
-        
-        # 🚀 BUG FIX: Safely extract the ASSET_MATRIX to avoid parsing the GLOBAL_MACRO_NEWS string
         assets_data = batched_payload.get("ASSET_MATRIX", batched_payload)
         
         # ---------------------------------------------------------
@@ -90,7 +109,6 @@ class ResilientAIRouter:
         # ---------------------------------------------------------
         is_market_active = False
         for ticker, data in assets_data.items():
-            # Ensure we are only looking at valid dictionary objects, not text strings
             if isinstance(data, dict):
                 z_score = data.get("volatility_z_score", 0.0)
                 if abs(z_score) >= 2.0:
@@ -124,9 +142,6 @@ class ResilientAIRouter:
             "Valid directions are strictly: BUY, SELL, HOLD. Every asset in the payload must have an entry in the response."
         )
 
-        # ---------------------------------------------------------
-        # 🟢 3. DYNAMIC SUFFIX (Live Market Data)
-        # ---------------------------------------------------------
         prompt = f"LIVE MARKET DATA BATCH:\n{json.dumps(batched_payload, indent=2)}"
 
         messages = [
@@ -135,14 +150,20 @@ class ResilientAIRouter:
         ]
 
         # ---------------------------------------------------------
-        # 🔄 4. CASCADE FAILOVER LOOP
+        # 🔄 4. RELENTLESS RETRY CASCADE (Never surrender to rate limits)
         # ---------------------------------------------------------
-        for attempt in range(len(self.providers)):
-            provider = self._get_next_healthy_provider()
+        MAX_ATTEMPTS = 12 # Will attempt for roughly ~60 seconds before failing
+        
+        for attempt in range(MAX_ATTEMPTS):
+            # If we've been failing for over 30 seconds, we lift the surge shield. Break the glass.
+            allow_surge_pricing = attempt >= 6 
+            
+            provider = self._get_next_healthy_provider(allow_surge=allow_surge_pricing)
             
             if not provider:
-                logger.error("⚠️ ALL AI NODES ON COOLDOWN. Returning emergency HOLD matrix.")
-                return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
+                logger.warning(f"⏳ Tactical Pause: All free/tier-1 nodes cooling down. Retrying in 5s (Attempt {attempt+1}/{MAX_ATTEMPTS})...")
+                await asyncio.sleep(5)
+                continue
 
             logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
             
@@ -150,7 +171,7 @@ class ResilientAIRouter:
                 response = await provider["client"].chat.completions.create(
                     model=provider["model"],
                     messages=messages,
-                    temperature=0.0,
+                    temperature=0.0, # Kept strictly at 0.0 to prevent json format breaking
                     top_p=0.95,
                     max_tokens=2048,
                     response_format={"type": "json_object"}
@@ -175,7 +196,7 @@ class ResilientAIRouter:
                     penalty = 30.0
                     
                 provider["cooldown_until"] = time.time() + penalty
-                logger.info(f"🔄 Rotating to next provider. {provider['name']} placed in penalty box for {penalty}s.")
+                logger.info(f"🔄 Rotating matrix. {provider['name']} placed in penalty box for {penalty}s.")
 
-        logger.critical("🛑 Systemic AI Network Blackout. All Cascade providers failed.")
+        logger.critical("🛑 Systemic AI Network Blackout. Exhausted all retries. Executing emergency tactical HOLD.")
         return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
