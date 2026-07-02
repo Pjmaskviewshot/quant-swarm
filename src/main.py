@@ -147,7 +147,7 @@ class DistributedQuantEngine:
                 signal_id = f"RECOVERY-{str(uuid.uuid4())[:8]}" 
                 
                 asyncio.create_task(self._position_lifecycle_daemon(
-                    symbol, signal_id, direction, entry_price, current_sl, atr, risk_matrix, feature_engine
+                    symbol, signal_id, direction, entry_price, current_sl, atr, risk_matrix, feature_engine, 8, "RANGING"
                 ))
                 
         except Exception as e:
@@ -169,27 +169,23 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            # 🚀 FIX 1: Mean Reversion Target Matrix
-            # Ranging markets bounce between bands. We must take profit at the mean (1.25 ATR), 
-            # NOT shoot for the moon (3.0 ATR) while leaving our Stop Loss wide.
             optimized["z_score_threshold"] = 1.8 
-            optimized["cooldown_period"] = 1200.0  # 🚀 FIX 2: 20-minute Hysteresis Cooldown to prevent whipsaws
+            optimized["cooldown_period"] = 1200.0  
             optimized["position_scaling"] = 1.0  
-            optimized["sl_multiplier"] = 2.0     
-            optimized["tp_multiplier"] = 1.25    # <-- The mathematical key to ranging profits
+            # 🚀 THE MATH FIX: Risk less, reward more
+            optimized["sl_multiplier"] = 1.25     # Tighter stop loss (amputates losers fast)
+            optimized["tp_multiplier"] = 2.0      # Wider profit target (makes winners count)
             if vol_mult < 0.4: 
                 optimized["execution_verdict"] = False
             if vol_mult >= 3.0:
-                optimized["sl_multiplier"] = 2.5  
-                optimized["tp_multiplier"] = 1.75
+                optimized["sl_multiplier"] = 1.5  
+                optimized["tp_multiplier"] = 2.5
                 
         elif market_regime == "TRENDING":
-            # 🚀 FIX 3: Breakout Matrix
-            # Trending markets run hard. Keep trailing stops tight, but let Take Profits run massive.
             optimized["z_score_threshold"] = 1.6 
-            optimized["cooldown_period"] = 300.0  # 5-minute cooldown (trend velocity is fast)
+            optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.5
-            optimized["tp_multiplier"] = 3.5      # Let winners run
+            optimized["tp_multiplier"] = 3.5      
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 2.0
                 optimized["tp_multiplier"] = 5.0
@@ -359,7 +355,6 @@ class DistributedQuantEngine:
         if regime == "HOLD":
             effective_z_threshold += 0.25
 
-        # 🚀 THE INSTITUTIONAL FIX: ADAPTIVE MIEG OVERRIDE
         fe = self.feature_engines[symbol]
         current_obi = fe.obi_history[-1] if len(fe.obi_history) > 0 else 0.0
         prev_obi = fe.obi_history[-2] if len(fe.obi_history) > 1 else current_obi
@@ -376,7 +371,6 @@ class DistributedQuantEngine:
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
-        # 🛡️ LIQUIDITY SPREAD CHECK
         spread_pct = real_spread / mid_price
         if spread_pct > 0.0025:
             return 
@@ -388,19 +382,16 @@ class DistributedQuantEngine:
         trade_direction = None
         has_pure_edge = False
         
-        # 🟢 LONG SETUP: Orderbook offered, limit selling exhausting, aggressive market buyers entering
         if z_obi <= -effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_long:
             if price_z_score <= -1.0: 
                 has_pure_edge = True
                 trade_direction = "BUY"
                 
-        # 🛑 SHORT SETUP: Orderbook bidded, limit buying exhausting, aggressive market sellers entering
         elif z_obi >= effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_short:
             if price_z_score >= 1.0: 
                 has_pure_edge = True
                 trade_direction = "SELL"
                 
-        # 🚀 FORCED PARABOLIC STRIKE: Instantly engage Bybit massive movers
         if is_golden_setup and not has_pure_edge and market_regime == "TRENDING":
             has_pure_edge = True
             trade_direction = "BUY" if price_z_score >= 0.0 else "SELL"
@@ -722,7 +713,6 @@ class DistributedQuantEngine:
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
                     if valid_assets:
-                        # 🚀 PHANTOM ACCURACY PATCH: Passing the full price trajectory array to MemoryBank
                         current_prices = {sym: self.screener_memory[sym]["prices"] for sym in valid_assets}
                         
                         for s, data in self.shadow_cooldown.items():
@@ -766,17 +756,14 @@ class DistributedQuantEngine:
                 dyn_win = self.global_state_cache.get("dynamic_window", self.min_horizon_floor)
                 pool = self.global_state_cache.get("total_resolved", 0)
                 
-                # 🚀 UPGRADE: Dynamic Wallet Baseline Auto-Calibration
                 if "wallet_baseline" not in self.global_state_cache:
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
                 
                 baseline = self.global_state_cache["wallet_baseline"]
                 
-                # If we made a massive profit, raise the high-water mark
                 if current_vault_balance > baseline:
                     self.global_state_cache["wallet_baseline"] = current_vault_balance
                     baseline = current_vault_balance
-                # If balance drops by more than 25% instantly (Manual Withdrawal), reset it so bot doesn't panic
                 elif current_vault_balance < (baseline * 0.75): 
                     logger.critical(f"💸 MANUAL WITHDRAWAL DETECTED. Auto-Calibrating FSM Baseline from {baseline:.2f} to {current_vault_balance:.2f} USDT")
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
@@ -789,7 +776,6 @@ class DistributedQuantEngine:
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
 
                 try:
-                    # 🚀 UPGRADE: True Calendar-Day Reporting (Survives Restarts)
                     now_utc = datetime.datetime.now(datetime.timezone.utc)
                     today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                     
@@ -1089,9 +1075,9 @@ class DistributedQuantEngine:
             )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
-            # Pass target_leverage to daemon to calculate exact fee offsets
+            # Pass target_leverage and market_regime to daemon for accurate kinetic logic
             asyncio.create_task(self._position_lifecycle_daemon(
-                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage
+                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage, market_regime
             ))
             
             return True
@@ -1101,7 +1087,7 @@ class DistributedQuantEngine:
             self.active_positions_lock.discard(symbol)
             return False
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8, market_regime: str = "RANGING"):
         logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
         polling_interval = 4  
         start_time = time.time()
@@ -1109,8 +1095,9 @@ class DistributedQuantEngine:
         
         current_hard_stop = initial_sl
         peak_observed_price = current_price
-        activation_threshold = atr * 1.0  
-        minimum_api_step = atr * 0.4      
+        
+        # Determine minimum tick step from dictionary
+        minimum_api_step = self.tick_sizes.get(symbol, 0.0001) * 10.0
 
         while True:
             await asyncio.sleep(polling_interval)
@@ -1178,63 +1165,64 @@ class DistributedQuantEngine:
                     profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
                     
                     # 1. Base Leash Logic (Kinetic Distance)
-                    if profit_distance >= (atr * 3.0):
-                        active_leash = atr * 1.2   
-                    elif profit_distance >= (atr * 2.0):
+                    if market_regime == "RANGING":
+                        # Ranging markets wave up and down. Give a fixed, wide leash.
                         active_leash = atr * 1.5   
-                    elif profit_distance >= (atr * 1.0):
-                        active_leash = atr * 1.8   
+                        # Do not choke the trade early! Wait until we are right near TP to lock break-even.
+                        be_trigger_1 = atr * 1.6
+                        be_trigger_2 = atr * 2.0
                     else:
-                        active_leash = atr * 2.2   
+                        # Trending markets run straight. Trail tighter to lock massive profits.
+                        if profit_distance >= (atr * 3.0): active_leash = atr * 1.2   
+                        elif profit_distance >= (atr * 2.0): active_leash = atr * 1.5   
+                        elif profit_distance >= (atr * 1.0): active_leash = atr * 1.8   
+                        else: active_leash = atr * 2.2
+                        be_trigger_1 = atr * 1.0
+                        be_trigger_2 = atr * 1.8
 
-                    # 🚀 UPGRADE 1: Alpha Decay (Time-Stop)
+                    # Alpha Decay (Time-Stop) -> Tightens leash to eject stale trades
                     if trade_duration > 2700 and profit_distance < (atr * 1.0):
                         active_leash = min(active_leash, atr * 0.75) 
 
-                    # Exact fee computation required to lock in a completely risk-free scratch trade
                     fee_offset = current_price * (0.00055 * 2 * target_leverage)
 
                     if direction == "BUY":
                         if live_mid > peak_observed_price: peak_observed_price = live_mid
                         
-                        # 🚀 RELAXED BREAK-EVEN ACCELERATOR: Give the asset room to cycle
-                        if peak_observed_price >= (current_price + (atr * 1.8)):
-                            # Secure entry, exchange fees, and lock in a minimum 0.5x ATR profit chunk
+                        # 🚀 THE FIX: Regime-Aware Break-Even Accelerator
+                        if peak_observed_price >= (current_price + be_trigger_2):
                             minimum_safe_stop = current_price + fee_offset + (atr * 0.5)
-                        elif peak_observed_price >= (current_price + (atr * 1.0)):
-                            # Hard break-even lock only after clearing 1 full ATR milestone
+                        elif peak_observed_price >= (current_price + be_trigger_1):
                             minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
                         else:
                             minimum_safe_stop = 0.0
 
-                        if peak_observed_price >= (current_price + activation_threshold) or minimum_safe_stop > 0:
-                            target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
-                            
-                            if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
-                                amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
-                                if amend_success:
-                                    current_hard_stop = target_stop
-                                    logger.info(f"📈 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
+                        target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
+                        
+                        if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
+                            amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                            if amend_success:
+                                current_hard_stop = target_stop
+                                logger.info(f"📈 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
                                     
                     elif direction == "SELL":
                         if live_mid < peak_observed_price: peak_observed_price = live_mid
                         
-                        # 🚀 RELAXED BREAK-EVEN ACCELERATOR: Give the asset room to cycle
-                        if peak_observed_price <= (current_price - (atr * 1.8)):
+                        # 🚀 THE FIX: Regime-Aware Break-Even Accelerator
+                        if peak_observed_price <= (current_price - be_trigger_2):
                             minimum_safe_stop = current_price - fee_offset - (atr * 0.5)
-                        elif peak_observed_price <= (current_price - (atr * 1.0)):
+                        elif peak_observed_price <= (current_price - be_trigger_1):
                             minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
                         else:
                             minimum_safe_stop = float('inf')
 
-                        if peak_observed_price <= (current_price - activation_threshold) or minimum_safe_stop != float('inf'):
-                            target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
-                            
-                            if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
-                                amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
-                                if amend_success:
-                                    current_hard_stop = target_stop
-                                    logger.info(f"📉 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
+                        target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
+                        
+                        if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
+                            amend_success = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                            if amend_success:
+                                current_hard_stop = target_stop
+                                logger.info(f"📉 KINETIC ADVANCE // {symbol} Stop: {round(target_stop, 4)} | Leash: {round(active_leash, 4)} | Time: {int(trade_duration/60)}m")
 
     # ==========================================
     # ORCHESTRATION BOOTSTRAPPER
