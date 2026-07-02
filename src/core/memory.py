@@ -26,8 +26,8 @@ class MemoryBank:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}")
             raise
 
-    def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None):
-        """Saves a fresh prediction sequence with virtual execution brackets bundled into the spread matrix."""
+    def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
+        """Saves a fresh prediction cleanly using the new dedicated schema columns."""
         if features is None:
             features = {}
             
@@ -37,13 +37,12 @@ class MemoryBank:
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
         
-        # 🚀 EXTRACT VIRTUAL BRACKETS (Defensive handling from feature matrix)
+        # 🚀 NO MORE HACKS: Using dedicated virtual columns
         sl_price = float(features.get("virtual_sl", price * 0.99))
         tp_price = float(features.get("virtual_tp", price * 1.015))
 
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
-        # We inject virtual SL/TP values directly into the feature storage properties dynamically
         payload = {
             "signal_id": str(signal_id),
             "timestamp": iso_timestamp,
@@ -56,14 +55,15 @@ class MemoryBank:
             "vol_mult": float(vol_mult),
             "spread": float(spread),
             "resolved": False,
-            # Bundle virtual boundaries into unused channels or pass as metadata safely
-            "net_pnl": sl_price,  # Repurposed temporarily as tracking storage
-            "slippage_drag": tp_price # Repurposed temporarily as tracking storage
+            "virtual_sl": sl_price,  # Clean database schema mapping
+            "virtual_tp": tp_price,  # Clean database schema mapping
+            "is_shadow": is_shadow   # Separates core trades from background noise
         }
 
         try:
             self.supabase.table("quantitative_ledger").insert(payload).execute()
-            logger.info(f"💾 LEDGER COMMIT SIGNED // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
+            label = "🦇 SHADOW" if is_shadow else "💾 CORE"
+            logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
@@ -90,8 +90,6 @@ class MemoryBank:
         """
         🚀pillar 1: KINETIC PATH-TRAVERSAL RESOLUTION ENGINE
         Resolves predictions by scanning the high-frequency price sequences to catch inside-candle bracket hits.
-        Accepts raw floats, explicit OHLC path bounds dictionaries, or chronological list arrays.
-        Enforces a hard maximum time-decay termination of 15 minutes.
         """
         resolved_count = 0
 
@@ -115,9 +113,9 @@ class MemoryBank:
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
-                # Extract our packed virtual execution parameters
-                sl_price = float(row.get("net_pnl", entry_price * 0.99))
-                tp_price = float(row.get("slippage_drag", entry_price * 1.015))
+                # 🚀 Pulling from clean schema columns now
+                sl_price = float(row.get("virtual_sl", entry_price * 0.99))
+                tp_price = float(row.get("virtual_tp", entry_price * 1.015))
                 
                 p_data = current_prices.get(symbol)
                 if p_data is None:
@@ -179,8 +177,6 @@ class MemoryBank:
                     row["resolved"] = True
                     row["actual_outcome"] = actual
                     row["is_correct"] = True if prediction == actual else False
-                    row["net_pnl"] = 0.0  # Reset temporary channels back to production baseline
-                    row["slippage_drag"] = 0.0
                     update_batch.append(row)
                     resolved_count += 1
                 
@@ -194,19 +190,23 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
             return 0
 
-    def compute_rolling_accuracy(self, window_size: int = 150) -> Tuple[float, int]:
+    def compute_rolling_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Tuple[float, int]:
         """
         🚀pillar 2: STABILIZED HORIZON MANAGEMENT
         Calculates a true rolling moving average accuracy over the fixed sample size.
-        Eliminates initialization weight shocks to protect FSM state stability.
+        Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
         try:
-            response = self.supabase.table("quantitative_ledger")\
+            query = self.supabase.table("quantitative_ledger")\
                 .select("is_correct")\
                 .eq("resolved", True)\
-                .order("timestamp", desc=True)\
-                .limit(window_size)\
-                .execute()
+                .eq("is_shadow", False)
+            
+            # 🚀 THE FIX: Only grade FSM accuracy on the core operational basket
+            if core_basket:
+                query = query.in_("symbol", core_basket)
+                
+            response = query.order("timestamp", desc=True).limit(window_size).execute()
 
             results = response.data if response else []
             total_resolved = len(results)

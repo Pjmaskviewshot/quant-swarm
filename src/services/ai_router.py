@@ -4,6 +4,7 @@ import json
 import logging
 import httpx
 import asyncio
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 from openai import AsyncOpenAI
@@ -15,7 +16,6 @@ class ResilientAIRouter:
         self.providers = []
         
         # 🛡️ HARDENED NETWORK CONFIGURATION FOR CLOUD DEPLOYMENT
-        # Lowered timeout to 12.0 so the Cascade Router can failover rapidly.
         self.custom_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(12.0, connect=5.0),
             http2=False,  # CRITICAL: Disabling HTTP/2 prevents shared-cloud connection drops
@@ -29,13 +29,17 @@ class ResilientAIRouter:
                 "name": "GROQ_LLAMA_3_1_8B",
                 "client": AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key, http_client=self.custom_http_client, max_retries=0),
                 "model": "llama-3.1-8b-instant",
-                "cooldown_until": 0.0
+                "cooldown_until": 0.0,
+                "json_mode": True,
+                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
             })
             self.providers.append({
                 "name": "GROQ_LLAMA_3_3_70B",
                 "client": AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key, http_client=self.custom_http_client, max_retries=0),
                 "model": "llama-3.3-70b-versatile",
-                "cooldown_until": 0.0
+                "cooldown_until": 0.0,
+                "json_mode": True,
+                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
             })
 
         # 2. NVIDIA NIM: Running Moonshot Kimi K2.6 (Institutional Heavy-Lifter)
@@ -45,7 +49,9 @@ class ResilientAIRouter:
                     "name": f"NVIDIA_NIM_KIMI_{i+1}",
                     "client": AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key, http_client=self.custom_http_client, max_retries=0),
                     "model": "moonshotai/kimi-k2.6",
-                    "cooldown_until": 0.0
+                    "cooldown_until": 0.0,
+                    "json_mode": False, # 🚀 Bypassed to prevent 400 Bad Request errors on Kimi
+                    "params": {"temperature": 1.00, "top_p": 1.00, "max_tokens": 16384}
                 })
 
         # 3. DEEPSEEK NATIVE: The Paid Last Resort
@@ -54,13 +60,19 @@ class ResilientAIRouter:
                 "name": "DEEPSEEK_V4_NATIVE",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
                 "model": "deepseek-chat",
-                "cooldown_until": 0.0
+                "cooldown_until": 0.0,
+                "json_mode": True,
+                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
             })
 
         if not self.providers:
             logger.critical("❌ NO AI PROVIDERS CONFIGURED. THE ROUTER IS BLIND.")
         else:
             logger.info(f"✅ Cascade Matrix initialized with {len(self.providers)} failover nodes (Hardened Network Mode Active)")
+
+    def _sanitize_error(self, error_str: str) -> str:
+        """🚀 SECURITY FIX: Redacts any string that looks like an API key to prevent log leakage."""
+        return re.sub(r'(gsk_[a-zA-Z0-9]{20,}|sk-[a-zA-Z0-9]{20,}|nvapi-[a-zA-Z0-9-_]{20,})', '[REDACTED_API_KEY]', error_str)
 
     def _is_deepseek_surge_pricing_active(self) -> bool:
         """
@@ -168,22 +180,28 @@ class ResilientAIRouter:
             logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
             
             try:
-                response = await provider["client"].chat.completions.create(
-                    model=provider["model"],
-                    messages=messages,
-                    temperature=0.0, # Kept strictly at 0.0 to prevent json format breaking
-                    top_p=0.95,
-                    max_tokens=2048,
-                    response_format={"type": "json_object"}
-                )
+                # 🚀 THE FIX: Dynamic Parameter Mapping
+                kwargs = {
+                    "model": provider["model"],
+                    "messages": messages,
+                    "temperature": provider.get("params", {}).get("temperature", 0.0),
+                    "top_p": provider.get("params", {}).get("top_p", 0.95),
+                    "max_tokens": provider.get("params", {}).get("max_tokens", 2048),
+                }
+                
+                # Apply OpenAI Strict JSON structure only if the model explicitly supports it
+                if provider.get("json_mode", False):
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                response = await provider["client"].chat.completions.create(**kwargs)
                 
                 raw_content = response.choices[0].message.content
                 cleaned_content = self._clean_json_output(raw_content)
                 return json.loads(cleaned_content)
                 
             except Exception as e:
-                error_str = str(e).lower()
-                logger.warning(f"⚠️ {provider['name']} Failed: {e}")
+                error_str = self._sanitize_error(str(e).lower())
+                logger.warning(f"⚠️ {provider['name']} Failed: {error_str}")
                 
                 # Dynamic Penalty Box Logic
                 if "rate limit" in error_str or "429" in error_str or "413" in error_str:
