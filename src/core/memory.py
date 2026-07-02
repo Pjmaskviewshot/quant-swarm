@@ -196,9 +196,9 @@ class MemoryBank:
 
     def compute_rolling_accuracy(self, window_size: int = 150) -> Tuple[float, int]:
         """
-        🚀pillar 2: ASYMMETRIC BAYESIAN HORIZON MANAGEMENT
-        Calculates Exponentially Weighted Moving Average (EWMA) accuracy over the sample size.
-        Penalizes recent streaks of failures aggressively to safeguard the vault.
+        🚀pillar 2: STABILIZED HORIZON MANAGEMENT
+        Calculates a true rolling moving average accuracy over the fixed sample size.
+        Eliminates initialization weight shocks to protect FSM state stability.
         """
         try:
             response = self.supabase.table("quantitative_ledger")\
@@ -214,18 +214,14 @@ class MemoryBank:
             if total_resolved == 0:
                 return 0.0, 0
 
-            # Pull boolean results chronological array order (oldest to newest)
-            correct_array = [1.0 if row.get("is_correct") is True else 0.0 for row in reversed(results)]
+            # Isolate raw boolean outcomes
+            correct_array = [1.0 if row.get("is_correct") is True else 0.0 for row in results]
             
-            # Apply institutional smoothing parameters (alpha scales weight decay factor)
-            alpha = 2 / (total_resolved + 1) if total_resolved > 10 else 0.1
-            ewma_accuracy = correct_array[0]
-            
-            for i in range(1, len(correct_array)):
-                ewma_accuracy = (correct_array[i] * alpha) + (ewma_accuracy * (1.0 - alpha))
+            # Calculate a perfectly unweighted rolling accuracy across the window
+            stable_accuracy = sum(correct_array) / total_resolved
                 
-            return float(ewma_accuracy), total_resolved
+            return float(stable_accuracy), total_resolved
 
         except Exception as e:
-            logger.error(f"❌ ENGINE EWMA EVALUATION EXCEPTION: {e}")
+            logger.error(f"❌ ENGINE HORIZON EVALUATION EXCEPTION: {e}")
             return 0.0, 0

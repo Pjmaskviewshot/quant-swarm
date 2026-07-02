@@ -354,8 +354,6 @@ class DistributedQuantEngine:
             effective_z_threshold += 0.25
 
         # 🚀 THE INSTITUTIONAL FIX: ADAPTIVE MIEG OVERRIDE
-        # Instead of relying on the hardcoded 2.4 threshold in the feature engine,
-        # we dynamically recalculate tape exhaustion using your adaptive FSM thresholds.
         fe = self.feature_engines[symbol]
         current_obi = fe.obi_history[-1] if len(fe.obi_history) > 0 else 0.0
         prev_obi = fe.obi_history[-2] if len(fe.obi_history) > 1 else current_obi
@@ -1173,13 +1171,13 @@ class DistributedQuantEngine:
                     
                     # 1. Base Leash Logic (Kinetic Distance)
                     if profit_distance >= (atr * 3.0):
-                        active_leash = atr * 1.5   
+                        active_leash = atr * 1.2   
                     elif profit_distance >= (atr * 2.0):
-                        active_leash = atr * 1.8   
+                        active_leash = atr * 1.5   
                     elif profit_distance >= (atr * 1.0):
-                        active_leash = atr * 2.2   
+                        active_leash = atr * 1.8   
                     else:
-                        active_leash = atr * 2.5   
+                        active_leash = atr * 2.2   
 
                     # 🚀 UPGRADE 1: Alpha Decay (Time-Stop)
                     if trade_duration > 2700 and profit_distance < (atr * 1.0):
@@ -1191,8 +1189,12 @@ class DistributedQuantEngine:
                     if direction == "BUY":
                         if live_mid > peak_observed_price: peak_observed_price = live_mid
                         
-                        # 🚀 UPGRADE 2: Hard Break-Even Accelerator
-                        if peak_observed_price >= (current_price + (atr * 0.8)):
+                        # 🚀 RELAXED BREAK-EVEN ACCELERATOR: Give the asset room to cycle
+                        if peak_observed_price >= (current_price + (atr * 1.8)):
+                            # Secure entry, exchange fees, and lock in a minimum 0.5x ATR profit chunk
+                            minimum_safe_stop = current_price + fee_offset + (atr * 0.5)
+                        elif peak_observed_price >= (current_price + (atr * 1.0)):
+                            # Hard break-even lock only after clearing 1 full ATR milestone
                             minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
                         else:
                             minimum_safe_stop = 0.0
@@ -1209,8 +1211,10 @@ class DistributedQuantEngine:
                     elif direction == "SELL":
                         if live_mid < peak_observed_price: peak_observed_price = live_mid
                         
-                        # 🚀 UPGRADE 2: Hard Break-Even Accelerator
-                        if peak_observed_price <= (current_price - (atr * 0.8)):
+                        # 🚀 RELAXED BREAK-EVEN ACCELERATOR: Give the asset room to cycle
+                        if peak_observed_price <= (current_price - (atr * 1.8)):
+                            minimum_safe_stop = current_price - fee_offset - (atr * 0.5)
+                        elif peak_observed_price <= (current_price - (atr * 1.0)):
                             minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
                         else:
                             minimum_safe_stop = float('inf')
