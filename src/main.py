@@ -60,14 +60,21 @@ class DistributedQuantEngine:
         
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
-        self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
+        self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {
+            s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket
+        }
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
-        self.screener_memory: Dict[str, Dict[str, List[float]]] = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+        self.screener_memory: Dict[str, Dict[str, List[float]]] = {
+            s: {"prices": [], "volumes": []} for s in self.asset_basket
+        }
         
-        self.screener_metrics: Dict[str, Dict[str, float]] = {s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket}
+        self.screener_metrics: Dict[str, Dict[str, float]] = {
+            s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket
+        }
+        
         self.pending_macro_payloads: Dict[str, dict] = {}
         self.active_workers: Dict[str, asyncio.Task] = {}
         self.active_positions_lock = set()
@@ -153,7 +160,7 @@ class DistributedQuantEngine:
             logger.error(f"❌ Failed to synchronize exchange state on boot: {e}")
 
     async def cleanup_stale_locks(self):
-        """🚀 THE FIX: Background sweep to unlock bricked threads safely."""
+        """🚀 Background sweep to unlock bricked threads safely."""
         while True:
             await asyncio.sleep(300) 
             try:
@@ -190,8 +197,10 @@ class DistributedQuantEngine:
             optimized["position_scaling"] = 1.0  
             optimized["sl_multiplier"] = 1.25     
             optimized["tp_multiplier"] = 2.0      
+            
             if vol_mult < 0.4: 
                 optimized["execution_verdict"] = False
+                
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 1.5  
                 optimized["tp_multiplier"] = 2.5
@@ -201,6 +210,7 @@ class DistributedQuantEngine:
             optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.5
             optimized["tp_multiplier"] = 3.5      
+            
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 2.0
                 optimized["tp_multiplier"] = 5.0
@@ -249,28 +259,40 @@ class DistributedQuantEngine:
                     batch_payload[sym].pop("macro_news_stream", None)
                     batch_payload[sym].pop("global_macro_news", None)
 
-                final_ai_payload = {"GLOBAL_MACRO_NEWS": self.global_macro_news_cache, "ASSET_MATRIX": batch_payload}
+                final_ai_payload = {
+                    "GLOBAL_MACRO_NEWS": self.global_macro_news_cache,
+                    "ASSET_MATRIX": batch_payload
+                }
 
                 try:
                     logger.info(f"🚨 COMMANDER: Structural Anomaly Detected. Routing Batch ({len(batch_payload)} assets) to Cascade Circuit Breaker...")
-                    verdict_matrix = await asyncio.wait_for(self.ai_router.extract_market_verdict(final_ai_payload), timeout=60.0)
+                    
+                    verdict_matrix = await asyncio.wait_for(
+                        self.ai_router.extract_market_verdict(final_ai_payload),
+                        timeout=60.0
+                    )
+                    
                     if isinstance(verdict_matrix, dict):
                         target_dict = verdict_matrix.get("ASSET_MATRIX", verdict_matrix)
+                        
                         if isinstance(target_dict, dict):
                             for symbol, data in target_dict.items():
                                 if symbol in self.asset_basket and isinstance(data, dict):
                                     self.macro_regimes[symbol] = data.get("direction", "HOLD")
                                     self.macro_confidences[symbol] = data.get("confidence", 0.0)
                                     logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                                    
                 except asyncio.TimeoutError:
                     logger.error("⏳ COMMANDER TIMEOUT on Single Batch.")
                 except Exception as e:
                     logger.error(f"⚠️ COMMANDER ERROR on Single Batch: {e}")
+                    
             except Exception as e:
                 logger.error(f"⚠️ COMMANDER FATAL ERROR: Failed to process payload: {e}")
 
     async def run_macro_regime_loop(self):
         logger.critical("🐺 IMMORTAL WATCHDOG ONLINE. Deploying Swarm Data Gatherers...")
+        
         for symbol in self.asset_basket:
             task = asyncio.create_task(self._asset_data_gatherer_lifecycle(symbol))
             self.active_workers[symbol] = task
@@ -286,9 +308,13 @@ class DistributedQuantEngine:
                     if task and task.done() and task.exception():
                         exc = task.exception()
                         logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception:")
+                        logger.error(f"\n{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}")
                     else:
                         logger.error(f"☠️ WATCHDOG ALERT: {symbol} worker thread vanished or stalled silently.")
-                    if task and not task.done(): task.cancel()
+                        
+                    if task and not task.done():
+                        task.cancel()
+                        
                     logger.critical(f"⚕️ WATCHDOG RESURRECTING {symbol} NODE...")
                     new_task = asyncio.create_task(self._asset_data_gatherer_lifecycle(symbol))
                     self.active_workers[symbol] = new_task
@@ -296,12 +322,17 @@ class DistributedQuantEngine:
     async def _asset_data_gatherer_lifecycle(self, symbol: str):
         import random
         await asyncio.sleep(random.uniform(0, 15))
+        
         while True:
             try:
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
                 current_price = history[-1] if history else 0.0
+                
                 if current_price == 0.0:
-                    klines = await asyncio.to_thread(self.executor.client.get_kline, category="linear", symbol=symbol, interval="15", limit=1)
+                    klines = await asyncio.to_thread(
+                        self.executor.client.get_kline,
+                        category="linear", symbol=symbol, interval="15", limit=1
+                    )
                     current_price = float(klines.get("result", {}).get("list", [[0.0, 0.0, 0.0, 0.0, 0.0]])[0][4])
 
                 feature_engine = self.feature_engines.get(symbol)
@@ -318,16 +349,20 @@ class DistributedQuantEngine:
                 }
             except Exception as e:
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
+                
             await asyncio.sleep(random.uniform(45.0, 75.0))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
-        if symbol not in self.asset_basket: return
+        if symbol not in self.asset_basket:
+            return
 
         bids = depth_data.get("b", [])
         asks = depth_data.get("a", [])
         features = self.feature_engines[symbol].push_orderbook_tick(bids, asks)
-        if not features.get("valid"): return
+        
+        if not features.get("valid"):
+            return
 
         z_obi = features["adaptive_obi_z"]
         mid_price = features["mid_price"]
@@ -337,15 +372,19 @@ class DistributedQuantEngine:
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
         optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics)
 
-        if not optimization["execution_verdict"]: return
+        if not optimization["execution_verdict"]:
+            return
 
         current_time = time.time()
-        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < optimization["cooldown_period"]: return
+        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < optimization["cooldown_period"]:
+            return
 
         effective_z_threshold = optimization["z_score_threshold"]
         vol_mult = metrics.get("vol_mult", 1.0)
         regime = self.macro_regimes.get(symbol, "HOLD")
-        if regime == "HOLD": effective_z_threshold += 0.25
+        
+        if regime == "HOLD":
+            effective_z_threshold += 0.25
 
         fe = self.feature_engines[symbol]
         current_obi = fe.obi_history[-1] if len(fe.obi_history) > 0 else 0.0
@@ -356,14 +395,17 @@ class DistributedQuantEngine:
         adaptive_mieg_short = (z_obi >= effective_z_threshold) and (current_obi < prev_obi) and (current_tfi < -0.2)
 
         history = self.screener_memory.get(symbol, {}).get("prices", [])
-        if len(history) < 20: return 
+        if len(history) < 20:
+            return 
+            
         prices_array = np.array(history)
         local_mean = np.mean(prices_array)
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
         spread_pct = real_spread / mid_price
-        if spread_pct > 0.0025: return 
+        if spread_pct > 0.0025:
+            return 
             
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
@@ -388,45 +430,58 @@ class DistributedQuantEngine:
             logger.critical(f"⚡ [PARABOLIC STRIKE TRIGGERED] {symbol} bypassing tape confirmation.")
 
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-        if not has_pure_edge: return
+        
+        if not has_pure_edge:
+            return
 
         if not self.test_mode and is_active:
-            if trade_direction == "BUY" and regime == "SELL" and not is_golden_setup: return 
-            if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup: return 
+            if trade_direction == "BUY" and regime == "SELL" and not is_golden_setup:
+                return 
+            if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup:
+                return 
 
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
             alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
+            
             if len(btc_history) >= 20 and len(alt_history) >= 20:
                 btc_array = np.array(btc_history[-20:])
                 alt_array = np.array(alt_history[-20:])
+                
                 btc_returns = np.diff(np.log(btc_array))
                 alt_returns = np.diff(np.log(alt_array))
+                
                 if len(btc_returns) > 1 and np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
                     correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
-                    if math.isnan(correlation): correlation = 0.0
+                    if math.isnan(correlation):
+                        correlation = 0.0
+                        
                     btc_mean = np.mean(btc_array)
                     btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
                     btc_z_score = (btc_array[-1] - btc_mean) / btc_std
                     
                     if btc_z_score <= -1.2:
-                        if trade_direction == "BUY" and correlation > 0.3: return
+                        if trade_direction == "BUY" and correlation > 0.3:
+                            return
                     if btc_z_score >= 1.2:
-                        if trade_direction == "SELL" and correlation > 0.3: return
+                        if trade_direction == "SELL" and correlation > 0.3:
+                            return
 
         self.last_execution_timestamps[symbol] = current_time
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
         logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z: {price_z_score:.2f}")
         
-        asyncio.create_task(self.run_signal_lifecycle(symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, is_golden_setup))
+        asyncio.create_task(self.run_signal_lifecycle(
+            symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, is_golden_setup
+        ))
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
-        if not symbol or symbol not in self.asset_basket: return
-
         price_str = data.get("lastPrice")
         volume_str = data.get("turnover24h")
-        if price_str is None or volume_str is None: return
+        
+        if not symbol or symbol not in self.asset_basket or price_str is None or volume_str is None:
+            return
 
         current_price = float(price_str)
         current_turnover = float(volume_str)
@@ -437,7 +492,10 @@ class DistributedQuantEngine:
         history = self.screener_memory[symbol]
         last_turnover = history.get("last_turnover", current_turnover)
         tick_volume = current_turnover - last_turnover
-        if tick_volume < 0: tick_volume = 0.0 
+        
+        if tick_volume < 0:
+            tick_volume = 0.0 
+            
         history["last_turnover"] = current_turnover
 
         history["prices"].append(current_price)
@@ -447,7 +505,9 @@ class DistributedQuantEngine:
             history["prices"].pop(0)
             history["volumes"].pop(0)
 
-        if len(history["prices"]) < 15: return
+        if len(history["prices"]) < 15:
+            return
+            
         prices_array = np.array(history["prices"])
         volumes_array = np.array(history["volumes"])
 
@@ -460,33 +520,48 @@ class DistributedQuantEngine:
         mean_return = np.mean(returns) if len(returns) > 0 else 0.0
         std_return = np.std(returns) if len(returns) > 0 else 1e-6
         vel_z = (returns[-1] - mean_return) / std_return if len(returns) > 0 else 0.0
+        
         mean_price = np.mean(prices_array)
         std_price = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         dist_z = (current_price - mean_price) / std_price
 
         volatility_z = (vel_z * 0.5) + (dist_z * 0.5)
-        self.screener_metrics[symbol] = {"vol_mult": float(volume_multiplier), "vol_z": float(volatility_z)}
+        
+        self.screener_metrics[symbol] = {
+            "vol_mult": float(volume_multiplier),
+            "vol_z": float(volatility_z)
+        }
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
-        if symbol not in self.asset_basket: return
+        if symbol not in self.asset_basket:
+            return
+            
         interval = data["interval"]
         candle = data["candle_data"]
+        
         self.feature_engines[symbol].update_multi_timeframe_candle(
-            timeframe=interval, open_p=float(candle.get("open", 0)),
-            high_p=float(candle.get("high", 0)), low_p=float(candle.get("low", 0)),
-            close_p=float(candle.get("close", 0)), volume=float(candle.get("volume", 0))
+            timeframe=interval,
+            open_p=float(candle.get("open", 0)),
+            high_p=float(candle.get("high", 0)),
+            low_p=float(candle.get("low", 0)),
+            close_p=float(candle.get("close", 0)),
+            volume=float(candle.get("volume", 0))
         )
 
     async def run_universe_refresher(self):
         while True:
             await asyncio.sleep(1800) 
             logger.info("🌍 FAST SATELLITE ROTATION INITIATED. Querying Bybit...")
+            
             await self._fetch_exchange_tick_sizes()
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
             
-            if len(full_market) < 25: continue
-            if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
+            if len(full_market) < 25:
+                continue
+                
+            if "BTCUSDT" in full_market:
+                full_market.remove("BTCUSDT")
                 
             new_core_basket = ["BTCUSDT"]
             for locked_sym in self.active_positions_lock:
@@ -504,8 +579,13 @@ class DistributedQuantEngine:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
                 self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
             
-            new_feature_engines, new_screener_memory, new_macro_regimes = {}, {}, {}
-            new_macro_confidences, new_current_atrs, new_last_execs, new_screener_metrics = {}, {}, {}, {}
+            new_feature_engines = {}
+            new_screener_memory = {}
+            new_macro_regimes = {}
+            new_macro_confidences = {}
+            new_current_atrs = {}
+            new_last_execs = {}
+            new_screener_metrics = {}
             
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
@@ -534,43 +614,55 @@ class DistributedQuantEngine:
                     
             for new_symbol in self.asset_basket:
                 if new_symbol not in self.active_workers:
-                    task = asyncio.create_task(self._asset_data_gatherer_lifecycle(new_symbol))
-                    self.active_workers[new_symbol] = task
+                    self.active_workers[new_symbol] = asyncio.create_task(self._asset_data_gatherer_lifecycle(new_symbol))
             
             self.stream_restart_event.set()
 
     def _detect_shadow_regime(self, closes: np.ndarray) -> str:
-        if len(closes) < 30: return "RANGING"
+        if len(closes) < 30:
+            return "RANGING"
         directional_change = abs(closes[-1] - closes[0])
         absolute_changes = np.sum(np.abs(np.diff(closes)))
         er = directional_change / absolute_changes if absolute_changes > 0 else 0.0
+        
         sma = np.mean(closes)
         std_dev = np.std(closes)
         bb_width = (4 * std_dev) / sma if sma > 0 else 0.0
-        return "TRENDING" if er >= 0.35 and bb_width >= 0.004 else "RANGING"
+        
+        if er >= 0.35 and bb_width >= 0.004:
+            return "TRENDING"
+        return "RANGING"
 
     async def run_shadow_swarm_scanner(self):
         logger.critical("🦇 SHADOW SWARM ONLINE. Hunting for pure data across extended universe...")
         while True:
             await asyncio.sleep(120) 
-            if not self.shadow_basket: continue
+            if not self.shadow_basket:
+                continue
                 
             BATCH_SIZE = 10
             for i in range(0, len(self.shadow_basket), BATCH_SIZE):
                 batch = self.shadow_basket[i:i+BATCH_SIZE]
                 for symbol in batch:
                     try:
-                        if symbol in self.shadow_cooldown and time.time() - self.shadow_cooldown[symbol] < 300: continue
+                        if symbol in self.shadow_cooldown and time.time() - self.shadow_cooldown[symbol] < 300:
+                            continue
+                            
                         klines = await asyncio.to_thread(
-                            self.executor.client.get_kline, category="linear", symbol=symbol, interval="15", limit=60
+                            self.executor.client.get_kline,
+                            category="linear", symbol=symbol, interval="15", limit=60
                         )
+                        
                         data = klines.get("result", {}).get("list", [])
-                        if len(data) < 30: continue
+                        if len(data) < 30:
+                            continue
 
                         closes = np.array([float(k[4]) for k in data])[::-1]
                         volumes = np.array([float(k[5]) for k in data])[::-1]
+                        
                         current_price = closes[-1]
-                        if current_price <= 0.01: continue
+                        if current_price <= 0.01:
+                            continue
                         
                         current_vol = volumes[-1]
                         avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else 1.0
@@ -584,11 +676,27 @@ class DistributedQuantEngine:
                         if (vol_z >= 2.2 and vol_mult >= 0.8) or (vol_mult >= 1.5 and vol_z >= 1.4):
                             direction = "BUY" if returns[-1] < 0 else "SELL"
                             market_regime = self._detect_shadow_regime(closes)
-                            features_dict = {"symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": vol_z, "liquidity_density_ratio": vol_mult, "bid_ask_spread": 0.0}
+                            
+                            features_dict = {
+                                "symbol": symbol,
+                                "market_regime": market_regime,
+                                "adaptive_obi_z": vol_z,
+                                "liquidity_density_ratio": vol_mult,
+                                "bid_ask_spread": 0.0
+                            }
+                            
                             # 🚀 THE FIX: Passing is_shadow=True to prevent FSM pollution
-                            self.memory.commit_prediction(str(uuid.uuid4()), time.time(), current_price, direction, 0.0, features_dict, is_shadow=True)
+                            self.memory.commit_prediction(
+                                str(uuid.uuid4()),
+                                time.time(),
+                                current_price,
+                                direction,
+                                0.0,
+                                features_dict,
+                                is_shadow=True
+                            )
                             self.shadow_cooldown[symbol] = time.time()
-                    except Exception as e:
+                    except Exception:
                         pass
                     await asyncio.sleep(1.5) 
                 await asyncio.sleep(2) 
@@ -596,11 +704,14 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket, intervals=["1", "5", "15"],
+                basket=self.asset_basket,
+                intervals=["1", "5", "15"],
                 orderbook_callback=self.handle_incoming_orderbook_tick,
                 screener_callback=self.handle_incoming_basket_screener_update,
-                kline_callback=self.handle_incoming_kline_update, engine_reference=self  
+                kline_callback=self.handle_incoming_kline_update,
+                engine_reference=self  
             )
+            
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
             await self.stream_restart_event.wait()
             stream_task.cancel()
@@ -622,12 +733,19 @@ class DistributedQuantEngine:
                     logger.info("⚡ Executing high-frequency database resolution sweep...")
                     age_cutoff_time = time.time() - 1800 
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
+                    
                     if valid_assets:
                         current_prices = {sym: self.screener_memory[sym]["prices"] for sym in valid_assets}
                         for s, data in self.shadow_cooldown.items():
-                            if s not in current_prices: current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])
+                            if s not in current_prices:
+                                current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])
                         
-                        await asyncio.to_thread(self.memory.resolve_batch_historical_predictions, assets=list(current_prices.keys()), current_prices=current_prices, age_cutoff=age_cutoff_time)
+                        await asyncio.to_thread(
+                            self.memory.resolve_batch_historical_predictions,
+                            assets=list(current_prices.keys()),
+                            current_prices=current_prices,
+                            age_cutoff=age_cutoff_time
+                        )
                 except Exception as e:
                     logger.error(f"❌ Failed to execute batched prediction validation: {str(e)}")
 
@@ -636,7 +754,9 @@ class DistributedQuantEngine:
             if loop_counter % 5 == 0:
                 avg_dynamic_window = 250
                 # 🚀 THE FIX: Grading accuracy only on core basket
-                accuracy, pool_size = self.memory.compute_rolling_accuracy(window_size=avg_dynamic_window, core_basket=self.asset_basket)
+                accuracy, pool_size = self.memory.compute_rolling_accuracy(
+                    window_size=avg_dynamic_window, core_basket=self.asset_basket
+                )
                 
                 self.global_state_cache["rolling_accuracy"] = accuracy
                 self.global_state_cache["total_resolved"] = pool_size
@@ -658,11 +778,14 @@ class DistributedQuantEngine:
             if loop_counter % 30 == 0:
                 state = self.fsm.current_state.value
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
+                
                 acc = self.global_state_cache.get("rolling_accuracy", 0.0)
                 dyn_win = self.global_state_cache.get("dynamic_window", self.min_horizon_floor)
                 pool = self.global_state_cache.get("total_resolved", 0)
                 
-                if "wallet_baseline" not in self.global_state_cache: self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
+                if "wallet_baseline" not in self.global_state_cache:
+                    self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
+                
                 baseline = self.global_state_cache["wallet_baseline"]
                 
                 if current_vault_balance > baseline:
@@ -673,9 +796,11 @@ class DistributedQuantEngine:
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
                     baseline = self.global_state_cache["wallet_baseline"]
                     # 🚀 THE FIX: Resetting Risk Vault peak balance to prevent permanent 99% drawdown glitch
-                    if hasattr(self.risk_vault, 'peak_balance'): self.risk_vault.peak_balance = baseline
+                    if hasattr(self.risk_vault, 'peak_balance'):
+                        self.risk_vault.peak_balance = baseline
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
+                
                 bar_length = 10
                 filled_blocks = min(bar_length, int(drawdown_pct * bar_length))
                 drawdown_bar = "🟢" * (bar_length - filled_blocks) + "🔴" * filled_blocks
@@ -686,8 +811,11 @@ class DistributedQuantEngine:
                     
                     response = self.memory.supabase.table("quantitative_ledger")\
                         .select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome")\
-                        .eq("resolved", True).eq("is_shadow", False)\
-                        .gte("timestamp", today_start_iso).order("timestamp", desc=False).execute()
+                        .eq("resolved", True)\
+                        .eq("is_shadow", False)\
+                        .gte("timestamp", today_start_iso)\
+                        .order("timestamp", desc=False)\
+                        .execute()
                     
                     data = response.data if response else []
                     net_pnl = sum(float(row.get("net_pnl", 0.0)) for row in data)
@@ -696,7 +824,8 @@ class DistributedQuantEngine:
                     for row in data:
                         regime = row.get("market_regime", "UNKNOWN")
                         pnl = float(row.get("net_pnl", 0.0))
-                        if regime not in regime_stats: regime_stats[regime] = {"count": 0, "pnl": 0.0}
+                        if regime not in regime_stats:
+                            regime_stats[regime] = {"count": 0, "pnl": 0.0}
                         regime_stats[regime]["count"] += 1
                         regime_stats[regime]["pnl"] += pnl
                         
@@ -705,33 +834,48 @@ class DistributedQuantEngine:
                         icon = "🕸️" if regime == "RANGING" else "🚀"
                         regime_breakdown_text += f"• {icon} <b>{regime}:</b> <code>{stats['count']} trades</code> | <code>{stats['pnl']:+.4f} USDT</code>\n"
                         
-                    if not regime_breakdown_text: regime_breakdown_text = "• <i>No resolved metrics recorded today yet.</i>\n"
+                    if not regime_breakdown_text:
+                        regime_breakdown_text = "• <i>No resolved metrics recorded today yet.</i>\n"
                         
                     recent_trades_text = ""
                     if data:
                         sorted_data = data[-5:]  
                         for t in sorted_data:
                             pnl_val = float(t.get('net_pnl', 0))
-                            outcome_icon = "👻" if pnl_val == 0.0 else ("✅" if t.get("actual_outcome") == "WIN" else "🔴")
+                            if pnl_val == 0.0:
+                                outcome_icon = "👻"
+                            else:
+                                outcome_icon = "✅" if t.get("actual_outcome") == "WIN" else "🔴"
+                            
                             recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {pnl_val:+.4f}\n"
                     else:
                         recent_trades_text = "• <i>Waiting for first maturity cycle...</i>\n"
 
                 except Exception as db_err:
+                    logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
                     net_pnl = 0.0
-                    regime_breakdown_text, recent_trades_text = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
+                    regime_breakdown_text = "• ⚠️ <i>Supabase ledger context error.</i>\n"
+                    recent_trades_text = "• <i>Unavailable</i>\n"
 
                 diagnostic_nodes = []
                 try:
-                    sorted_metrics = sorted(self.screener_metrics.items(), key=lambda x: abs(x[1].get("vol_z", 0.0)), reverse=True)[:3]
+                    sorted_metrics = sorted(
+                        self.screener_metrics.items(),
+                        key=lambda x: abs(x[1].get("vol_z", 0.0)),
+                        reverse=True
+                    )[:3]
                     for ticker, metrics in sorted_metrics:
                         bias = self.macro_regimes.get(ticker, "HOLD")
-                        diagnostic_nodes.append(f"• 📡 <b>{ticker}</b> | Z: <code>{metrics.get('vol_z', 0.0):+.2f}</code> | Vol: <code>{metrics.get('vol_mult', 1.0):.2f}x</code> | Bias: <code>{bias}</code>")
+                        diagnostic_nodes.append(
+                            f"• 📡 <b>{ticker}</b> | Z: <code>{metrics.get('vol_z', 0.0):+.2f}</code> | "
+                            f"Vol: <code>{metrics.get('vol_mult', 1.0):.2f}x</code> | Bias: <code>{bias}</code>"
+                        )
                 except Exception:
                     diagnostic_nodes = ["• <i>Diagnostic matrix initializing...</i>"]
 
                 diagnostic_block = "\n".join(diagnostic_nodes)
 
+                # 🚀 Expanded Telegram Formatter
                 report = (
                     f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -760,13 +904,23 @@ class DistributedQuantEngine:
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
-        if optimization is None: optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
-        fee_drag_factor = 0.00055 * 2 * leverage
+        if optimization is None:
+            optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
+            
+        # 🚀 THE CRITICAL MATH FIX: NO LEVERAGE MULTIPLIER ON FEES.
+        # Bybit taker fee is 0.055%. Round trip is 0.11%.
+        fee_drag_factor = 0.00055 * 2 
         fee_buffer = entry_price * fee_drag_factor
-        tp_multiplier, sl_multiplier = optimization["tp_multiplier"], optimization["sl_multiplier"]
         
-        if vol_z >= 3.0: tp_multiplier = max(tp_multiplier, 4.5)
-        elif vol_z >= 1.5: tp_multiplier = max(tp_multiplier, 3.0)
+        tp_multiplier = optimization["tp_multiplier"]
+        sl_multiplier = optimization["sl_multiplier"]
+        
+        if vol_z >= 3.0:
+            tp_multiplier = max(tp_multiplier, 4.5)
+            logger.info(f"📈 EXTREME VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
+        elif vol_z >= 1.5:
+            tp_multiplier = max(tp_multiplier, 3.0)
+            logger.info(f"📊 ELEVATED VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
         
         if side.upper() == "BUY":
             initial_sl = entry_price - (sl_multiplier * atr)
@@ -776,21 +930,28 @@ class DistributedQuantEngine:
             target_tp = entry_price - (tp_multiplier * atr) - fee_buffer
             
         tick_dec = Decimal(str(tick_size))
-        sl_dec, tp_dec = Decimal(str(initial_sl)), Decimal(str(target_tp))
+        sl_dec = Decimal(str(initial_sl))
+        tp_dec = Decimal(str(target_tp))
+        
         snapped_sl = (sl_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
         snapped_tp = (tp_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
         
         return float(snapped_sl.quantize(tick_dec)), float(snapped_tp.quantize(tick_dec))
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, is_golden_setup: bool = False):
-        if optimization is None: optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
-        if symbol in self.active_positions_lock: return False
+        if optimization is None:
+            optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
+            
+        if symbol in self.active_positions_lock:
+            logger.warning(f"🔒 Guard execution bypass [{symbol}]: Signal ignored to prevent position stacking collision.")
+            return False
             
         self.active_positions_lock.add(symbol)
         
         try:
             signal_id = str(uuid.uuid4())
             confidence = self.macro_confidences.get(symbol, 0.0)
+            
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             
@@ -801,8 +962,17 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            features_dict = {"symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread}
-            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
+            features_dict = {
+                "symbol": symbol,
+                "market_regime": market_regime,
+                "adaptive_obi_z": 0.0, 
+                "liquidity_density_ratio": vol_mult,
+                "bid_ask_spread": real_spread
+            }
+            
+            self.memory.commit_prediction(
+                signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False
+            )
             
             rolling_acc = self.global_state_cache["rolling_accuracy"]
             dynamic_window = self.global_state_cache["dynamic_window"]
@@ -811,8 +981,10 @@ class DistributedQuantEngine:
             has_institutional_edge = rolling_acc >= 0.60
             
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
-                if is_golden_setup: logger.critical(f"🌟 [GOLDEN ALPHA OVERRIDE] Bypassing shield for {symbol}.")
+                if is_golden_setup:
+                    logger.critical(f"🌟 [GOLDEN ALPHA OVERRIDE] Bypassing shield for {symbol}.")
                 else:
+                    logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
                     self.active_positions_lock.discard(symbol)
                     return True
             
@@ -821,14 +993,20 @@ class DistributedQuantEngine:
                 return True 
 
             balance = await self.executor.get_wallet_balance_usdt()
-            risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(account_balance=balance, win_rate=self.historical_win_rate, win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr, current_price=current_price, ai_confidence=confidence, market_regime=market_regime)
+            risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
+                account_balance=balance, win_rate=self.historical_win_rate,
+                win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
+                current_price=current_price, ai_confidence=confidence, market_regime=market_regime
+            )
             
             if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
+                logger.warning(f"Execution canceled for {symbol}. Kelly criteria failed.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
             conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
+            
             base_opex_target = 0.26
             amortization_weight = math.tanh(balance / 45.0) 
             active_opex_target = base_opex_target * amortization_weight
@@ -846,7 +1024,9 @@ class DistributedQuantEngine:
             
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             margin_required = final_allocation / target_leverage
-            if margin_required > (balance * 0.90): final_allocation = (balance * 0.90) * target_leverage
+            if margin_required > (balance * 0.90):
+                logger.warning(f"⚠️ OpEx scaling capped. Optimizing allocation...")
+                final_allocation = (balance * 0.90) * target_leverage
             
             risk_matrix["allocated_value_usdt"] = final_allocation
             risk_matrix["size"] = final_allocation / current_price
@@ -861,7 +1041,9 @@ class DistributedQuantEngine:
                 return False
             
             tick_size = self.tick_sizes.get(symbol, 0.0001) 
-            initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, target_leverage, vol_z_abs, optimization, tick_size)
+            initial_sl, target_tp = self.calculate_initial_bracket(
+                current_price, atr, direction, target_leverage, vol_z_abs, optimization, tick_size
+            )
             
             if vol_mult < 0.3: 
                 self.active_positions_lock.discard(symbol)
@@ -877,12 +1059,21 @@ class DistributedQuantEngine:
                 return False
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
-            if hasattr(feature_engine, 'get_orderbook_snapshot'): current_depth = feature_engine.get_orderbook_snapshot()
+            if hasattr(feature_engine, 'get_orderbook_snapshot'):
+                current_depth = feature_engine.get_orderbook_snapshot()
 
             if market_regime == "TRENDING":
-                execution_success = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=risk_matrix["size"], current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp, depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine)
+                execution_success = await self.sor.execute_iceberg_block(
+                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
+                    depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
+                )
             else:
-                execution_success = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=risk_matrix["size"], current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp, depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine)
+                execution_success = await self.sor.execute_mean_reversion_bracket(
+                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
+                    depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
+                )
             
             if not execution_success:
                 self.active_positions_lock.discard(symbol)
@@ -890,10 +1081,19 @@ class DistributedQuantEngine:
                 
             self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
             
-            alert_text = (f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n• Node: {symbol} | {direction}\n• Market Regime: {market_regime}\n• Leverage Applied: {target_leverage}x\n• Notional Value: ${risk_matrix['allocated_value_usdt']:.2f} USDT\n🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}")
+            alert_text = (
+                f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
+                f"• Node: {symbol} | {direction}\n"
+                f"• Market Regime: {market_regime}\n"
+                f"• Leverage Applied: {target_leverage}x\n"
+                f"• Notional Value: ${risk_matrix['allocated_value_usdt']:.2f} USDT\n"
+                f"🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}"
+            )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
-            asyncio.create_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage, market_regime))
+            asyncio.create_task(self._position_lifecycle_daemon(
+                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage, market_regime
+            ))
             return True
 
         except Exception as e:
@@ -927,7 +1127,7 @@ class DistributedQuantEngine:
                                 has_active_position = True
                                 order_filled = True 
                                 break
-                except Exception as e:
+                except Exception:
                     has_active_position = False
 
                 if not order_filled and (time.time() - start_time) > 180:
@@ -936,8 +1136,10 @@ class DistributedQuantEngine:
                         open_orders = await asyncio.to_thread(self.executor.client.get_open_orders, category="linear", symbol=symbol)
                         for order in open_orders.get("result", {}).get("list", []):
                             if order.get("side").upper() == direction:
-                                await asyncio.to_thread(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=order.get("orderId"))
-                    except Exception as e:
+                                await asyncio.to_thread(
+                                    self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=order.get("orderId")
+                                )
+                    except Exception:
                         pass
                     
                     self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
@@ -951,7 +1153,15 @@ class DistributedQuantEngine:
                         entry_px = float(settlement.get('entry', current_price))
                         slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
                         
-                        report_message = (f"🔔 <b>EXCHANGE EXECUTION TERMINATION ALERT</b>\n━━━━━━━━━━━━━━━━━━━━━━\n📈 <b>Asset Node:</b> <code>{symbol}</code>\n📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n━━━━━━━━━━━━━━━━━━━━━━")
+                        report_message = (
+                            f"🔔 <b>EXCHANGE EXECUTION TERMINATION ALERT</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📈 <b>Asset Node:</b> <code>{symbol}</code>\n"
+                            f"📊 <b>Outcome Verdict:</b> " + ("🟢 PROFIT" if net_pnl > 0 else "🔴 LOSS") + f"\n"
+                            f"💰 <b>Net Session Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
+                            f"⚡ <b>Slippage Footprint:</b> <code>{slippage_drag:.4f} Price Units</code>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━"
+                        )
                         asyncio.create_task(self.telegram.send_html_report(report_message))
                         self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
                         self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
@@ -965,35 +1175,58 @@ class DistributedQuantEngine:
                         profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
                         
                         if market_regime == "RANGING":
-                            active_leash, be_trigger_1, be_trigger_2 = atr * 1.5, atr * 1.6, atr * 2.0
+                            active_leash = atr * 1.5
+                            be_trigger_1 = atr * 1.6
+                            be_trigger_2 = atr * 2.0
                         else:
-                            if profit_distance >= (atr * 3.0): active_leash = atr * 1.2   
-                            elif profit_distance >= (atr * 2.0): active_leash = atr * 1.5   
-                            elif profit_distance >= (atr * 1.0): active_leash = atr * 1.8   
-                            else: active_leash = atr * 2.2
-                            be_trigger_1, be_trigger_2 = atr * 1.0, atr * 1.8
+                            if profit_distance >= (atr * 3.0):
+                                active_leash = atr * 1.2   
+                            elif profit_distance >= (atr * 2.0):
+                                active_leash = atr * 1.5   
+                            elif profit_distance >= (atr * 1.0):
+                                active_leash = atr * 1.8   
+                            else:
+                                active_leash = atr * 2.2
+                                
+                            be_trigger_1 = atr * 1.0
+                            be_trigger_2 = atr * 1.8
 
-                        if trade_duration > 2700 and profit_distance < (atr * 1.0): active_leash = min(active_leash, atr * 0.75) 
-                        fee_offset = current_price * (0.00055 * 2 * target_leverage)
+                        if trade_duration > 2700 and profit_distance < (atr * 1.0):
+                            active_leash = min(active_leash, atr * 0.75) 
+                        
+                        # 🚀 THE CRITICAL MATH FIX: NO LEVERAGE MULTIPLIER ON FEES.
+                        fee_offset = current_price * (0.00055 * 2)
 
                         if direction == "BUY":
-                            if live_mid > peak_observed_price: peak_observed_price = live_mid
-                            if peak_observed_price >= (current_price + be_trigger_2): minimum_safe_stop = current_price + fee_offset + (atr * 0.5)
-                            elif peak_observed_price >= (current_price + be_trigger_1): minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
-                            else: minimum_safe_stop = 0.0
+                            if live_mid > peak_observed_price:
+                                peak_observed_price = live_mid
+                                
+                            if peak_observed_price >= (current_price + be_trigger_2):
+                                minimum_safe_stop = current_price + fee_offset + (atr * 0.5)
+                            elif peak_observed_price >= (current_price + be_trigger_1):
+                                minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
+                            else:
+                                minimum_safe_stop = 0.0
 
                             target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
+                            
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
                                 if await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))):
                                     current_hard_stop = target_stop
                                         
                         elif direction == "SELL":
-                            if live_mid < peak_observed_price: peak_observed_price = live_mid
-                            if peak_observed_price <= (current_price - be_trigger_2): minimum_safe_stop = current_price - fee_offset - (atr * 0.5)
-                            elif peak_observed_price <= (current_price - be_trigger_1): minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
-                            else: minimum_safe_stop = float('inf')
+                            if live_mid < peak_observed_price:
+                                peak_observed_price = live_mid
+                                
+                            if peak_observed_price <= (current_price - be_trigger_2):
+                                minimum_safe_stop = current_price - fee_offset - (atr * 0.5)
+                            elif peak_observed_price <= (current_price - be_trigger_1):
+                                minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
+                            else:
+                                minimum_safe_stop = float('inf')
 
                             target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
+                            
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
                                 if await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))):
                                     current_hard_stop = target_stop
@@ -1011,7 +1244,9 @@ class DistributedQuantEngine:
         boot_basket = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
         
         if boot_basket and len(boot_basket) >= 25:
-            if "BTCUSDT" in boot_basket: boot_basket.remove("BTCUSDT")
+            if "BTCUSDT" in boot_basket:
+                boot_basket.remove("BTCUSDT")
+                
             self.asset_basket = ["BTCUSDT"] + boot_basket[:24]
             self.shadow_basket = boot_basket[24:]
             
