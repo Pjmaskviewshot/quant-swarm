@@ -38,7 +38,11 @@ class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
-        self.test_mode = False 
+        # 🚀 THE FIX: Dynamic Environment Configuration
+        self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+        self.historical_win_rate = float(os.getenv("HISTORICAL_WIN_RATE", "0.58"))
+        self.historical_win_loss_ratio = float(os.getenv("HISTORICAL_WIN_LOSS_RATIO", "1.65"))
+        self.min_horizon_floor = int(os.getenv("MIN_HORIZON_FLOOR", "30"))
         
         if self.test_mode:
             logger.critical("⚠️ SYSTEM INITIALIZED IN TEST MODE (GHOST TRADING SIMULATION ACTIVE) ⚠️")
@@ -54,10 +58,7 @@ class DistributedQuantEngine:
         self.stream_restart_event = asyncio.Event()
         
         self.memory = MemoryBank()
-        
-        self.min_horizon_floor = 30
         self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=self.min_horizon_floor)
-        
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {
@@ -82,9 +83,6 @@ class DistributedQuantEngine:
         
         self.global_macro_news_cache: str = "No significant macro shifts detected."
         self.last_news_fetch: float = 0.0
-        
-        self.historical_win_rate = 0.58
-        self.historical_win_loss_ratio = 1.65
 
         self.global_state_cache = {
             "rolling_accuracy": 0.50,
@@ -179,34 +177,23 @@ class DistributedQuantEngine:
         return self.min_horizon_floor
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
-        vol_mult = float(metrics.get("vol_mult", 1.0))
-
+        # 🚀 THE FIX: Cleaned up dead variables and unified logic
         optimized = {
-            "cooldown_period": 900.0,
-            "z_score_threshold": 2.2, 
+            "cooldown_period": 600.0,
+            "z_score_threshold": 1.6, 
             "position_scaling": 1.0,
-            "sl_multiplier": 1.5,
+            "sl_multiplier": 1.25,
             "tp_multiplier": 2.0,
             "execution_verdict": True
         }
 
-        if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 1.8 
-            optimized["cooldown_period"] = 600.0  
-            optimized["position_scaling"] = 1.0  
-            # 🚀 FIX: Re-balanced stop loss to match trailing stop math
-            optimized["sl_multiplier"] = 1.5     
-            optimized["tp_multiplier"] = 2.0      
-            
-            if vol_mult < 0.4: 
-                optimized["execution_verdict"] = False
-                
-        elif market_regime == "TRENDING":
+        if market_regime == "TRENDING":
             optimized["z_score_threshold"] = 1.5 
             optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.5
             optimized["tp_multiplier"] = 3.5      
             
+            vol_mult = float(metrics.get("vol_mult", 1.0))
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 2.0
                 optimized["tp_multiplier"] = 5.0
@@ -343,6 +330,7 @@ class DistributedQuantEngine:
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
             except Exception as e:
+                # 🚀 THE FIX: Removed silent exception in data gatherer
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
             await asyncio.sleep(random.uniform(45.0, 75.0))
@@ -580,7 +568,12 @@ class DistributedQuantEngine:
             new_screener_metrics = {}
             
             for s in self.asset_basket:
-                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+                # 🚀 THE FIX: Explicitly reuse old engine to preserve history
+                if s in self.feature_engines:
+                    new_feature_engines[s] = self.feature_engines[s]
+                else:
+                    new_feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
+                    
                 new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": []})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
@@ -692,8 +685,9 @@ class DistributedQuantEngine:
                                 is_shadow=True
                             )
                             self.shadow_cooldown[symbol] = time.time()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # 🚀 THE FIX: Removed silent exception in shadow scanner
+                        logger.error(f"Shadow scanner error for {symbol}: {e}")
                     await asyncio.sleep(1.5) 
                 await asyncio.sleep(2) 
 
@@ -967,13 +961,12 @@ class DistributedQuantEngine:
             )
             
             rolling_acc = self.global_state_cache["rolling_accuracy"]
-            dynamic_window = self.global_state_cache["dynamic_window"]
-
+            
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
             
-            # 🚀 THE FIX: Golden Override completely deleted. The bot respects the shield now.
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
+                logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%}")
                 logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
                 self.active_positions_lock.discard(symbol)
                 return True
@@ -1163,9 +1156,6 @@ class DistributedQuantEngine:
                         profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
                         
                         if market_regime == "RANGING":
-                            # 🚀 THE FIX: Synchronized Leash. 
-                            # Stop Loss is 1.5 ATR. The leash trailing the peak is 1.2 ATR.
-                            # It is tighter than the SL, meaning it locks profit instead of getting hit by the hard stop.
                             active_leash = atr * 1.2
                             be_trigger_1 = atr * 1.0
                             be_trigger_2 = atr * 1.5
@@ -1201,8 +1191,15 @@ class DistributedQuantEngine:
                             target_stop = max(peak_observed_price - active_leash, minimum_safe_stop)
                             
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
-                                if await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))):
-                                    current_hard_stop = target_stop
+                                try:
+                                    response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                                    # 🚀 THE FIX: Validating Bybit API Response code
+                                    if isinstance(response, dict) and response.get("retCode") == 0:
+                                        current_hard_stop = target_stop
+                                    else:
+                                        logger.warning(f"Stop update rejected for {symbol}: {response.get('retMsg', response)}")
+                                except Exception as e:
+                                    logger.debug(f"⚠️ Trailing stop update bypassed by exchange for {symbol}: {e}")
                                         
                         elif direction == "SELL":
                             if live_mid < peak_observed_price:
@@ -1218,8 +1215,15 @@ class DistributedQuantEngine:
                             target_stop = min(peak_observed_price + active_leash, minimum_safe_stop)
                             
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
-                                if await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4))):
-                                    current_hard_stop = target_stop
+                                try:
+                                    response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                                    # 🚀 THE FIX: Validating Bybit API Response code
+                                    if isinstance(response, dict) and response.get("retCode") == 0:
+                                        current_hard_stop = target_stop
+                                    else:
+                                        logger.warning(f"Stop update rejected for {symbol}: {response.get('retMsg', response)}")
+                                except Exception as e:
+                                    logger.debug(f"⚠️ Trailing stop update bypassed by exchange for {symbol}: {e}")
 
         except Exception as daemon_error:
             logger.error(f"☠️ FATAL DAEMON CRASH on {symbol}: {daemon_error}")
