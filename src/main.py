@@ -160,7 +160,6 @@ class DistributedQuantEngine:
             logger.error(f"❌ Failed to synchronize exchange state on boot: {e}")
 
     async def cleanup_stale_locks(self):
-        """🚀 Background sweep to unlock bricked threads safely."""
         while True:
             await asyncio.sleep(300) 
             try:
@@ -192,17 +191,22 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 1.6 
+            optimized["z_score_threshold"] = 1.8 
             optimized["cooldown_period"] = 600.0  
             optimized["position_scaling"] = 1.0  
-            optimized["sl_multiplier"] = 1.25     
+            # 🚀 FIX: Re-balanced stop loss to match trailing stop math
+            optimized["sl_multiplier"] = 1.5     
             optimized["tp_multiplier"] = 2.0      
+            
+            if vol_mult < 0.4: 
+                optimized["execution_verdict"] = False
                 
         elif market_regime == "TRENDING":
             optimized["z_score_threshold"] = 1.5 
             optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.5
             optimized["tp_multiplier"] = 3.5      
+            
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 2.0
                 optimized["tp_multiplier"] = 5.0
@@ -300,7 +304,6 @@ class DistributedQuantEngine:
                     if task and task.done() and task.exception():
                         exc = task.exception()
                         logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception:")
-                        logger.error(f"\n{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}")
                     else:
                         logger.error(f"☠️ WATCHDOG ALERT: {symbol} worker thread vanished or stalled silently.")
                         
@@ -896,7 +899,6 @@ class DistributedQuantEngine:
         if optimization is None:
             optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
-        # 🚀 NO LEVERAGE MULTIPLIER ON FEES.
         fee_drag_factor = 0.00055 * 2 
         fee_buffer = entry_price * fee_drag_factor
         
@@ -970,13 +972,11 @@ class DistributedQuantEngine:
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
             
+            # 🚀 THE FIX: Golden Override completely deleted. The bot respects the shield now.
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
-                if is_golden_setup:
-                    logger.critical(f"🌟 [GOLDEN ALPHA OVERRIDE] Bypassing shield for {symbol}.")
-                else:
-                    logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
-                    self.active_positions_lock.discard(symbol)
-                    return True
+                logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
+                self.active_positions_lock.discard(symbol)
+                return True
             
             if self.test_mode:
                 self.active_positions_lock.discard(symbol)
@@ -1163,9 +1163,12 @@ class DistributedQuantEngine:
                         profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
                         
                         if market_regime == "RANGING":
-                            active_leash = atr * 1.5
-                            be_trigger_1 = atr * 1.6
-                            be_trigger_2 = atr * 2.0
+                            # 🚀 THE FIX: Synchronized Leash. 
+                            # Stop Loss is 1.5 ATR. The leash trailing the peak is 1.2 ATR.
+                            # It is tighter than the SL, meaning it locks profit instead of getting hit by the hard stop.
+                            active_leash = atr * 1.2
+                            be_trigger_1 = atr * 1.0
+                            be_trigger_2 = atr * 1.5
                         else:
                             if profit_distance >= (atr * 3.0):
                                 active_leash = atr * 1.2   
@@ -1182,7 +1185,6 @@ class DistributedQuantEngine:
                         if trade_duration > 2700 and profit_distance < (atr * 1.0):
                             active_leash = min(active_leash, atr * 0.75) 
                         
-                        # 🚀 THE CRITICAL MATH FIX: NO LEVERAGE MULTIPLIER ON FEES.
                         fee_offset = current_price * (0.00055 * 2)
 
                         if direction == "BUY":
@@ -1253,7 +1255,7 @@ class DistributedQuantEngine:
             self.stream_manager_loop(),
             self.run_system_heartbeat(),
             self.run_shadow_swarm_scanner(),
-            self.cleanup_stale_locks()
+            self.cleanup_stale_locks() 
         )
 
 if __name__ == "__main__":
