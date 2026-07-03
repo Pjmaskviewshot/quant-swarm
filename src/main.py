@@ -55,7 +55,7 @@ class DistributedQuantEngine:
         
         self.memory = MemoryBank()
         
-        self.min_horizon_floor = 150
+        self.min_horizon_floor = 30
         self.fsm = SystemStateMachine(accuracy_threshold=0.60, warmup_epochs=self.min_horizon_floor)
         
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
@@ -177,7 +177,7 @@ class DistributedQuantEngine:
                 logger.error(f"Cleanup thread failed: {e}")
 
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
-        return 250
+        return self.min_horizon_floor
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
         vol_mult = float(metrics.get("vol_mult", 1.0))
@@ -192,25 +192,17 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "RANGING":
-            optimized["z_score_threshold"] = 1.8 
-            optimized["cooldown_period"] = 1200.0  
+            optimized["z_score_threshold"] = 1.6 
+            optimized["cooldown_period"] = 600.0  
             optimized["position_scaling"] = 1.0  
             optimized["sl_multiplier"] = 1.25     
             optimized["tp_multiplier"] = 2.0      
-            
-            if vol_mult < 0.4: 
-                optimized["execution_verdict"] = False
-                
-            if vol_mult >= 3.0:
-                optimized["sl_multiplier"] = 1.5  
-                optimized["tp_multiplier"] = 2.5
                 
         elif market_regime == "TRENDING":
-            optimized["z_score_threshold"] = 1.6 
+            optimized["z_score_threshold"] = 1.5 
             optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.5
             optimized["tp_multiplier"] = 3.5      
-            
             if vol_mult >= 3.0:
                 optimized["sl_multiplier"] = 2.0
                 optimized["tp_multiplier"] = 5.0
@@ -244,12 +236,12 @@ class DistributedQuantEngine:
             try:
                 is_market_active = False
                 for sym, data in batch_payload.items():
-                    if abs(data.get("volatility_z_score", 0.0)) >= 2.0:
+                    if abs(data.get("volatility_z_score", 0.0)) >= 1.5:
                         is_market_active = True
                         break
 
                 if not is_market_active:
-                    logger.info("💤 COMMANDER: Matrix is flat (|Z| < 2.0). API bypassed to save execution costs.")
+                    logger.info("💤 COMMANDER: Matrix is flat (|Z| < 1.5). API bypassed to save execution costs.")
                     for symbol in batch_payload.keys():
                         self.macro_regimes[symbol] = "HOLD"
                         self.macro_confidences[symbol] = 0.0
@@ -383,16 +375,13 @@ class DistributedQuantEngine:
         vol_mult = metrics.get("vol_mult", 1.0)
         regime = self.macro_regimes.get(symbol, "HOLD")
         
-        if regime == "HOLD":
-            effective_z_threshold += 0.25
-
         fe = self.feature_engines[symbol]
         current_obi = fe.obi_history[-1] if len(fe.obi_history) > 0 else 0.0
         prev_obi = fe.obi_history[-2] if len(fe.obi_history) > 1 else current_obi
         current_tfi = fe.tfi_history[-1] if len(fe.tfi_history) > 0 else 0.0
 
-        adaptive_mieg_long = (z_obi <= -effective_z_threshold) and (current_obi > prev_obi) and (current_tfi > 0.2)
-        adaptive_mieg_short = (z_obi >= effective_z_threshold) and (current_obi < prev_obi) and (current_tfi < -0.2)
+        adaptive_mieg_long = (z_obi <= -effective_z_threshold) and (current_obi > prev_obi) and (current_tfi > 0.15)
+        adaptive_mieg_short = (z_obi >= effective_z_threshold) and (current_obi < prev_obi) and (current_tfi < -0.15)
 
         history = self.screener_memory.get(symbol, {}).get("prices", [])
         if len(history) < 20:
@@ -404,23 +393,23 @@ class DistributedQuantEngine:
         price_z_score = (mid_price - local_mean) / local_std
         
         spread_pct = real_spread / mid_price
-        if spread_pct > 0.0025:
+        if spread_pct > 0.0035:
             return 
             
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
-        is_golden_setup = vol_z_abs >= 2.4 and vol_mult >= 1.2
+        is_golden_setup = vol_z_abs >= 2.2 and vol_mult >= 1.0
             
         trade_direction = None
         has_pure_edge = False
         
-        if z_obi <= -effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_long:
-            if price_z_score <= -1.0: 
+        if z_obi <= -effective_z_threshold and adaptive_mieg_long:
+            if price_z_score <= -0.8: 
                 has_pure_edge = True
                 trade_direction = "BUY"
                 
-        elif z_obi >= effective_z_threshold and vol_mult >= 1.0 and adaptive_mieg_short:
-            if price_z_score >= 1.0: 
+        elif z_obi >= effective_z_threshold and adaptive_mieg_short:
+            if price_z_score >= 0.8: 
                 has_pure_edge = True
                 trade_direction = "SELL"
                 
@@ -460,11 +449,11 @@ class DistributedQuantEngine:
                     btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
                     btc_z_score = (btc_array[-1] - btc_mean) / btc_std
                     
-                    if btc_z_score <= -1.2:
-                        if trade_direction == "BUY" and correlation > 0.3:
+                    if btc_z_score <= -1.5:
+                        if trade_direction == "BUY" and correlation > 0.4:
                             return
-                    if btc_z_score >= 1.2:
-                        if trade_direction == "SELL" and correlation > 0.3:
+                    if btc_z_score >= 1.5:
+                        if trade_direction == "SELL" and correlation > 0.4:
                             return
 
         self.last_execution_timestamps[symbol] = current_time
@@ -685,7 +674,6 @@ class DistributedQuantEngine:
                                 "bid_ask_spread": 0.0
                             }
                             
-                            # 🚀 THE FIX: Passing is_shadow=True to prevent FSM pollution
                             self.memory.commit_prediction(
                                 str(uuid.uuid4()),
                                 time.time(),
@@ -752,8 +740,7 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours.")
 
             if loop_counter % 5 == 0:
-                avg_dynamic_window = 250
-                # 🚀 THE FIX: Grading accuracy only on core basket
+                avg_dynamic_window = self.min_horizon_floor
                 accuracy, pool_size = self.memory.compute_rolling_accuracy(
                     window_size=avg_dynamic_window, core_basket=self.asset_basket
                 )
@@ -764,7 +751,6 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
-                # 🚀 THE FIX: Emergency Lock Recovery Path
                 if accuracy < 0.60:
                     if self.fsm.current_state != TradingState.EMERGENCY_LOCK:
                         self.fsm.current_state = TradingState.CALIBRATING
@@ -795,7 +781,6 @@ class DistributedQuantEngine:
                     logger.critical(f"💸 MANUAL WITHDRAWAL DETECTED. Auto-Calibrating FSM Baseline.")
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
                     baseline = self.global_state_cache["wallet_baseline"]
-                    # 🚀 THE FIX: Resetting Risk Vault peak balance to prevent permanent 99% drawdown glitch
                     if hasattr(self.risk_vault, 'peak_balance'):
                         self.risk_vault.peak_balance = baseline
                     
@@ -875,7 +860,6 @@ class DistributedQuantEngine:
 
                 diagnostic_block = "\n".join(diagnostic_nodes)
 
-                # 🚀 Expanded Telegram Formatter
                 report = (
                     f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -907,8 +891,7 @@ class DistributedQuantEngine:
         if optimization is None:
             optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
             
-        # 🚀 THE CRITICAL MATH FIX: NO LEVERAGE MULTIPLIER ON FEES.
-        # Bybit taker fee is 0.055%. Round trip is 0.11%.
+        # 🚀 NO LEVERAGE MULTIPLIER ON FEES.
         fee_drag_factor = 0.00055 * 2 
         fee_buffer = entry_price * fee_drag_factor
         
@@ -967,7 +950,9 @@ class DistributedQuantEngine:
                 "market_regime": market_regime,
                 "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult,
-                "bid_ask_spread": real_spread
+                "bid_ask_spread": real_spread,
+                "virtual_sl": current_price - (optimization["sl_multiplier"] * atr) if direction == "BUY" else current_price + (optimization["sl_multiplier"] * atr),
+                "virtual_tp": current_price + (optimization["tp_multiplier"] * atr) if direction == "BUY" else current_price - (optimization["tp_multiplier"] * atr)
             }
             
             self.memory.commit_prediction(
@@ -1104,7 +1089,6 @@ class DistributedQuantEngine:
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8, market_regime: str = "RANGING"):
         logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
         
-        # 🚀 THE FIX: Thread Safety. Guaranteed to release the lock.
         try:
             polling_interval = 4  
             start_time = time.time()
@@ -1132,7 +1116,6 @@ class DistributedQuantEngine:
 
                 if not order_filled and (time.time() - start_time) > 180:
                     try:
-                        # 🚀 THE FIX: Surgical Order Cancellation
                         open_orders = await asyncio.to_thread(self.executor.client.get_open_orders, category="linear", symbol=symbol)
                         for order in open_orders.get("result", {}).get("list", []):
                             if order.get("side").upper() == direction:
@@ -1265,7 +1248,7 @@ class DistributedQuantEngine:
             self.stream_manager_loop(),
             self.run_system_heartbeat(),
             self.run_shadow_swarm_scanner(),
-            self.cleanup_stale_locks() # 🚀 THE FIX: Runs background sweep for dead threads
+            self.cleanup_stale_locks()
         )
 
 if __name__ == "__main__":
