@@ -597,7 +597,12 @@ class DistributedQuantEngine:
             
             for old_symbol in list(self.active_workers.keys()):
                 if old_symbol not in self.asset_basket:
-                    self.active_workers[old_symbol].cancel()
+                    task = self.active_workers[old_symbol]
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=2.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
                     del self.active_workers[old_symbol]
                     self.pending_macro_payloads.pop(old_symbol, None)
                     
