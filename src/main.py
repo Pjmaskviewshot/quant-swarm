@@ -38,6 +38,7 @@ class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
+        # 🚀 THE FIX: Dynamic Environment Configuration
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         self.historical_win_rate = float(os.getenv("HISTORICAL_WIN_RATE", "0.58"))
         self.historical_win_loss_ratio = float(os.getenv("HISTORICAL_WIN_LOSS_RATIO", "1.65"))
@@ -176,6 +177,7 @@ class DistributedQuantEngine:
         return self.min_horizon_floor
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
+        # 🚀 THE FIX: Cleaned up dead variables and unified logic
         optimized = {
             "cooldown_period": 600.0,
             "z_score_threshold": 1.6, 
@@ -328,6 +330,7 @@ class DistributedQuantEngine:
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
             except Exception as e:
+                # 🚀 THE FIX: Removed silent exception in data gatherer
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
             await asyncio.sleep(random.uniform(45.0, 75.0))
@@ -380,9 +383,8 @@ class DistributedQuantEngine:
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
-        # 🚀 THE FIX: Dynamic Toxic Spread Wall (0.35% max)
         spread_pct = real_spread / mid_price
-        if spread_pct > 0.0035:
+        if spread_pct > 0.0030: # 🚀 THE FIX: Strict Toxic Spread Wall (0.30% max)
             return 
             
         raw_vol_z = metrics.get("vol_z", 0.0)
@@ -402,6 +404,11 @@ class DistributedQuantEngine:
                 has_pure_edge = True
                 trade_direction = "SELL"
                 
+        if is_golden_setup and not has_pure_edge and market_regime == "TRENDING":
+            has_pure_edge = True
+            trade_direction = "BUY" if price_z_score >= 0.0 else "SELL"
+            logger.critical(f"⚡ [PARABOLIC STRIKE TRIGGERED] {symbol} bypassing tape confirmation.")
+
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
         if not has_pure_edge:
@@ -561,6 +568,7 @@ class DistributedQuantEngine:
             new_screener_metrics = {}
             
             for s in self.asset_basket:
+                # 🚀 THE FIX: Explicitly reuse old engine to preserve history
                 if s in self.feature_engines:
                     new_feature_engines[s] = self.feature_engines[s]
                 else:
@@ -678,6 +686,7 @@ class DistributedQuantEngine:
                             )
                             self.shadow_cooldown[symbol] = time.time()
                     except Exception as e:
+                        # 🚀 THE FIX: Removed silent exception in shadow scanner
                         logger.error(f"Shadow scanner error for {symbol}: {e}")
                     await asyncio.sleep(1.5) 
                 await asyncio.sleep(2) 
@@ -937,9 +946,9 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 THE FIX: Dynamic Volume Floor
-            if vol_mult < 0.25:
-                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.25x safe limit. Trade skipped.")
+            # 🚀 THE FIX: Isolated Toxic Coin Fix (0.30x)
+            if vol_mult < 0.30:
+                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.30x safe limit. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
             
@@ -984,7 +993,7 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 THE FIX: Dynamic Uncapped Capital Allocation
+            # 🚀 THE FIX: Dynamic Uncapped Capital Allocation (Risk Manager Upgrade)
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
             
@@ -992,8 +1001,6 @@ class DistributedQuantEngine:
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
             
             # Dynamic Leverage Ceiling: Scales automatically with the FSM's rolling accuracy.
-            # Base multiplier is 1.0x. For every 10% accuracy above 50%, the multiplier increases dynamically.
-            # Example: At 60% accuracy -> 2.0x multiplier. At 80% accuracy -> 4.0x multiplier.
             dynamic_concentration_multiplier = 1.0 + ((rolling_acc - 0.50) * 10.0) if rolling_acc > 0.50 else 1.0
             dynamic_concentration_notional = balance * max(1.0, dynamic_concentration_multiplier)
             
@@ -1034,8 +1041,8 @@ class DistributedQuantEngine:
             slippage_penalty = safe_spread * (1.0 / max(0.4, vol_mult))
             total_friction = safe_spread + slippage_penalty
             
-            # 🚀 THE FIX: Dynamic Friction-to-Profit Barrier
-            if expected_profit < (total_friction * 1.1):
+            # --- RESTORED YESTERDAY'S PROFIT BARRIER ---
+            if expected_profit < total_friction:
                 logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total friction. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
@@ -1192,6 +1199,7 @@ class DistributedQuantEngine:
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
                                 try:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                                    # 🚀 THE FIX: Validating Bybit API Response code
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
                                     else:
@@ -1215,6 +1223,7 @@ class DistributedQuantEngine:
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
                                 try:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
+                                    # 🚀 THE FIX: Validating Bybit API Response code
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
                                     else:
