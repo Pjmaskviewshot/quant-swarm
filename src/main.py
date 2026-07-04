@@ -38,7 +38,7 @@ class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
-        # 🚀 THE FIX: Dynamic Environment Configuration
+        # 🚀 SYSTEM CONFIGURATION
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         self.historical_win_rate = float(os.getenv("HISTORICAL_WIN_RATE", "0.58"))
         self.historical_win_loss_ratio = float(os.getenv("HISTORICAL_WIN_LOSS_RATIO", "1.65"))
@@ -177,12 +177,13 @@ class DistributedQuantEngine:
         return self.min_horizon_floor
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
+        # 🚀 MASTER UPGRADE: The Wick Absorber (Ranging Market Defaults)
         optimized = {
             "cooldown_period": 600.0,
-            "z_score_threshold": 1.6, 
+            "z_score_threshold": 2.0, 
             "position_scaling": 1.0,
-            "sl_multiplier": 1.25,
-            "tp_multiplier": 2.0,
+            "sl_multiplier": 2.5,  # Widened to absorb market chop
+            "tp_multiplier": 2.5,
             "execution_verdict": True
         }
 
@@ -388,13 +389,12 @@ class DistributedQuantEngine:
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
         
-        # 🚀 THE UPGRADE: Regime-Specific Alpha Execution
+        # 🚀 MASTER UPGRADE: Regime-Specific Alpha Execution
         trade_direction = None
         has_pure_edge = False
         is_golden_setup = False
         
         if market_regime == "TRENDING":
-            # BREAKOUT MECHANICS: We demand volume expansion (vol_mult > 1.2) to confirm institutional backing.
             if vol_mult >= 1.2 and vol_z_abs >= 1.5:
                 if z_obi <= -effective_z_threshold and adaptive_mieg_long and price_z_score <= -0.5:
                     has_pure_edge = True
@@ -403,7 +403,6 @@ class DistributedQuantEngine:
                     has_pure_edge = True
                     trade_direction = "SELL"
                     
-            # PARABOLIC STRIKE: Absolute momentum dominance
             if vol_z_abs >= 2.5 and vol_mult >= 2.0 and not has_pure_edge:
                 has_pure_edge = True
                 is_golden_setup = True
@@ -411,9 +410,6 @@ class DistributedQuantEngine:
                 logger.critical(f"⚡ [PARABOLIC STRIKE] {symbol} bypassing tape. Riding raw institutional momentum.")
 
         elif market_regime == "RANGING":
-            # EXHAUSTION MECHANICS: To win the chop, we do the exact opposite. 
-            # We fade the extreme outer bands (Z >= 2.0) ONLY when volume is dying (vol_mult < 1.0). 
-            # High volume at a boundary = Breakout (Danger). Low volume at a boundary = Trap (Opportunity).
             is_exhausted = vol_mult < 1.0 
             is_extreme_deviation = abs(price_z_score) >= 2.0 
             
@@ -962,7 +958,6 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 THE FIX: Isolated Toxic Coin Fix (0.30x)
             if vol_mult < 0.30:
                 logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.30x safe limit. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
@@ -999,11 +994,8 @@ class DistributedQuantEngine:
 
             balance = await self.executor.get_wallet_balance_usdt()
             
-            # 🚀 THE UPGRADE: Dynamic Swarm Concurrency Limit
-            active_live_trades = len(getattr(self.risk_vault, 'active_positions', {}))
-            
-            # If accuracy is just barely recovering (60%-70%), strictly limit the bot to 2 live trades at a time.
-            # If accuracy proves it is crushing the market (>70%), unlock up to 5 simultaneous slots.
+            # 🚀 MASTER UPGRADE: Dynamic Swarm Concurrency Limit (Async-Safe)
+            active_live_trades = len(self.active_positions_lock)
             max_allowed_trades = 2 if rolling_acc < 0.70 else 5
             
             if not self.test_mode and active_live_trades >= max_allowed_trades:
@@ -1022,23 +1014,20 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
-            
-            base_opex_target = 0.26
-            amortization_weight = math.tanh(balance / 45.0) 
-            active_opex_target = base_opex_target * amortization_weight
-            
-            opex_required_notional = active_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
-            max_concentration_notional = balance * 1.45 
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
+            
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
-            safety_ceiling = min(absolute_max_notional, max_concentration_notional)
+            
+            dynamic_concentration_multiplier = 1.0 + ((rolling_acc - 0.50) * 10.0) if rolling_acc > 0.50 else 1.0
+            dynamic_concentration_notional = balance * max(1.0, dynamic_concentration_multiplier)
+            
+            safety_ceiling = min(absolute_max_notional, dynamic_concentration_notional)
             
             base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
             min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
-            dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
-            final_allocation = min(dynamic_allocation, safety_ceiling)
+            
+            final_allocation = min(max(base_kelly_allocation, min_exchange_notional), safety_ceiling)
             
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             margin_required = final_allocation / target_leverage
@@ -1068,7 +1057,6 @@ class DistributedQuantEngine:
             slippage_penalty = safe_spread * (1.0 / max(0.4, vol_mult))
             total_friction = safe_spread + slippage_penalty
             
-            # --- RESTORED YESTERDAY'S PROFIT BARRIER ---
             if expected_profit < total_friction:
                 logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total friction. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
@@ -1226,7 +1214,6 @@ class DistributedQuantEngine:
                             if target_stop > (current_hard_stop + minimum_api_step) and target_stop < live_mid:
                                 try:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
-                                    # 🚀 THE FIX: Validating Bybit API Response code
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
                                     else:
@@ -1250,7 +1237,6 @@ class DistributedQuantEngine:
                             if target_stop < (current_hard_stop - minimum_api_step) and target_stop > live_mid:
                                 try:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
-                                    # 🚀 THE FIX: Validating Bybit API Response code
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
                                     else:
