@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Dict, Any, List
 
 logger = logging.getLogger("QUANT_CORE.RISK_MANAGER")
@@ -7,7 +8,7 @@ class InstitutionalRiskVault:
     def __init__(self, max_drawdown_pct: float = 0.25, max_single_position_risk_pct: float = 0.15, exchange_min_notional: float = 5.0, max_single_asset_leverage_limit: float = 1.5):
         """
         Risk engine initialized with baseline protections and Phase 2 advanced safety rings.
-        Optimized for small account balances to meet exchange limits while safeguarding capital.
+        Optimized dynamically to handle both micro-balances and large account scaling seamlessly.
         
         Parameters:
             max_drawdown_pct (float): Maximum trailing drawdown limit before circuit breaking.
@@ -23,18 +24,12 @@ class InstitutionalRiskVault:
         self.emergency_circuit_breaker = False
         
         # --- GLOBAL PORTFOLIO LEDGER ---
-        # Tracks current notional exposure for all assets in the swarm to prevent over-leverage
         self.active_positions: Dict[str, float] = {}
 
         # ====================================================================
-        # 🚀 PHASE 2 UPGRADES: RISK HARDENING LAYERS
+        # 🚀 PHASE 2 UPGRADES: DYNAMIC CAPITAL HARDENING LAYERS
         # ====================================================================
-        # 1. CAPITAL HARVESTING VAULT BASELINE
-        # Any profits generated above this threshold are locked away from active margin calculations.
-        self.harvesting_baseline_usdt = 100.0
-        
-        # 2. CROSS-ASSET CORRELATION MATRIX GROUPS
-        # Map highly covariant tickers to prevent simultaneous exposure to macro flash-crashes.
+        # Cross-asset correlation groups to prevent structural systemic risk
         self.correlation_groups = {
             "L1_HIGH_COVARIANCE": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         }
@@ -62,14 +57,11 @@ class InstitutionalRiskVault:
                     self.emergency_circuit_breaker = True
                 return False
         
-        # 🚀 PHASE 2 ADVANCEMENT: CROSS-ASSET CORRELATION GUARD
-        # Scans current active trades to prevent holding overlapping high-covariance cluster positions.
+        # 4. Cross-Asset Correlation Guard
         if symbol and new_position_notional > 0:
             for group_name, asset_list in self.correlation_groups.items():
                 if symbol in asset_list:
-                    # Check if any other asset in this identical cluster group is currently active
                     active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
-                    
                     if active_correlated_nodes:
                         logger.warning(
                             f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected. "
@@ -77,15 +69,14 @@ class InstitutionalRiskVault:
                         )
                         return False
 
-        # 4. Check Node-Specific Allocation Cap (Concentration Risk Mitigation)
+        # 5. Check Node-Specific Allocation Cap (Concentration Risk Mitigation)
         if symbol:
             current_node_exposure = self.active_positions.get(symbol, 0.0)
             if (current_node_exposure + new_position_notional) > (current_balance * self.max_single_asset_leverage_limit):
                 logger.warning(f"⚠️ Single asset concentration risk limit reached for {symbol}: Exceeds limit of {self.max_single_asset_leverage_limit}x balance.")
                 return False
 
-        # 5. Check Global Exposure (The Swarm Central Banker)
-        # Sum of current positions + proposed position must not exceed 300% of balance
+        # 6. Check Global Exposure (The Swarm Central Banker)
         total_exposure = sum(self.active_positions.values()) + new_position_notional
         if total_exposure > (current_balance * 3.0):
             logger.warning(f"⚠️ Global exposure limit reached: Current {sum(self.active_positions.values()):.2f} + New {new_position_notional:.2f} exceeds capacity.")
@@ -108,28 +99,33 @@ class InstitutionalRiskVault:
 
     def compute_variance_adjusted_kelly(self, account_balance: float, win_rate: float, win_loss_ratio: float, asset_volatility_atr: float, current_price: float, ai_confidence: float = 0.5, market_regime: str = "TRENDING") -> Dict[str, Any]:
         """
-        Calculates position sizes using the Kelly Criterion, adjusted for market variance, AI confidence, 
-        macroeconomic regime states, and isolates compounded returns into a harvesting chamber.
+        Calculates position sizes using the Kelly Criterion, dynamically adjusting operating limits 
+        to ensure infinite scalability from tiny seed funds up to institutional account tiers.
         """
         if self.emergency_circuit_breaker:
             return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
 
-        # Safety bounds guard for input parsing
         if current_price <= 0 or asset_volatility_atr < 0:
             logger.error("Invalid pricing vectors passed to Kelly optimization module.")
             return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
 
-        # 🚀 PHASE 2 ADVANCEMENT: DYNAMIC CAPITAL HARVESTING VAULT
-        # If the account balance compounds past our target baseline limit, the engine captures and locks 
-        # away the excess, restricting Kelly sizing inputs strictly to the baseline amount to insulate cash.
-        effective_balance = account_balance
-        if account_balance > self.harvesting_baseline_usdt:
-            harvested_yield = account_balance - self.harvesting_baseline_usdt
-            effective_balance = self.harvesting_baseline_usdt
-            logger.info(
-                f"💰 HARVESTING VAULT ENGAGED // Total Wallet: ${account_balance:.4f} USDT | "
-                f"Isolated Secured Yield: ${harvested_yield:.4f} USDT | Kelly Operating Baseline: ${effective_balance:.2f} USDT"
-            )
+        # ====================================================================
+        # 🚀 ADJUSTMENT: ADAPTIVE COMPOUNDING HARVESTER
+        # ====================================================================
+        # If account balance is small (< $50), unlock 100% of capital availability to cross exchange minimum constraints.
+        # As the vault scales, automatically convert to a trailing 85% operating base, locking away a fluid 15% cash yield.
+        if account_balance > 50.0:
+            dynamic_baseline = self.peak_balance * 0.85
+            effective_balance = min(account_balance, dynamic_baseline)
+            harvested_yield = max(0.0, account_balance - effective_balance)
+            
+            if harvested_yield > 0:
+                logger.info(
+                    f"💰 DYNAMIC HARVESTING ACTIVE // Total Balance: ${account_balance:.2f} USDT | "
+                    f"Protected Trailing Reserve: ${harvested_yield:.2f} USDT | Active Kelly Compounding Base: ${effective_balance:.2f} USDT"
+                )
+        else:
+            effective_balance = account_balance
 
         # Standard Kelly Formula: f = p - (q / b)
         p = max(0.0, min(1.0, win_rate))
@@ -175,7 +171,7 @@ class InstitutionalRiskVault:
             
         base_leverage = min(5, leverage_cap)
         
-        # Initial target capital deployment (margin size calculated using effective safe harvesting balance)
+        # Target capital deployment
         margin_allocated = effective_balance * safe_fraction
         calculated_notional = margin_allocated * base_leverage
         

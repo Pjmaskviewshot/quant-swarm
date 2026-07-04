@@ -984,23 +984,27 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            conservative_win_pct = (1.0 * atr) / current_price
+            # 🚀 THE FIX: Dynamic Uncapped Capital Allocation
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
-            
-            base_opex_target = 0.26
-            amortization_weight = math.tanh(balance / 45.0) 
-            active_opex_target = base_opex_target * amortization_weight
-            
-            opex_required_notional = active_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
-            max_concentration_notional = balance * 1.45 
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
+            
+            # Calculate exactly how much notional volume we can safely trade without risking >15% of the total wallet if stopped out.
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
-            safety_ceiling = min(absolute_max_notional, max_concentration_notional)
+            
+            # Dynamic Leverage Ceiling: Scales automatically with the FSM's rolling accuracy.
+            # Base multiplier is 1.0x. For every 10% accuracy above 50%, the multiplier increases dynamically.
+            # Example: At 60% accuracy -> 2.0x multiplier. At 80% accuracy -> 4.0x multiplier.
+            dynamic_concentration_multiplier = 1.0 + ((rolling_acc - 0.50) * 10.0) if rolling_acc > 0.50 else 1.0
+            dynamic_concentration_notional = balance * max(1.0, dynamic_concentration_multiplier)
+            
+            # The safety ceiling strictly respects whichever is mathematically safer for the current market state.
+            safety_ceiling = min(absolute_max_notional, dynamic_concentration_notional)
             
             base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
             min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
-            dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
-            final_allocation = min(dynamic_allocation, safety_ceiling)
+            
+            # Let the Kelly Criterion run freely, uncapped by legacy OpEx limits, up to the dynamic safety ceiling.
+            final_allocation = min(max(base_kelly_allocation, min_exchange_notional), safety_ceiling)
             
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             margin_required = final_allocation / target_leverage
