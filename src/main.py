@@ -380,9 +380,9 @@ class DistributedQuantEngine:
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
-        # 🚀 THE FIX: Dynamic Toxic Spread Wall (0.20% max)
+        # 🚀 THE FIX: Dynamic Toxic Spread Wall (0.35% max)
         spread_pct = real_spread / mid_price
-        if spread_pct > 0.0020:
+        if spread_pct > 0.0035:
             return 
             
         raw_vol_z = metrics.get("vol_z", 0.0)
@@ -938,8 +938,8 @@ class DistributedQuantEngine:
             vol_mult = metrics.get("vol_mult", 1.0)
             
             # 🚀 THE FIX: Dynamic Volume Floor
-            if vol_mult < 0.5:
-                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.5x safe limit. Trade skipped.")
+            if vol_mult < 0.25:
+                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.25x safe limit. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
             
@@ -1031,7 +1031,7 @@ class DistributedQuantEngine:
             total_friction = safe_spread + slippage_penalty
             
             # 🚀 THE FIX: Dynamic Friction-to-Profit Barrier
-            if expected_profit < (total_friction * 1.5):
+            if expected_profit < (total_friction * 1.1):
                 logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total friction. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
