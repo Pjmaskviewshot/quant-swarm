@@ -177,7 +177,6 @@ class DistributedQuantEngine:
         return self.min_horizon_floor
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
-        # 🚀 THE FIX: Cleaned up dead variables and unified logic
         optimized = {
             "cooldown_period": 600.0,
             "z_score_threshold": 1.6, 
@@ -330,7 +329,6 @@ class DistributedQuantEngine:
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
             except Exception as e:
-                # 🚀 THE FIX: Removed silent exception in data gatherer
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
             await asyncio.sleep(random.uniform(45.0, 75.0))
@@ -384,30 +382,50 @@ class DistributedQuantEngine:
         price_z_score = (mid_price - local_mean) / local_std
         
         spread_pct = real_spread / mid_price
-        if spread_pct > 0.0030: # 🚀 THE FIX: Strict Toxic Spread Wall (0.30% max)
+        if spread_pct > 0.0030: # 🚀 Strict Toxic Spread Wall
             return 
             
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
-        is_golden_setup = vol_z_abs >= 2.2 and vol_mult >= 1.0
-            
+        
+        # 🚀 THE UPGRADE: Regime-Specific Alpha Execution
         trade_direction = None
         has_pure_edge = False
+        is_golden_setup = False
         
-        if z_obi <= -effective_z_threshold and adaptive_mieg_long:
-            if price_z_score <= -0.8: 
+        if market_regime == "TRENDING":
+            # BREAKOUT MECHANICS: We demand volume expansion (vol_mult > 1.2) to confirm institutional backing.
+            if vol_mult >= 1.2 and vol_z_abs >= 1.5:
+                if z_obi <= -effective_z_threshold and adaptive_mieg_long and price_z_score <= -0.5:
+                    has_pure_edge = True
+                    trade_direction = "BUY"
+                elif z_obi >= effective_z_threshold and adaptive_mieg_short and price_z_score >= 0.5:
+                    has_pure_edge = True
+                    trade_direction = "SELL"
+                    
+            # PARABOLIC STRIKE: Absolute momentum dominance
+            if vol_z_abs >= 2.5 and vol_mult >= 2.0 and not has_pure_edge:
                 has_pure_edge = True
-                trade_direction = "BUY"
-                
-        elif z_obi >= effective_z_threshold and adaptive_mieg_short:
-            if price_z_score >= 0.8: 
-                has_pure_edge = True
-                trade_direction = "SELL"
-                
-        if is_golden_setup and not has_pure_edge and market_regime == "TRENDING":
-            has_pure_edge = True
-            trade_direction = "BUY" if price_z_score >= 0.0 else "SELL"
-            logger.critical(f"⚡ [PARABOLIC STRIKE TRIGGERED] {symbol} bypassing tape confirmation.")
+                is_golden_setup = True
+                trade_direction = "BUY" if price_z_score > 0 else "SELL"
+                logger.critical(f"⚡ [PARABOLIC STRIKE] {symbol} bypassing tape. Riding raw institutional momentum.")
+
+        elif market_regime == "RANGING":
+            # EXHAUSTION MECHANICS: To win the chop, we do the exact opposite. 
+            # We fade the extreme outer bands (Z >= 2.0) ONLY when volume is dying (vol_mult < 1.0). 
+            # High volume at a boundary = Breakout (Danger). Low volume at a boundary = Trap (Opportunity).
+            is_exhausted = vol_mult < 1.0 
+            is_extreme_deviation = abs(price_z_score) >= 2.0 
+            
+            if is_extreme_deviation and is_exhausted:
+                if price_z_score <= -2.0 and z_obi <= -effective_z_threshold: 
+                    has_pure_edge = True
+                    trade_direction = "BUY"
+                    logger.critical(f"🕸️ [LIQUIDITY TRAP] {symbol} Exhausted Dip (Z: {price_z_score:.2f}). Reverting to Mean.")
+                elif price_z_score >= 2.0 and z_obi >= effective_z_threshold: 
+                    has_pure_edge = True
+                    trade_direction = "SELL"
+                    logger.critical(f"🕸️ [LIQUIDITY TRAP] {symbol} Exhausted Pump (Z: {price_z_score:.2f}). Reverting to Mean.")
 
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
@@ -568,7 +586,6 @@ class DistributedQuantEngine:
             new_screener_metrics = {}
             
             for s in self.asset_basket:
-                # 🚀 THE FIX: Explicitly reuse old engine to preserve history
                 if s in self.feature_engines:
                     new_feature_engines[s] = self.feature_engines[s]
                 else:
@@ -686,7 +703,6 @@ class DistributedQuantEngine:
                             )
                             self.shadow_cooldown[symbol] = time.time()
                     except Exception as e:
-                        # 🚀 THE FIX: Removed silent exception in shadow scanner
                         logger.error(f"Shadow scanner error for {symbol}: {e}")
                     await asyncio.sleep(1.5) 
                 await asyncio.sleep(2) 
@@ -982,6 +998,19 @@ class DistributedQuantEngine:
                 return True 
 
             balance = await self.executor.get_wallet_balance_usdt()
+            
+            # 🚀 THE UPGRADE: Dynamic Swarm Concurrency Limit
+            active_live_trades = len(getattr(self.risk_vault, 'active_positions', {}))
+            
+            # If accuracy is just barely recovering (60%-70%), strictly limit the bot to 2 live trades at a time.
+            # If accuracy proves it is crushing the market (>70%), unlock up to 5 simultaneous slots.
+            max_allowed_trades = 2 if rolling_acc < 0.70 else 5
+            
+            if not self.test_mode and active_live_trades >= max_allowed_trades:
+                logger.warning(f"🛑 CONCURRENCY CAPPED // {active_live_trades} active trades. Pausing {symbol} to prevent swarm over-exposure.")
+                self.active_positions_lock.discard(symbol)
+                return False
+
             risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
                 account_balance=balance, win_rate=self.historical_win_rate,
                 win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
@@ -993,25 +1022,23 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 THE FIX: Dynamic Uncapped Capital Allocation (Risk Manager Upgrade)
+            conservative_win_pct = (1.0 * atr) / current_price
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
+            
+            base_opex_target = 0.26
+            amortization_weight = math.tanh(balance / 45.0) 
+            active_opex_target = base_opex_target * amortization_weight
+            
+            opex_required_notional = active_opex_target / conservative_win_pct if conservative_win_pct > 0 else 0.0
+            max_concentration_notional = balance * 1.45 
             max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
-            
-            # Calculate exactly how much notional volume we can safely trade without risking >15% of the total wallet if stopped out.
             absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
-            
-            # Dynamic Leverage Ceiling: Scales automatically with the FSM's rolling accuracy.
-            dynamic_concentration_multiplier = 1.0 + ((rolling_acc - 0.50) * 10.0) if rolling_acc > 0.50 else 1.0
-            dynamic_concentration_notional = balance * max(1.0, dynamic_concentration_multiplier)
-            
-            # The safety ceiling strictly respects whichever is mathematically safer for the current market state.
-            safety_ceiling = min(absolute_max_notional, dynamic_concentration_notional)
+            safety_ceiling = min(absolute_max_notional, max_concentration_notional)
             
             base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
             min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
-            
-            # Let the Kelly Criterion run freely, uncapped by legacy OpEx limits, up to the dynamic safety ceiling.
-            final_allocation = min(max(base_kelly_allocation, min_exchange_notional), safety_ceiling)
+            dynamic_allocation = max(base_kelly_allocation, opex_required_notional, min_exchange_notional)
+            final_allocation = min(dynamic_allocation, safety_ceiling)
             
             target_leverage = risk_matrix.get("recommended_leverage", 1)
             margin_required = final_allocation / target_leverage
