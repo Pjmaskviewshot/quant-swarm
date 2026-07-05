@@ -965,6 +965,12 @@ class DistributedQuantEngine:
                 logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.30x safe limit. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
+
+            # 🚀 FIX: Calculate the TRUE dynamic brackets FIRST so the database grades us fairly
+            tick_size = self.tick_sizes.get(symbol, 0.0001) 
+            initial_sl, target_tp = self.calculate_initial_bracket(
+                current_price, atr, direction, 8, vol_z_abs, optimization, tick_size
+            )
             
             features_dict = {
                 "symbol": symbol,
@@ -972,8 +978,8 @@ class DistributedQuantEngine:
                 "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult,
                 "bid_ask_spread": real_spread,
-                "virtual_sl": current_price - (optimization["sl_multiplier"] * atr) if direction == "BUY" else current_price + (optimization["sl_multiplier"] * atr),
-                "virtual_tp": current_price + (optimization["tp_multiplier"] * atr) if direction == "BUY" else current_price - (optimization["tp_multiplier"] * atr)
+                "virtual_sl": initial_sl,  # 🚀 Now uses the true Log-Normal Expanded SL
+                "virtual_tp": target_tp    # 🚀 Now uses the true Log-Normal Expanded TP
             }
             
             self.memory.commit_prediction(
@@ -1049,11 +1055,6 @@ class DistributedQuantEngine:
             if not leverage_success:
                 self.active_positions_lock.discard(symbol)
                 return False
-            
-            tick_size = self.tick_sizes.get(symbol, 0.0001) 
-            initial_sl, target_tp = self.calculate_initial_bracket(
-                current_price, atr, direction, target_leverage, vol_z_abs, optimization, tick_size
-            )
             
             expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
             safe_spread = max(real_spread, current_price * 0.0001) 
