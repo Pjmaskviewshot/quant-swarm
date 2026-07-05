@@ -903,20 +903,23 @@ class DistributedQuantEngine:
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
         if optimization is None:
-            optimization = {"sl_multiplier": 1.5, "tp_multiplier": 2.0}
+            optimization = {"sl_multiplier": 2.5, "tp_multiplier": 2.5}
             
         fee_drag_factor = 0.00055 * 2 
         fee_buffer = entry_price * fee_drag_factor
         
-        tp_multiplier = optimization["tp_multiplier"]
-        sl_multiplier = optimization["sl_multiplier"]
+        base_sl_mult = optimization["sl_multiplier"]
+        base_tp_mult = optimization["tp_multiplier"]
         
-        if vol_z >= 3.0:
-            tp_multiplier = max(tp_multiplier, 4.5)
-            logger.info(f"📈 EXTREME VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
-        elif vol_z >= 1.5:
-            tp_multiplier = max(tp_multiplier, 3.0)
-            logger.info(f"📊 ELEVATED VOLATILITY DETECTED (Z: {vol_z:.2f}). Stretching TP to {tp_multiplier}x ATR.")
+        # 🚀 MASTER UPGRADE: Continuous Log-Normal Volatility Scaling
+        vol_z_abs = abs(vol_z)
+        vol_dampened_curve = math.log1p(vol_z_abs)
+        
+        tp_multiplier = base_tp_mult * (1.0 + (vol_dampened_curve * 0.6))
+        sl_multiplier = min(base_sl_mult * (1.0 + (vol_dampened_curve * 0.25)), 4.0)
+        
+        if vol_z_abs >= 1.5:
+            logger.info(f"⚡ [VOLATILITY EXPANSION ENGINE] Smooth Scaling Active // Vol Z: {vol_z:.2f} | Dynamic SL: {sl_multiplier:.2f}x | Dynamic TP: {tp_multiplier:.2f}x")
         
         if side.upper() == "BUY":
             initial_sl = entry_price - (sl_multiplier * atr)
@@ -1112,6 +1115,7 @@ class DistributedQuantEngine:
             polling_interval = 4  
             start_time = time.time()
             order_filled = False
+            position_reconciled = False  # 🚀 Added to track partial fills
             
             current_hard_stop = initial_sl
             peak_observed_price = current_price
@@ -1119,6 +1123,9 @@ class DistributedQuantEngine:
 
             while True:
                 await asyncio.sleep(polling_interval)
+                actual_filled_qty = 0.0
+                actual_entry_price = current_price
+
                 try:
                     pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
                     positions = pos_response.get("result", {}).get("list", [])
@@ -1126,13 +1133,31 @@ class DistributedQuantEngine:
                     
                     if positions:
                         for p in positions:
-                            if float(p.get("size", 0.0)) > 0:
+                            size_float = float(p.get("size", 0.0))
+                            if size_float > 0:
                                 has_active_position = True
                                 order_filled = True 
+                                actual_filled_qty = size_float
+                                actual_entry_price = float(p.get("avgPrice", current_price))
                                 break
                 except Exception:
                     has_active_position = False
 
+                # 🚀 UPGRADE 1: Real-Time Ledger Reconciliation (Partial Fill Trap Fixed)
+                if has_active_position and not position_reconciled:
+                    actual_notional = actual_filled_qty * actual_entry_price
+                    allocated_notional = risk_matrix['allocated_value_usdt']
+                    
+                    # If we got partially filled, free up the phantom margin in the risk vault immediately
+                    if actual_notional < (allocated_notional * 0.95):
+                        freed_margin = allocated_notional - actual_notional
+                        self.risk_vault.update_position_ledger(symbol, -freed_margin)
+                        risk_matrix['allocated_value_usdt'] = actual_notional
+                        logger.info(f"⚖️ LEDGER RECONCILED // {symbol} partial fill detected. Freed ${freed_margin:.2f} of phantom margin.")
+                    
+                    position_reconciled = True
+
+                # Handle Timeout / Stale Orders
                 if not order_filled and (time.time() - start_time) > 180:
                     try:
                         open_orders = await asyncio.to_thread(self.executor.client.get_open_orders, category="linear", symbol=symbol)
@@ -1148,11 +1173,12 @@ class DistributedQuantEngine:
                     logger.critical(f"🔓 PORTFOLIO UNLOCKED // Stale exposure dissolved for {symbol}.")
                     break
 
+                # Handle Settlement (Trade Closed)
                 if order_filled and not has_active_position:
                     settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
                     if settlement.get("closed"):
                         net_pnl = float(settlement.get('pnl', 0.0))
-                        entry_px = float(settlement.get('entry', current_price))
+                        entry_px = float(settlement.get('entry', actual_entry_price))
                         slippage_drag = entry_px - current_price if direction == "BUY" else current_price - entry_px
                         
                         report_message = (
@@ -1169,43 +1195,54 @@ class DistributedQuantEngine:
                         self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
                         break
                 
+                # Active Trailing Stop Management
                 if has_active_position:
                     trade_duration = time.time() - start_time
                     live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
                     
                     if live_mid:
-                        profit_distance = (live_mid - current_price) if direction == "BUY" else (current_price - live_mid)
+                        profit_distance = (live_mid - actual_entry_price) if direction == "BUY" else (actual_entry_price - live_mid)
+                        
+                        # 🚀 UPGRADE 2: Live Volatility Dampening for Trailing Stops
+                        live_metrics = self.screener_metrics.get(symbol, {})
+                        live_vol_z = abs(live_metrics.get("vol_z", 0.0))
+                        vol_dampener = math.log1p(live_vol_z) # Breathes dynamically with the tape
+                        
+                        # Base leash expands smoothly with live volatility to avoid wick-outs in profit
+                        base_leash = atr * 1.2
+                        dynamic_leash_multiplier = 1.0 + (vol_dampener * 0.3)
                         
                         if market_regime == "RANGING":
-                            active_leash = atr * 1.2
+                            active_leash = base_leash * dynamic_leash_multiplier
                             be_trigger_1 = atr * 1.0
                             be_trigger_2 = atr * 1.5
                         else:
                             if profit_distance >= (atr * 3.0):
-                                active_leash = atr * 1.2   
+                                active_leash = (atr * 1.2) * dynamic_leash_multiplier   
                             elif profit_distance >= (atr * 2.0):
-                                active_leash = atr * 1.5   
+                                active_leash = (atr * 1.5) * dynamic_leash_multiplier   
                             elif profit_distance >= (atr * 1.0):
-                                active_leash = atr * 1.8   
+                                active_leash = (atr * 1.8) * dynamic_leash_multiplier   
                             else:
-                                active_leash = atr * 2.2
+                                active_leash = (atr * 2.2) * dynamic_leash_multiplier
                                 
                             be_trigger_1 = atr * 1.0
                             be_trigger_2 = atr * 1.8
 
+                        # Time-decay: Tighten the leash if the trade takes too long to play out
                         if trade_duration > 2700 and profit_distance < (atr * 1.0):
                             active_leash = min(active_leash, atr * 0.75) 
                         
-                        fee_offset = current_price * (0.00055 * 2)
+                        fee_offset = actual_entry_price * (0.00055 * 2)
 
                         if direction == "BUY":
                             if live_mid > peak_observed_price:
                                 peak_observed_price = live_mid
                                 
-                            if peak_observed_price >= (current_price + be_trigger_2):
-                                minimum_safe_stop = current_price + fee_offset + (atr * 0.5)
-                            elif peak_observed_price >= (current_price + be_trigger_1):
-                                minimum_safe_stop = current_price + fee_offset + (current_price * 0.0001)
+                            if peak_observed_price >= (actual_entry_price + be_trigger_2):
+                                minimum_safe_stop = actual_entry_price + fee_offset + (atr * 0.5)
+                            elif peak_observed_price >= (actual_entry_price + be_trigger_1):
+                                minimum_safe_stop = actual_entry_price + fee_offset + (actual_entry_price * 0.0001)
                             else:
                                 minimum_safe_stop = 0.0
 
@@ -1225,10 +1262,10 @@ class DistributedQuantEngine:
                             if live_mid < peak_observed_price:
                                 peak_observed_price = live_mid
                                 
-                            if peak_observed_price <= (current_price - be_trigger_2):
-                                minimum_safe_stop = current_price - fee_offset - (atr * 0.5)
-                            elif peak_observed_price <= (current_price - be_trigger_1):
-                                minimum_safe_stop = current_price - fee_offset - (current_price * 0.0001)
+                            if peak_observed_price <= (actual_entry_price - be_trigger_2):
+                                minimum_safe_stop = actual_entry_price - fee_offset - (atr * 0.5)
+                            elif peak_observed_price <= (actual_entry_price - be_trigger_1):
+                                minimum_safe_stop = actual_entry_price - fee_offset - (actual_entry_price * 0.0001)
                             else:
                                 minimum_safe_stop = float('inf')
 

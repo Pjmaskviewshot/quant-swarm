@@ -165,8 +165,8 @@ class MemoryBank:
                             is_terminated = True
                             break
 
-                # ⏳ Enforce hard microstructural time decay block at 15 minutes maximum
-                if not is_terminated and elapsed_minutes >= 15.0:
+                # ⏳ MASTER UPGRADE: Raised from 15.0 to 60.0 minutes to prevent label truncation
+                if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     if current_price > entry_price:
                         actual = "BUY"
