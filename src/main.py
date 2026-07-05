@@ -176,27 +176,35 @@ class DistributedQuantEngine:
     def compute_dynamic_memory_window(self, vol_mult: float) -> int:
         return self.min_horizon_floor
 
-    def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict) -> dict:
-        # 🚀 MASTER UPGRADE: The Wick Absorber (Ranging Market Defaults)
+    def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict, confidence: float = 0.0) -> dict:
+        vol_mult = float(metrics.get("vol_mult", 1.0))
+        
+        # 🚀 MASTER UPGRADE: Confidence-Weighted Z-Score Threshold
+        # High AI confidence lowers the barrier to entry. Zero confidence demands extreme statistical proof.
+        dynamic_z_threshold = 2.5 - (confidence * 1.0)
+        
+        # 🚀 MASTER UPGRADE: Liquidity-Adjusted Base Horizons
+        # Inversely proportional to volume density. Thin markets naturally stretch the base to survive noise.
+        liquidity_buffer = 1.0 / math.sqrt(max(0.10, vol_mult))
+        
         optimized = {
             "cooldown_period": 600.0,
-            "z_score_threshold": 2.0, 
+            "z_score_threshold": dynamic_z_threshold, 
             "position_scaling": 1.0,
-            "sl_multiplier": 2.5,  # Widened to absorb market chop
-            "tp_multiplier": 2.5,
+            "sl_multiplier": 2.0 + (liquidity_buffer * 0.5), # Symmetrical breathing for ranging chop
+            "tp_multiplier": 2.0 + (liquidity_buffer * 0.5),
             "execution_verdict": True
         }
 
         if market_regime == "TRENDING":
-            optimized["z_score_threshold"] = 1.5 
             optimized["cooldown_period"] = 300.0  
-            optimized["sl_multiplier"] = 1.5
-            optimized["tp_multiplier"] = 3.5      
+            # Trending markets allow tighter base stops to protect capital
+            optimized["sl_multiplier"] = 1.2 + (liquidity_buffer * 0.3)
+            # TP scales proportionally with pure volume density to ride momentum
+            optimized["tp_multiplier"] = 3.0 + (vol_mult * 0.5)      
             
-            vol_mult = float(metrics.get("vol_mult", 1.0))
             if vol_mult >= 3.0:
-                optimized["sl_multiplier"] = 2.0
-                optimized["tp_multiplier"] = 5.0
+                optimized["tp_multiplier"] += 1.5 # Violent target expansion for parabolic strikes
             
         return optimized
 
@@ -352,7 +360,10 @@ class DistributedQuantEngine:
         real_spread = features.get("bid_ask_spread", mid_price * 0.0005)
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
-        optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics)
+        
+        # Hooking up live confidence to dynamically shift boundaries
+        live_confidence = self.macro_confidences.get(symbol, 0.0)
+        optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics, live_confidence)
 
         if not optimization["execution_verdict"]:
             return
@@ -382,13 +393,18 @@ class DistributedQuantEngine:
         local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
         price_z_score = (mid_price - local_mean) / local_std
         
-        spread_pct = real_spread / mid_price
-        if spread_pct > 0.0030: # 🚀 Strict Toxic Spread Wall
-            return 
-            
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
         
+        spread_pct = real_spread / mid_price
+        
+        # 🚀 MASTER UPGRADE: Dynamic Volatility-Adjusted Spread Wall
+        # Market makers naturally widen spreads during breakouts. We expand tolerance logarithmically.
+        dynamic_max_spread = 0.0015 * (1.0 + math.log1p(vol_z_abs))
+        
+        if spread_pct > dynamic_max_spread:
+            return 
+            
         # 🚀 MASTER UPGRADE: Regime-Specific Alpha Execution
         trade_direction = None
         has_pure_edge = False
@@ -961,8 +977,12 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            if vol_mult < 0.30:
-                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Volume Multiplier {vol_mult:.2f}x is below 0.30x safe limit. Trade skipped.")
+            # 🚀 MASTER UPGRADE: Dynamic Spread-Weighted Liquidity Floor
+            spread_pct = real_spread / current_price if current_price > 0 else 0.0
+            dynamic_vol_floor = 0.15 + (spread_pct * 100.0)
+            
+            if vol_mult < dynamic_vol_floor:
+                logger.info(f"⚖️ DYNAMIC LIQUIDITY WALL // Node: {symbol} | Vol: {vol_mult:.2f}x | Req Floor: {dynamic_vol_floor:.2f}x (Spread: {spread_pct:.3%}). Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
@@ -1058,11 +1078,14 @@ class DistributedQuantEngine:
             
             expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
             safe_spread = max(real_spread, current_price * 0.0001) 
-            slippage_penalty = safe_spread * (1.0 / max(0.4, vol_mult))
+            
+            # 🚀 MASTER UPGRADE: Square-Root Law of Market Impact
+            # Temporary market impact scales concavely with volume density
+            slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
             total_friction = safe_spread + slippage_penalty
             
             if expected_profit < total_friction:
-                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total friction. Trade skipped.")
+                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total impact friction. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
