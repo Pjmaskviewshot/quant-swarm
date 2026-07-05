@@ -191,8 +191,9 @@ class DistributedQuantEngine:
             "cooldown_period": 600.0,
             "z_score_threshold": dynamic_z_threshold, 
             "position_scaling": 1.0,
-            "sl_multiplier": 2.0 + (liquidity_buffer * 0.5), # Symmetrical breathing for ranging chop
-            "tp_multiplier": 2.0 + (liquidity_buffer * 0.5),
+            # 🚀 FIX: In dead ranging markets, expand SL to survive chop, but TIGHTEN TP to scalp realistic targets
+            "sl_multiplier": 2.0 + (liquidity_buffer * 0.5), 
+            "tp_multiplier": max(1.0, 2.0 - (liquidity_buffer * 0.2)),
             "execution_verdict": True
         }
 
@@ -991,6 +992,17 @@ class DistributedQuantEngine:
             initial_sl, target_tp = self.calculate_initial_bracket(
                 current_price, atr, direction, 8, vol_z_abs, optimization, tick_size
             )
+
+            # 🚀 MASTER UPGRADE: The Friction Filter Must Apply BEFORE The Database Commit!
+            expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
+            safe_spread = max(real_spread, current_price * 0.0001) 
+            slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
+            total_friction = safe_spread + slippage_penalty
+            
+            if expected_profit < total_friction:
+                logger.info(f"⚖️ FRICTION WALL // Node: {symbol} | Target too small to survive exchange fees & slippage. Signal shredded.")
+                self.active_positions_lock.discard(symbol)
+                return False
             
             features_dict = {
                 "symbol": symbol,
@@ -998,8 +1010,8 @@ class DistributedQuantEngine:
                 "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult,
                 "bid_ask_spread": real_spread,
-                "virtual_sl": initial_sl,  # 🚀 Now uses the true Log-Normal Expanded SL
-                "virtual_tp": target_tp    # 🚀 Now uses the true Log-Normal Expanded TP
+                "virtual_sl": initial_sl,  
+                "virtual_tp": target_tp    
             }
             
             self.memory.commit_prediction(
@@ -1073,19 +1085,6 @@ class DistributedQuantEngine:
 
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             if not leverage_success:
-                self.active_positions_lock.discard(symbol)
-                return False
-            
-            expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
-            safe_spread = max(real_spread, current_price * 0.0001) 
-            
-            # 🚀 MASTER UPGRADE: Square-Root Law of Market Impact
-            # Temporary market impact scales concavely with volume density
-            slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
-            total_friction = safe_spread + slippage_penalty
-            
-            if expected_profit < total_friction:
-                logger.info(f"⚖️ LIQUIDITY FILTER ACTIVE // Node: {symbol} | Profit target too low compared to total impact friction. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
