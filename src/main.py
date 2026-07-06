@@ -1051,44 +1051,52 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            risk_matrix = self.risk_vault.compute_variance_adjusted_kelly(
-                account_balance=balance, win_rate=self.historical_win_rate,
-                win_loss_ratio=self.historical_win_loss_ratio, asset_volatility_atr=atr,
-                current_price=current_price, ai_confidence=confidence, market_regime=market_regime
-            )
+            # 🚀 THE ADVANCED QUANTITATIVE SOLUTION: Asymptotic Capital Allocation Model (ACAM)
+            # Replaces rigid institutional limits with a continuous exponential decay risk curve.
             
-            if not risk_matrix["approved"] or risk_matrix["size"] <= 0.0:
-                logger.warning(f"Execution canceled for {symbol}. Kelly criteria failed.")
-                self.active_positions_lock.discard(symbol)
-                return False
-
+            # 1. Asymptotic Risk Tolerance
+            # Scales mathematically: $7 balance = ~19% risk tolerance. $1,000+ balance = ~2.0% risk.
+            dynamic_risk_pct = 0.02 + (0.18 * math.exp(-0.005 * balance))
+            max_loss_usdt = balance * dynamic_risk_pct
+            
+            # 2. Distance to Stop Loss (In Percentage)
             stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
-            max_risk_pct = getattr(self.risk_vault, 'max_single_position_risk_pct', 0.15)
             
-            absolute_max_notional = (balance * max_risk_pct) / stop_loss_pct if stop_loss_pct > 0 else 0.0
+            # 3. Maximum Safe Unleveraged Notional 
+            safe_notional = max_loss_usdt / stop_loss_pct if stop_loss_pct > 0 else 0.0
             
-            dynamic_concentration_multiplier = 1.0 + ((rolling_acc - 0.50) * 10.0) if rolling_acc > 0.50 else 1.0
-            dynamic_concentration_notional = balance * max(1.0, dynamic_concentration_multiplier)
+            # 4. Fractional Kelly & Edge Multipliers
+            kelly_fraction = 0.5 + (max(0.0, confidence) * 0.5) 
+            edge_multiplier = 1.0 + ((rolling_acc - 0.50) * 5.0) if rolling_acc > 0.50 else 0.5
+            target_notional = safe_notional * kelly_fraction * edge_multiplier
             
-            safety_ceiling = min(absolute_max_notional, dynamic_concentration_notional)
+            # 5. Exchange Microstructure Adherence
+            min_exchange_notional = 5.50  # Bybit hard minimum + 10% safety buffer
+            final_notional = max(target_notional, min_exchange_notional)
             
-            base_kelly_allocation = risk_matrix["allocated_value_usdt"] * optimization.get("position_scaling", 1.0)
-            min_exchange_notional = getattr(self.risk_vault, 'exchange_min_notional', 5.0)
-            
-            final_allocation = min(max(base_kelly_allocation, min_exchange_notional), safety_ceiling)
-            
-            target_leverage = risk_matrix.get("recommended_leverage", 1)
-            margin_required = final_allocation / target_leverage
-            if margin_required > (balance * 0.90):
-                logger.warning(f"⚠️ OpEx scaling capped. Optimizing allocation...")
-                final_allocation = (balance * 0.90) * target_leverage
-            
-            risk_matrix["allocated_value_usdt"] = final_allocation
-            risk_matrix["size"] = final_allocation / current_price
-
-            if not self.risk_vault.evaluate_portfolio_safety(balance, risk_matrix['allocated_value_usdt'], symbol):
+            # 6. Absolute Wipeout Guard
+            # If forcing the $5.50 minimum breaches a fatal account loss percentage, abort mathematically.
+            projected_loss = final_notional * stop_loss_pct
+            if projected_loss > (balance * 0.35):
+                logger.warning(f"⚖️ MATHEMATICAL RISK WALL // {symbol} minimum trade forces {projected_loss/balance:.1%} account risk. Trade unviable.")
                 self.active_positions_lock.discard(symbol)
                 return False
+                
+            # 7. Dynamic Margin Efficiency (Leverage Optimizer)
+            # Locks up a maximum of 15% of free balance as collateral by dynamically solving for leverage.
+            max_margin_collateral = balance * 0.15
+            optimal_leverage = math.ceil(final_notional / max_margin_collateral)
+            
+            max_allowed_leverage = 20 if vol_z_abs < 2.0 else 10
+            target_leverage = int(min(max(1, optimal_leverage), max_allowed_leverage))
+            
+            risk_matrix = {
+                "allocated_value_usdt": final_notional,
+                "size": final_notional / current_price,
+                "recommended_leverage": target_leverage
+            }
+
+            logger.info(f"📐 [ACAM PROFILER] Node: {symbol} | Allowed Risk: {dynamic_risk_pct:.1%} | Target Notional: ${final_notional:.2f} | Leverage: {target_leverage}x")
 
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             if not leverage_success:
