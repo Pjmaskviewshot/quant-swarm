@@ -180,18 +180,15 @@ class DistributedQuantEngine:
         vol_mult = float(metrics.get("vol_mult", 1.0))
         
         # 🚀 MASTER UPGRADE: Confidence-Weighted Z-Score Threshold
-        # High AI confidence lowers the barrier to entry. Zero confidence demands extreme statistical proof.
         dynamic_z_threshold = 2.5 - (confidence * 1.0)
         
         # 🚀 MASTER UPGRADE: Liquidity-Adjusted Base Horizons
-        # Inversely proportional to volume density. Thin markets naturally stretch the base to survive noise.
         liquidity_buffer = 1.0 / math.sqrt(max(0.10, vol_mult))
         
         optimized = {
             "cooldown_period": 600.0,
             "z_score_threshold": dynamic_z_threshold, 
             "position_scaling": 1.0,
-            # 🚀 FIX: In dead ranging markets, expand SL to survive chop, but TIGHTEN TP to scalp realistic targets
             "sl_multiplier": 2.0 + (liquidity_buffer * 0.5), 
             "tp_multiplier": max(1.0, 2.0 - (liquidity_buffer * 0.2)),
             "execution_verdict": True
@@ -199,13 +196,11 @@ class DistributedQuantEngine:
 
         if market_regime == "TRENDING":
             optimized["cooldown_period"] = 300.0  
-            # Trending markets allow tighter base stops to protect capital
             optimized["sl_multiplier"] = 1.2 + (liquidity_buffer * 0.3)
-            # TP scales proportionally with pure volume density to ride momentum
             optimized["tp_multiplier"] = 3.0 + (vol_mult * 0.5)      
             
             if vol_mult >= 3.0:
-                optimized["tp_multiplier"] += 1.5 # Violent target expansion for parabolic strikes
+                optimized["tp_multiplier"] += 1.5 
             
         return optimized
 
@@ -362,7 +357,6 @@ class DistributedQuantEngine:
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
         
-        # Hooking up live confidence to dynamically shift boundaries
         live_confidence = self.macro_confidences.get(symbol, 0.0)
         optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics, live_confidence)
 
@@ -399,14 +393,11 @@ class DistributedQuantEngine:
         
         spread_pct = real_spread / mid_price
         
-        # 🚀 MASTER UPGRADE: Dynamic Volatility-Adjusted Spread Wall
-        # Market makers naturally widen spreads during breakouts. We expand tolerance logarithmically.
         dynamic_max_spread = 0.0015 * (1.0 + math.log1p(vol_z_abs))
         
         if spread_pct > dynamic_max_spread:
             return 
             
-        # 🚀 MASTER UPGRADE: Regime-Specific Alpha Execution
         trade_direction = None
         has_pure_edge = False
         is_golden_setup = False
@@ -978,9 +969,25 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 MASTER UPGRADE: Dynamic Spread-Weighted Liquidity Floor
+            # 🚀 MASTER UPGRADE: Micro-Notional Liquidity Elasticity (MNLE)
+            # Market impact scales strictly with order size relative to depth.
             spread_pct = real_spread / current_price if current_price > 0 else 0.0
-            dynamic_vol_floor = 0.15 + (spread_pct * 100.0)
+            
+            # 1. Capital Scale Factor (Tanh Curve): 
+            # Smoothly scales from 0.0 (micro-accounts) to 1.0 (institutional blocks > $1k)
+            # Use cached balance to avoid rate-limiting the pre-filter
+            cached_balance = self.global_state_cache.get("wallet_baseline", 10.0)
+            estimated_trade_value = cached_balance * 0.15 # Assuming max single risk
+            capital_scale = math.tanh(estimated_trade_value / 1000.0)
+            
+            # 2. AI Conviction Elasticity: High confidence lowers the barrier to entry
+            conviction_bonus = math.expm1(max(0.0, confidence)) 
+            
+            # 3. Dynamic Non-Linear Construction
+            base_floor = 0.05 + (0.15 * capital_scale)
+            spread_weight = (50.0 * (1.0 + capital_scale)) - (conviction_bonus * 5.0)
+            
+            dynamic_vol_floor = max(0.02, base_floor + (spread_pct * max(10.0, spread_weight)))
             
             if vol_mult < dynamic_vol_floor:
                 logger.info(f"⚖️ DYNAMIC LIQUIDITY WALL // Node: {symbol} | Vol: {vol_mult:.2f}x | Req Floor: {dynamic_vol_floor:.2f}x (Spread: {spread_pct:.3%}). Trade skipped.")
