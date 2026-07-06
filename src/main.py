@@ -69,7 +69,7 @@ class DistributedQuantEngine:
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, List[float]]] = {
-            s: {"prices": [], "volumes": []} for s in self.asset_basket
+            s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
         }
         
         self.screener_metrics: Dict[str, Dict[str, float]] = {
@@ -312,6 +312,26 @@ class DistributedQuantEngine:
         while True:
             try:
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
+                
+                # 🚀 UPGRADE 1: Institutional Pre-Loader
+                # Loads 15 hours of structural baseline so the bot isn't blind on reboot
+                if len(history) < 60:
+                    klines = await asyncio.to_thread(
+                        self.executor.client.get_kline,
+                        category="linear", symbol=symbol, interval="15", limit=60
+                    )
+                    data = klines.get("result", {}).get("list", [])
+                    if data:
+                        closes = [float(k[4]) for k in data][::-1]
+                        volumes = [float(k[5]) for k in data][::-1]
+                        self.screener_memory[symbol] = {
+                            "prices": closes, 
+                            "volumes": volumes, 
+                            "last_turnover": volumes[-1],
+                            "last_update_time": time.time()
+                        }
+                        history = closes
+                
                 current_price = history[-1] if history else 0.0
                 
                 if current_price == 0.0:
@@ -442,32 +462,49 @@ class DistributedQuantEngine:
             if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup:
                 return 
 
+        # 🚀 UPGRADE 3: Asymmetric Macro Squeeze Filter (AMSF)
+        # Prevents shorting into systemic market liquidations
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
-            alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
             
-            if len(btc_history) >= 20 and len(alt_history) >= 20:
-                btc_array = np.array(btc_history[-20:])
-                alt_array = np.array(alt_history[-20:])
+            if len(btc_history) >= 30:
+                btc_array = np.array(btc_history)
+                btc_mean = np.mean(btc_array)
+                btc_std = np.std(btc_array) + 1e-6
+                btc_z_score = (btc_array[-1] - btc_mean) / btc_std
                 
-                btc_returns = np.diff(np.log(btc_array))
-                alt_returns = np.diff(np.log(alt_array))
+                macro_bias = self.macro_regimes.get("BTCUSDT", "HOLD")
+                btc_metrics = self.screener_metrics.get("BTCUSDT", {})
+                btc_vol_z = btc_metrics.get("vol_z", 0.0)
                 
-                if len(btc_returns) > 1 and np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
-                    correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
-                    if math.isnan(correlation):
-                        correlation = 0.0
-                        
-                    btc_mean = np.mean(btc_array)
-                    btc_std = np.std(btc_array) if np.std(btc_array) > 0 else 1e-6
-                    btc_z_score = (btc_array[-1] - btc_mean) / btc_std
+                # Institutional Squeeze Detection Math
+                is_systemic_bull_squeeze = (btc_z_score >= 1.5 and macro_bias == "BUY") or btc_vol_z >= 2.0 or btc_z_score >= 2.5
+                is_systemic_bear_squeeze = (btc_z_score <= -1.5 and macro_bias == "SELL") or btc_vol_z <= -2.0 or btc_z_score <= -2.5
+                
+                if trade_direction == "SELL" and is_systemic_bull_squeeze:
+                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic short-squeeze detected (Z: {btc_z_score:.2f}). {symbol} short blocked.")
+                    return 
                     
-                    if btc_z_score <= -1.5:
-                        if trade_direction == "BUY" and correlation > 0.4:
-                            return
-                    if btc_z_score >= 1.5:
-                        if trade_direction == "SELL" and correlation > 0.4:
-                            return
+                if trade_direction == "BUY" and is_systemic_bear_squeeze:
+                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic flash-crash detected (Z: {btc_z_score:.2f}). {symbol} dip-buy blocked.")
+                    return
+                    
+                # Standard Correlation Filter for non-squeeze conditions
+                alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
+                if len(alt_history) >= 30:
+                    alt_array = np.array(alt_history[-30:])
+                    btc_slice = btc_array[-30:]
+                    
+                    btc_returns = np.diff(np.log(btc_slice))
+                    alt_returns = np.diff(np.log(alt_array))
+                    
+                    if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
+                        correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
+                        if not math.isnan(correlation) and correlation > 0.45:
+                            if trade_direction == "BUY" and btc_z_score <= -1.0:
+                                return
+                            if trade_direction == "SELL" and btc_z_score >= 1.0:
+                                return
 
         self.last_execution_timestamps[symbol] = current_time
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
@@ -489,9 +526,18 @@ class DistributedQuantEngine:
         current_turnover = float(volume_str)
 
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_turnover": current_turnover}
+            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_turnover": current_turnover, "last_update_time": 0.0}
 
         history = self.screener_memory[symbol]
+        
+        # 🚀 UPGRADE 2: High-Frequency Micro-Noise Throttle
+        # Prevents the memory array from filling with millisecond data, which crushes Standard Deviation to zero.
+        current_time = time.time()
+        if current_time - history.get("last_update_time", 0.0) < 60.0:
+            return
+            
+        history["last_update_time"] = current_time
+
         last_turnover = history.get("last_turnover", current_turnover)
         tick_volume = current_turnover - last_turnover
         
@@ -595,7 +641,7 @@ class DistributedQuantEngine:
                 else:
                     new_feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
                     
-                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": []})
+                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": [], "last_update_time": 0.0})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
@@ -1339,7 +1385,7 @@ class DistributedQuantEngine:
             self.shadow_basket = boot_basket[24:]
             
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
-            self.screener_memory = {s: {"prices": [], "volumes": []} for s in self.asset_basket}
+            self.screener_memory = {s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
