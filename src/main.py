@@ -115,7 +115,7 @@ class DistributedQuantEngine:
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
-        self.screener_memory: Dict[str, Dict[str, List[float]]] = {
+        self.screener_memory: Dict[str, Dict[str, Any]] = {
             s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
         }
         
@@ -368,7 +368,6 @@ class DistributedQuantEngine:
                         self.screener_memory[symbol] = {
                             "prices": closes, 
                             "volumes": volumes, 
-                            "last_turnover": volumes[-1],
                             "last_update_time": time.time()
                         }
                         history = closes
@@ -552,75 +551,16 @@ class DistributedQuantEngine:
         ))
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        # We now use the 1m Kline stream for true volume and volatility calculations.
+        # This function is kept only to maintain interface compatibility and freshness tracking.
         symbol = data.get("symbol")
-        price_str = data.get("lastPrice")
-        volume_str = data.get("turnover24h")
-        
-        if not symbol or symbol not in self.asset_basket or price_str is None or volume_str is None:
+        if not symbol or symbol not in self.asset_basket:
             return
-
-        current_price = float(price_str)
-        current_turnover = float(volume_str)
-
+            
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_turnover": current_turnover, "last_update_time": 0.0}
-
-        history = self.screener_memory[symbol]
-        
-        current_time = time.time()
-        if current_time - history.get("last_update_time", 0.0) < 60.0:
-            return
+            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_update_time": 0.0}
             
-        history["last_update_time"] = current_time
-
-        last_turnover = history.get("last_turnover", current_turnover)
-        tick_volume = current_turnover - last_turnover
-        
-        if tick_volume < 0:
-            tick_volume = 0.0 
-            
-        history["last_turnover"] = current_turnover
-
-        history["prices"].append(current_price)
-        history["volumes"].append(tick_volume)
-
-        if len(history["prices"]) > 60:
-            history["prices"].pop(0)
-            history["volumes"].pop(0)
-
-        if len(history["prices"]) < 15:
-            return
-            
-        prices_array = np.array(history["prices"])
-        volumes_array = np.array(history["volumes"])
-
-        baseline_tick_turnover = 100.0  
-        mean_volume = np.mean(volumes_array[:-1]) if len(volumes_array) > 1 else baseline_tick_turnover
-        mean_volume = max(mean_volume, baseline_tick_turnover)
-        volume_multiplier = tick_volume / mean_volume
-
-        returns = np.diff(np.log(prices_array))
-        mean_return = np.mean(returns) if len(returns) > 0 else 0.0
-        std_return = np.std(returns) if len(returns) > 0 else 1e-6
-        vel_z = (returns[-1] - mean_return) / std_return if len(returns) > 0 else 0.0
-        
-        mean_price = np.mean(prices_array)
-        std_price = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
-        dist_z = (current_price - mean_price) / std_price
-
-        volatility_z = (vel_z * 0.5) + (dist_z * 0.5)
-        
-        # 🚀 UPDATE FAST MATH ENGINES (Kalman & Hawkes)
-        math_engine = self.math_engines.setdefault(symbol, FastMathEngine())
-        smoothed_price = math_engine.kalman_update(current_price)
-        hawkes_score = math_engine.hawkes_cluster_score(current_time, tick_volume)
-        
-        self.screener_metrics[symbol] = {
-            "vol_mult": float(volume_multiplier),
-            "vol_z": float(volatility_z),
-            "smoothed_price": smoothed_price,
-            "hawkes_score": hawkes_score
-        }
+        self.screener_memory[symbol]["last_update_time"] = time.time()
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
@@ -630,14 +570,67 @@ class DistributedQuantEngine:
         interval = data["interval"]
         candle = data["candle_data"]
         
+        c_open = float(candle.get("open", 0))
+        c_high = float(candle.get("high", 0))
+        c_low = float(candle.get("low", 0))
+        c_close = float(candle.get("close", 0))
+        c_vol = float(candle.get("volume", 0))
+        
         self.feature_engines[symbol].update_multi_timeframe_candle(
             timeframe=interval,
-            open_p=float(candle.get("open", 0)),
-            high_p=float(candle.get("high", 0)),
-            low_p=float(candle.get("low", 0)),
-            close_p=float(candle.get("close", 0)),
-            volume=float(candle.get("volume", 0))
+            open_p=c_open,
+            high_p=c_high,
+            low_p=c_low,
+            close_p=c_close,
+            volume=c_vol
         )
+        
+        # 🚀 APEX FIX: Calculate true Volume Multiplier using 1-minute candle volume
+        if str(interval) == "1":
+            history = self.screener_memory[symbol]
+            history["volumes"].append(c_vol)
+            history["prices"].append(c_close)
+            
+            if len(history["volumes"]) > 60:
+                history["volumes"].pop(0)
+                history["prices"].pop(0)
+                
+            if len(history["volumes"]) >= 15:
+                vol_array = np.array(history["volumes"])
+                price_array = np.array(history["prices"])
+                
+                # Calculate True Volume Multiplier
+                mean_vol = np.mean(vol_array[:-1]) if len(vol_array) > 1 else 1.0
+                mean_vol = max(mean_vol, 1.0) # Prevent division by zero
+                vol_mult = c_vol / mean_vol
+                
+                # Calculate True Volatility Z-Score
+                returns = np.diff(np.log(price_array))
+                if len(returns) > 0:
+                    mean_return = np.mean(returns)
+                    std_return = np.std(returns) + 1e-6
+                    vel_z = (returns[-1] - mean_return) / std_return
+                else:
+                    vel_z = 0.0
+                    
+                mean_price = np.mean(price_array)
+                std_price = np.std(price_array) + 1e-6
+                dist_z = (c_close - mean_price) / std_price
+                
+                vol_z = (vel_z * 0.5) + (dist_z * 0.5)
+                
+                current_time = time.time()
+                # 🚀 UPDATE FAST MATH ENGINES (Kalman & Hawkes)
+                math_engine = self.math_engines.setdefault(symbol, FastMathEngine())
+                smoothed_price = math_engine.kalman_update(c_close)
+                hawkes_score = math_engine.hawkes_cluster_score(current_time, c_vol)
+                
+                self.screener_metrics[symbol] = {
+                    "vol_mult": float(vol_mult),
+                    "vol_z": float(vol_z),
+                    "smoothed_price": smoothed_price,
+                    "hawkes_score": hawkes_score
+                }
 
     async def run_universe_refresher(self):
         while True:
@@ -997,7 +990,6 @@ class DistributedQuantEngine:
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, vol_z: float = 0.0, confidence: float = 0.0, tick_size: float = 0.0001):
-        # 🚀 APEX UPGRADE: Order-Book Implied Brackets (OBIB)
         vol_z_abs = abs(vol_z)
         dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4) 
         
@@ -1091,10 +1083,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True 
 
-            # ============================================================
-            # 🚀 APEX ENGINE: Continuous Sigmoid Allocation & OBIB
-            # ============================================================
-            
             balance = await self.executor.get_wallet_balance_usdt()
             
             history = self.screener_memory.get(symbol, {}).get("prices", [])
@@ -1103,7 +1091,6 @@ class DistributedQuantEngine:
             local_std = np.std(prices_array) if len(prices_array) > 0 and np.std(prices_array) > 0 else 1e-6
             price_z_score = (current_price - local_mean) / local_std
 
-            # 1. Macro-Regime Alignment (The Steering Wheel)
             if market_regime == "TRENDING":
                 if direction == "SELL" and price_z_score > 0.5: 
                     logger.critical(f"🛡️ REGIME-LOCK // Trending market. Short blocked on {symbol}.")
@@ -1114,7 +1101,6 @@ class DistributedQuantEngine:
                     self.active_positions_lock.discard(symbol)
                     return False
                     
-            # 1.5 Elite Math Filters (Kalman & Hawkes)
             smoothed_price = metrics.get("smoothed_price", current_price)
             kalman_diff_pct = (current_price - smoothed_price) / current_price if current_price > 0 else 0.0
 
@@ -1136,11 +1122,9 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            # 2. Continuous Sigmoid Capital Allocation (NO STEP FUNCTIONS)
             sigmoid_risk_pct = 0.01 + (0.03 / (1.0 + math.exp(0.04 * (balance - 40.0))))
             dollar_risk = balance * sigmoid_risk_pct
 
-            # 3. Calculate Dynamic Brackets (No Hardcoded Multipliers)
             tick_size = self.tick_sizes.get(symbol, 0.0001) 
             initial_sl, target_tp = self.calculate_initial_bracket(
                 current_price, atr, direction, vol_z_abs, confidence, tick_size
@@ -1161,14 +1145,12 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 4. Position Sizing (Strict Institutional Fractional Risk)
             sl_distance = abs(current_price - initial_sl)
             if sl_distance <= 0: sl_distance = current_price * 0.015
             
             position_size = (dollar_risk / sl_distance)
             notional = position_size * current_price
             
-            # 5. Microstructure Overrides
             if notional < 5.50:
                 position_size = 5.50 / current_price
                 notional = 5.50
@@ -1178,11 +1160,9 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            # 6. Smooth Leverage Ceiling
             max_allowed_leverage = 20 if vol_z_abs < 1.5 else (10 if vol_z_abs < 2.5 else 5)
             target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), max_allowed_leverage))
             
-            # 7. Execution Matrix
             risk_matrix = {
                 "allocated_value_usdt": notional,
                 "size": position_size,
