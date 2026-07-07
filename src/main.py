@@ -116,7 +116,7 @@ class DistributedQuantEngine:
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.screener_memory: Dict[str, Dict[str, Any]] = {
-            s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
+            s: {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
         }
         
         self.screener_metrics: Dict[str, Dict[str, float]] = {
@@ -367,7 +367,8 @@ class DistributedQuantEngine:
                         volumes = [float(k[5]) for k in data][::-1]
                         self.screener_memory[symbol] = {
                             "prices": closes, 
-                            "volumes": volumes, 
+                            "volumes": volumes,
+                            "macro_prices": closes.copy(),
                             "last_update_time": time.time()
                         }
                         history = closes
@@ -462,7 +463,14 @@ class DistributedQuantEngine:
         has_pure_edge = False
         is_golden_setup = False
         
+        # 🚀 APEX UPGRADE 2: Dynamic Time-Warping Trend Matrix
+        hawkes_score = metrics.get("hawkes_score", 0.0)
+        valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
+        avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
+        hawkes_ratio = hawkes_score / avg_hawkes if avg_hawkes > 0 else 0.0
+
         if market_regime == "TRENDING":
+            # 1. Existing Logic: Catching the Pullback
             if vol_mult >= 1.2 and vol_z_abs >= 1.5:
                 if z_obi <= -effective_z_threshold and adaptive_mieg_long and price_z_score <= -0.5:
                     has_pure_edge = True
@@ -471,11 +479,27 @@ class DistributedQuantEngine:
                     has_pure_edge = True
                     trade_direction = "SELL"
                     
-            if vol_z_abs >= 2.5 and vol_mult >= 2.0 and not has_pure_edge:
+            # 2. Advanced Trend Matrix: Vector Alignment
+            price_vector = np.clip(price_z_score / 2.0, -1.0, 1.0) 
+            obi_vector = np.clip(z_obi / max(1.0, effective_z_threshold), -1.0, 1.0)
+            kinetic_vector = np.clip(math.log1p(vol_mult) * max(0.0, hawkes_ratio - 1.0), 0.0, 1.5)
+            
+            trend_force = 0.0
+            if price_vector > 0 and obi_vector > 0:
+                trend_force = ((price_vector + obi_vector) / 2.0) * (1.0 + kinetic_vector)
+            elif price_vector < 0 and obi_vector < 0:
+                trend_force = ((price_vector + obi_vector) / 2.0) * (1.0 + kinetic_vector)
+                
+            activation_barrier = 1.25 
+            
+            if trend_force >= activation_barrier and not has_pure_edge:
                 has_pure_edge = True
-                is_golden_setup = True
-                trade_direction = "BUY" if price_z_score > 0 else "SELL"
-                logger.critical(f"⚡ [PARABOLIC STRIKE] {symbol} bypassing tape. Riding raw institutional momentum.")
+                trade_direction = "BUY"
+                logger.critical(f"🚀 [VECTOR ALIGNMENT] {symbol} Upward breakout confirmed (Force: {trend_force:.2f}).")
+            elif trend_force <= -activation_barrier and not has_pure_edge:
+                has_pure_edge = True
+                trade_direction = "SELL"
+                logger.critical(f"🚀 [VECTOR ALIGNMENT] {symbol} Downward breakdown confirmed (Force: {trend_force:.2f}).")
 
         elif market_regime == "RANGING":
             is_exhausted = vol_mult < 1.0 
@@ -510,13 +534,15 @@ class DistributedQuantEngine:
                 btc_mean = np.mean(btc_array)
                 btc_std = np.std(btc_array) + 1e-6
                 btc_z_score = (btc_array[-1] - btc_mean) / btc_std
+                btc_pct_change = (btc_array[-1] - btc_mean) / btc_mean
                 
                 macro_bias = self.macro_regimes.get("BTCUSDT", "HOLD")
                 btc_metrics = self.screener_metrics.get("BTCUSDT", {})
                 btc_vol_z = btc_metrics.get("vol_z", 0.0)
                 
-                is_systemic_bull_squeeze = (btc_z_score >= 1.5 and macro_bias == "BUY") or btc_vol_z >= 2.0 or btc_z_score >= 2.5
-                is_systemic_bear_squeeze = (btc_z_score <= -1.5 and macro_bias == "SELL") or btc_vol_z <= -2.0 or btc_z_score <= -2.5
+                # 🚀 Fix: Ensure a real percentage drop accompanies the Z-Score to prevent 60-min myopia
+                is_systemic_bull_squeeze = (btc_z_score >= 2.0 and btc_pct_change > 0.015) or btc_vol_z >= 2.5
+                is_systemic_bear_squeeze = (btc_z_score <= -2.0 and btc_pct_change < -0.015) or btc_vol_z <= -2.5
                 
                 if trade_direction == "SELL" and is_systemic_bull_squeeze:
                     logger.critical(f"🛡️ MACRO SHIELD // BTC systemic short-squeeze detected (Z: {btc_z_score:.2f}). {symbol} short blocked.")
@@ -551,14 +577,12 @@ class DistributedQuantEngine:
         ))
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        # We now use the 1m Kline stream for true volume and volatility calculations.
-        # This function is kept only to maintain interface compatibility and freshness tracking.
         symbol = data.get("symbol")
         if not symbol or symbol not in self.asset_basket:
             return
             
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "volumes": [], "last_update_time": 0.0}
+            self.screener_memory[symbol] = {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
             
         self.screener_memory[symbol]["last_update_time"] = time.time()
 
@@ -585,9 +609,22 @@ class DistributedQuantEngine:
             volume=c_vol
         )
         
-        # 🚀 APEX FIX: Calculate true Volume Multiplier using 1-minute candle volume
+        if symbol not in self.screener_memory:
+            self.screener_memory[symbol] = {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
+            
+        history = self.screener_memory[symbol]
+
+        # 🚀 APEX UPGRADE: Continuous Exponential Moving Volatility (CEMV)
+        if str(interval) == "15":
+             if "macro_prices" not in history:
+                 history["macro_prices"] = []
+             
+             macro_hist = history["macro_prices"]
+             macro_hist.append(c_close)
+             if len(macro_hist) > 48: 
+                 macro_hist.pop(0)
+                 
         if str(interval) == "1":
-            history = self.screener_memory[symbol]
             history["volumes"].append(c_vol)
             history["prices"].append(c_close)
             
@@ -599,28 +636,39 @@ class DistributedQuantEngine:
                 vol_array = np.array(history["volumes"])
                 price_array = np.array(history["prices"])
                 
-                # Calculate True Volume Multiplier
-                mean_vol = np.mean(vol_array[:-1]) if len(vol_array) > 1 else 1.0
-                mean_vol = max(mean_vol, 1.0) # Prevent division by zero
-                vol_mult = c_vol / mean_vol
+                # 1. Advanced Volume Multiplier (Exponential Decay)
+                weights = np.exp(np.linspace(-1., 0., len(vol_array[:-1])))
+                weights /= weights.sum()
+                ewm_vol = np.sum(vol_array[:-1] * weights)
+                ewm_vol = max(ewm_vol, 1.0)
+                vol_mult = c_vol / ewm_vol
                 
-                # Calculate True Volatility Z-Score
+                # 2. Continuous Volatility Z-Score (CEMV)
                 returns = np.diff(np.log(price_array))
                 if len(returns) > 0:
-                    mean_return = np.mean(returns)
-                    std_return = np.std(returns) + 1e-6
-                    vel_z = (returns[-1] - mean_return) / std_return
+                    ret_weights = np.exp(np.linspace(-1., 0., len(returns)))
+                    ret_weights /= ret_weights.sum()
+                    ewm_mean_ret = np.sum(returns * ret_weights)
+                    
+                    variance = np.sum(ret_weights * (returns - ewm_mean_ret)**2)
+                    ewm_std_ret = np.sqrt(variance) + 1e-6
+                    
+                    vel_z = (returns[-1] - ewm_mean_ret) / ewm_std_ret
                 else:
                     vel_z = 0.0
                     
-                mean_price = np.mean(price_array)
-                std_price = np.std(price_array) + 1e-6
-                dist_z = (c_close - mean_price) / std_price
-                
-                vol_z = (vel_z * 0.5) + (dist_z * 0.5)
+                # 3. Macro Baseline Detachment (True Flash Crash Detector)
+                macro_hist = history.get("macro_prices", [])
+                if len(macro_hist) >= 10:
+                    macro_mean = np.mean(macro_hist)
+                    macro_std = np.std(macro_hist) + 1e-6
+                    macro_z = (c_close - macro_mean) / macro_std
+                else:
+                    macro_z = (c_close - np.mean(price_array)) / (np.std(price_array) + 1e-6)
+                    
+                vol_z = (vel_z * 0.4) + (macro_z * 0.6) 
                 
                 current_time = time.time()
-                # 🚀 UPDATE FAST MATH ENGINES (Kalman & Hawkes)
                 math_engine = self.math_engines.setdefault(symbol, FastMathEngine())
                 smoothed_price = math_engine.kalman_update(c_close)
                 hawkes_score = math_engine.hawkes_cluster_score(current_time, c_vol)
@@ -674,7 +722,7 @@ class DistributedQuantEngine:
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
                 new_math_engines[s] = self.math_engines.get(s, FastMathEngine())
-                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": [], "last_update_time": 0.0})
+                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
@@ -1405,7 +1453,7 @@ class DistributedQuantEngine:
             
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.math_engines = {s: FastMathEngine() for s in self.asset_basket}
-            self.screener_memory = {s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
+            self.screener_memory = {s: {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
