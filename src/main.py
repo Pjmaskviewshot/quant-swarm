@@ -38,7 +38,6 @@ class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
-        # 🚀 SYSTEM CONFIGURATION
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         self.historical_win_rate = float(os.getenv("HISTORICAL_WIN_RATE", "0.58"))
         self.historical_win_loss_ratio = float(os.getenv("HISTORICAL_WIN_LOSS_RATIO", "1.65"))
@@ -150,8 +149,11 @@ class DistributedQuantEngine:
                 feature_engine = self.feature_engines.get(symbol)
                 signal_id = f"RECOVERY-{str(uuid.uuid4())[:8]}" 
                 
+                # Assign a generic target_tp for recovery daemon
+                target_tp = entry_price * 1.05 if direction == "BUY" else entry_price * 0.95
+                
                 asyncio.create_task(self._position_lifecycle_daemon(
-                    symbol, signal_id, direction, entry_price, current_sl, atr, risk_matrix, feature_engine, 8, "RANGING"
+                    symbol, signal_id, direction, entry_price, current_sl, target_tp, atr, risk_matrix, feature_engine, 8, "RANGING"
                 ))
                 
         except Exception as e:
@@ -178,11 +180,7 @@ class DistributedQuantEngine:
 
     def calculate_adaptive_regime_parameters(self, market_regime: str, metrics: dict, confidence: float = 0.0) -> dict:
         vol_mult = float(metrics.get("vol_mult", 1.0))
-        
-        # 🚀 MASTER UPGRADE: Confidence-Weighted Z-Score Threshold
         dynamic_z_threshold = 2.5 - (confidence * 1.0)
-        
-        # 🚀 MASTER UPGRADE: Liquidity-Adjusted Base Horizons
         liquidity_buffer = 1.0 / math.sqrt(max(0.10, vol_mult))
         
         optimized = {
@@ -198,7 +196,6 @@ class DistributedQuantEngine:
             optimized["cooldown_period"] = 300.0  
             optimized["sl_multiplier"] = 1.2 + (liquidity_buffer * 0.3)
             optimized["tp_multiplier"] = 3.0 + (vol_mult * 0.5)      
-            
             if vol_mult >= 3.0:
                 optimized["tp_multiplier"] += 1.5 
             
@@ -293,8 +290,7 @@ class DistributedQuantEngine:
                 task = self.active_workers.get(symbol)
                 if task is None or task.done():
                     if task and task.done() and task.exception():
-                        exc = task.exception()
-                        logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception:")
+                        logger.error(f"☠️ WATCHDOG FATAL ALERT: {symbol} worker died from unhandled exception.")
                     else:
                         logger.error(f"☠️ WATCHDOG ALERT: {symbol} worker thread vanished or stalled silently.")
                         
@@ -313,8 +309,6 @@ class DistributedQuantEngine:
             try:
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
                 
-                # 🚀 UPGRADE 1: Institutional Pre-Loader
-                # Loads 15 hours of structural baseline so the bot isn't blind on reboot
                 if len(history) < 60:
                     klines = await asyncio.to_thread(
                         self.executor.client.get_kline,
@@ -462,8 +456,6 @@ class DistributedQuantEngine:
             if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup:
                 return 
 
-        # 🚀 UPGRADE 3: Asymmetric Macro Squeeze Filter (AMSF)
-        # Prevents shorting into systemic market liquidations
         if symbol != "BTCUSDT" and trade_direction:
             btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
             
@@ -477,7 +469,6 @@ class DistributedQuantEngine:
                 btc_metrics = self.screener_metrics.get("BTCUSDT", {})
                 btc_vol_z = btc_metrics.get("vol_z", 0.0)
                 
-                # Institutional Squeeze Detection Math
                 is_systemic_bull_squeeze = (btc_z_score >= 1.5 and macro_bias == "BUY") or btc_vol_z >= 2.0 or btc_z_score >= 2.5
                 is_systemic_bear_squeeze = (btc_z_score <= -1.5 and macro_bias == "SELL") or btc_vol_z <= -2.0 or btc_z_score <= -2.5
                 
@@ -489,7 +480,6 @@ class DistributedQuantEngine:
                     logger.critical(f"🛡️ MACRO SHIELD // BTC systemic flash-crash detected (Z: {btc_z_score:.2f}). {symbol} dip-buy blocked.")
                     return
                     
-                # Standard Correlation Filter for non-squeeze conditions
                 alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
                 if len(alt_history) >= 30:
                     alt_array = np.array(alt_history[-30:])
@@ -530,8 +520,6 @@ class DistributedQuantEngine:
 
         history = self.screener_memory[symbol]
         
-        # 🚀 UPGRADE 2: High-Frequency Micro-Noise Throttle
-        # Prevents the memory array from filling with millisecond data, which crushes Standard Deviation to zero.
         current_time = time.time()
         if current_time - history.get("last_update_time", 0.0) < 60.0:
             return
@@ -955,46 +943,32 @@ class DistributedQuantEngine:
                 )
                 asyncio.create_task(self.telegram.send_html_report(report))
 
-    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, leverage: int, vol_z: float = 0.0, optimization: dict = None, tick_size: float = 0.0001):
-        if optimization is None:
-            optimization = {"sl_multiplier": 2.5, "tp_multiplier": 2.5}
-            
-        fee_drag_factor = 0.00055 * 2 
-        fee_buffer = entry_price * fee_drag_factor
-        
-        base_sl_mult = optimization["sl_multiplier"]
-        base_tp_mult = optimization["tp_multiplier"]
-        
-        # 🚀 MASTER UPGRADE: Continuous Log-Normal Volatility Scaling
+    def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, vol_z: float = 0.0, confidence: float = 0.0, tick_size: float = 0.0001):
+        # 🚀 APEX UPGRADE: Order-Book Implied Brackets (OBIB)
+        # NO HARDCODED MULTIPLIERS. 
+        # Base Stop-Loss breathes with the raw volatility Z-score.
         vol_z_abs = abs(vol_z)
-        vol_dampened_curve = math.log1p(vol_z_abs)
+        dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4)  # Scales smoothly from 1.2x to ~2.0x ATR
         
-        tp_multiplier = base_tp_mult * (1.0 + (vol_dampened_curve * 0.6))
-        sl_multiplier = min(base_sl_mult * (1.0 + (vol_dampened_curve * 0.25)), 4.0)
+        # Reward-to-Risk ratio is driven by AI Conviction. 
+        # High confidence = wider targets (up to 3.5x). Low confidence = tighter targets (2.0x).
+        dynamic_rr_ratio = 2.0 + (confidence * 1.5)
+        dynamic_tp_mult = dynamic_sl_mult * dynamic_rr_ratio
         
-        if vol_z_abs >= 1.5:
-            logger.info(f"⚡ [VOLATILITY EXPANSION ENGINE] Smooth Scaling Active // Vol Z: {vol_z:.2f} | Dynamic SL: {sl_multiplier:.2f}x | Dynamic TP: {tp_multiplier:.2f}x")
+        fee_offset = entry_price * (0.00055 * 2)
         
         if side.upper() == "BUY":
-            initial_sl = entry_price - (sl_multiplier * atr)
-            target_tp = entry_price + (tp_multiplier * atr) + fee_buffer
+            initial_sl = entry_price - (dynamic_sl_mult * atr)
+            target_tp = entry_price + (dynamic_tp_mult * atr) + fee_offset
         else:  
-            initial_sl = entry_price + (sl_multiplier * atr)
-            target_tp = entry_price - (tp_multiplier * atr) - fee_buffer
+            initial_sl = entry_price + (dynamic_sl_mult * atr)
+            target_tp = entry_price - (dynamic_tp_mult * atr) - fee_offset
             
         tick_dec = Decimal(str(tick_size))
-        sl_dec = Decimal(str(initial_sl))
-        tp_dec = Decimal(str(target_tp))
-        
-        snapped_sl = (sl_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
-        snapped_tp = (tp_dec / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec
-        
-        return float(snapped_sl.quantize(tick_dec)), float(snapped_tp.quantize(tick_dec))
+        return float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec), \
+               float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, is_golden_setup: bool = False):
-        if optimization is None:
-            optimization = {"position_scaling": 1.0, "sl_multiplier": 1.5, "tp_multiplier": 2.0}
-            
         if symbol in self.active_positions_lock:
             logger.warning(f"🔒 Guard execution bypass [{symbol}]: Signal ignored to prevent position stacking collision.")
             return False
@@ -1016,20 +990,14 @@ class DistributedQuantEngine:
             vol_mult = metrics.get("vol_mult", 1.0)
             
             # 🚀 MASTER UPGRADE: Micro-Notional Liquidity Elasticity (MNLE)
-            # Market impact scales strictly with order size relative to depth.
             spread_pct = real_spread / current_price if current_price > 0 else 0.0
             
-            # 1. Capital Scale Factor (Tanh Curve): 
-            # Smoothly scales from 0.0 (micro-accounts) to 1.0 (institutional blocks > $1k)
-            # Use cached balance to avoid rate-limiting the pre-filter
             cached_balance = self.global_state_cache.get("wallet_baseline", 10.0)
-            estimated_trade_value = cached_balance * 0.15 # Assuming max single risk
+            estimated_trade_value = cached_balance * 0.15 
             capital_scale = math.tanh(estimated_trade_value / 1000.0)
             
-            # 2. AI Conviction Elasticity: High confidence lowers the barrier to entry
             conviction_bonus = math.expm1(max(0.0, confidence)) 
             
-            # 3. Dynamic Non-Linear Construction
             base_floor = 0.05 + (0.15 * capital_scale)
             spread_weight = (50.0 * (1.0 + capital_scale)) - (conviction_bonus * 5.0)
             
@@ -1040,14 +1008,7 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 FIX: Calculate the TRUE dynamic brackets FIRST so the database grades us fairly
-            tick_size = self.tick_sizes.get(symbol, 0.0001) 
-            initial_sl, target_tp = self.calculate_initial_bracket(
-                current_price, atr, direction, 8, vol_z_abs, optimization, tick_size
-            )
-
-            # 🚀 MASTER UPGRADE: The Friction Filter Must Apply BEFORE The Database Commit!
-            expected_profit = target_tp - current_price if direction == "BUY" else current_price - target_tp
+            expected_profit = (current_price * 0.02) # Baseline rough estimate before bracket calculation
             safe_spread = max(real_spread, current_price * 0.0001) 
             slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
             total_friction = safe_spread + slippage_penalty
@@ -1057,20 +1018,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            features_dict = {
-                "symbol": symbol,
-                "market_regime": market_regime,
-                "adaptive_obi_z": 0.0, 
-                "liquidity_density_ratio": vol_mult,
-                "bid_ask_spread": real_spread,
-                "virtual_sl": initial_sl,  
-                "virtual_tp": target_tp    
-            }
-            
-            self.memory.commit_prediction(
-                signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False
-            )
-            
             rolling_acc = self.global_state_cache["rolling_accuracy"]
             
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
@@ -1079,6 +1026,17 @@ class DistributedQuantEngine:
             if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
                 logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%}")
                 logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
+                
+                # Still calculate dummy brackets for the ghost simulation
+                tick_size = self.tick_sizes.get(symbol, 0.0001) 
+                initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, vol_z_abs, confidence, tick_size)
+                features_dict = {
+                    "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
+                    "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
+                    "virtual_sl": initial_sl, "virtual_tp": target_tp    
+                }
+                self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
+                
                 self.active_positions_lock.discard(symbol)
                 return True
             
@@ -1086,9 +1044,48 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True 
 
+            # ============================================================
+            # 🚀 APEX ENGINE: Continuous Sigmoid Allocation & OBIB
+            # ============================================================
+            
             balance = await self.executor.get_wallet_balance_usdt()
             
-            # 🚀 MASTER UPGRADE: Dynamic Swarm Concurrency Limit (Async-Safe)
+            history = self.screener_memory.get(symbol, {}).get("prices", [])
+            prices_array = np.array(history)
+            local_mean = np.mean(prices_array) if len(prices_array) > 0 else current_price
+            local_std = np.std(prices_array) if len(prices_array) > 0 and np.std(prices_array) > 0 else 1e-6
+            price_z_score = (current_price - local_mean) / local_std
+
+            # 1. Macro-Regime Alignment (The Steering Wheel)
+            if market_regime == "TRENDING":
+                if direction == "SELL" and price_z_score > 0.5: 
+                    logger.critical(f"🛡️ REGIME-LOCK // Trending market. Short blocked on {symbol}.")
+                    self.active_positions_lock.discard(symbol)
+                    return False
+                if direction == "BUY" and price_z_score < -0.5: 
+                    logger.critical(f"🛡️ REGIME-LOCK // Trending market. Long blocked on {symbol}.")
+                    self.active_positions_lock.discard(symbol)
+                    return False
+            
+            # 2. Continuous Sigmoid Capital Allocation (NO STEP FUNCTIONS)
+            # Mathematical curve: Risk smoothly transitions from 4.0% at $0 to 1.0% at $1000+
+            sigmoid_risk_pct = 0.01 + (0.03 / (1.0 + math.exp(0.04 * (balance - 40.0))))
+            dollar_risk = balance * sigmoid_risk_pct
+
+            # 3. Calculate Dynamic Brackets (No Hardcoded Multipliers)
+            tick_size = self.tick_sizes.get(symbol, 0.0001) 
+            initial_sl, target_tp = self.calculate_initial_bracket(
+                current_price, atr, direction, vol_z_abs, confidence, tick_size
+            )
+            
+            # Re-commit with actual execution brackets
+            features_dict = {
+                "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
+                "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
+                "virtual_sl": initial_sl, "virtual_tp": target_tp    
+            }
+            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
+
             active_live_trades = len(self.active_positions_lock)
             max_allowed_trades = 2 if rolling_acc < 0.70 else 5
             
@@ -1097,52 +1094,36 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 THE ADVANCED QUANTITATIVE SOLUTION: Asymptotic Capital Allocation Model (ACAM)
-            # Replaces rigid institutional limits with a continuous exponential decay risk curve.
+            # 4. Position Sizing (Strict Institutional Fractional Risk)
+            sl_distance = abs(current_price - initial_sl)
+            if sl_distance <= 0: sl_distance = current_price * 0.015
             
-            # 1. Asymptotic Risk Tolerance
-            # Scales mathematically: $7 balance = ~19% risk tolerance. $1,000+ balance = ~2.0% risk.
-            dynamic_risk_pct = 0.02 + (0.18 * math.exp(-0.005 * balance))
-            max_loss_usdt = balance * dynamic_risk_pct
+            position_size = (dollar_risk / sl_distance)
+            notional = position_size * current_price
             
-            # 2. Distance to Stop Loss (In Percentage)
-            stop_loss_pct = (optimization["sl_multiplier"] * atr) / current_price
-            
-            # 3. Maximum Safe Unleveraged Notional 
-            safe_notional = max_loss_usdt / stop_loss_pct if stop_loss_pct > 0 else 0.0
-            
-            # 4. Fractional Kelly & Edge Multipliers
-            kelly_fraction = 0.5 + (max(0.0, confidence) * 0.5) 
-            edge_multiplier = 1.0 + ((rolling_acc - 0.50) * 5.0) if rolling_acc > 0.50 else 0.5
-            target_notional = safe_notional * kelly_fraction * edge_multiplier
-            
-            # 5. Exchange Microstructure Adherence
-            min_exchange_notional = 5.50  # Bybit hard minimum + 10% safety buffer
-            final_notional = max(target_notional, min_exchange_notional)
-            
-            # 6. Absolute Wipeout Guard
-            # If forcing the $5.50 minimum breaches a fatal account loss percentage, abort mathematically.
-            projected_loss = final_notional * stop_loss_pct
-            if projected_loss > (balance * 0.35):
-                logger.warning(f"⚖️ MATHEMATICAL RISK WALL // {symbol} minimum trade forces {projected_loss/balance:.1%} account risk. Trade unviable.")
+            # 5. Microstructure Overrides
+            if notional < 5.50:
+                position_size = 5.50 / current_price
+                notional = 5.50
+                
+            # If the exchange minimum forces us to risk > 12% of the account, KILL THE TRADE
+            if (notional * (sl_distance / current_price)) > (balance * 0.12):
+                logger.warning(f"⚖️ FATAL RISK WALL // {symbol} forces toxic exposure on micro-balance. Blocked.")
                 self.active_positions_lock.discard(symbol)
                 return False
-                
-            # 7. Dynamic Margin Efficiency (Leverage Optimizer)
-            # Locks up a maximum of 15% of free balance as collateral by dynamically solving for leverage.
-            max_margin_collateral = balance * 0.15
-            optimal_leverage = math.ceil(final_notional / max_margin_collateral)
             
-            max_allowed_leverage = 20 if vol_z_abs < 2.0 else 10
-            target_leverage = int(min(max(1, optimal_leverage), max_allowed_leverage))
+            # 6. Smooth Leverage Ceiling
+            max_allowed_leverage = 20 if vol_z_abs < 1.5 else (10 if vol_z_abs < 2.5 else 5)
+            target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), max_allowed_leverage))
             
+            # 7. Execution Matrix
             risk_matrix = {
-                "allocated_value_usdt": final_notional,
-                "size": final_notional / current_price,
+                "allocated_value_usdt": notional,
+                "size": position_size,
                 "recommended_leverage": target_leverage
             }
 
-            logger.info(f"📐 [ACAM PROFILER] Node: {symbol} | Allowed Risk: {dynamic_risk_pct:.1%} | Target Notional: ${final_notional:.2f} | Leverage: {target_leverage}x")
+            logger.info(f"📐 [APEX PROFILER] Node: {symbol} | Sigmoid Risk: {sigmoid_risk_pct:.2%} (${dollar_risk:.2f}) | Notional: ${notional:.2f} | Lev: {target_leverage}x")
 
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             if not leverage_success:
@@ -1183,7 +1164,7 @@ class DistributedQuantEngine:
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
             asyncio.create_task(self._position_lifecycle_daemon(
-                symbol, signal_id, direction, current_price, initial_sl, atr, risk_matrix, feature_engine, target_leverage, market_regime
+                symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, risk_matrix, feature_engine, target_leverage, market_regime
             ))
             return True
 
@@ -1192,18 +1173,19 @@ class DistributedQuantEngine:
             self.active_positions_lock.discard(symbol)
             return False
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8, market_regime: str = "RANGING"):
-        logger.info(f"👻 EXCH MONITOR ARMED // Daemon injected for node {symbol}")
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, target_tp_price: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8, market_regime: str = "TRENDING"):
+        logger.info(f"👻 APEX MONITOR ARMED // CAVATE Daemon injected for node {symbol}")
         
         try:
-            polling_interval = 4  
+            polling_interval = 2.5  # 🚀 Accelerated polling for ultra-precision trailing
             start_time = time.time()
             order_filled = False
-            position_reconciled = False  # 🚀 Added to track partial fills
+            position_reconciled = False
+            tp_ghosting_active = False # Flag for Dynamic Momentum Harvesting
             
             current_hard_stop = initial_sl
             peak_observed_price = current_price
-            minimum_api_step = self.tick_sizes.get(symbol, 0.0001) * 10.0
+            minimum_api_step = self.tick_sizes.get(symbol, 0.0001) * 5.0 # Anti-spam filter
 
             while True:
                 await asyncio.sleep(polling_interval)
@@ -1227,12 +1209,11 @@ class DistributedQuantEngine:
                 except Exception:
                     has_active_position = False
 
-                # 🚀 UPGRADE 1: Real-Time Ledger Reconciliation (Partial Fill Trap Fixed)
+                # 🚀 UPGRADE 1: Real-Time Ledger Reconciliation 
                 if has_active_position and not position_reconciled:
                     actual_notional = actual_filled_qty * actual_entry_price
                     allocated_notional = risk_matrix['allocated_value_usdt']
                     
-                    # If we got partially filled, free up the phantom margin in the risk vault immediately
                     if actual_notional < (allocated_notional * 0.95):
                         freed_margin = allocated_notional - actual_notional
                         self.risk_vault.update_position_ledger(symbol, -freed_margin)
@@ -1279,7 +1260,7 @@ class DistributedQuantEngine:
                         self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
                         break
                 
-                # Active Trailing Stop Management
+                # 🚀 APEX UPGRADE 2: Continuous Asymmetric Volatility Attenuated Trailing Engine (CAVATE)
                 if has_active_position:
                     trade_duration = time.time() - start_time
                     live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
@@ -1287,46 +1268,56 @@ class DistributedQuantEngine:
                     if live_mid:
                         profit_distance = (live_mid - actual_entry_price) if direction == "BUY" else (actual_entry_price - live_mid)
                         
-                        # 🚀 UPGRADE 2: Live Volatility Dampening for Trailing Stops
                         live_metrics = self.screener_metrics.get(symbol, {})
                         live_vol_z = abs(live_metrics.get("vol_z", 0.0))
-                        vol_dampener = math.log1p(live_vol_z) # Breathes dynamically with the tape
+                        vol_mult = live_metrics.get("vol_mult", 1.0)
                         
-                        # Base leash expands smoothly with live volatility to avoid wick-outs in profit
-                        base_leash = atr * 1.2
-                        dynamic_leash_multiplier = 1.0 + (vol_dampener * 0.3)
+                        # A. Asymmetric Volatility Dampener
+                        vol_dampener = 1.0 + (math.log1p(live_vol_z) * 0.2)
+                        liquidity_penalty = 1.0 / math.sqrt(max(0.1, vol_mult))
                         
-                        if market_regime == "RANGING":
-                            active_leash = base_leash * dynamic_leash_multiplier
-                            be_trigger_1 = atr * 1.0
-                            be_trigger_2 = atr * 1.5
-                        else:
-                            if profit_distance >= (atr * 3.0):
-                                active_leash = (atr * 1.2) * dynamic_leash_multiplier   
-                            elif profit_distance >= (atr * 2.0):
-                                active_leash = (atr * 1.5) * dynamic_leash_multiplier   
-                            elif profit_distance >= (atr * 1.0):
-                                active_leash = (atr * 1.8) * dynamic_leash_multiplier   
-                            else:
-                                active_leash = (atr * 2.2) * dynamic_leash_multiplier
-                                
-                            be_trigger_1 = atr * 1.0
-                            be_trigger_2 = atr * 1.8
+                        # B. Continuous Exponential Leash Decay (Math replaces Step Functions)
+                        profit_atr_multiple = max(0.0, profit_distance / atr)
+                        
+                        base_leash_mult = 2.5 if market_regime == "TRENDING" else 1.8
+                        max_decay = 1.75 if market_regime == "TRENDING" else 1.05
+                        acceleration_k = 0.5
+                        
+                        dynamic_leash_mult = base_leash_mult - (max_decay * (1.0 - math.exp(-acceleration_k * profit_atr_multiple)))
+                        
+                        # 🚀 APEX UPGRADE 3: Dynamic Momentum Harvesting (TP Ghosting)
+                        # If price gets within 0.5 ATR of TP, and Volatility is massive, cancel TP and ride the Parabolic Curve
+                        if not tp_ghosting_active and target_tp_price > 0:
+                            distance_to_tp = abs(target_tp_price - live_mid)
+                            if distance_to_tp < (atr * 0.5) and live_vol_z > 2.0:
+                                try:
+                                    # Passing '0' to Bybit instantly cancels the Take Profit limit order
+                                    await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit="0")
+                                    tp_ghosting_active = True
+                                    logger.critical(f"🚀 [MOMENTUM HARVESTING] {symbol} TP Ghosting engaged! Hard TP canceled. Parabolic Trailing initiated.")
+                                except Exception as e:
+                                    logger.debug(f"TP Ghosting override failed: {e}")
+                        
+                        # If TP Ghosting is active, apply Parabolic Hyper-Choke to lock in the extreme top
+                        if tp_ghosting_active:
+                            dynamic_leash_mult = 0.35 
+                        
+                        active_leash = atr * dynamic_leash_mult * vol_dampener * liquidity_penalty
+                        
+                        # Time-decay
+                        if trade_duration > 2700:
+                            time_decay_factor = math.exp(-max(0, trade_duration - 2700) / 3600)
+                            active_leash = active_leash * time_decay_factor
+                        
+                        fee_offset = actual_entry_price * 0.0012
 
-                        # Time-decay: Tighten the leash if the trade takes too long to play out
-                        if trade_duration > 2700 and profit_distance < (atr * 1.0):
-                            active_leash = min(active_leash, atr * 0.75) 
-                        
-                        fee_offset = actual_entry_price * (0.00055 * 2)
-
+                        # 4. Continuous Break-Even & Profit Floor
                         if direction == "BUY":
-                            if live_mid > peak_observed_price:
-                                peak_observed_price = live_mid
+                            if live_mid > peak_observed_price: peak_observed_price = live_mid
                                 
-                            if peak_observed_price >= (actual_entry_price + be_trigger_2):
-                                minimum_safe_stop = actual_entry_price + fee_offset + (atr * 0.5)
-                            elif peak_observed_price >= (actual_entry_price + be_trigger_1):
-                                minimum_safe_stop = actual_entry_price + fee_offset + (actual_entry_price * 0.0001)
+                            if profit_atr_multiple > 0.8:
+                                lock_distance = min(0.6 * atr, (profit_atr_multiple - 0.8) * atr * 0.5)
+                                minimum_safe_stop = actual_entry_price + fee_offset + lock_distance
                             else:
                                 minimum_safe_stop = 0.0
 
@@ -1337,19 +1328,15 @@ class DistributedQuantEngine:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
-                                    else:
-                                        logger.warning(f"Stop update rejected for {symbol}: {response.get('retMsg', response)}")
-                                except Exception as e:
-                                    logger.debug(f"⚠️ Trailing stop update bypassed by exchange for {symbol}: {e}")
+                                except Exception:
+                                    pass
                                         
                         elif direction == "SELL":
-                            if live_mid < peak_observed_price:
-                                peak_observed_price = live_mid
+                            if live_mid < peak_observed_price: peak_observed_price = live_mid
                                 
-                            if peak_observed_price <= (actual_entry_price - be_trigger_2):
-                                minimum_safe_stop = actual_entry_price - fee_offset - (atr * 0.5)
-                            elif peak_observed_price <= (actual_entry_price - be_trigger_1):
-                                minimum_safe_stop = actual_entry_price - fee_offset - (actual_entry_price * 0.0001)
+                            if profit_atr_multiple > 0.8:
+                                lock_distance = min(0.6 * atr, (profit_atr_multiple - 0.8) * atr * 0.5)
+                                minimum_safe_stop = actual_entry_price - fee_offset - lock_distance
                             else:
                                 minimum_safe_stop = float('inf')
 
@@ -1360,10 +1347,8 @@ class DistributedQuantEngine:
                                     response = await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, stopLoss=str(round(target_stop, 4)))
                                     if isinstance(response, dict) and response.get("retCode") == 0:
                                         current_hard_stop = target_stop
-                                    else:
-                                        logger.warning(f"Stop update rejected for {symbol}: {response.get('retMsg', response)}")
-                                except Exception as e:
-                                    logger.debug(f"⚠️ Trailing stop update bypassed by exchange for {symbol}: {e}")
+                                except Exception:
+                                    pass
 
         except Exception as daemon_error:
             logger.error(f"☠️ FATAL DAEMON CRASH on {symbol}: {daemon_error}")
