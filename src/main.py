@@ -34,10 +34,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
+
+class FastMathEngine:
+    """1D Kalman Filter & Hawkes Process Approximation for Async Event Loops"""
+    def __init__(self):
+        # 1D Kalman Filter State
+        self.k_est = 0.0
+        self.k_err = 1.0
+        self.q = 0.01  # Process noise
+        self.r = 0.1   # Measurement noise
+        
+        # Hawkes Excitement State
+        self.trade_timestamps = []
+        self.decay_factor = 0.5  # Controls how fast old volume "forgets"
+
+    def kalman_update(self, measurement: float) -> float:
+        """A lightning-fast 1D Kalman filter to find the true price trend through noise."""
+        if self.k_est == 0.0:
+            self.k_est = measurement
+            return measurement
+            
+        # Prediction Update
+        p_pred = self.k_err + self.q
+        # Measurement Update
+        kalman_gain = p_pred / (p_pred + self.r)
+        self.k_est = self.k_est + kalman_gain * (measurement - self.k_est)
+        self.k_err = (1.0 - kalman_gain) * p_pred
+        return self.k_est
+
+    def hawkes_cluster_score(self, current_time: float, volume: float) -> float:
+        """Approximates a Hawkes process by calculating time-decayed volume clustering."""
+        self.trade_timestamps.append((current_time, volume))
+        
+        # Keep only last 60 seconds of data to prevent memory leaks
+        self.trade_timestamps = [t for t in self.trade_timestamps if current_time - t[0] < 60]
+        
+        excitement = 0.0
+        for t_time, t_vol in self.trade_timestamps:
+            time_diff = current_time - t_time
+            excitement += t_vol * math.exp(-self.decay_factor * time_diff)
+            
+        return excitement
+
+
 class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
         
+        # 🚀 SYSTEM CONFIGURATION
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         self.historical_win_rate = float(os.getenv("HISTORICAL_WIN_RATE", "0.58"))
         self.historical_win_loss_ratio = float(os.getenv("HISTORICAL_WIN_LOSS_RATIO", "1.65"))
@@ -63,6 +107,10 @@ class DistributedQuantEngine:
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {
             s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket
         }
+        
+        # 🚀 INIT FAST MATH ENGINES
+        self.math_engines: Dict[str, FastMathEngine] = {s: FastMathEngine() for s in self.asset_basket}
+        
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
@@ -72,7 +120,7 @@ class DistributedQuantEngine:
         }
         
         self.screener_metrics: Dict[str, Dict[str, float]] = {
-            s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket
+            s: {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0} for s in self.asset_basket
         }
         
         self.pending_macro_payloads: Dict[str, dict] = {}
@@ -149,7 +197,6 @@ class DistributedQuantEngine:
                 feature_engine = self.feature_engines.get(symbol)
                 signal_id = f"RECOVERY-{str(uuid.uuid4())[:8]}" 
                 
-                # Assign a generic target_tp for recovery daemon
                 target_tp = entry_price * 1.05 if direction == "BUY" else entry_price * 0.95
                 
                 asyncio.create_task(self._position_lifecycle_daemon(
@@ -563,9 +610,16 @@ class DistributedQuantEngine:
 
         volatility_z = (vel_z * 0.5) + (dist_z * 0.5)
         
+        # 🚀 UPDATE FAST MATH ENGINES (Kalman & Hawkes)
+        math_engine = self.math_engines.setdefault(symbol, FastMathEngine())
+        smoothed_price = math_engine.kalman_update(current_price)
+        hawkes_score = math_engine.hawkes_cluster_score(current_time, tick_volume)
+        
         self.screener_metrics[symbol] = {
             "vol_mult": float(volume_multiplier),
-            "vol_z": float(volatility_z)
+            "vol_z": float(volatility_z),
+            "smoothed_price": smoothed_price,
+            "hawkes_score": hawkes_score
         }
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
@@ -616,6 +670,7 @@ class DistributedQuantEngine:
                 self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
             
             new_feature_engines = {}
+            new_math_engines = {}
             new_screener_memory = {}
             new_macro_regimes = {}
             new_macro_confidences = {}
@@ -624,19 +679,17 @@ class DistributedQuantEngine:
             new_screener_metrics = {}
             
             for s in self.asset_basket:
-                if s in self.feature_engines:
-                    new_feature_engines[s] = self.feature_engines[s]
-                else:
-                    new_feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
-                    
+                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+                new_math_engines[s] = self.math_engines.get(s, FastMathEngine())
                 new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "volumes": [], "last_update_time": 0.0})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
                 new_last_execs[s] = self.last_execution_timestamps.get(s, 0.0)
-                new_screener_metrics[s] = self.screener_metrics.get(s, {"vol_mult": 1.0, "vol_z": 0.0})
+                new_screener_metrics[s] = self.screener_metrics.get(s, {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0})
                 
             self.feature_engines = new_feature_engines
+            self.math_engines = new_math_engines
             self.screener_memory = new_screener_memory
             self.macro_regimes = new_macro_regimes
             self.macro_confidences = new_macro_confidences
@@ -945,13 +998,9 @@ class DistributedQuantEngine:
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, vol_z: float = 0.0, confidence: float = 0.0, tick_size: float = 0.0001):
         # 🚀 APEX UPGRADE: Order-Book Implied Brackets (OBIB)
-        # NO HARDCODED MULTIPLIERS. 
-        # Base Stop-Loss breathes with the raw volatility Z-score.
         vol_z_abs = abs(vol_z)
-        dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4)  # Scales smoothly from 1.2x to ~2.0x ATR
+        dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4) 
         
-        # Reward-to-Risk ratio is driven by AI Conviction. 
-        # High confidence = wider targets (up to 3.5x). Low confidence = tighter targets (2.0x).
         dynamic_rr_ratio = 2.0 + (confidence * 1.5)
         dynamic_tp_mult = dynamic_sl_mult * dynamic_rr_ratio
         
@@ -989,7 +1038,6 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 MASTER UPGRADE: Micro-Notional Liquidity Elasticity (MNLE)
             spread_pct = real_spread / current_price if current_price > 0 else 0.0
             
             cached_balance = self.global_state_cache.get("wallet_baseline", 10.0)
@@ -1004,11 +1052,11 @@ class DistributedQuantEngine:
             dynamic_vol_floor = max(0.02, base_floor + (spread_pct * max(10.0, spread_weight)))
             
             if vol_mult < dynamic_vol_floor:
-                logger.info(f"⚖️ DYNAMIC LIQUIDITY WALL // Node: {symbol} | Vol: {vol_mult:.2f}x | Req Floor: {dynamic_vol_floor:.2f}x (Spread: {spread_pct:.3%}). Trade skipped.")
+                logger.info(f"⚖️ DYNAMIC LIQUIDITY WALL // Node: {symbol} | Vol: {vol_mult:.2f}x | Req Floor: {dynamic_vol_floor:.2f}x. Trade skipped.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            expected_profit = (current_price * 0.02) # Baseline rough estimate before bracket calculation
+            expected_profit = (current_price * 0.02) 
             safe_spread = max(real_spread, current_price * 0.0001) 
             slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
             total_friction = safe_spread + slippage_penalty
@@ -1027,7 +1075,6 @@ class DistributedQuantEngine:
                 logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%}")
                 logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
                 
-                # Still calculate dummy brackets for the ghost simulation
                 tick_size = self.tick_sizes.get(symbol, 0.0001) 
                 initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, vol_z_abs, confidence, tick_size)
                 features_dict = {
@@ -1066,9 +1113,30 @@ class DistributedQuantEngine:
                     logger.critical(f"🛡️ REGIME-LOCK // Trending market. Long blocked on {symbol}.")
                     self.active_positions_lock.discard(symbol)
                     return False
+                    
+            # 1.5 Elite Math Filters (Kalman & Hawkes)
+            smoothed_price = metrics.get("smoothed_price", current_price)
+            kalman_diff_pct = (current_price - smoothed_price) / current_price if current_price > 0 else 0.0
+
+            if direction == "BUY" and kalman_diff_pct < -0.001:
+                logger.warning(f"🛡️ KALMAN SHIELD // {symbol} raw price spiked, but Kalman trend is down. Fakeout avoided.")
+                self.active_positions_lock.discard(symbol)
+                return False
+            if direction == "SELL" and kalman_diff_pct > 0.001:
+                logger.warning(f"🛡️ KALMAN SHIELD // {symbol} raw price dropped, but Kalman trend is up. Fakeout avoided.")
+                self.active_positions_lock.discard(symbol)
+                return False
+
+            hawkes_score = metrics.get("hawkes_score", 0.0)
+            valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
+            avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.0
+            
+            if market_regime == "TRENDING" and hawkes_score < (avg_hawkes * 1.2):
+                logger.warning(f"🛡️ HAWKES SHIELD // {symbol} lacks institutional volume clustering. Momentum unverified.")
+                self.active_positions_lock.discard(symbol)
+                return False
             
             # 2. Continuous Sigmoid Capital Allocation (NO STEP FUNCTIONS)
-            # Mathematical curve: Risk smoothly transitions from 4.0% at $0 to 1.0% at $1000+
             sigmoid_risk_pct = 0.01 + (0.03 / (1.0 + math.exp(0.04 * (balance - 40.0))))
             dollar_risk = balance * sigmoid_risk_pct
 
@@ -1078,7 +1146,6 @@ class DistributedQuantEngine:
                 current_price, atr, direction, vol_z_abs, confidence, tick_size
             )
             
-            # Re-commit with actual execution brackets
             features_dict = {
                 "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
@@ -1106,7 +1173,6 @@ class DistributedQuantEngine:
                 position_size = 5.50 / current_price
                 notional = 5.50
                 
-            # If the exchange minimum forces us to risk > 12% of the account, KILL THE TRADE
             if (notional * (sl_distance / current_price)) > (balance * 0.12):
                 logger.warning(f"⚖️ FATAL RISK WALL // {symbol} forces toxic exposure on micro-balance. Blocked.")
                 self.active_positions_lock.discard(symbol)
@@ -1177,15 +1243,15 @@ class DistributedQuantEngine:
         logger.info(f"👻 APEX MONITOR ARMED // CAVATE Daemon injected for node {symbol}")
         
         try:
-            polling_interval = 2.5  # 🚀 Accelerated polling for ultra-precision trailing
+            polling_interval = 2.5  
             start_time = time.time()
             order_filled = False
             position_reconciled = False
-            tp_ghosting_active = False # Flag for Dynamic Momentum Harvesting
+            tp_ghosting_active = False 
             
             current_hard_stop = initial_sl
             peak_observed_price = current_price
-            minimum_api_step = self.tick_sizes.get(symbol, 0.0001) * 5.0 # Anti-spam filter
+            minimum_api_step = self.tick_sizes.get(symbol, 0.0001) * 5.0
 
             while True:
                 await asyncio.sleep(polling_interval)
@@ -1209,7 +1275,6 @@ class DistributedQuantEngine:
                 except Exception:
                     has_active_position = False
 
-                # 🚀 UPGRADE 1: Real-Time Ledger Reconciliation 
                 if has_active_position and not position_reconciled:
                     actual_notional = actual_filled_qty * actual_entry_price
                     allocated_notional = risk_matrix['allocated_value_usdt']
@@ -1222,7 +1287,6 @@ class DistributedQuantEngine:
                     
                     position_reconciled = True
 
-                # Handle Timeout / Stale Orders
                 if not order_filled and (time.time() - start_time) > 180:
                     try:
                         open_orders = await asyncio.to_thread(self.executor.client.get_open_orders, category="linear", symbol=symbol)
@@ -1238,7 +1302,6 @@ class DistributedQuantEngine:
                     logger.critical(f"🔓 PORTFOLIO UNLOCKED // Stale exposure dissolved for {symbol}.")
                     break
 
-                # Handle Settlement (Trade Closed)
                 if order_filled and not has_active_position:
                     settlement = await self.executor.check_recent_settlement(symbol=symbol, lookback_seconds=30)
                     if settlement.get("closed"):
@@ -1260,7 +1323,6 @@ class DistributedQuantEngine:
                         self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
                         break
                 
-                # 🚀 APEX UPGRADE 2: Continuous Asymmetric Volatility Attenuated Trailing Engine (CAVATE)
                 if has_active_position:
                     trade_duration = time.time() - start_time
                     live_mid = feature_engine.get_latest_mid() if feature_engine and hasattr(feature_engine, 'get_latest_mid') else None
@@ -1272,11 +1334,9 @@ class DistributedQuantEngine:
                         live_vol_z = abs(live_metrics.get("vol_z", 0.0))
                         vol_mult = live_metrics.get("vol_mult", 1.0)
                         
-                        # A. Asymmetric Volatility Dampener
                         vol_dampener = 1.0 + (math.log1p(live_vol_z) * 0.2)
                         liquidity_penalty = 1.0 / math.sqrt(max(0.1, vol_mult))
                         
-                        # B. Continuous Exponential Leash Decay (Math replaces Step Functions)
                         profit_atr_multiple = max(0.0, profit_distance / atr)
                         
                         base_leash_mult = 2.5 if market_regime == "TRENDING" else 1.8
@@ -1285,33 +1345,27 @@ class DistributedQuantEngine:
                         
                         dynamic_leash_mult = base_leash_mult - (max_decay * (1.0 - math.exp(-acceleration_k * profit_atr_multiple)))
                         
-                        # 🚀 APEX UPGRADE 3: Dynamic Momentum Harvesting (TP Ghosting)
-                        # If price gets within 0.5 ATR of TP, and Volatility is massive, cancel TP and ride the Parabolic Curve
                         if not tp_ghosting_active and target_tp_price > 0:
                             distance_to_tp = abs(target_tp_price - live_mid)
                             if distance_to_tp < (atr * 0.5) and live_vol_z > 2.0:
                                 try:
-                                    # Passing '0' to Bybit instantly cancels the Take Profit limit order
                                     await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit="0")
                                     tp_ghosting_active = True
                                     logger.critical(f"🚀 [MOMENTUM HARVESTING] {symbol} TP Ghosting engaged! Hard TP canceled. Parabolic Trailing initiated.")
                                 except Exception as e:
                                     logger.debug(f"TP Ghosting override failed: {e}")
                         
-                        # If TP Ghosting is active, apply Parabolic Hyper-Choke to lock in the extreme top
                         if tp_ghosting_active:
                             dynamic_leash_mult = 0.35 
                         
                         active_leash = atr * dynamic_leash_mult * vol_dampener * liquidity_penalty
                         
-                        # Time-decay
                         if trade_duration > 2700:
                             time_decay_factor = math.exp(-max(0, trade_duration - 2700) / 3600)
                             active_leash = active_leash * time_decay_factor
                         
                         fee_offset = actual_entry_price * 0.0012
 
-                        # 4. Continuous Break-Even & Profit Floor
                         if direction == "BUY":
                             if live_mid > peak_observed_price: peak_observed_price = live_mid
                                 
@@ -1370,12 +1424,13 @@ class DistributedQuantEngine:
             self.shadow_basket = boot_basket[24:]
             
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
+            self.math_engines = {s: FastMathEngine() for s in self.asset_basket}
             self.screener_memory = {s: {"prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
             self.last_execution_timestamps = {s: 0.0 for s in self.asset_basket}
-            self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0} for s in self.asset_basket}
+            self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0} for s in self.asset_basket}
         
         await asyncio.gather(
             self.run_macro_commander(),        
