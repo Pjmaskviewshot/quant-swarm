@@ -463,17 +463,14 @@ class DistributedQuantEngine:
         has_pure_edge = False
         is_golden_setup = False
         
-        # 🚀 APEX UPGRADE 2: Kinetic Alpha Predator Logic
         hawkes_score = metrics.get("hawkes_score", 0.0)
         valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
         avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
         hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
         
-        # Kinetic Alpha = Volume Surge * Institutional Excitement
         kinetic_alpha = vol_mult * hawkes_ratio
         
         if market_regime == "TRENDING":
-            # 1. Existing Logic: Catching the Pullback
             if vol_mult >= 1.2 and vol_z_abs >= 1.5:
                 if z_obi <= -effective_z_threshold and adaptive_mieg_long and price_z_score <= -0.5:
                     has_pure_edge = True
@@ -482,7 +479,6 @@ class DistributedQuantEngine:
                     has_pure_edge = True
                     trade_direction = "SELL"
                     
-            # 2. Kinetic Matrix: Vector Alignment
             price_vector = np.clip(price_z_score / 2.0, -1.0, 1.0) 
             obi_vector = np.clip(z_obi / max(1.0, effective_z_threshold), -1.0, 1.0)
             kinetic_vector = np.clip(math.log1p(vol_mult) * max(0.0, hawkes_ratio - 1.0), 0.0, 1.5)
@@ -493,7 +489,6 @@ class DistributedQuantEngine:
             elif price_vector < 0 and obi_vector < 0:
                 trend_force = ((price_vector + obi_vector) / 2.0) * (1.0 + kinetic_vector)
                 
-            # Adaptive Entry Barrier: Drop the wall if Alpha is screaming
             dynamic_activation_barrier = 1.25 
             if kinetic_alpha >= 3.0:
                 dynamic_activation_barrier = 0.85
@@ -533,49 +528,6 @@ class DistributedQuantEngine:
                 return 
             if trade_direction == "SELL" and regime == "BUY" and not is_golden_setup:
                 return 
-
-        if symbol != "BTCUSDT" and trade_direction:
-            btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
-            
-            if len(btc_history) >= 30:
-                btc_array = np.array(btc_history)
-                btc_mean = np.mean(btc_array)
-                btc_std = np.std(btc_array) + 1e-6
-                btc_z_score = (btc_array[-1] - btc_mean) / btc_std
-                
-                # Check actual percentage drop to ignore 60-min myopia noise
-                btc_pct_change = (btc_array[-1] - btc_mean) / btc_mean
-                
-                macro_bias = self.macro_regimes.get("BTCUSDT", "HOLD")
-                btc_metrics = self.screener_metrics.get("BTCUSDT", {})
-                btc_vol_z = btc_metrics.get("vol_z", 0.0)
-                
-                is_systemic_bull_squeeze = (btc_z_score >= 2.0 and btc_pct_change > 0.015) or btc_vol_z >= 2.5
-                is_systemic_bear_squeeze = (btc_z_score <= -2.0 and btc_pct_change < -0.015) or btc_vol_z <= -2.5
-                
-                if trade_direction == "SELL" and is_systemic_bull_squeeze:
-                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic short-squeeze detected. {symbol} short blocked.")
-                    return 
-                    
-                if trade_direction == "BUY" and is_systemic_bear_squeeze:
-                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic flash-crash detected. {symbol} dip-buy blocked.")
-                    return
-                    
-                alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
-                if len(alt_history) >= 30:
-                    alt_array = np.array(alt_history[-30:])
-                    btc_slice = btc_array[-30:]
-                    
-                    btc_returns = np.diff(np.log(btc_slice))
-                    alt_returns = np.diff(np.log(alt_array))
-                    
-                    if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
-                        correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
-                        if not math.isnan(correlation) and correlation > 0.45:
-                            if trade_direction == "BUY" and btc_z_score <= -1.0:
-                                return
-                            if trade_direction == "SELL" and btc_z_score >= 1.0:
-                                return
 
         self.last_execution_timestamps[symbol] = current_time
         mode_label = "🔥 LIVE" if is_active else "👻 GHOST"
@@ -623,7 +575,6 @@ class DistributedQuantEngine:
             
         history = self.screener_memory[symbol]
 
-        # 🚀 APEX UPGRADE 1: Continuous Exponential Moving Volatility (CEMV)
         if str(interval) == "15":
              if "macro_prices" not in history:
                  history["macro_prices"] = []
@@ -645,14 +596,12 @@ class DistributedQuantEngine:
                 vol_array = np.array(history["volumes"])
                 price_array = np.array(history["prices"])
                 
-                # Exponential Decay Volume
                 weights = np.exp(np.linspace(-1., 0., len(vol_array[:-1])))
                 weights /= weights.sum()
                 ewm_vol = np.sum(vol_array[:-1] * weights)
                 ewm_vol = max(ewm_vol, 1.0) 
                 vol_mult = c_vol / ewm_vol
                 
-                # Continuous Volatility Z-Score (CEMV)
                 returns = np.diff(np.log(price_array))
                 if len(returns) > 0:
                     ret_weights = np.exp(np.linspace(-1., 0., len(returns)))
@@ -666,7 +615,6 @@ class DistributedQuantEngine:
                 else:
                     vel_z = 0.0
                     
-                # Macro Baseline Detachment
                 macro_hist = history.get("macro_prices", [])
                 if len(macro_hist) >= 10:
                     macro_mean = np.mean(macro_hist)
@@ -1047,12 +995,12 @@ class DistributedQuantEngine:
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, vol_z: float = 0.0, confidence: float = 0.0, tick_size: float = 0.0001):
+        # NOTE: This function is preserved for interface compatibility. 
+        # Live stop-loss math is now handled dynamically inside run_signal_lifecycle via the Fat-Tail Multiplier.
         vol_z_abs = abs(vol_z)
         dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4) 
-        
         dynamic_rr_ratio = 2.0 + (confidence * 1.5)
         dynamic_tp_mult = dynamic_sl_mult * dynamic_rr_ratio
-        
         fee_offset = entry_price * (0.00055 * 2)
         
         if side.upper() == "BUY":
@@ -1068,7 +1016,6 @@ class DistributedQuantEngine:
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, is_golden_setup: bool = False):
         if symbol in self.active_positions_lock:
-            logger.warning(f"🔒 Guard execution bypass [{symbol}]: Signal ignored to prevent position stacking collision.")
             return False
             
         self.active_positions_lock.add(symbol)
@@ -1087,61 +1034,71 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 NEW: KINETIC ALPHA SCORE
+            # 🚀 STRUCTURAL FIX 1: Kinetic Efficiency (Spoofing & Dead Coin Defense)
             hawkes_score = metrics.get("hawkes_score", 0.0)
             valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
             avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
             
-            # Kinetic Alpha measures true institutional velocity against the market average
-            kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
-            is_hyper_trend = kinetic_alpha >= 2.0 and market_regime == "TRENDING"
+            history = self.screener_memory.get(symbol, {}).get("prices", [])
+            prices_array = np.array(history)
+            local_mean = np.mean(prices_array) if len(prices_array) > 0 else current_price
+            local_std = np.std(prices_array) if len(prices_array) > 0 and np.std(prices_array) > 0 else 1e-6
+            price_z_score = (current_price - local_mean) / local_std
             
-            spread_pct = real_spread / current_price if current_price > 0 else 0.0
+            # Calculate how much price moved relative to volume (Velocity per unit of Mass)
+            kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
             
-            cached_balance = self.global_state_cache.get("wallet_baseline", 10.0)
-            estimated_trade_value = cached_balance * 0.15 
-            capital_scale = math.tanh(estimated_trade_value / 1000.0)
-            
-            conviction_bonus = math.expm1(max(0.0, confidence)) 
-            
-            base_floor = 0.05 + (0.15 * capital_scale)
-            spread_weight = (50.0 * (1.0 + capital_scale)) - (conviction_bonus * 5.0)
-            
-            dynamic_vol_floor = max(0.02, base_floor + (spread_pct * max(10.0, spread_weight)))
-            
-            if vol_mult < dynamic_vol_floor:
-                logger.info(f"⚖️ DYNAMIC LIQUIDITY WALL // Node: {symbol} | Vol: {vol_mult:.2f}x | Req Floor: {dynamic_vol_floor:.2f}x. Trade skipped.")
+            # Hard structural floor: We require baseline liquidity to trade
+            if vol_mult < 0.65:
+                logger.info(f"💀 DEAD ASSET FILTER // {symbol} lacks structural liquidity (Vol: {vol_mult:.2f}x). Aborting.")
+                self.active_positions_lock.discard(symbol)
+                return False
+                
+            # Spoofing Filter: High volume but no price movement = Institutional Absorption
+            if vol_mult >= 2.0 and kinetic_efficiency < 0.3:
+                logger.warning(f"🛡️ SPOOFING DETECTED // {symbol} has massive volume but zero velocity. Market makers are absorbing liquidity. Aborting.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            expected_profit = (current_price * 0.02) 
-            safe_spread = max(real_spread, current_price * 0.0001) 
-            slippage_penalty = safe_spread * (1.0 / math.sqrt(max(0.10, vol_mult)))
-            total_friction = safe_spread + slippage_penalty
+            # Kinetic Alpha for Breakouts
+            kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
+            is_hyper_trend = kinetic_alpha >= 1.5 and market_regime == "TRENDING"
             
-            if expected_profit < total_friction:
-                logger.info(f"⚖️ FRICTION WALL // Node: {symbol} | Target too small to survive exchange fees & slippage. Signal shredded.")
+            spread_pct = real_spread / current_price if current_price > 0 else 0.0
+            total_friction = max(real_spread, current_price * 0.0001) + (real_spread * (1.0 / math.sqrt(max(0.10, vol_mult))))
+            
+            if (current_price * 0.02) < total_friction:
                 self.active_positions_lock.discard(symbol)
                 return False
             
             rolling_acc = self.global_state_cache["rolling_accuracy"]
-            
             is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
             has_institutional_edge = rolling_acc >= 0.60
             
-            if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
-                logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Accuracy: {rolling_acc:.2%}")
-                logger.critical(f"👻 [SHIELD ACTIVE] Routing to Ghost Simulation -> Node: {symbol}")
+            # 🚀 STRUCTURAL FIX 2: Fat-Tail Elastic Stop Loss Calculation
+            # The stop expands exponentially as volatility approaches statistical extremes
+            fat_tail_multiplier = 1.5 + math.exp(min(vol_z_abs, 4.0) / 2.0)
+            sl_distance = atr * fat_tail_multiplier
+            
+            if direction == "BUY":
+                initial_sl = current_price - sl_distance
+                target_tp = current_price + (sl_distance * 2.0) + (current_price * 0.0011) # 2:1 RR + Fees
+            else:
+                initial_sl = current_price + sl_distance
+                target_tp = current_price - (sl_distance * 2.0) - (current_price * 0.0011)
                 
-                tick_size = self.tick_sizes.get(symbol, 0.0001) 
-                initial_sl, target_tp = self.calculate_initial_bracket(current_price, atr, direction, vol_z_abs, confidence, tick_size)
+            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+            initial_sl = float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
+            target_tp = float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
+
+            if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
+                logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Routing to Ghost Simulation -> Node: {symbol}")
                 features_dict = {
                     "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
                     "virtual_sl": initial_sl, "virtual_tp": target_tp    
                 }
                 self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
-                
                 self.active_positions_lock.discard(symbol)
                 return True
             
@@ -1149,94 +1106,54 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True 
 
-            balance = await self.executor.get_wallet_balance_usdt()
-            
-            history = self.screener_memory.get(symbol, {}).get("prices", [])
-            prices_array = np.array(history)
-            local_mean = np.mean(prices_array) if len(prices_array) > 0 else current_price
-            local_std = np.std(prices_array) if len(prices_array) > 0 and np.std(prices_array) > 0 else 1e-6
-            price_z_score = (current_price - local_mean) / local_std
-
-            if market_regime == "TRENDING":
-                if direction == "SELL" and price_z_score > 0.5: 
-                    logger.critical(f"🛡️ REGIME-LOCK // Trending market. Short blocked on {symbol}.")
-                    self.active_positions_lock.discard(symbol)
-                    return False
-                if direction == "BUY" and price_z_score < -0.5: 
-                    logger.critical(f"🛡️ REGIME-LOCK // Trending market. Long blocked on {symbol}.")
-                    self.active_positions_lock.discard(symbol)
-                    return False
+            # 🚀 STRUCTURAL FIX 3: Cross-Asset Systemic Gravity (True Falling Knife Shield)
+            if symbol != "BTCUSDT":
+                btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
+                if len(btc_history) >= 30:
+                    btc_array = np.array(btc_history)
+                    btc_mean = np.mean(btc_array)
+                    btc_std = np.std(btc_array) + 1e-6
+                    btc_z_score = (btc_array[-1] - btc_mean) / btc_std
+                    btc_velocity = (btc_array[-1] - btc_array[-10]) / btc_array[-10] # 10-candle macro velocity
                     
-            smoothed_price = metrics.get("smoothed_price", current_price)
-            kalman_diff_pct = (current_price - smoothed_price) / current_price if current_price > 0 else 0.0
+                    alt_array = np.array(history[-30:])
+                    btc_slice = btc_array[-30:]
+                    
+                    btc_returns = np.diff(np.log(btc_slice))
+                    alt_returns = np.diff(np.log(alt_array))
+                    
+                    if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
+                        correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
+                        
+                        # If highly correlated to BTC (>0.7), we apply Systemic Gravity checks
+                        if not math.isnan(correlation) and correlation > 0.70:
+                            if direction == "BUY" and btc_velocity < -0.01:
+                                logger.critical(f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a falling BTC. Dip-buy aborted.")
+                                self.active_positions_lock.discard(symbol)
+                                return False
+                            if direction == "SELL" and btc_velocity > 0.01:
+                                logger.critical(f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a surging BTC. Short aborted.")
+                                self.active_positions_lock.discard(symbol)
+                                return False
 
-            if direction == "BUY" and kalman_diff_pct < -0.001:
-                logger.warning(f"🛡️ KALMAN SHIELD // {symbol} raw price spiked, but Kalman trend is down. Fakeout avoided.")
-                self.active_positions_lock.discard(symbol)
-                return False
-            if direction == "SELL" and kalman_diff_pct > 0.001:
-                logger.warning(f"🛡️ KALMAN SHIELD // {symbol} raw price dropped, but Kalman trend is up. Fakeout avoided.")
-                self.active_positions_lock.discard(symbol)
-                return False
-
-            if market_regime == "TRENDING" and hawkes_score < (avg_hawkes * 1.2):
-                logger.warning(f"🛡️ HAWKES SHIELD // {symbol} lacks institutional volume clustering. Momentum unverified.")
-                self.active_positions_lock.discard(symbol)
-                return False
-            
+            # Execute Trade Parameters
+            balance = await self.executor.get_wallet_balance_usdt()
             sigmoid_risk_pct = 0.01 + (0.03 / (1.0 + math.exp(0.04 * (balance - 40.0))))
             dollar_risk = balance * sigmoid_risk_pct
-
-            tick_size = self.tick_sizes.get(symbol, 0.0001) 
-            initial_sl, target_tp = self.calculate_initial_bracket(
-                current_price, atr, direction, vol_z_abs, confidence, tick_size
-            )
             
-            # 🚀 NEW: KINETIC ELASTICITY (Anti-Wick Defense)
-            if is_hyper_trend:
-                # Expand Stop Loss based on Volatility (Logarithmic)
-                vol_expansion = 1.0 + (math.log1p(vol_z_abs) * 0.4)
-                sl_distance = abs(current_price - initial_sl) * vol_expansion
-                initial_sl = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
-                
-                # Expand Take Profit based on Alpha Momentum (Exponential)
-                tp_distance = abs(current_price - target_tp) * (1.0 + (math.log1p(kinetic_alpha) * 0.5))
-                target_tp = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
-                
-                logger.critical(f"🔥 [KINETIC ELASTICITY] {symbol} Hyper-Trend Engaged. SL/TP Brackets dynamically widened to absorb volatility.")
-
-            features_dict = {
-                "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
-                "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
-                "virtual_sl": initial_sl, "virtual_tp": target_tp    
-            }
-            self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
-
-            active_live_trades = len(self.active_positions_lock)
-            max_allowed_trades = 2 if rolling_acc < 0.70 else 5
-            
-            if not self.test_mode and active_live_trades >= max_allowed_trades:
-                logger.warning(f"🛑 CONCURRENCY CAPPED // {active_live_trades} active trades. Pausing {symbol} to prevent swarm over-exposure.")
-                self.active_positions_lock.discard(symbol)
-                return False
-
-            sl_distance = abs(current_price - initial_sl)
-            if sl_distance <= 0: sl_distance = current_price * 0.015
-            
-            position_size = (dollar_risk / sl_distance)
+            position_size = (dollar_risk / abs(current_price - initial_sl))
             notional = position_size * current_price
             
             if notional < 5.50:
                 position_size = 5.50 / current_price
                 notional = 5.50
                 
-            if (notional * (sl_distance / current_price)) > (balance * 0.12):
+            if (notional * (abs(current_price - initial_sl) / current_price)) > (balance * 0.15):
                 logger.warning(f"⚖️ FATAL RISK WALL // {symbol} forces toxic exposure on micro-balance. Blocked.")
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            max_allowed_leverage = 20 if vol_z_abs < 1.5 else (10 if vol_z_abs < 2.5 else 5)
-            target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), max_allowed_leverage))
+            target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), 15))
             
             risk_matrix = {
                 "allocated_value_usdt": notional,
@@ -1244,7 +1161,7 @@ class DistributedQuantEngine:
                 "recommended_leverage": target_leverage
             }
 
-            logger.info(f"📐 [APEX PROFILER] Node: {symbol} | Sigmoid Risk: {sigmoid_risk_pct:.2%} (${dollar_risk:.2f}) | Notional: ${notional:.2f} | Lev: {target_leverage}x")
+            logger.info(f"📐 [FAT-TAIL PROFILER] Node: {symbol} | SL Expansion: {fat_tail_multiplier:.2f}x ATR | Lev: {target_leverage}x")
 
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             if not leverage_success:
@@ -1280,7 +1197,7 @@ class DistributedQuantEngine:
                 f"• Market Regime: {market_regime}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
                 f"• Notional Value: ${risk_matrix['allocated_value_usdt']:.2f} USDT\n"
-                f"🛡️ *Brackets Active*: SL: {initial_sl} | TP (Fee Offset): {target_tp}"
+                f"🛡️ *Elastic Brackets Active*: SL: {initial_sl} | TP: {target_tp}"
             )
             asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
             
