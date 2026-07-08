@@ -367,8 +367,8 @@ class DistributedQuantEngine:
                         volumes = [float(k[5]) for k in data][::-1]
                         self.screener_memory[symbol] = {
                             "prices": closes, 
-                            "volumes": volumes,
                             "macro_prices": closes.copy(),
+                            "volumes": volumes, 
                             "last_update_time": time.time()
                         }
                         history = closes
@@ -463,12 +463,15 @@ class DistributedQuantEngine:
         has_pure_edge = False
         is_golden_setup = False
         
-        # 🚀 APEX UPGRADE 2: Dynamic Time-Warping Trend Matrix
+        # 🚀 APEX UPGRADE 2: Kinetic Alpha Predator Logic
         hawkes_score = metrics.get("hawkes_score", 0.0)
         valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
         avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
-        hawkes_ratio = hawkes_score / avg_hawkes if avg_hawkes > 0 else 0.0
-
+        hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
+        
+        # Kinetic Alpha = Volume Surge * Institutional Excitement
+        kinetic_alpha = vol_mult * hawkes_ratio
+        
         if market_regime == "TRENDING":
             # 1. Existing Logic: Catching the Pullback
             if vol_mult >= 1.2 and vol_z_abs >= 1.5:
@@ -479,7 +482,7 @@ class DistributedQuantEngine:
                     has_pure_edge = True
                     trade_direction = "SELL"
                     
-            # 2. Advanced Trend Matrix: Vector Alignment
+            # 2. Kinetic Matrix: Vector Alignment
             price_vector = np.clip(price_z_score / 2.0, -1.0, 1.0) 
             obi_vector = np.clip(z_obi / max(1.0, effective_z_threshold), -1.0, 1.0)
             kinetic_vector = np.clip(math.log1p(vol_mult) * max(0.0, hawkes_ratio - 1.0), 0.0, 1.5)
@@ -490,16 +493,21 @@ class DistributedQuantEngine:
             elif price_vector < 0 and obi_vector < 0:
                 trend_force = ((price_vector + obi_vector) / 2.0) * (1.0 + kinetic_vector)
                 
-            activation_barrier = 1.25 
+            # Adaptive Entry Barrier: Drop the wall if Alpha is screaming
+            dynamic_activation_barrier = 1.25 
+            if kinetic_alpha >= 3.0:
+                dynamic_activation_barrier = 0.85
+            elif kinetic_alpha >= 2.0:
+                dynamic_activation_barrier = 1.05
             
-            if trend_force >= activation_barrier and not has_pure_edge:
+            if trend_force >= dynamic_activation_barrier and not has_pure_edge:
                 has_pure_edge = True
                 trade_direction = "BUY"
-                logger.critical(f"🚀 [VECTOR ALIGNMENT] {symbol} Upward breakout confirmed (Force: {trend_force:.2f}).")
-            elif trend_force <= -activation_barrier and not has_pure_edge:
+                logger.critical(f"🚀 [KINETIC HUNTER] {symbol} Breakout struck! (Force: {trend_force:.2f} | Alpha: {kinetic_alpha:.2f})")
+            elif trend_force <= -dynamic_activation_barrier and not has_pure_edge:
                 has_pure_edge = True
                 trade_direction = "SELL"
-                logger.critical(f"🚀 [VECTOR ALIGNMENT] {symbol} Downward breakdown confirmed (Force: {trend_force:.2f}).")
+                logger.critical(f"🚀 [KINETIC HUNTER] {symbol} Breakdown struck! (Force: {trend_force:.2f} | Alpha: {kinetic_alpha:.2f})")
 
         elif market_regime == "RANGING":
             is_exhausted = vol_mult < 1.0 
@@ -534,22 +542,23 @@ class DistributedQuantEngine:
                 btc_mean = np.mean(btc_array)
                 btc_std = np.std(btc_array) + 1e-6
                 btc_z_score = (btc_array[-1] - btc_mean) / btc_std
+                
+                # Check actual percentage drop to ignore 60-min myopia noise
                 btc_pct_change = (btc_array[-1] - btc_mean) / btc_mean
                 
                 macro_bias = self.macro_regimes.get("BTCUSDT", "HOLD")
                 btc_metrics = self.screener_metrics.get("BTCUSDT", {})
                 btc_vol_z = btc_metrics.get("vol_z", 0.0)
                 
-                # 🚀 Fix: Ensure a real percentage drop accompanies the Z-Score to prevent 60-min myopia
                 is_systemic_bull_squeeze = (btc_z_score >= 2.0 and btc_pct_change > 0.015) or btc_vol_z >= 2.5
                 is_systemic_bear_squeeze = (btc_z_score <= -2.0 and btc_pct_change < -0.015) or btc_vol_z <= -2.5
                 
                 if trade_direction == "SELL" and is_systemic_bull_squeeze:
-                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic short-squeeze detected (Z: {btc_z_score:.2f}). {symbol} short blocked.")
+                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic short-squeeze detected. {symbol} short blocked.")
                     return 
                     
                 if trade_direction == "BUY" and is_systemic_bear_squeeze:
-                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic flash-crash detected (Z: {btc_z_score:.2f}). {symbol} dip-buy blocked.")
+                    logger.critical(f"🛡️ MACRO SHIELD // BTC systemic flash-crash detected. {symbol} dip-buy blocked.")
                     return
                     
                 alt_history = self.screener_memory.get(symbol, {}).get("prices", [])
@@ -614,7 +623,7 @@ class DistributedQuantEngine:
             
         history = self.screener_memory[symbol]
 
-        # 🚀 APEX UPGRADE: Continuous Exponential Moving Volatility (CEMV)
+        # 🚀 APEX UPGRADE 1: Continuous Exponential Moving Volatility (CEMV)
         if str(interval) == "15":
              if "macro_prices" not in history:
                  history["macro_prices"] = []
@@ -636,14 +645,14 @@ class DistributedQuantEngine:
                 vol_array = np.array(history["volumes"])
                 price_array = np.array(history["prices"])
                 
-                # 1. Advanced Volume Multiplier (Exponential Decay)
+                # Exponential Decay Volume
                 weights = np.exp(np.linspace(-1., 0., len(vol_array[:-1])))
                 weights /= weights.sum()
                 ewm_vol = np.sum(vol_array[:-1] * weights)
-                ewm_vol = max(ewm_vol, 1.0)
+                ewm_vol = max(ewm_vol, 1.0) 
                 vol_mult = c_vol / ewm_vol
                 
-                # 2. Continuous Volatility Z-Score (CEMV)
+                # Continuous Volatility Z-Score (CEMV)
                 returns = np.diff(np.log(price_array))
                 if len(returns) > 0:
                     ret_weights = np.exp(np.linspace(-1., 0., len(returns)))
@@ -657,7 +666,7 @@ class DistributedQuantEngine:
                 else:
                     vel_z = 0.0
                     
-                # 3. Macro Baseline Detachment (True Flash Crash Detector)
+                # Macro Baseline Detachment
                 macro_hist = history.get("macro_prices", [])
                 if len(macro_hist) >= 10:
                     macro_mean = np.mean(macro_hist)
@@ -1078,6 +1087,15 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
+            # 🚀 NEW: KINETIC ALPHA SCORE
+            hawkes_score = metrics.get("hawkes_score", 0.0)
+            valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
+            avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
+            
+            # Kinetic Alpha measures true institutional velocity against the market average
+            kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
+            is_hyper_trend = kinetic_alpha >= 2.0 and market_regime == "TRENDING"
+            
             spread_pct = real_spread / current_price if current_price > 0 else 0.0
             
             cached_balance = self.global_state_cache.get("wallet_baseline", 10.0)
@@ -1161,10 +1179,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            hawkes_score = metrics.get("hawkes_score", 0.0)
-            valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
-            avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.0
-            
             if market_regime == "TRENDING" and hawkes_score < (avg_hawkes * 1.2):
                 logger.warning(f"🛡️ HAWKES SHIELD // {symbol} lacks institutional volume clustering. Momentum unverified.")
                 self.active_positions_lock.discard(symbol)
@@ -1178,6 +1192,19 @@ class DistributedQuantEngine:
                 current_price, atr, direction, vol_z_abs, confidence, tick_size
             )
             
+            # 🚀 NEW: KINETIC ELASTICITY (Anti-Wick Defense)
+            if is_hyper_trend:
+                # Expand Stop Loss based on Volatility (Logarithmic)
+                vol_expansion = 1.0 + (math.log1p(vol_z_abs) * 0.4)
+                sl_distance = abs(current_price - initial_sl) * vol_expansion
+                initial_sl = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
+                
+                # Expand Take Profit based on Alpha Momentum (Exponential)
+                tp_distance = abs(current_price - target_tp) * (1.0 + (math.log1p(kinetic_alpha) * 0.5))
+                target_tp = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
+                
+                logger.critical(f"🔥 [KINETIC ELASTICITY] {symbol} Hyper-Trend Engaged. SL/TP Brackets dynamically widened to absorb volatility.")
+
             features_dict = {
                 "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
                 "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
