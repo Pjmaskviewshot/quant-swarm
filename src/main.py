@@ -397,7 +397,9 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
-            await asyncio.sleep(random.uniform(45.0, 75.0))
+            # 🚀 PRO-TIP FIX: Jittered Sleep to avoid Bybit Rate Limits
+            jitter = random.uniform(50.0, 90.0)
+            await asyncio.sleep(jitter)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -441,13 +443,17 @@ class DistributedQuantEngine:
         adaptive_mieg_short = (z_obi >= effective_z_threshold) and (current_obi < prev_obi) and (current_tfi < -0.15)
 
         history = self.screener_memory.get(symbol, {}).get("prices", [])
-        if len(history) < 20:
+        
+        # 🚀 STRUCTURAL FIX 4: 100-Period Robust Price Z-Score (Median + MAD)
+        if len(history) < 100:
             return 
             
-        prices_array = np.array(history)
-        local_mean = np.mean(prices_array)
-        local_std = np.std(prices_array) if np.std(prices_array) > 0 else 1e-6
-        price_z_score = (mid_price - local_mean) / local_std
+        prices_array = np.array(history[-100:])
+        median_price = np.median(prices_array)
+        mad = np.median(np.abs(prices_array - median_price))
+        mad_scaled = mad * 1.4826 + 1e-6 # 1.4826 normalizes MAD to StdDev. +1e-6 prevents zero-div.
+        
+        price_z_score = (mid_price - median_price) / mad_scaled
         
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
@@ -1027,8 +1033,14 @@ class DistributedQuantEngine:
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             
-            raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else current_price * 0.015
-            atr = max(raw_atr, current_price * 0.0125) 
+            # 🚨 FIX: Removed arbitrary 1.25% fallback unless ATR is completely broken
+            raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
+            if raw_atr <= 0:
+                atr = current_price * 0.0125
+                logger.warning(f"⚠️ ATR Fallback: Using 1.25% of price for {symbol}")
+            else:
+                atr = raw_atr
+                
             self.current_atrs[symbol] = atr
 
             metrics = self.screener_metrics.get(symbol, {})
@@ -1040,10 +1052,18 @@ class DistributedQuantEngine:
             avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
             
             history = self.screener_memory.get(symbol, {}).get("prices", [])
-            prices_array = np.array(history)
-            local_mean = np.mean(prices_array) if len(prices_array) > 0 else current_price
-            local_std = np.std(prices_array) if len(prices_array) > 0 and np.std(prices_array) > 0 else 1e-6
-            price_z_score = (current_price - local_mean) / local_std
+            
+            # 🚀 STRUCTURAL FIX 4: 100-Period Robust Price Z-Score (Median + MAD)
+            if len(history) < 100:
+                self.active_positions_lock.discard(symbol)
+                return False 
+                
+            prices_array = np.array(history[-100:])
+            median_price = np.median(prices_array)
+            mad = np.median(np.abs(prices_array - median_price))
+            mad_scaled = mad * 1.4826 + 1e-6 # 1.4826 normalizes MAD to StdDev. +1e-6 prevents zero-div.
+            
+            price_z_score = (current_price - median_price) / mad_scaled
             
             # Calculate how much price moved relative to volume (Velocity per unit of Mass)
             kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
