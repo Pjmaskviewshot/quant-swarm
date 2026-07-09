@@ -115,6 +115,11 @@ class DistributedQuantEngine:
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
+        
+        # 🚀 PREDICTIVE UPGRADE: Volatility Baseline Tracking
+        self.volatility_baseline: Dict[str, float] = {}
+        self.volatility_window = 100
+        
         self.screener_memory: Dict[str, Dict[str, Any]] = {
             s: {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
         }
@@ -311,7 +316,7 @@ class DistributedQuantEngine:
                                 if symbol in self.asset_basket and isinstance(data, dict):
                                     self.macro_regimes[symbol] = data.get("direction", "HOLD")
                                     self.macro_confidences[symbol] = data.get("confidence", 0.0)
-                                    logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2%}")
+                                    logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2f}")
                                     
                 except asyncio.TimeoutError:
                     logger.error("⏳ COMMANDER TIMEOUT on Single Batch.")
@@ -594,6 +599,19 @@ class DistributedQuantEngine:
             history["volumes"].append(c_vol)
             history["prices"].append(c_close)
             
+            # 🚀 PREDICTIVE UPGRADE: Track 100-period Volatility Baseline
+            current_raw_atr = self.feature_engines[symbol].get_computed_atr() if hasattr(self.feature_engines[symbol], 'get_computed_atr') else (c_high - c_low)
+            if current_raw_atr > 0:
+                if "atr_history" not in history:
+                    history["atr_history"] = []
+                
+                history["atr_history"].append(current_raw_atr)
+                if len(history["atr_history"]) > self.volatility_window:
+                    history["atr_history"].pop(0)
+                    
+                if len(history["atr_history"]) >= 20:
+                    self.volatility_baseline[symbol] = np.mean(history["atr_history"])
+            
             if len(history["volumes"]) > 60:
                 history["volumes"].pop(0)
                 history["prices"].pop(0)
@@ -681,6 +699,7 @@ class DistributedQuantEngine:
             new_current_atrs = {}
             new_last_execs = {}
             new_screener_metrics = {}
+            new_volatility_baseline = {}
             
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
@@ -691,6 +710,7 @@ class DistributedQuantEngine:
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
                 new_last_execs[s] = self.last_execution_timestamps.get(s, 0.0)
                 new_screener_metrics[s] = self.screener_metrics.get(s, {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0})
+                new_volatility_baseline[s] = self.volatility_baseline.get(s, 0.0)
                 
             self.feature_engines = new_feature_engines
             self.math_engines = new_math_engines
@@ -700,6 +720,7 @@ class DistributedQuantEngine:
             self.current_atrs = new_current_atrs
             self.last_execution_timestamps = new_last_execs
             self.screener_metrics = new_screener_metrics
+            self.volatility_baseline = new_volatility_baseline
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED.")
             
@@ -858,19 +879,17 @@ class DistributedQuantEngine:
                     window_size=avg_dynamic_window, core_basket=self.asset_basket
                 )
                 
+                # 🚀 REVOLUTIONARY FIX 1: Continuous Bayesian State Tracking
+                # We no longer lock the bot. We simply record the empirical probability.
                 self.global_state_cache["rolling_accuracy"] = accuracy
                 self.global_state_cache["total_resolved"] = pool_size
                 self.global_state_cache["dynamic_window"] = avg_dynamic_window
                 self.global_state_cache["last_updated"] = time.time()
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
-                if accuracy < 0.60:
-                    if self.fsm.current_state != TradingState.EMERGENCY_LOCK:
-                        self.fsm.current_state = TradingState.CALIBRATING
-                        logger.critical(f"📉 EDGE DECAY OVERRIDE: Accuracy {accuracy:.2%} is below 60%. Engine locked to CALIBRATING.")
-                elif self.fsm.current_state == TradingState.EMERGENCY_LOCK and accuracy >= 0.70:
+                # The FSM is now just a label. The actual execution is gated by the Kelly Math below.
+                if accuracy < 0.45:
                     self.fsm.current_state = TradingState.CALIBRATING
-                    logger.info("🔓 EMERGENCY LOCK LIFTED. System recovering via Calibrating state.")
                 else:
                     self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
 
@@ -1091,10 +1110,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            rolling_acc = self.global_state_cache["rolling_accuracy"]
-            is_whitelisted_state = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
-            has_institutional_edge = rolling_acc >= 0.60
-            
             # 🚀 STRUCTURAL FIX 2: Fat-Tail Elastic Stop Loss Calculation
             # The stop expands exponentially as volatility approaches statistical extremes
             fat_tail_multiplier = 1.5 + math.exp(min(vol_z_abs, 4.0) / 2.0)
@@ -1111,17 +1126,6 @@ class DistributedQuantEngine:
             initial_sl = float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
             target_tp = float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
 
-            if not self.test_mode and (not is_whitelisted_state or not has_institutional_edge):
-                logger.critical(f"👻 [SHIELD ACTIVE] FSM State: {self.fsm.current_state.value} | Routing to Ghost Simulation -> Node: {symbol}")
-                features_dict = {
-                    "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
-                    "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
-                    "virtual_sl": initial_sl, "virtual_tp": target_tp    
-                }
-                self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
-                self.active_positions_lock.discard(symbol)
-                return True
-            
             if self.test_mode:
                 self.active_positions_lock.discard(symbol)
                 return True 
@@ -1156,32 +1160,101 @@ class DistributedQuantEngine:
                                 self.active_positions_lock.discard(symbol)
                                 return False
 
-            # Execute Trade Parameters
+            # ============================================================
+            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Kelly Sizing
+            # ============================================================
+
+            # 1. Get Empirical Probability
+            empirical_p = self.global_state_cache.get("rolling_accuracy", 0.50)
+            pool_size = self.global_state_cache.get("total_resolved", 0)
+
+            # 2. Calculate Bayesian Adjusted Probability
+            if pool_size < 30:
+                bayesian_p = (empirical_p * 0.3) + (confidence * 0.7)
+            else:
+                bayesian_p = (empirical_p * 0.7) + (confidence * 0.3)
+
+            bayesian_p = max(0.01, min(0.99, bayesian_p))
+
+            # 3. Calculate Dynamic Reward/Risk Ratio
+            distance_to_sl = abs(current_price - initial_sl)
+            if distance_to_sl <= 0:
+                distance_to_sl = current_price * 0.015
+            distance_to_tp = abs(target_tp - current_price)
+            reward_risk_ratio = distance_to_tp / distance_to_sl
+
+            # 4. Base Kelly Criterion
+            base_kelly = bayesian_p - ((1.0 - bayesian_p) / max(0.1, reward_risk_ratio))
+
+            # 5. 🚀 PREDICTIVE UPGRADE: Volatility Adjustment Factor
+            historical_atr = self.volatility_baseline.get(symbol, atr)
+            # Ensure we don't divide by zero
+            safe_historical_atr = max(historical_atr, current_price * 0.001)
+            volatility_ratio = atr / safe_historical_atr
+
+            # Inverse relationship: High Vol = Crush Position, Low Vol = Expand Position
+            volatility_adjustment = 1.0 / volatility_ratio if volatility_ratio > 0 else 1.0
+            volatility_adjustment = max(0.1, min(3.0, volatility_adjustment))
+
+            # 6. Regime-Specific Multiplier
+            regime_multiplier = 1.2 if market_regime == "TRENDING" else 0.7
+
+            # 7. Micro-Account Optimized Multiplier
             balance = await self.executor.get_wallet_balance_usdt()
-            sigmoid_risk_pct = 0.01 + (0.03 / (1.0 + math.exp(0.04 * (balance - 40.0))))
-            dollar_risk = balance * sigmoid_risk_pct
-            
-            position_size = (dollar_risk / abs(current_price - initial_sl))
+            micro_multiplier = 0.75 if balance < 50.0 else 0.25
+
+            # 8. Final Volatility-Adjusted Kelly
+            adjusted_kelly = base_kelly * volatility_adjustment * regime_multiplier * micro_multiplier
+
+            if adjusted_kelly <= 0.0:
+                logger.critical(f"📉 [VOL-PREDICTIVE REJECTION] Negative Edge (Adj Kelly: {adjusted_kelly:.4f}). Vol Ratio: {volatility_ratio:.2f}x. Trade bypassed organically.")
+                features_dict = {
+                    "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
+                    "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
+                    "virtual_sl": initial_sl, "virtual_tp": target_tp    
+                }
+                self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
+                self.active_positions_lock.discard(symbol)
+                return True
+
+            dynamic_risk_pct = min(0.05, adjusted_kelly)
+            dollar_risk = balance * dynamic_risk_pct
+
+            position_size = dollar_risk / distance_to_sl
             notional = position_size * current_price
-            
-            if notional < 5.50:
-                position_size = 5.50 / current_price
-                notional = 5.50
-                
-            if (notional * (abs(current_price - initial_sl) / current_price)) > (balance * 0.15):
+
+            if notional < 5.50 and adjusted_kelly > 0.0:
+                min_position = 5.50 / current_price
+                min_risk = min_position * distance_to_sl
+                if min_risk <= balance * 0.05: 
+                    position_size = min_position
+                    notional = 5.50
+                else:
+                    logger.info(f"📉 [MIN EXCEEDED] {symbol} Minimum notional exceeds 5% risk cap.")
+                    self.active_positions_lock.discard(symbol)
+                    return True
+
+            if (notional * (distance_to_sl / current_price)) > (balance * 0.15):
                 logger.warning(f"⚖️ FATAL RISK WALL // {symbol} forces toxic exposure on micro-balance. Blocked.")
                 self.active_positions_lock.discard(symbol)
                 return False
-            
+
             target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), 15))
-            
+
+            logger.critical(
+                f"📐 [PREDICTIVE KELLY] {symbol} | "
+                f"P(win): {bayesian_p:.2%} | "
+                f"Vol Ratio: {volatility_ratio:.2f}x | "
+                f"Adj: {volatility_adjustment:.2f}x | "
+                f"Kelly: {adjusted_kelly:.4f} | "
+                f"Pos: {position_size:.4f} | Lev: {target_leverage}x"
+            )
+
             risk_matrix = {
                 "allocated_value_usdt": notional,
                 "size": position_size,
                 "recommended_leverage": target_leverage
             }
-
-            logger.info(f"📐 [FAT-TAIL PROFILER] Node: {symbol} | SL Expansion: {fat_tail_multiplier:.2f}x ATR | Lev: {target_leverage}x")
 
             leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
             if not leverage_success:
@@ -1423,6 +1496,7 @@ class DistributedQuantEngine:
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
             self.last_execution_timestamps = {s: 0.0 for s in self.asset_basket}
             self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0} for s in self.asset_basket}
+            self.volatility_baseline = {s: 0.0 for s in self.asset_basket}
         
         await asyncio.gather(
             self.run_macro_commander(),        
