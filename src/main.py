@@ -120,8 +120,9 @@ class DistributedQuantEngine:
         self.volatility_baseline: Dict[str, float] = {}
         self.volatility_window = 100
         
+        # 🚀 STRUCTURAL FIX: Added OHLC highs/lows tracking
         self.screener_memory: Dict[str, Dict[str, Any]] = {
-            s: {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
+            s: {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket
         }
         
         self.screener_metrics: Dict[str, Dict[str, float]] = {
@@ -361,17 +362,22 @@ class DistributedQuantEngine:
             try:
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
                 
-                if len(history) < 60:
+                # 🚀 CRITICAL FIX: Fetch 150 1-minute candles so the 100-period MAD math has enough data
+                if len(history) < 100:
                     klines = await asyncio.to_thread(
                         self.executor.client.get_kline,
-                        category="linear", symbol=symbol, interval="15", limit=60
+                        category="linear", symbol=symbol, interval="1", limit=150
                     )
                     data = klines.get("result", {}).get("list", [])
                     if data:
                         closes = [float(k[4]) for k in data][::-1]
+                        highs = [float(k[2]) for k in data][::-1]
+                        lows = [float(k[3]) for k in data][::-1]
                         volumes = [float(k[5]) for k in data][::-1]
                         self.screener_memory[symbol] = {
                             "prices": closes, 
+                            "highs": highs,
+                            "lows": lows,
                             "macro_prices": closes.copy(),
                             "volumes": volumes, 
                             "last_update_time": time.time()
@@ -554,7 +560,7 @@ class DistributedQuantEngine:
             return
             
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
+            self.screener_memory[symbol] = {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
             
         self.screener_memory[symbol]["last_update_time"] = time.time()
 
@@ -582,7 +588,7 @@ class DistributedQuantEngine:
         )
         
         if symbol not in self.screener_memory:
-            self.screener_memory[symbol] = {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
+            self.screener_memory[symbol] = {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
             
         history = self.screener_memory[symbol]
 
@@ -599,6 +605,11 @@ class DistributedQuantEngine:
             history["volumes"].append(c_vol)
             history["prices"].append(c_close)
             
+            if "highs" not in history: history["highs"] = []
+            if "lows" not in history: history["lows"] = []
+            history["highs"].append(c_high)
+            history["lows"].append(c_low)
+            
             # 🚀 PREDICTIVE UPGRADE: Track 100-period Volatility Baseline
             current_raw_atr = self.feature_engines[symbol].get_computed_atr() if hasattr(self.feature_engines[symbol], 'get_computed_atr') else (c_high - c_low)
             if current_raw_atr > 0:
@@ -612,9 +623,12 @@ class DistributedQuantEngine:
                 if len(history["atr_history"]) >= 20:
                     self.volatility_baseline[symbol] = np.mean(history["atr_history"])
             
-            if len(history["volumes"]) > 60:
+            # Expanded array memory cap to fully support 100-period MAD + Wicks
+            if len(history["volumes"]) > 150:
                 history["volumes"].pop(0)
                 history["prices"].pop(0)
+                history["highs"].pop(0)
+                history["lows"].pop(0)
                 
             if len(history["volumes"]) >= 15:
                 vol_array = np.array(history["volumes"])
@@ -704,7 +718,7 @@ class DistributedQuantEngine:
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
                 new_math_engines[s] = self.math_engines.get(s, FastMathEngine())
-                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0})
+                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
@@ -820,8 +834,9 @@ class DistributedQuantEngine:
                             self.shadow_cooldown[symbol] = time.time()
                     except Exception as e:
                         logger.error(f"Shadow scanner error for {symbol}: {e}")
-                    await asyncio.sleep(1.5) 
-                await asyncio.sleep(2) 
+                    
+                    await asyncio.sleep(2.5) 
+                await asyncio.sleep(3.0) 
 
     async def stream_manager_loop(self):
         while True:
@@ -857,10 +872,11 @@ class DistributedQuantEngine:
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
                     if valid_assets:
-                        current_prices = {sym: self.screener_memory[sym]["prices"] for sym in valid_assets}
+                        # 🚀 CRITICAL FIX: Passing the full dictionary containing Highs, Lows, and Prices to the memory resolver
+                        current_prices = {sym: self.screener_memory[sym] for sym in valid_assets}
                         for s, data in self.shadow_cooldown.items():
                             if s not in current_prices:
-                                current_prices[s] = self.screener_memory.get(s, {}).get("prices", [0.0])
+                                current_prices[s] = self.screener_memory.get(s, {"prices": [], "highs": [], "lows": []})
                         
                         await asyncio.to_thread(
                             self.memory.resolve_batch_historical_predictions,
@@ -879,15 +895,12 @@ class DistributedQuantEngine:
                     window_size=avg_dynamic_window, core_basket=self.asset_basket
                 )
                 
-                # 🚀 REVOLUTIONARY FIX 1: Continuous Bayesian State Tracking
-                # We no longer lock the bot. We simply record the empirical probability.
                 self.global_state_cache["rolling_accuracy"] = accuracy
                 self.global_state_cache["total_resolved"] = pool_size
                 self.global_state_cache["dynamic_window"] = avg_dynamic_window
                 self.global_state_cache["last_updated"] = time.time()
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
-                # The FSM is now just a label. The actual execution is gated by the Kelly Math below.
                 if accuracy < 0.45:
                     self.fsm.current_state = TradingState.CALIBRATING
                 else:
@@ -1020,8 +1033,6 @@ class DistributedQuantEngine:
                 asyncio.create_task(self.telegram.send_html_report(report))
 
     def calculate_initial_bracket(self, entry_price: float, atr: float, side: str, vol_z: float = 0.0, confidence: float = 0.0, tick_size: float = 0.0001):
-        # NOTE: This function is preserved for interface compatibility. 
-        # Live stop-loss math is now handled dynamically inside run_signal_lifecycle via the Fat-Tail Multiplier.
         vol_z_abs = abs(vol_z)
         dynamic_sl_mult = 1.2 + (math.log1p(vol_z_abs) * 0.4) 
         dynamic_rr_ratio = 2.0 + (confidence * 1.5)
@@ -1052,7 +1063,6 @@ class DistributedQuantEngine:
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             
-            # 🚨 FIX: Removed arbitrary 1.25% fallback unless ATR is completely broken
             raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
             if raw_atr <= 0:
                 atr = current_price * 0.0125
@@ -1065,14 +1075,12 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            # 🚀 STRUCTURAL FIX 1: Kinetic Efficiency (Spoofing & Dead Coin Defense)
             hawkes_score = metrics.get("hawkes_score", 0.0)
             valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
             avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
             
             history = self.screener_memory.get(symbol, {}).get("prices", [])
             
-            # 🚀 STRUCTURAL FIX 4: 100-Period Robust Price Z-Score (Median + MAD)
             if len(history) < 100:
                 self.active_positions_lock.discard(symbol)
                 return False 
@@ -1080,26 +1088,21 @@ class DistributedQuantEngine:
             prices_array = np.array(history[-100:])
             median_price = np.median(prices_array)
             mad = np.median(np.abs(prices_array - median_price))
-            mad_scaled = mad * 1.4826 + 1e-6 # 1.4826 normalizes MAD to StdDev. +1e-6 prevents zero-div.
+            mad_scaled = mad * 1.4826 + 1e-6 
             
             price_z_score = (current_price - median_price) / mad_scaled
-            
-            # Calculate how much price moved relative to volume (Velocity per unit of Mass)
             kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
             
-            # Hard structural floor: We require baseline liquidity to trade
             if vol_mult < 0.65:
                 logger.info(f"💀 DEAD ASSET FILTER // {symbol} lacks structural liquidity (Vol: {vol_mult:.2f}x). Aborting.")
                 self.active_positions_lock.discard(symbol)
                 return False
                 
-            # Spoofing Filter: High volume but no price movement = Institutional Absorption
             if vol_mult >= 2.0 and kinetic_efficiency < 0.3:
                 logger.warning(f"🛡️ SPOOFING DETECTED // {symbol} has massive volume but zero velocity. Market makers are absorbing liquidity. Aborting.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # Kinetic Alpha for Breakouts
             kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
             is_hyper_trend = kinetic_alpha >= 1.5 and market_regime == "TRENDING"
             
@@ -1110,14 +1113,12 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
             
-            # 🚀 STRUCTURAL FIX 2: Fat-Tail Elastic Stop Loss Calculation
-            # The stop expands exponentially as volatility approaches statistical extremes
             fat_tail_multiplier = 1.5 + math.exp(min(vol_z_abs, 4.0) / 2.0)
             sl_distance = atr * fat_tail_multiplier
             
             if direction == "BUY":
                 initial_sl = current_price - sl_distance
-                target_tp = current_price + (sl_distance * 2.0) + (current_price * 0.0011) # 2:1 RR + Fees
+                target_tp = current_price + (sl_distance * 2.0) + (current_price * 0.0011)
             else:
                 initial_sl = current_price + sl_distance
                 target_tp = current_price - (sl_distance * 2.0) - (current_price * 0.0011)
@@ -1130,7 +1131,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True 
 
-            # 🚀 STRUCTURAL FIX 3: Cross-Asset Systemic Gravity (True Falling Knife Shield)
             if symbol != "BTCUSDT":
                 btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
                 if len(btc_history) >= 30:
@@ -1138,7 +1138,7 @@ class DistributedQuantEngine:
                     btc_mean = np.mean(btc_array)
                     btc_std = np.std(btc_array) + 1e-6
                     btc_z_score = (btc_array[-1] - btc_mean) / btc_std
-                    btc_velocity = (btc_array[-1] - btc_array[-10]) / btc_array[-10] # 10-candle macro velocity
+                    btc_velocity = (btc_array[-1] - btc_array[-10]) / btc_array[-10]
                     
                     alt_array = np.array(history[-30:])
                     btc_slice = btc_array[-30:]
@@ -1149,7 +1149,6 @@ class DistributedQuantEngine:
                     if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
                         correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
                         
-                        # If highly correlated to BTC (>0.7), we apply Systemic Gravity checks
                         if not math.isnan(correlation) and correlation > 0.70:
                             if direction == "BUY" and btc_velocity < -0.01:
                                 logger.critical(f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a falling BTC. Dip-buy aborted.")
@@ -1161,12 +1160,16 @@ class DistributedQuantEngine:
                                 return False
 
             # ============================================================
-            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Kelly Sizing
+            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Systemic Kelly Sizing
             # ============================================================
 
             # 1. Get Empirical Probability
             empirical_p = self.global_state_cache.get("rolling_accuracy", 0.50)
             pool_size = self.global_state_cache.get("total_resolved", 0)
+
+            # 🚀 CRITICAL FIX: The Uninformative Prior
+            if pool_size == 0:
+                empirical_p = 0.50
 
             # 2. Calculate Bayesian Adjusted Probability
             if pool_size < 30:
@@ -1186,28 +1189,45 @@ class DistributedQuantEngine:
             # 4. Base Kelly Criterion
             base_kelly = bayesian_p - ((1.0 - bayesian_p) / max(0.1, reward_risk_ratio))
 
-            # 5. 🚀 PREDICTIVE UPGRADE: Volatility Adjustment Factor
+            # 5. Volatility Adjustment Factor
             historical_atr = self.volatility_baseline.get(symbol, atr)
-            # Ensure we don't divide by zero
             safe_historical_atr = max(historical_atr, current_price * 0.001)
             volatility_ratio = atr / safe_historical_atr
 
-            # Inverse relationship: High Vol = Crush Position, Low Vol = Expand Position
             volatility_adjustment = 1.0 / volatility_ratio if volatility_ratio > 0 else 1.0
             volatility_adjustment = max(0.1, min(3.0, volatility_adjustment))
 
-            # 6. Regime-Specific Multiplier
-            regime_multiplier = 1.2 if market_regime == "TRENDING" else 0.7
+            # 6. 🚀 THE ULTIMATE UPGRADE: Dynamic Systemic Correlation Penalty
+            total_assets = len(self.macro_regimes)
+            bullish_count = sum(1 for v in self.macro_regimes.values() if v == "BUY")
+            bearish_count = sum(1 for v in self.macro_regimes.values() if v == "SELL")
+            
+            systemic_bias = (bullish_count - bearish_count) / total_assets if total_assets > 0 else 0.0
+
+            systemic_multiplier = 1.0
+            if direction == "BUY":
+                if systemic_bias < -0.3:
+                    systemic_multiplier = max(0.1, 1.0 + systemic_bias)
+                elif systemic_bias > 0.3:
+                    systemic_multiplier = min(1.5, 1.0 + (systemic_bias * 0.5))
+            elif direction == "SELL":
+                if systemic_bias > 0.3:
+                    systemic_multiplier = max(0.1, 1.0 - systemic_bias)
+                elif systemic_bias < -0.3:
+                    systemic_multiplier = min(1.5, 1.0 + (abs(systemic_bias) * 0.5))
+            
+            base_regime_multiplier = 1.2 if market_regime == "TRENDING" else 0.7
+            final_regime_multiplier = base_regime_multiplier * systemic_multiplier
 
             # 7. Micro-Account Optimized Multiplier
             balance = await self.executor.get_wallet_balance_usdt()
             micro_multiplier = 0.75 if balance < 50.0 else 0.25
 
-            # 8. Final Volatility-Adjusted Kelly
-            adjusted_kelly = base_kelly * volatility_adjustment * regime_multiplier * micro_multiplier
+            # 8. Final Systemic Volatility-Adjusted Kelly
+            adjusted_kelly = base_kelly * volatility_adjustment * final_regime_multiplier * micro_multiplier
 
             if adjusted_kelly <= 0.0:
-                logger.critical(f"📉 [VOL-PREDICTIVE REJECTION] Negative Edge (Adj Kelly: {adjusted_kelly:.4f}). Vol Ratio: {volatility_ratio:.2f}x. Trade bypassed organically.")
+                logger.critical(f"📉 [SYS-PREDICTIVE REJECTION] Negative Edge (Adj Kelly: {adjusted_kelly:.4f}). Vol Ratio: {volatility_ratio:.2f}x | Sys Bias: {systemic_bias:+.2f}. Trade bypassed organically.")
                 features_dict = {
                     "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
@@ -1242,10 +1262,10 @@ class DistributedQuantEngine:
             target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), 15))
 
             logger.critical(
-                f"📐 [PREDICTIVE KELLY] {symbol} | "
+                f"📐 [SYS-PREDICTIVE KELLY] {symbol} | "
                 f"P(win): {bayesian_p:.2%} | "
-                f"Vol Ratio: {volatility_ratio:.2f}x | "
-                f"Adj: {volatility_adjustment:.2f}x | "
+                f"Vol: {volatility_ratio:.2f}x | "
+                f"Bias: {systemic_bias:+.2f} | "
                 f"Kelly: {adjusted_kelly:.4f} | "
                 f"Pos: {position_size:.4f} | Lev: {target_leverage}x"
             )
@@ -1490,7 +1510,7 @@ class DistributedQuantEngine:
             
             self.feature_engines = {s: AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600) for s in self.asset_basket}
             self.math_engines = {s: FastMathEngine() for s in self.asset_basket}
-            self.screener_memory = {s: {"prices": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
+            self.screener_memory = {s: {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0} for s in self.asset_basket}
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}

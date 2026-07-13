@@ -27,7 +27,7 @@ class MemoryBank:
             raise
 
     def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
-        """Saves a fresh prediction cleanly using the new dedicated schema columns."""
+        """Saves a fresh prediction cleanly using the dedicated schema columns."""
         if features is None:
             features = {}
             
@@ -37,7 +37,6 @@ class MemoryBank:
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
         
-        # 🚀 NO MORE HACKS: Using dedicated virtual columns
         sl_price = float(features.get("virtual_sl", price * 0.99))
         tp_price = float(features.get("virtual_tp", price * 1.015))
 
@@ -55,9 +54,9 @@ class MemoryBank:
             "vol_mult": float(vol_mult),
             "spread": float(spread),
             "resolved": False,
-            "virtual_sl": sl_price,  # Clean database schema mapping
-            "virtual_tp": tp_price,  # Clean database schema mapping
-            "is_shadow": is_shadow   # Separates core trades from background noise
+            "virtual_sl": sl_price,  
+            "virtual_tp": tp_price,  
+            "is_shadow": is_shadow   
         }
 
         try:
@@ -88,7 +87,7 @@ class MemoryBank:
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
         """
-        🚀pillar 1: KINETIC PATH-TRAVERSAL RESOLUTION ENGINE
+        🚀 pillar 1: KINETIC PATH-TRAVERSAL RESOLUTION ENGINE
         Resolves predictions by scanning the high-frequency price sequences to catch inside-candle bracket hits.
         """
         resolved_count = 0
@@ -113,7 +112,6 @@ class MemoryBank:
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
-                # 🚀 Pulling from clean schema columns now
                 sl_price = float(row.get("virtual_sl", entry_price * 0.99))
                 tp_price = float(row.get("virtual_tp", entry_price * 1.015))
                 
@@ -121,62 +119,79 @@ class MemoryBank:
                 if p_data is None:
                     continue
 
-                # Dynamic Data Parsing Strategy (Supports Floats, Dicts, or Sequence Lists)
+                # Parse multi-dimensional arrays out of modern screener payload securely
                 if isinstance(p_data, dict):
-                    current_price = float(p_data.get("close", p_data.get("current", entry_price)))
-                    price_sequence = p_data.get("sequence", [current_price])
+                    closes = p_data.get("prices", [])
+                    highs = p_data.get("highs", closes)
+                    lows = p_data.get("lows", closes)
                 elif isinstance(p_data, (list, np.ndarray)):
-                    if len(p_data) == 0:
-                        continue
-                    price_sequence = [float(p) for p in p_data]
-                    current_price = price_sequence[-1]
+                    closes = [float(p) for p in p_data]
+                    highs = closes
+                    lows = closes
                 else:
-                    # Fallback for standard backwards compatible float tracking
-                    current_price = float(p_data)
-                    price_sequence = [current_price]
-
-                if current_price <= 0:
                     continue
 
+                if len(closes) == 0:
+                    continue
+
+                current_price = closes[-1]
                 row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
                 elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
 
                 is_terminated = False
                 actual = "HOLD"
+                exit_price = entry_price
 
-                # Chronological microstructural path verification loop
-                for p in price_sequence:
+                # Chronological microstructural path verification loop using Highs/Lows for wicks
+                for i in range(len(closes)):
+                    high = highs[i]
+                    low = lows[i]
+                    
                     if prediction == "BUY":
-                        if p >= tp_price:
+                        if high >= tp_price:
                             actual = "BUY"
                             is_terminated = True
+                            exit_price = tp_price
                             break
-                        elif p <= sl_price:
+                        elif low <= sl_price:
                             actual = "SELL"
                             is_terminated = True
+                            exit_price = sl_price
                             break
                     elif prediction == "SELL":
-                        if p <= tp_price:
+                        if low <= tp_price:
                             actual = "SELL"
                             is_terminated = True
+                            exit_price = tp_price
                             break
-                        elif p >= sl_price:
+                        elif high >= sl_price:
                             actual = "BUY"
                             is_terminated = True
+                            exit_price = sl_price
                             break
 
-                # ⏳ MASTER UPGRADE: Raised from 15.0 to 60.0 minutes to prevent label truncation
+                # Handle Master Timeout (60-minute window cutoff)
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
+                    exit_price = current_price
                     if current_price > entry_price:
                         actual = "BUY"
                     elif current_price < entry_price:
                         actual = "SELL"
+                    else:
+                        actual = "HOLD"
 
-                if is_terminated:
+                if is_terminated and actual != "HOLD":
+                    # 🚀 CRITICAL FIX: Calculate nominal statistical return for Ghost Ledger tracking
+                    if prediction == "BUY":
+                        net_pnl = ((exit_price - entry_price) / entry_price) * 10.0  # Normalized to an arbitrary $10 unit
+                    else:
+                        net_pnl = ((entry_price - exit_price) / entry_price) * 10.0
+
                     row["resolved"] = True
-                    row["actual_outcome"] = actual
-                    row["is_correct"] = True if prediction == actual else False
+                    row["actual_outcome"] = "WIN" if prediction == actual else "LOSS"
+                    row["is_correct"] = (prediction == actual)
+                    row["net_pnl"] = float(net_pnl)
                     update_batch.append(row)
                     resolved_count += 1
                 
@@ -192,7 +207,7 @@ class MemoryBank:
 
     def compute_rolling_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Tuple[float, int]:
         """
-        🚀pillar 2: STABILIZED HORIZON MANAGEMENT
+        🚀 pillar 2: STABILIZED HORIZON MANAGEMENT
         Calculates a true rolling moving average accuracy over the fixed sample size.
         Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
@@ -202,26 +217,22 @@ class MemoryBank:
                 .eq("resolved", True)\
                 .eq("is_shadow", False)
             
-            # 🚀 THE FIX: Only grade FSM accuracy on the core operational basket
             if core_basket:
                 query = query.in_("symbol", core_basket)
                 
             response = query.order("timestamp", desc=True).limit(window_size).execute()
-
             results = response.data if response else []
             total_resolved = len(results)
             
+            # 🚀 CRITICAL FIX: Handle the Bayesian Uninformative Prior Baseline
             if total_resolved == 0:
-                return 0.0, 0
+                return 0.50, 0
 
-            # Isolate raw boolean outcomes
             correct_array = [1.0 if row.get("is_correct") is True else 0.0 for row in results]
-            
-            # Calculate a perfectly unweighted rolling accuracy across the window
             stable_accuracy = sum(correct_array) / total_resolved
                 
             return float(stable_accuracy), total_resolved
 
         except Exception as e:
             logger.error(f"❌ ENGINE HORIZON EVALUATION EXCEPTION: {e}")
-            return 0.0, 0
+            return 0.50, 0
