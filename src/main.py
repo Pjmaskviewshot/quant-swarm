@@ -355,8 +355,6 @@ class DistributedQuantEngine:
                     self.active_workers[symbol] = new_task
 
     async def _asset_data_gatherer_lifecycle(self, symbol: str):
-        # 🚀 STRUCTURAL FIX: Removed REST API polling to prevent 403 IP Bans.
-        # This worker now purely processes the memory arrays built by the WebSocket stream.
         import random
         await asyncio.sleep(random.uniform(0, 15))
         
@@ -364,14 +362,37 @@ class DistributedQuantEngine:
             try:
                 history = self.screener_memory.get(symbol, {}).get("prices", [])
                 
-                # We need at least 15 candles to calculate basic velocity, 100 for the full MAD.
-                # If we don't have them yet, just wait for the WebSocket to fill the arrays.
-                if len(history) < 15:
-                    await asyncio.sleep(10)
-                    continue
+                # 🚀 CRITICAL FIX: Fetch 150 1-minute candles so the 100-period MAD math has enough data
+                if len(history) < 100:
+                    klines = await asyncio.to_thread(
+                        self.executor.client.get_kline,
+                        category="linear", symbol=symbol, interval="1", limit=150
+                    )
+                    data = klines.get("result", {}).get("list", [])
+                    if data:
+                        closes = [float(k[4]) for k in data][::-1]
+                        highs = [float(k[2]) for k in data][::-1]
+                        lows = [float(k[3]) for k in data][::-1]
+                        volumes = [float(k[5]) for k in data][::-1]
+                        self.screener_memory[symbol] = {
+                            "prices": closes, 
+                            "highs": highs,
+                            "lows": lows,
+                            "macro_prices": closes.copy(),
+                            "volumes": volumes, 
+                            "last_update_time": time.time()
+                        }
+                        history = closes
                 
-                current_price = history[-1]
+                current_price = history[-1] if history else 0.0
                 
+                if current_price == 0.0:
+                    klines = await asyncio.to_thread(
+                        self.executor.client.get_kline,
+                        category="linear", symbol=symbol, interval="15", limit=1
+                    )
+                    current_price = float(klines.get("result", {}).get("list", [[0.0, 0.0, 0.0, 0.0, 0.0]])[0][4])
+
                 feature_engine = self.feature_engines.get(symbol)
                 self.current_atrs[symbol] = current_price * 0.0125
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
@@ -387,7 +408,9 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"⚠️ DATA WORKER ERROR: Exception on {symbol} loop: {e}")
                 
-            await asyncio.sleep(60.0) # Only process macro states once per minute
+            # 🚀 PRO-TIP FIX: Jittered Sleep to avoid Bybit Rate Limits
+            jitter = random.uniform(50.0, 90.0)
+            await asyncio.sleep(jitter)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -695,35 +718,7 @@ class DistributedQuantEngine:
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
                 new_math_engines[s] = self.math_engines.get(s, FastMathEngine())
-                
-                # 🚀 STRUCTURAL FIX: One-time safe REST API pull to seed the WebSocket arrays
-                cached_history = self.screener_memory.get(s)
-                if not cached_history or len(cached_history.get("prices", [])) < 100:
-                    try:
-                        # Pull 150 candles once to seed the MAD calculation
-                        klines = await asyncio.to_thread(
-                            self.executor.client.get_kline,
-                            category="linear", symbol=s, interval="1", limit=150
-                        )
-                        data = klines.get("result", {}).get("list", [])
-                        if data:
-                            closes = [float(k[4]) for k in data][::-1]
-                            highs = [float(k[2]) for k in data][::-1]
-                            lows = [float(k[3]) for k in data][::-1]
-                            volumes = [float(k[5]) for k in data][::-1]
-                            new_screener_memory[s] = {
-                                "prices": closes, "highs": highs, "lows": lows, 
-                                "macro_prices": closes.copy(), "volumes": volumes, "last_update_time": time.time()
-                            }
-                        else:
-                            new_screener_memory[s] = {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
-                        await asyncio.sleep(0.5) # Safe pacing to avoid 403 bans on boot
-                    except Exception as e:
-                        logger.error(f"Failed to seed {s} arrays: {e}")
-                        new_screener_memory[s] = {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0}
-                else:
-                    new_screener_memory[s] = cached_history
-
+                new_screener_memory[s] = self.screener_memory.get(s, {"prices": [], "highs": [], "lows": [], "macro_prices": [], "volumes": [], "last_update_time": 0.0})
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
                 new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
@@ -776,9 +771,72 @@ class DistributedQuantEngine:
         return "RANGING"
 
     async def run_shadow_swarm_scanner(self):
-        logger.critical("🦇 SHADOW SWARM: Temporarily suspended to protect server IP from Bybit 403 bans.")
+        logger.critical("🦇 SHADOW SWARM ONLINE. Hunting for pure data across extended universe...")
         while True:
-            await asyncio.sleep(3600) # Sleep indefinitely
+            await asyncio.sleep(120) 
+            if not self.shadow_basket:
+                continue
+                
+            BATCH_SIZE = 10
+            for i in range(0, len(self.shadow_basket), BATCH_SIZE):
+                batch = self.shadow_basket[i:i+BATCH_SIZE]
+                for symbol in batch:
+                    try:
+                        if symbol in self.shadow_cooldown and time.time() - self.shadow_cooldown[symbol] < 300:
+                            continue
+                            
+                        klines = await asyncio.to_thread(
+                            self.executor.client.get_kline,
+                            category="linear", symbol=symbol, interval="15", limit=60
+                        )
+                        
+                        data = klines.get("result", {}).get("list", [])
+                        if len(data) < 30:
+                            continue
+
+                        closes = np.array([float(k[4]) for k in data])[::-1]
+                        volumes = np.array([float(k[5]) for k in data])[::-1]
+                        
+                        current_price = closes[-1]
+                        if current_price <= 0.01:
+                            continue
+                        
+                        current_vol = volumes[-1]
+                        avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else 1.0
+                        vol_mult = current_vol / avg_vol if avg_vol > 0 else 1.0
+                        
+                        returns = np.diff(np.log(closes))
+                        mean_return = np.mean(returns) if len(returns) > 0 else 0.0
+                        std_return = np.std(returns) if len(returns) > 0 else 1e-6
+                        vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
+                        
+                        if (vol_z >= 2.2 and vol_mult >= 0.8) or (vol_mult >= 1.5 and vol_z >= 1.4):
+                            direction = "BUY" if returns[-1] < 0 else "SELL"
+                            market_regime = self._detect_shadow_regime(closes)
+                            
+                            features_dict = {
+                                "symbol": symbol,
+                                "market_regime": market_regime,
+                                "adaptive_obi_z": vol_z,
+                                "liquidity_density_ratio": vol_mult,
+                                "bid_ask_spread": 0.0
+                            }
+                            
+                            self.memory.commit_prediction(
+                                str(uuid.uuid4()),
+                                time.time(),
+                                current_price,
+                                direction,
+                                0.0,
+                                features_dict,
+                                is_shadow=True
+                            )
+                            self.shadow_cooldown[symbol] = time.time()
+                    except Exception as e:
+                        logger.error(f"Shadow scanner error for {symbol}: {e}")
+                    
+                    await asyncio.sleep(2.5) 
+                await asyncio.sleep(3.0) 
 
     async def stream_manager_loop(self):
         while True:
