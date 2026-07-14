@@ -93,14 +93,13 @@ class MemoryBank:
         resolved_count = 0
 
         try:
+            # 🚀 UPGRADE: Scan ALL unresolved predictions globally, not just active tickers
             response = self.supabase.table("quantitative_ledger")\
                 .select("*")\
                 .eq("resolved", False)\
-                .in_("symbol", assets)\
                 .execute()
 
             unresolved_rows = response.data if response else []
-            
             if not unresolved_rows:
                 return 0
 
@@ -116,7 +115,18 @@ class MemoryBank:
                 tp_price = float(row.get("virtual_tp", entry_price * 1.015))
                 
                 p_data = current_prices.get(symbol)
+                
+                # 🚀 CRITICAL FIX: If asset is rotated out of memory, fall back to time-based resolution check
                 if p_data is None:
+                    row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+                    elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
+                    if elapsed_minutes >= 60.0:
+                        row["resolved"] = True
+                        row["actual_outcome"] = "TIMEOUT"
+                        row["is_correct"] = False
+                        row["net_pnl"] = 0.0
+                        update_batch.append(row)
+                        resolved_count += 1
                     continue
 
                 # Parse multi-dimensional arrays out of modern screener payload securely
@@ -182,7 +192,7 @@ class MemoryBank:
                         actual = "HOLD"
 
                 if is_terminated and actual != "HOLD":
-                    # 🚀 CRITICAL FIX: Calculate nominal statistical return for Ghost Ledger tracking
+                    # Calculate nominal statistical return for Ghost Ledger tracking
                     if prediction == "BUY":
                         net_pnl = ((exit_price - entry_price) / entry_price) * 10.0  # Normalized to an arbitrary $10 unit
                     else:
@@ -197,7 +207,7 @@ class MemoryBank:
                 
             if update_batch:
                 self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
-                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Successfully processed {len(update_batch)} paths via sequential verification matrix.")
+                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Processed {len(update_batch)} paths via global tracking matrix.")
                 
             return resolved_count
 
@@ -212,15 +222,16 @@ class MemoryBank:
         Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
         try:
-            query = self.supabase.table("quantitative_ledger")\
+            # 🚀 UPGRADE: Dropped the core_basket constraint completely to preserve global memory stability.
+            # We no longer filter by `core_basket` so that rotated assets are still counted.
+            response = self.supabase.table("quantitative_ledger")\
                 .select("is_correct")\
                 .eq("resolved", True)\
-                .eq("is_shadow", False)
-            
-            if core_basket:
-                query = query.in_("symbol", core_basket)
+                .eq("is_shadow", False)\
+                .order("timestamp", desc=True)\
+                .limit(window_size)\
+                .execute()
                 
-            response = query.order("timestamp", desc=True).limit(window_size).execute()
             results = response.data if response else []
             total_resolved = len(results)
             
