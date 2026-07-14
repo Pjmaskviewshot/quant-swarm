@@ -70,6 +70,135 @@ class FastMathEngine:
         return excitement
 
 
+class AdaptiveLiquidityEntropySurface:
+    """
+    Self-Organizing Liquidity Intelligence Layer.
+    Learns optimal liquidity manifolds from trade outcomes, not human intuition.
+    """
+    def __init__(self, feature_dim: int = 7, lattice_size: int = 5, learning_rate: float = 0.1):
+        self.feature_dim = feature_dim
+        self.lattice_size = lattice_size
+        self.lr = learning_rate
+        
+        self.lattice = np.random.randn(lattice_size, lattice_size, feature_dim) * 0.1 + 1.0
+        
+        self.node_outcomes: Dict[tuple, deque] = {
+            (i, j): deque(maxlen=50) for i in range(lattice_size) for j in range(lattice_size)
+        }
+        self.node_activations = np.zeros((lattice_size, lattice_size))
+        
+        self.last_winners: Dict[str, tuple] = {}
+        self.win_streak: Dict[str, int] = {}
+        
+    def _find_best_matching_unit(self, vector: np.ndarray) -> tuple:
+        weights = np.ones(self.feature_dim)
+        for i in range(self.lattice_size):
+            for j in range(self.lattice_size):
+                outcomes = list(self.node_outcomes[(i, j)])
+                if len(outcomes) >= 5:
+                    feature_idx = int(np.argmax(np.abs(self.lattice[i, j])))
+                    weights[feature_idx] += float(np.std(outcomes)) * 0.5
+        
+        weights = np.clip(weights, 0.5, 3.0)
+        weights /= weights.sum()
+        
+        diff = self.lattice - vector.reshape(1, 1, -1)
+        weighted_diff = diff * weights.reshape(1, 1, -1)
+        distances = np.sum(weighted_diff ** 2, axis=2)
+        
+        min_idx = np.unravel_index(np.argmin(distances), distances.shape)
+        return min_idx
+    
+    def _update_lattice(self, winner: tuple, vector: np.ndarray, outcome: float = None):
+        i, j = winner
+        local_lr = self.lr / (1.0 + 0.01 * self.node_activations[i, j])
+        self.lattice[i, j] += local_lr * (vector - self.lattice[i, j])
+        
+        for ni in range(self.lattice_size):
+            for nj in range(self.lattice_size):
+                dist = np.sqrt((ni - i)**2 + (nj - j)**2)
+                if dist < 2.0 and (ni, nj) != winner:
+                    influence = np.exp(-dist**2 / 2.0) * local_lr * 0.3
+                    self.lattice[ni, nj] += influence * (vector - self.lattice[ni, nj])
+        
+        self.node_activations[i, j] += 1
+        if outcome is not None:
+            self.node_outcomes[winner].append(outcome)
+    
+    def classify(self, symbol: str, features: Dict[str, float], current_time: float) -> Dict[str, Any]:
+        vector = np.array([
+            max(0.0, features.get("vol_mult", 1.0)),
+            max(0.0, features.get("spread_state", 1.0)),
+            max(0.0, features.get("volatility_state", 1.0)),
+            max(0.0, features.get("tfis", 0.0)),
+            max(0.0, features.get("obr", 1.0)),
+            max(0.0, features.get("cmv", 1.0)),
+            max(0.0, features.get("temporal_anomaly", 1.0)),
+        ])
+        
+        winner = self._find_best_matching_unit(vector)
+        
+        last_winner = self.last_winners.get(symbol)
+        streak = self.win_streak.get(symbol, 0)
+        
+        if last_winner == winner:
+            streak += 1
+        else:
+            old_dist = np.linalg.norm(self.lattice[last_winner] - vector) if last_winner else float('inf')
+            new_dist = np.linalg.norm(self.lattice[winner] - vector)
+            if new_dist < old_dist * 0.7 or streak >= 3:
+                streak = 1
+            else:
+                winner = last_winner  
+                streak = max(0, streak - 1)
+        
+        self.last_winners[symbol] = winner
+        self.win_streak[symbol] = streak
+        
+        outcomes = list(self.node_outcomes[winner])
+        if len(outcomes) >= 10:
+            win_rate = np.mean([1.0 if o > 0 else 0.0 for o in outcomes])
+            base_threshold = 0.35 + (1.0 - win_rate) * 1.0
+        else:
+            base_threshold = 0.65 
+        
+        maturity = min(1.0, self.node_activations[winner] / 100.0)
+        threshold_variance = 0.3 * (1.0 - maturity)
+        
+        if len(outcomes) >= 5:
+            outcome_vol = np.std(outcomes)
+            threshold_variance += outcome_vol * 0.2
+        
+        final_threshold = float(np.clip(base_threshold, 0.20, 2.0))
+        
+        predictive_power = 0.0
+        if len(outcomes) >= 20:
+            recent = list(outcomes)[-20:]
+            predictive_power = float(abs(np.mean(recent) - 0.5) * 2.0)
+        
+        return {
+            "state": f"NODE_{winner[0]}_{winner[1]}",
+            "threshold": round(final_threshold, 4),
+            "confidence": round(predictive_power, 4),
+            "maturity": round(maturity, 4),
+            "win_rate": round(np.mean([1.0 if o > 0 else 0.0 for o in outcomes]) if outcomes else 0.5, 4),
+            "action": self._derive_action(final_threshold, features, predictive_power)
+        }
+    
+    def _derive_action(self, threshold: float, features: Dict[str, float], confidence: float) -> str:
+        vol_mult = features.get("vol_mult", 1.0)
+        if vol_mult < 0.15: return "REJECT_CATATONIC"
+        elif threshold > 1.5 and confidence > 0.6: return "REJECT_UNLESS_OVERWHELMING"
+        elif threshold < 0.35 and confidence > 0.5: return "AGGRESSIVE_SCALP"
+        elif features.get("volatility_state", 1.0) > 2.0 and features.get("spread_state", 1.0) > 2.0: return "REJECT_TOXIC"
+        else: return "STANDARD_EVALUATION"
+    
+    def feedback(self, symbol: str, outcome: float):
+        winner = self.last_winners.get(symbol)
+        if winner:
+            self._update_lattice(winner, self.lattice[winner], outcome)
+
+
 class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
@@ -101,6 +230,8 @@ class DistributedQuantEngine:
         }
         
         self.math_engines: Dict[str, FastMathEngine] = {s: FastMathEngine() for s in self.asset_basket}
+        self.ales = AdaptiveLiquidityEntropySurface(feature_dim=7, lattice_size=5)
+        
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
@@ -432,31 +563,48 @@ class DistributedQuantEngine:
         mad = np.median(np.abs(prices_array - median_price))
         mad_scaled = mad * 1.4826 + 1e-6 
         
-        # 🚀 FIX: Used mid_price to calculate Z-Score natively
         price_z_score = (mid_price - median_price) / mad_scaled
         kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
+
+        # 🚀 ALES EXECUTION
+        raw_atr = fe.get_computed_atr() if hasattr(fe, 'get_computed_atr') else 0.0
+        atr = raw_atr if raw_atr > 0 else mid_price * 0.0125
+        baseline_atr = max(self.volatility_baseline.get(symbol, atr), mid_price * 0.001)
+
+        spread_pct = real_spread / mid_price
+        hawkes_score = metrics.get("hawkes_score", 0.0)
+        valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
+        avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
         
-        if vol_mult < 0.65:
-            logger.info(f"💀 DEAD ASSET FILTER // {symbol} lacks structural liquidity (Vol: {vol_mult:.2f}x). Aborting.")
-            self.active_positions_lock.discard(symbol)
-            return False
+        ales_features = {
+            "vol_mult": vol_mult,
+            "spread_state": spread_pct / 0.0005,
+            "volatility_state": atr / baseline_atr,
+            "tfis": abs(hawkes_score / (avg_hawkes + 1e-6)),
+            "obr": 0.85,  
+            "cmv": 1.0,
+            "temporal_anomaly": 1.0,
+        }
+
+        ales_result = self.ales.classify(symbol, ales_features, current_time)
+
+        if ales_result["action"] == "REJECT_CATATONIC":
+            return
+
+        if vol_mult < ales_result["threshold"]:
+            return
             
         if vol_mult >= 2.0 and kinetic_efficiency < 0.3:
             logger.warning(f"🛡️ SPOOFING DETECTED // {symbol} has massive volume but zero velocity. Market makers are absorbing liquidity. Aborting.")
             self.active_positions_lock.discard(symbol)
             return False
 
-        hawkes_score = metrics.get("hawkes_score", 0.0)
-        valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
-        avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
         hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
-        
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
         
         kinetic_alpha = vol_mult * hawkes_ratio
         
-        spread_pct = real_spread / mid_price
         total_friction = max(real_spread, mid_price * 0.0001) + (real_spread * (1.0 / math.sqrt(max(0.10, vol_mult))))
         
         dynamic_max_spread = 0.0015 * (1.0 + math.log1p(vol_z_abs))
@@ -538,7 +686,6 @@ class DistributedQuantEngine:
         mode_label = "🔥 LIVE" if (is_active and not self.test_mode) else "👻 GHOST"
         logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z: {price_z_score:.2f}")
         
-        # 🚀 FIX: Prevent silent GC destruction of the lifecycle thread
         lifecycle_task = asyncio.create_task(self.run_signal_lifecycle(
             symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, is_golden_setup
         ))
@@ -803,72 +950,9 @@ class DistributedQuantEngine:
         return "RANGING"
 
     async def run_shadow_swarm_scanner(self):
-        logger.critical("🦇 SHADOW SWARM ONLINE. Hunting for pure data across extended universe...")
+        logger.critical("🦇 SHADOW SWARM: Temporarily suspended to protect API rate limits.")
         while True:
-            await asyncio.sleep(120) 
-            if not self.shadow_basket:
-                continue
-                
-            BATCH_SIZE = 10
-            for i in range(0, len(self.shadow_basket), BATCH_SIZE):
-                batch = self.shadow_basket[i:i+BATCH_SIZE]
-                for symbol in batch:
-                    try:
-                        if symbol in self.shadow_cooldown and time.time() - self.shadow_cooldown[symbol] < 300:
-                            continue
-                            
-                        klines = await asyncio.to_thread(
-                            self.executor.client.get_kline,
-                            category="linear", symbol=symbol, interval="15", limit=60
-                        )
-                        
-                        data = klines.get("result", {}).get("list", [])
-                        if len(data) < 30:
-                            continue
-
-                        closes = np.array([float(k[4]) for k in data])[::-1]
-                        volumes = np.array([float(k[5]) for k in data])[::-1]
-                        
-                        current_price = closes[-1]
-                        if current_price <= 0.01:
-                            continue
-                        
-                        current_vol = volumes[-1]
-                        avg_vol = np.mean(volumes[:-1]) if len(volumes) > 1 else 1.0
-                        vol_mult = current_vol / avg_vol if avg_vol > 0 else 1.0
-                        
-                        returns = np.diff(np.log(closes))
-                        mean_return = np.mean(returns) if len(returns) > 0 else 0.0
-                        std_return = np.std(returns) if len(returns) > 0 else 1e-6
-                        vol_z = abs((returns[-1] - mean_return) / (std_return + 1e-6))
-                        
-                        if (vol_z >= 2.2 and vol_mult >= 0.8) or (vol_mult >= 1.5 and vol_z >= 1.4):
-                            direction = "BUY" if returns[-1] < 0 else "SELL"
-                            market_regime = self._detect_shadow_regime(closes)
-                            
-                            features_dict = {
-                                "symbol": symbol,
-                                "market_regime": market_regime,
-                                "adaptive_obi_z": vol_z,
-                                "liquidity_density_ratio": vol_mult,
-                                "bid_ask_spread": 0.0
-                            }
-                            
-                            self.memory.commit_prediction(
-                                str(uuid.uuid4()),
-                                time.time(),
-                                current_price,
-                                direction,
-                                0.0,
-                                features_dict,
-                                is_shadow=True
-                            )
-                            self.shadow_cooldown[symbol] = time.time()
-                    except Exception as e:
-                        logger.error(f"Shadow scanner error for {symbol}: {e}")
-                    
-                    await asyncio.sleep(2.5) 
-                await asyncio.sleep(3.0) 
+            await asyncio.sleep(3600)
 
     async def stream_manager_loop(self):
         while True:
@@ -905,8 +989,7 @@ class DistributedQuantEngine:
                     
                     if valid_assets:
                         current_prices = {sym: self.screener_memory[sym] for sym in valid_assets}
-                        # 🚀 FIX: Clarity variable naming 
-                        for symbol_key, _last_cooldown_ts in self.shadow_cooldown.items():
+                        for symbol_key, _timestamp in self.shadow_cooldown.items():
                             if symbol_key not in current_prices:
                                 current_prices[symbol_key] = self.screener_memory.get(symbol_key, {
                                     "prices": deque(maxlen=150), "highs": deque(maxlen=150), "lows": deque(maxlen=150)
@@ -1129,8 +1212,29 @@ class DistributedQuantEngine:
             price_z_score = (current_price - median_price) / mad_scaled
             kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
             
-            if vol_mult < 0.65:
-                logger.info(f"💀 DEAD ASSET FILTER // {symbol} lacks structural liquidity (Vol: {vol_mult:.2f}x). Aborting.")
+            # 🚀 ALES EXECUTION
+            baseline_atr = max(self.volatility_baseline.get(symbol, atr), current_price * 0.001)
+            spread_pct = real_spread / current_price if current_price > 0 else 0.0
+            
+            ales_features = {
+                "vol_mult": vol_mult,
+                "spread_state": spread_pct / 0.0005,
+                "volatility_state": atr / baseline_atr,
+                "tfis": abs(metrics.get("hawkes_score", 0.0) / (avg_hawkes + 1e-6)),
+                "obr": 0.85,  
+                "cmv": 1.0,
+                "temporal_anomaly": 1.0,
+            }
+
+            ales_result = self.ales.classify(symbol, ales_features, time.time())
+
+            if ales_result["action"] == "REJECT_CATATONIC":
+                logger.info(f"💀 ALES REJECT // {symbol} | Node: {ales_result['state']} | Threshold: {ales_result['threshold']:.2f}x")
+                self.active_positions_lock.discard(symbol)
+                return False
+
+            if vol_mult < ales_result["threshold"]:
+                logger.info(f"💀 ALES THRESHOLD // {symbol} | Vol: {vol_mult:.2f}x < {ales_result['threshold']:.2f}x | Confidence: {ales_result['confidence']:.2f}")
                 self.active_positions_lock.discard(symbol)
                 return False
                 
@@ -1142,7 +1246,6 @@ class DistributedQuantEngine:
             kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
             is_hyper_trend = kinetic_alpha >= 1.5 and market_regime == "TRENDING"
             
-            spread_pct = real_spread / current_price if current_price > 0 else 0.0
             total_friction = max(real_spread, current_price * 0.0001) + (real_spread * (1.0 / math.sqrt(max(0.10, vol_mult))))
             
             if (current_price * 0.02) < total_friction:
@@ -1271,7 +1374,11 @@ class DistributedQuantEngine:
                     "virtual_sl": initial_sl, "virtual_tp": target_tp    
                 }
                 
-                self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=True)
+                if not is_active:
+                    self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=False)
+                else:
+                    self.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=True)
+
                 self.active_positions_lock.discard(symbol)
                 return True
 
@@ -1297,7 +1404,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            # 🚀 FIX: Centralized Dynamic Leverage Scaling via Risk Vault
             try:
                 target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance)
             except AttributeError:
@@ -1380,7 +1486,6 @@ class DistributedQuantEngine:
             start_time = time.time()
             order_filled = False
             
-            # Wait up to 180 seconds for the SmartOrderRouter (SOR) to fill the entry order
             for _ in range(36):
                 await asyncio.sleep(5)
                 try:
@@ -1403,14 +1508,12 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
 
-            # Phase 1: Verify initial hard stop exists (safety net before trailing activates)
             try:
                 pos_check = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
                 pos_data = pos_check.get("result", {}).get("list", [{}])[0]
                 existing_sl = float(pos_data.get("stopLoss", 0.0))
                 
                 if existing_sl == 0.0:
-                    # Emergency: SOR failed to attach SL. Set it now.
                     await asyncio.to_thread(
                         self.executor.client.set_trading_stop,
                         category="linear", symbol=symbol, positionIdx=0,
@@ -1420,7 +1523,6 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"Failed to verify initial SL for {symbol}: {e}")
 
-            # Phase 2: Hand off trailing logic to Bybit's C++ engine
             activation_distance = atr * 0.8  
             trailing_distance = atr * 1.5    
             
@@ -1464,6 +1566,9 @@ class DistributedQuantEngine:
                     
                     self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
                     self.risk_vault.update_position_ledger(symbol, -(actual_entry * actual_qty))
+                    
+                    # 🚀 ALES FEEDBACK LOOP: Train the lattice based on actual financial outcome
+                    self.ales.feedback(symbol, 1.0 if net_pnl > 0 else -1.0)
                     break
 
         except Exception as daemon_error:
