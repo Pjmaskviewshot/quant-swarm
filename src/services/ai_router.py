@@ -51,7 +51,8 @@ class ResilientAIRouter:
                     "model": "moonshotai/kimi-k2.6",
                     "cooldown_until": 0.0,
                     "json_mode": False, # 🚀 Bypassed to prevent 400 Bad Request errors on Kimi
-                    "params": {"temperature": 1.00, "top_p": 1.00, "max_tokens": 16384}
+                    # 🚀 CRITICAL FIX: Temperature locked to 0.0 for strict quantitative determinism
+                    "params": {"temperature": 0.0, "top_p": 0.10, "max_tokens": 16384}
                 })
 
         # 3. DEEPSEEK NATIVE: The Paid Last Resort

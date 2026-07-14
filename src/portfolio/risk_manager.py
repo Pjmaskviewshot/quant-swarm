@@ -97,6 +97,22 @@ class InstitutionalRiskVault:
         self.active_positions.clear()
         logger.info("💼 PORTFOLIO LEDGER PURGED SATELLITE MATRIX CLEAR.")
 
+    def calculate_dynamic_leverage(self, notional_position_usdt: float, account_balance: float, base_leverage: int = 5, hard_cap: int = 15) -> int:
+        """
+        🚀 CENTRALIZED LEVERAGE AUTHORITY
+        Replaces all hardcoded leverage math in main.py. Dynamically scales leverage required 
+        to execute the ideal Kelly fraction while strictly adhering to safety margin rules.
+        """
+        if account_balance <= 0 or notional_position_usdt <= 0:
+            return 1
+            
+        # Target consuming a maximum of 12% of the free balance as margin per trade
+        margin_required = account_balance * 0.12
+        calculated_leverage = math.ceil(notional_position_usdt / margin_required)
+        
+        # Apply institutional safety bounds to prevent liquidation cascades
+        return int(min(max(1, calculated_leverage), hard_cap))
+
     def compute_variance_adjusted_kelly(self, account_balance: float, win_rate: float, win_loss_ratio: float, asset_volatility_atr: float, current_price: float, ai_confidence: float = 0.5, market_regime: str = "TRENDING") -> Dict[str, Any]:
         """
         Calculates position sizes using the Kelly Criterion, dynamically adjusting operating limits 
