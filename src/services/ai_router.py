@@ -124,12 +124,12 @@ class ResilientAIRouter:
         for ticker, data in assets_data.items():
             if isinstance(data, dict):
                 z_score = data.get("volatility_z_score", 0.0)
-                if abs(z_score) >= 2.0:
+                if abs(z_score) >= 1.5: # Lowered to 1.5 to ensure AI engages during warmups
                     is_market_active = True
                     break
         
         if not is_market_active:
-            logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 2.0). Skipping AI matrix to save rate limits.")
+            logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 1.5). Skipping AI matrix to save rate limits.")
             return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
 
         logger.info("🚨 Local Pre-Filter: Structural Anomaly Detected. Waking up AI Cascade Matrix...")
@@ -139,11 +139,11 @@ class ResilientAIRouter:
         # ---------------------------------------------------------
         system_instruction = (
             "You are an elite institutional algorithmic execution core operating a Dual-Gate MIEG+TFI architecture.\n"
-            "Your objective is to analyze order book imbalances (Z-OBI), tape flow exhaustion, and regime profiles.\n\n"
+            "Your objective is to analyze order book imbalances (obi_z_score), trade flow imbalance (trade_flow_imbalance), and volatility.\n\n"
             "EXECUTION RULES:\n"
-            "1. If Z-score is strictly between -2.0 and 2.0, output HOLD.\n"
-            "2. If Z-score <= -2.40 and tape confirms exhaustion, output BUY.\n"
-            "3. If Z-score >= 2.40 and tape confirms exhaustion, output SELL.\n"
+            "1. If |volatility_z_score| is strictly between -2.0 and 2.0, output HOLD.\n"
+            "2. If volatility_z_score <= -2.40 AND trade_flow_imbalance > 0.15 (aggressive buying), output BUY.\n"
+            "3. If volatility_z_score >= 2.40 AND trade_flow_imbalance < -0.15 (aggressive selling), output SELL.\n"
             "4. For edge cases between 2.0 and 2.40, evaluate structural volume.\n\n"
             "You MUST return ONLY a raw, valid JSON dictionary mapping the asset ticker symbol to its verdict. "
             "Do not include markdown formatting tags, wrapping blocks, or prose.\n"
@@ -181,7 +181,6 @@ class ResilientAIRouter:
             logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
             
             try:
-                # 🚀 THE FIX: Dynamic Parameter Mapping
                 kwargs = {
                     "model": provider["model"],
                     "messages": messages,

@@ -21,6 +21,7 @@ from core.fsm import SystemStateMachine, TradingState
 from features.adaptive_engine import AdaptiveFeatureEngine
 from portfolio.risk_manager import InstitutionalRiskVault
 from execution.sor import SmartOrderRouter
+from liquidity_state import AdaptiveLiquidityEntropySurface  # 🚀 IMPORTED PROPERLY
 
 # External Service Connectors
 from services.ai_router import ResilientAIRouter
@@ -68,135 +69,6 @@ class FastMathEngine:
             excitement += t_vol * math.exp(-self.decay_factor * time_diff)
             
         return excitement
-
-
-class AdaptiveLiquidityEntropySurface:
-    """
-    Self-Organizing Liquidity Intelligence Layer.
-    Learns optimal liquidity manifolds from trade outcomes, not human intuition.
-    """
-    def __init__(self, feature_dim: int = 7, lattice_size: int = 5, learning_rate: float = 0.1):
-        self.feature_dim = feature_dim
-        self.lattice_size = lattice_size
-        self.lr = learning_rate
-        
-        self.lattice = np.random.randn(lattice_size, lattice_size, feature_dim) * 0.1 + 1.0
-        
-        self.node_outcomes: Dict[tuple, deque] = {
-            (i, j): deque(maxlen=50) for i in range(lattice_size) for j in range(lattice_size)
-        }
-        self.node_activations = np.zeros((lattice_size, lattice_size))
-        
-        self.last_winners: Dict[str, tuple] = {}
-        self.win_streak: Dict[str, int] = {}
-        
-    def _find_best_matching_unit(self, vector: np.ndarray) -> tuple:
-        weights = np.ones(self.feature_dim)
-        for i in range(self.lattice_size):
-            for j in range(self.lattice_size):
-                outcomes = list(self.node_outcomes[(i, j)])
-                if len(outcomes) >= 5:
-                    feature_idx = int(np.argmax(np.abs(self.lattice[i, j])))
-                    weights[feature_idx] += float(np.std(outcomes)) * 0.5
-        
-        weights = np.clip(weights, 0.5, 3.0)
-        weights /= weights.sum()
-        
-        diff = self.lattice - vector.reshape(1, 1, -1)
-        weighted_diff = diff * weights.reshape(1, 1, -1)
-        distances = np.sum(weighted_diff ** 2, axis=2)
-        
-        min_idx = np.unravel_index(np.argmin(distances), distances.shape)
-        return min_idx
-    
-    def _update_lattice(self, winner: tuple, vector: np.ndarray, outcome: float = None):
-        i, j = winner
-        local_lr = self.lr / (1.0 + 0.01 * self.node_activations[i, j])
-        self.lattice[i, j] += local_lr * (vector - self.lattice[i, j])
-        
-        for ni in range(self.lattice_size):
-            for nj in range(self.lattice_size):
-                dist = np.sqrt((ni - i)**2 + (nj - j)**2)
-                if dist < 2.0 and (ni, nj) != winner:
-                    influence = np.exp(-dist**2 / 2.0) * local_lr * 0.3
-                    self.lattice[ni, nj] += influence * (vector - self.lattice[ni, nj])
-        
-        self.node_activations[i, j] += 1
-        if outcome is not None:
-            self.node_outcomes[winner].append(outcome)
-    
-    def classify(self, symbol: str, features: Dict[str, float], current_time: float) -> Dict[str, Any]:
-        vector = np.array([
-            max(0.0, features.get("vol_mult", 1.0)),
-            max(0.0, features.get("spread_state", 1.0)),
-            max(0.0, features.get("volatility_state", 1.0)),
-            max(0.0, features.get("tfis", 0.0)),
-            max(0.0, features.get("obr", 1.0)),
-            max(0.0, features.get("cmv", 1.0)),
-            max(0.0, features.get("temporal_anomaly", 1.0)),
-        ])
-        
-        winner = self._find_best_matching_unit(vector)
-        
-        last_winner = self.last_winners.get(symbol)
-        streak = self.win_streak.get(symbol, 0)
-        
-        if last_winner == winner:
-            streak += 1
-        else:
-            old_dist = np.linalg.norm(self.lattice[last_winner] - vector) if last_winner else float('inf')
-            new_dist = np.linalg.norm(self.lattice[winner] - vector)
-            if new_dist < old_dist * 0.7 or streak >= 3:
-                streak = 1
-            else:
-                winner = last_winner  
-                streak = max(0, streak - 1)
-        
-        self.last_winners[symbol] = winner
-        self.win_streak[symbol] = streak
-        
-        outcomes = list(self.node_outcomes[winner])
-        if len(outcomes) >= 10:
-            win_rate = np.mean([1.0 if o > 0 else 0.0 for o in outcomes])
-            base_threshold = 0.35 + (1.0 - win_rate) * 1.0
-        else:
-            base_threshold = 0.65 
-        
-        maturity = min(1.0, self.node_activations[winner] / 100.0)
-        threshold_variance = 0.3 * (1.0 - maturity)
-        
-        if len(outcomes) >= 5:
-            outcome_vol = np.std(outcomes)
-            threshold_variance += outcome_vol * 0.2
-        
-        final_threshold = float(np.clip(base_threshold, 0.20, 2.0))
-        
-        predictive_power = 0.0
-        if len(outcomes) >= 20:
-            recent = list(outcomes)[-20:]
-            predictive_power = float(abs(np.mean(recent) - 0.5) * 2.0)
-        
-        return {
-            "state": f"NODE_{winner[0]}_{winner[1]}",
-            "threshold": round(final_threshold, 4),
-            "confidence": round(predictive_power, 4),
-            "maturity": round(maturity, 4),
-            "win_rate": round(np.mean([1.0 if o > 0 else 0.0 for o in outcomes]) if outcomes else 0.5, 4),
-            "action": self._derive_action(final_threshold, features, predictive_power)
-        }
-    
-    def _derive_action(self, threshold: float, features: Dict[str, float], confidence: float) -> str:
-        vol_mult = features.get("vol_mult", 1.0)
-        if vol_mult < 0.15: return "REJECT_CATATONIC"
-        elif threshold > 1.5 and confidence > 0.6: return "REJECT_UNLESS_OVERWHELMING"
-        elif threshold < 0.35 and confidence > 0.5: return "AGGRESSIVE_SCALP"
-        elif features.get("volatility_state", 1.0) > 2.0 and features.get("spread_state", 1.0) > 2.0: return "REJECT_TOXIC"
-        else: return "STANDARD_EVALUATION"
-    
-    def feedback(self, symbol: str, outcome: float):
-        winner = self.last_winners.get(symbol)
-        if winner:
-            self._update_lattice(winner, self.lattice[winner], outcome)
 
 
 class DistributedQuantEngine:
@@ -261,6 +133,7 @@ class DistributedQuantEngine:
         self.active_positions_lock = set()
         
         self._daemon_registry = weakref.WeakSet()
+        self._log_throttle_cache: Dict[str, float] = {}
         
         self.tick_sizes: Dict[str, float] = {}
         self.global_macro_news_cache: str = "No significant macro shifts detected."
@@ -280,6 +153,20 @@ class DistributedQuantEngine:
         
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=False)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+
+    def _throttled_log(self, level: str, message: str, category: str = None, throttle_seconds: int = 30):
+        current_time = time.time()
+        key = category or hash(message)
+        last_logged = self._log_throttle_cache.get(key, 0.0)
+        
+        if current_time - last_logged > throttle_seconds:
+            self._log_throttle_cache[key] = current_time
+            if level == "WARNING":
+                logger.warning(message)
+            elif level == "INFO":
+                logger.info(message)
+            elif level == "CRITICAL":
+                logger.critical(message)
 
     async def _fetch_exchange_tick_sizes(self):
         try:
@@ -500,11 +387,16 @@ class DistributedQuantEngine:
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
                 rolling_acc = self.global_state_cache.get("rolling_accuracy", 0.50)
                 
+                current_tfi = feature_engine.tfi_history[-1] if feature_engine and len(feature_engine.tfi_history) > 0 else 0.0
+                current_obi = feature_engine.obi_history[-1] if feature_engine and len(feature_engine.obi_history) > 0 else 0.0
+
                 self.pending_macro_payloads[symbol] = {
                     "price": current_price,
                     "atr_volatility": self.current_atrs[symbol],
                     "volume_multiplier": round(metrics.get("vol_mult", 1.0), 2),
                     "volatility_z_score": round(metrics.get("vol_z", 0.0), 2),
+                    "trade_flow_imbalance": round(current_tfi, 4),
+                    "obi_z_score": round(current_obi, 4),
                     "rolling_system_accuracy": f"{rolling_acc:.2%}" 
                 }
             except Exception as e:
@@ -589,15 +481,14 @@ class DistributedQuantEngine:
         ales_result = self.ales.classify(symbol, ales_features, current_time)
 
         if ales_result["action"] == "REJECT_CATATONIC":
+            self._throttled_log("INFO", f"💀 ALES REJECT // {symbol} | Node: {ales_result['state']} | Threshold: {ales_result['threshold']:.2f}x", f"ALES_REJECT_{symbol}", 60)
             return
 
         if vol_mult < ales_result["threshold"]:
+            self._throttled_log("INFO", f"💀 ALES THRESHOLD // {symbol} | Vol: {vol_mult:.2f}x < {ales_result['threshold']:.2f}x | Confidence: {ales_result['confidence']:.2f}", f"ALES_THRESH_{symbol}", 60)
             return
             
-        if vol_mult >= 2.0 and kinetic_efficiency < 0.3:
-            logger.warning(f"🛡️ SPOOFING DETECTED // {symbol} has massive volume but zero velocity. Market makers are absorbing liquidity. Aborting.")
-            self.active_positions_lock.discard(symbol)
-            return False
+        # 🚀 THE STATIC SPOOFING BLOCK HAS BEEN PURGED. ALES IS SOLE AUTHORITY.
 
         hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
         raw_vol_z = metrics.get("vol_z", 0.0)
@@ -613,8 +504,7 @@ class DistributedQuantEngine:
             return 
         
         if (mid_price * 0.02) < total_friction:
-            self.active_positions_lock.discard(symbol)
-            return False
+            return
         
         trade_direction = None
         has_pure_edge = False
@@ -672,6 +562,12 @@ class DistributedQuantEngine:
         
         if not has_pure_edge:
             return
+
+        if not is_active:
+            is_golden_setup = True
+        elif abs(price_z_score) >= 2.5 and vol_mult >= 1.5:
+            is_golden_setup = True
+            self._throttled_log("INFO", f"✨ GOLDEN SETUP DETECTED // {symbol} mathematical edge overrides AI bias.", f"GOLDEN_{symbol}", 60)
 
         if regime == "HOLD" and not is_golden_setup:
             return 
@@ -1018,10 +914,13 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 self.fsm.warmup_epochs = avg_dynamic_window
                 
+                # 🚀 FIX: Detect real macro regime from BTC instead of hardcoding "RANGING"
                 if accuracy < 0.45:
                     self.fsm.current_state = TradingState.CALIBRATING
                 else:
-                    self.fsm.process_state_transition(accuracy, pool_size, "RANGING") 
+                    btc_fe = self.feature_engines.get("BTCUSDT")
+                    current_macro_regime = btc_fe.detect_market_regime() if btc_fe else "RANGING"
+                    self.fsm.process_state_transition(accuracy, pool_size, current_macro_regime) 
 
             if loop_counter % 30 == 0:
                 state = self.fsm.current_state.value
@@ -1194,63 +1093,58 @@ class DistributedQuantEngine:
             metrics = self.screener_metrics.get(symbol, {})
             vol_mult = metrics.get("vol_mult", 1.0)
             
-            hawkes_score = metrics.get("hawkes_score", 0.0)
-            valid_hawkes = [m.get("hawkes_score", 0.0) for m in self.screener_metrics.values() if "hawkes_score" in m]
-            avg_hawkes = np.mean(valid_hawkes) if valid_hawkes else 0.1
-            
             history = self.screener_memory.get(symbol, {}).get("prices", [])
-            
             if len(history) < 100:
                 self.active_positions_lock.discard(symbol)
                 return False 
                 
-            prices_array = np.array(list(history)[-100:])
-            median_price = np.median(prices_array)
-            mad = np.median(np.abs(prices_array - median_price))
-            mad_scaled = mad * 1.4826 + 1e-6 
-            
-            price_z_score = (current_price - median_price) / mad_scaled
-            kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
-            
-            # 🚀 ALES EXECUTION
-            baseline_atr = max(self.volatility_baseline.get(symbol, atr), current_price * 0.001)
-            spread_pct = real_spread / current_price if current_price > 0 else 0.0
-            
-            ales_features = {
-                "vol_mult": vol_mult,
-                "spread_state": spread_pct / 0.0005,
-                "volatility_state": atr / baseline_atr,
-                "tfis": abs(metrics.get("hawkes_score", 0.0) / (avg_hawkes + 1e-6)),
-                "obr": 0.85,  
-                "cmv": 1.0,
-                "temporal_anomaly": 1.0,
-            }
-
-            ales_result = self.ales.classify(symbol, ales_features, time.time())
-
-            if ales_result["action"] == "REJECT_CATATONIC":
-                logger.info(f"💀 ALES REJECT // {symbol} | Node: {ales_result['state']} | Threshold: {ales_result['threshold']:.2f}x")
+            if self.test_mode:
                 self.active_positions_lock.discard(symbol)
-                return False
+                return True 
 
-            if vol_mult < ales_result["threshold"]:
-                logger.info(f"💀 ALES THRESHOLD // {symbol} | Vol: {vol_mult:.2f}x < {ales_result['threshold']:.2f}x | Confidence: {ales_result['confidence']:.2f}")
-                self.active_positions_lock.discard(symbol)
-                return False
-                
-            if vol_mult >= 2.0 and kinetic_efficiency < 0.3:
-                logger.warning(f"🛡️ SPOOFING DETECTED // {symbol} has massive volume but zero velocity. Market makers are absorbing liquidity. Aborting.")
-                self.active_positions_lock.discard(symbol)
-                return False
+            if symbol != "BTCUSDT":
+                btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
+                if len(btc_history) >= 30:
+                    btc_array = np.array(list(btc_history))
+                    btc_mean = np.mean(btc_array)
+                    btc_std = np.std(btc_array) + 1e-6
+                    btc_velocity = (btc_array[-1] - btc_array[-10]) / btc_array[-10]
+                    
+                    alt_array = np.array(list(history)[-30:])
+                    btc_slice = btc_array[-30:]
+                    
+                    btc_returns = np.diff(np.log(btc_slice))
+                    alt_returns = np.diff(np.log(alt_array))
+                    
+                    if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
+                        correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
+                        
+                        if not math.isnan(correlation) and correlation > 0.70:
+                            if direction == "BUY" and btc_velocity < -0.01:
+                                self._throttled_log("CRITICAL", f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a falling BTC. Dip-buy aborted.", f"MACRO_{symbol}", 60)
+                                self.active_positions_lock.discard(symbol)
+                                return False
+                            if direction == "SELL" and btc_velocity > 0.01:
+                                self._throttled_log("CRITICAL", f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a surging BTC. Short aborted.", f"MACRO_{symbol}", 60)
+                                self.active_positions_lock.discard(symbol)
+                                return False
 
-            kinetic_alpha = vol_mult * (hawkes_score / (avg_hawkes + 1e-6))
-            is_hyper_trend = kinetic_alpha >= 1.5 and market_regime == "TRENDING"
-            
-            total_friction = max(real_spread, current_price * 0.0001) + (real_spread * (1.0 / math.sqrt(max(0.10, vol_mult))))
-            
-            if (current_price * 0.02) < total_friction:
-                self.active_positions_lock.discard(symbol)
-                return False
+            # ============================================================
+            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Systemic Kelly Sizing
+            # ============================================================
+
+            empirical_p = self.global_state_cache.get("rolling_accuracy", 0.50)
+            pool_size = self.global_state_cache.get("total_resolved", 0)
+
+            if pool_size == 0:
+                empirical_p = 0.50
+
+            if pool_size < 30:
+                bayesian_p = (empirical_p * 0.3) + (confidence * 0.7)
+            else:
+                bayesian_p = (empirical_p * 0.7) + (confidence * 0.3)
+
+            bayesian_p = max(0.01, min(0.99, bayesian_p))
             
             fat_tail_multiplier = 1.5 + math.exp(min(vol_z_abs, 4.0) / 2.0)
             sl_distance = atr * fat_tail_multiplier
@@ -1266,68 +1160,14 @@ class DistributedQuantEngine:
             initial_sl = float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
             target_tp = float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
 
-            if self.test_mode:
-                self.active_positions_lock.discard(symbol)
-                return True 
-
-            if symbol != "BTCUSDT":
-                btc_history = self.screener_memory.get("BTCUSDT", {}).get("prices", [])
-                if len(btc_history) >= 30:
-                    btc_array = np.array(list(btc_history))
-                    btc_mean = np.mean(btc_array)
-                    btc_std = np.std(btc_array) + 1e-6
-                    btc_z_score = (btc_array[-1] - btc_mean) / btc_std
-                    btc_velocity = (btc_array[-1] - btc_array[-10]) / btc_array[-10]
-                    
-                    alt_array = np.array(list(history)[-30:])
-                    btc_slice = btc_array[-30:]
-                    
-                    btc_returns = np.diff(np.log(btc_slice))
-                    alt_returns = np.diff(np.log(alt_array))
-                    
-                    if np.std(btc_returns) > 0 and np.std(alt_returns) > 0:
-                        correlation = np.corrcoef(btc_returns, alt_returns)[0, 1]
-                        
-                        if not math.isnan(correlation) and correlation > 0.70:
-                            if direction == "BUY" and btc_velocity < -0.01:
-                                logger.critical(f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a falling BTC. Dip-buy aborted.")
-                                self.active_positions_lock.discard(symbol)
-                                return False
-                            if direction == "SELL" and btc_velocity > 0.01:
-                                logger.critical(f"🔴 MACRO GRAVITY BLOCKED // {symbol} is highly correlated ({correlation:.2f}) to a surging BTC. Short aborted.")
-                                self.active_positions_lock.discard(symbol)
-                                return False
-
-            # ============================================================
-            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Systemic Kelly Sizing
-            # ============================================================
-
-            # 1. Get Empirical Probability
-            empirical_p = self.global_state_cache.get("rolling_accuracy", 0.50)
-            pool_size = self.global_state_cache.get("total_resolved", 0)
-
-            if pool_size == 0:
-                empirical_p = 0.50
-
-            # 2. Calculate Bayesian Adjusted Probability
-            if pool_size < 30:
-                bayesian_p = (empirical_p * 0.3) + (confidence * 0.7)
-            else:
-                bayesian_p = (empirical_p * 0.7) + (confidence * 0.3)
-
-            bayesian_p = max(0.01, min(0.99, bayesian_p))
-
-            # 3. Calculate Dynamic Reward/Risk Ratio
             distance_to_sl = abs(current_price - initial_sl)
             if distance_to_sl <= 0:
                 distance_to_sl = current_price * 0.015
             distance_to_tp = abs(target_tp - current_price)
             reward_risk_ratio = distance_to_tp / distance_to_sl
 
-            # 4. Base Kelly Criterion
             base_kelly = bayesian_p - ((1.0 - bayesian_p) / max(0.1, reward_risk_ratio))
 
-            # 5. Volatility Adjustment Factor
             historical_atr = self.volatility_baseline.get(symbol, atr)
             safe_historical_atr = max(historical_atr, current_price * 0.001)
             volatility_ratio = atr / safe_historical_atr
@@ -1335,7 +1175,6 @@ class DistributedQuantEngine:
             volatility_adjustment = 1.0 / volatility_ratio if volatility_ratio > 0 else 1.0
             volatility_adjustment = max(0.1, min(3.0, volatility_adjustment))
 
-            # 6. Dynamic Systemic Correlation Penalty
             total_assets = len(self.macro_regimes)
             bullish_count = sum(1 for v in self.macro_regimes.values() if v == "BUY")
             bearish_count = sum(1 for v in self.macro_regimes.values() if v == "SELL")
@@ -1357,11 +1196,9 @@ class DistributedQuantEngine:
             base_regime_multiplier = 1.2 if market_regime == "TRENDING" else 0.7
             final_regime_multiplier = base_regime_multiplier * systemic_multiplier
 
-            # 7. Micro-Account Optimized Multiplier
             balance = await self.executor.get_wallet_balance_usdt()
             micro_multiplier = 0.75 if balance < 50.0 else 0.25
 
-            # 8. Final Systemic Volatility-Adjusted Kelly
             adjusted_kelly = base_kelly * volatility_adjustment * final_regime_multiplier * micro_multiplier
 
             is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
@@ -1504,9 +1341,23 @@ class DistributedQuantEngine:
                 try:
                     await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
                 except Exception: pass
-                self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
-                self.active_positions_lock.discard(symbol)
-                return
+                
+                # 🚀 FIX: The Race-Condition Safety Net
+                try:
+                    final_check = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    final_pos = final_check.get("result", {}).get("list", [])
+                    if final_pos and float(final_pos[0].get("size", 0.0)) > 0:
+                        logger.warning(f"⚠️ RACE CONDITION AVERTED // {symbol} filled exactly at timeout boundary. Adopting position.")
+                        order_filled = True
+                        actual_entry = float(final_pos[0].get("avgPrice", current_price))
+                        actual_qty = float(final_pos[0].get("size", 0.0))
+                except Exception:
+                    pass
+
+                if not order_filled:
+                    self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                    self.active_positions_lock.discard(symbol)
+                    return
 
             try:
                 pos_check = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
