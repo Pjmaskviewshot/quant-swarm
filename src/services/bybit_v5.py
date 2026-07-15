@@ -72,7 +72,6 @@ class BybitUnifiedExecutor:
         Safely modifies isolated/cross leverage thresholds before order dispatch.
         Attempts to set leverage, gracefully clamping to exchange maximums if rejected.
         """
-        import re 
         try:
             await self.rate_limiter.acquire()
             await asyncio.to_thread(
@@ -94,26 +93,32 @@ class BybitUnifiedExecutor:
                 return True
                 
             # ErrCode 110013: Requested leverage exceeds Bybit's hard risk limit for this specific altcoin
-            if "110013" in error_msg and "maxLeverage" in error_msg:
+            if "110013" in error_msg:
                 try:
-                    # Extract the exchange's max limit directly from the error string (e.g., "maxLeverage [1000]")
-                    match = re.search(r"maxLeverage \[(\d+)\]", error_msg)
-                    if match:
-                        # Bybit formats 10x as 1000 internally. Divide by 100 to get the real multiplier.
-                        max_allowed = int(match.group(1)) // 100
-                        
-                        logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
-                        
-                        # Immediately retry the exchange request with the safely capped maximum
-                        await self.rate_limiter.acquire()
-                        await asyncio.to_thread(
-                            self.client.set_leverage,
-                            category="linear",
-                            symbol=symbol,
-                            buyLeverage=str(max_allowed),
-                            sellLeverage=str(max_allowed)
-                        )
-                        return True
+                    # 🛑 CRITICAL FIX: Deterministic API Query instead of fragile Regex parsing
+                    await self.rate_limiter.acquire()
+                    info = await asyncio.to_thread(
+                        self.client.get_instruments_info,
+                        category="linear",
+                        symbol=symbol
+                    )
+                    
+                    # Safely extract exact maximum allowed leverage directly from the exchange specifications
+                    max_allowed_str = info["result"]["list"][0]["leverageFilter"]["maxLeverage"]
+                    max_allowed = int(float(max_allowed_str))
+                    
+                    logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
+                    
+                    # Immediately retry the exchange request with the safely capped maximum
+                    await self.rate_limiter.acquire()
+                    await asyncio.to_thread(
+                        self.client.set_leverage,
+                        category="linear",
+                        symbol=symbol,
+                        buyLeverage=str(max_allowed),
+                        sellLeverage=str(max_allowed)
+                    )
+                    return True
                 except Exception as fallback_err:
                     logger.error(f"Leverage auto-clamping failed for {symbol}: {fallback_err}")
                     return False

@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import numpy as np
 from datetime import datetime, timezone
@@ -25,6 +26,23 @@ class MemoryBank:
         except Exception as e:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}")
             raise
+
+    def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        🛡️ EXPONENTIAL BACKOFF WRAPPER
+        Prevents transient cloud network drops from permanently blinding the quantitative ledger.
+        """
+        for attempt in range(max_retries):
+            try:
+                return query_builder.execute()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ SUPABASE FATAL: Operation failed permanently after {max_retries} attempts. {e}")
+                    raise e
+                
+                sleep_time = base_delay * (1.5 ** attempt)
+                logger.warning(f"⚠️ Supabase connection transient fault. Retrying in {sleep_time:.2f}s... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(sleep_time)
 
     def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
         """Saves a fresh prediction cleanly using the dedicated schema columns."""
@@ -60,7 +78,8 @@ class MemoryBank:
         }
 
         try:
-            self.supabase.table("quantitative_ledger").insert(payload).execute()
+            # 🛡️ Wrapped in safe execution
+            self._safe_execute(self.supabase.table("quantitative_ledger").insert(payload))
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
@@ -71,8 +90,10 @@ class MemoryBank:
         is_correct = True if net_pnl > 0 else False
         
         try:
-            response = self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)).execute()
-            if response.data:
+            # 🛡️ Wrapped in safe execution
+            response = self._safe_execute(self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)))
+            
+            if response and response.data:
                 row = response.data[0]
                 row["resolved"] = True
                 row["actual_outcome"] = str(outcome)
@@ -80,7 +101,7 @@ class MemoryBank:
                 row["slippage_drag"] = float(slippage)
                 row["is_correct"] = is_correct
                 
-                self.supabase.table("quantitative_ledger").upsert(row).execute()
+                self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
                 logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
@@ -93,11 +114,12 @@ class MemoryBank:
         resolved_count = 0
 
         try:
-            # 🚀 UPGRADE: Scan ALL unresolved predictions globally, not just active tickers
-            response = self.supabase.table("quantitative_ledger")\
-                .select("*")\
-                .eq("resolved", False)\
-                .execute()
+            # 🛡️ Wrapped in safe execution
+            response = self._safe_execute(
+                self.supabase.table("quantitative_ledger")
+                .select("*")
+                .eq("resolved", False)
+            )
 
             unresolved_rows = response.data if response else []
             if not unresolved_rows:
@@ -206,7 +228,8 @@ class MemoryBank:
                     resolved_count += 1
                 
             if update_batch:
-                self.supabase.table("quantitative_ledger").upsert(update_batch).execute()
+                # 🛡️ Wrapped in safe execution
+                self._safe_execute(self.supabase.table("quantitative_ledger").upsert(update_batch))
                 logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Processed {len(update_batch)} paths via global tracking matrix.")
                 
             return resolved_count
@@ -222,15 +245,15 @@ class MemoryBank:
         Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
         try:
-            # 🚀 UPGRADE: Dropped the core_basket constraint completely to preserve global memory stability.
-            # We no longer filter by `core_basket` so that rotated assets are still counted.
-            response = self.supabase.table("quantitative_ledger")\
-                .select("is_correct")\
-                .eq("resolved", True)\
-                .eq("is_shadow", False)\
-                .order("timestamp", desc=True)\
-                .limit(window_size)\
-                .execute()
+            # 🛡️ Wrapped in safe execution
+            response = self._safe_execute(
+                self.supabase.table("quantitative_ledger")
+                .select("is_correct")
+                .eq("resolved", True)
+                .eq("is_shadow", False)
+                .order("timestamp", desc=True)
+                .limit(window_size)
+            )
                 
             results = response.data if response else []
             total_resolved = len(results)

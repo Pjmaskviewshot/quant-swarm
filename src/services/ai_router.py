@@ -124,12 +124,13 @@ class ResilientAIRouter:
         for ticker, data in assets_data.items():
             if isinstance(data, dict):
                 z_score = data.get("volatility_z_score", 0.0)
-                if abs(z_score) >= 1.5: # Lowered to 1.5 to ensure AI engages during warmups
+                # 🛑 ALIGNED WITH LLM PROMPT: Ensure we don't pay for guaranteed HOLDs
+                if abs(z_score) >= 2.0: 
                     is_market_active = True
                     break
         
         if not is_market_active:
-            logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 1.5). Skipping AI matrix to save rate limits.")
+            logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 2.0). Skipping AI matrix to save rate limits.")
             return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
 
         logger.info("🚨 Local Pre-Filter: Structural Anomaly Detected. Waking up AI Cascade Matrix...")

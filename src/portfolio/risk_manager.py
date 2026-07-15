@@ -1,5 +1,6 @@
 import logging
 import math
+import numpy as np
 from typing import Dict, Any, List
 
 logger = logging.getLogger("QUANT_CORE.RISK_MANAGER")
@@ -31,8 +32,44 @@ class InstitutionalRiskVault:
         # ====================================================================
         # Cross-asset correlation groups to prevent structural systemic risk
         self.correlation_groups = {
-            "L1_HIGH_COVARIANCE": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            "DYNAMIC_BTC_COVARIANCE": ["BTCUSDT"] # Will be updated dynamically by the math engine
         }
+
+    def update_correlation_matrix(self, price_histories: Dict[str, List[float]], base_asset: str = "BTCUSDT", threshold: float = 0.75):
+        """
+        🚀 STRUCTURAL UPGRADE: DYNAMIC PEARSON COVARIANCE MATRIX
+        Calculates rolling Pearson correlation coefficients against a base asset (e.g., BTCUSDT).
+        Automatically classifies high-beta altcoins into a restricted group during risk-off events.
+        """
+        if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
+            return
+            
+        # Use recent history (e.g., last 150 periods) to gauge current market stress
+        base_prices = np.array(price_histories[base_asset][-150:]) 
+        base_returns = np.diff(base_prices) / base_prices[:-1]
+        
+        restricted_group = [base_asset]
+        
+        for symbol, prices in price_histories.items():
+            if symbol == base_asset or len(prices) < len(base_prices):
+                continue
+                
+            # Align sequence lengths for mathematical parity
+            sym_prices = np.array(prices[-len(base_prices):])
+            sym_returns = np.diff(sym_prices) / sym_prices[:-1]
+            
+            # Prevent division by zero anomalies in flat/illiquid micro-caps
+            if np.std(sym_returns) == 0 or np.std(base_returns) == 0:
+                continue
+                
+            # Calculate linear correlation
+            correlation = np.corrcoef(base_returns, sym_returns)[0, 1]
+            
+            if correlation >= threshold:
+                restricted_group.append(symbol)
+                
+        self.correlation_groups["DYNAMIC_BTC_COVARIANCE"] = restricted_group
+        logger.debug(f"🕸️ COVARIANCE MATRIX UPDATED: {len(restricted_group)} assets locked in high-correlation with {base_asset}.")
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> bool:
         """
@@ -100,11 +137,18 @@ class InstitutionalRiskVault:
     def calculate_dynamic_leverage(self, notional_position_usdt: float, account_balance: float, base_leverage: int = 5, hard_cap: int = 15) -> int:
         """
         🚀 CENTRALIZED LEVERAGE AUTHORITY
-        Replaces all hardcoded leverage math in main.py. Dynamically scales leverage required 
-        to execute the ideal Kelly fraction while strictly adhering to safety margin rules.
+        Dynamically scales leverage required to execute the ideal Kelly fraction while strictly adhering to safety bounds.
+        Contains un-bypassable micro-account scaling rules.
         """
         if account_balance <= 0 or notional_position_usdt <= 0:
             return 1
+            
+        # 🛑 MICRO-ACCOUNT SURVIVAL CLAMP
+        # A tiny account cannot handle 15x leverage without imminent liquidation risk from standard volatility.
+        if account_balance < 10.0:
+            hard_cap = min(hard_cap, 2)  # Ultra-safe mode for sub-$10 accounts
+        elif account_balance < 50.0:
+            hard_cap = min(hard_cap, 3)  # Safe mode for sub-$50 accounts
             
         # Target consuming a maximum of 12% of the free balance as margin per trade
         margin_required = account_balance * 0.12
@@ -128,8 +172,6 @@ class InstitutionalRiskVault:
         # ====================================================================
         # 🚀 ADJUSTMENT: ADAPTIVE COMPOUNDING HARVESTER
         # ====================================================================
-        # If account balance is small (< $50), unlock 100% of capital availability to cross exchange minimum constraints.
-        # As the vault scales, automatically convert to a trailing 85% operating base, locking away a fluid 15% cash yield.
         if account_balance > 50.0:
             dynamic_baseline = self.peak_balance * 0.85
             effective_balance = min(account_balance, dynamic_baseline)
@@ -193,7 +235,8 @@ class InstitutionalRiskVault:
         
         # --- MICRO-ACCOUNT ADAPTIVE LEVERAGE ENGINE ---
         if calculated_notional < self.exchange_min_notional:
-            recommended_leverage = leverage_cap
+            # Check the central authority so micro-accounts are governed securely
+            recommended_leverage = self.calculate_dynamic_leverage(self.exchange_min_notional, effective_balance, base_leverage, leverage_cap)
             required_margin = self.exchange_min_notional / recommended_leverage
             required_fraction = required_margin / effective_balance
             
@@ -212,7 +255,7 @@ class InstitutionalRiskVault:
                 )
                 return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
         else:
-            recommended_leverage = base_leverage
+            recommended_leverage = self.calculate_dynamic_leverage(calculated_notional, effective_balance, base_leverage, leverage_cap)
             notional_position_usdt = calculated_notional
 
         token_quantity = notional_position_usdt / current_price
