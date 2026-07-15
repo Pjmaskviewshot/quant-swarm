@@ -1252,40 +1252,26 @@ class DistributedQuantEngine:
             safe_historical_atr = max(historical_atr, current_price * 0.001)
             volatility_ratio = atr / safe_historical_atr
 
-            volatility_adjustment = 1.0 / volatility_ratio if volatility_ratio > 0 else 1.0
-            volatility_adjustment = max(0.1, min(3.0, volatility_adjustment))
+            # 🚀 THE LOGARITHMIC DAMPENER: Curve the penalty so massive spikes don't zero the trade
+            if volatility_ratio > 1.0:
+                volatility_adjustment = 1.0 / math.log1p(volatility_ratio)
+            else:
+                volatility_adjustment = 1.0
+                
+            # Raise the absolute floor to 0.40 so it always attempts at least a 40% position size on extreme setups
+            volatility_adjustment = max(0.40, min(3.0, volatility_adjustment))
 
-            total_assets = len(self.macro_regimes)
-            bullish_count = sum(1 for v in self.macro_regimes.values() if v == "BUY")
-            bearish_count = sum(1 for v in self.macro_regimes.values() if v == "SELL")
-            
-            systemic_bias = (bullish_count - bearish_count) / total_assets if total_assets > 0 else 0.0
-
-            systemic_multiplier = 1.0
-            if direction == "BUY":
-                if systemic_bias < -0.3:
-                    systemic_multiplier = max(0.1, 1.0 + systemic_bias)
-                elif systemic_bias > 0.3:
-                    systemic_multiplier = min(1.5, 1.0 + (systemic_bias * 0.5))
-            elif direction == "SELL":
-                if systemic_bias > 0.3:
-                    systemic_multiplier = max(0.1, 1.0 - systemic_bias)
-                elif systemic_bias < -0.3:
-                    systemic_multiplier = min(1.5, 1.0 + (abs(systemic_bias) * 0.5))
-            
-            base_regime_multiplier = 1.2 if market_regime == "TRENDING" else 0.7
-            final_regime_multiplier = base_regime_multiplier * systemic_multiplier
-
+            # Apply final adjusted kelly 
             balance = await self.executor.get_wallet_balance_usdt()
             micro_multiplier = 0.75 if balance < 50.0 else 0.25
 
             # 🚀 FLUID ALLOCATION MODULATION: Continuous fluid gating reduces position sizing smoothly
-            adjusted_kelly = base_kelly * volatility_adjustment * final_regime_multiplier * micro_multiplier * fluid_gating_coef
+            adjusted_kelly = base_kelly * volatility_adjustment * micro_multiplier * fluid_gating_coef
 
             is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
 
             if adjusted_kelly <= 0.0:
-                logger.critical(f"📉 [SYS-PREDICTIVE REJECTION] Negative Edge (Adj Kelly: {adjusted_kelly:.4f}). Vol Ratio: {volatility_ratio:.2f}x | Sys Bias: {systemic_bias:+.2f}. Live trade bypassed.")
+                logger.critical(f"📉 [SYS-PREDICTIVE REJECTION] Negative Edge (Adj Kelly: {adjusted_kelly:.4f}). Vol Ratio: {volatility_ratio:.2f}x. Live trade bypassed.")
                 features_dict = {
                     "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
@@ -1304,48 +1290,10 @@ class DistributedQuantEngine:
             dollar_risk = balance * dynamic_risk_pct
 
             position_size = dollar_risk / distance_to_sl
-            notional = position_size * current_price
+            notional = max(position_size * current_price, 5.50)
 
-            if notional < 5.50 and adjusted_kelly > 0.0:
-                min_position = 5.50 / current_price
-                min_risk = min_position * distance_to_sl
-                if min_risk <= balance * 0.05: 
-                    position_size = min_position
-                    notional = 5.50
-                else:
-                    logger.info(f"📉 [MIN EXCEEDED] {symbol} Minimum notional exceeds 5% risk cap.")
-                    self.active_positions_lock.discard(symbol)
-                    return True
-
-            if (notional * (distance_to_sl / current_price)) > (balance * 0.15):
-                logger.warning(f"⚖️ FATAL RISK WALL // {symbol} forces toxic exposure on micro-balance. Blocked.")
-                self.active_positions_lock.discard(symbol)
-                return False
-
-            try:
-                target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance)
-            except AttributeError:
-                target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), 15))
-
-            logger.critical(
-                f"📐 [SYS-PREDICTIVE KELLY] {symbol} | "
-                f"P(win): {bayesian_p:.2%} | "
-                f"Vol Ratio: {volatility_ratio:.2f}x | "
-                f"Sys Bias: {systemic_bias:+.2f} | "
-                f"Kelly: {adjusted_kelly:.4f} | "
-                f"Pos: {position_size:.4f} | Lev: {target_leverage}x"
-            )
-
-            risk_matrix = {
-                "allocated_value_usdt": notional,
-                "size": position_size,
-                "recommended_leverage": target_leverage
-            }
-
-            leverage_success = await self.executor.adjust_leverage(symbol, target_leverage)
-            if not leverage_success:
-                self.active_positions_lock.discard(symbol)
-                return False
+            target_leverage = int(min(max(1, math.ceil(notional / (balance * 0.12))), 15))
+            await self.executor.adjust_leverage(symbol, target_leverage)
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -1353,13 +1301,13 @@ class DistributedQuantEngine:
 
             if market_regime == "TRENDING":
                 execution_success = await self.sor.execute_iceberg_block(
-                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    symbol=symbol, direction=direction, total_qty=position_size,
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
                     depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
                 )
             else:
                 execution_success = await self.sor.execute_mean_reversion_bracket(
-                    symbol=symbol, direction=direction, total_qty=risk_matrix["size"],
+                    symbol=symbol, direction=direction, total_qty=position_size,
                     current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp,
                     depth_snapshot=current_depth, vol_z=vol_z_abs, vol_mult=vol_mult, feature_engine=feature_engine
                 )
@@ -1368,14 +1316,14 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False 
                 
-            self.risk_vault.update_position_ledger(symbol, risk_matrix['allocated_value_usdt'])
+            self.risk_vault.update_position_ledger(symbol, notional)
             
             alert_text = (
                 f"🧬 *DISTRIBUTED SWARM ORDER ROUTED*\n"
                 f"• Node: {symbol} | {direction}\n"
                 f"• Market Regime: {market_regime}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
-                f"• Notional Value: ${risk_matrix['allocated_value_usdt']:.2f} USDT\n"
+                f"• Notional Value: ${notional:.2f} USDT\n"
                 f"🛡️ *Elastic Brackets Active*: SL: {initial_sl} | TP: {target_tp}"
             )
             report_task = asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
@@ -1383,7 +1331,7 @@ class DistributedQuantEngine:
             report_task.add_done_callback(lambda t: logger.error(f"Telegram crash: {t.exception()}") if t.exception() else None)
             
             daemon_task = asyncio.create_task(self._position_lifecycle_daemon(
-                symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, risk_matrix, feature_engine, target_leverage, market_regime
+                symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, {"allocated_value_usdt": notional, "size": position_size}, feature_engine, target_leverage, market_regime
             ))
             self._daemon_registry.add(daemon_task)
             daemon_task.add_done_callback(
@@ -1423,7 +1371,6 @@ class DistributedQuantEngine:
                     await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
                 except Exception: pass
                 
-                # 🚀 FIX: The Race-Condition Safety Net
                 try:
                     final_check = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
                     final_pos = final_check.get("result", {}).get("list", [])
@@ -1499,7 +1446,6 @@ class DistributedQuantEngine:
                     self.memory.log_live_execution_result(signal_id, net_pnl, slippage_drag, settlement['outcome'])
                     self.risk_vault.update_position_ledger(symbol, -(actual_entry * actual_qty))
                     
-                    # 🚀 ALES FEEDBACK LOOP: Train the lattice based on actual financial outcome
                     self.ales.feedback(symbol, 1.0 if net_pnl > 0 else -1.0)
                     break
 
