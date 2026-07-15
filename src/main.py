@@ -73,7 +73,8 @@ class FastMathEngine:
 class AdaptiveLiquidityEntropySurface:
     """
     Self-Organizing Liquidity Intelligence Layer.
-    Learns optimal liquidity manifolds from trade outcomes, not human intuition.
+    Uses Beta-Binomial Bayesian Updating and Continuous Sigmoidal Activation
+    to destroy the Cold Start Problem and adaptively scale micro-cap entries.
     """
     def __init__(self, feature_dim: int = 7, lattice_size: int = 5, learning_rate: float = 0.1):
         self.feature_dim = feature_dim
@@ -82,50 +83,31 @@ class AdaptiveLiquidityEntropySurface:
         
         self.lattice = np.random.randn(lattice_size, lattice_size, feature_dim) * 0.1 + 1.0
         
-        self.node_outcomes: Dict[tuple, deque] = {
-            (i, j): deque(maxlen=50) for i in range(lattice_size) for j in range(lattice_size)
+        # 🚀 BAYESIAN PRIOR STORAGE: (Alpha, Beta) parameters for conjugate Beta distribution
+        self.node_priors: Dict[tuple, List[float]] = {
+            (i, j): [2.0, 2.0] for i in range(lattice_size) for j in range(lattice_size)
         }
         self.node_activations = np.zeros((lattice_size, lattice_size))
-        
         self.last_winners: Dict[str, tuple] = {}
-        self.win_streak: Dict[str, int] = {}
         
     def _find_best_matching_unit(self, vector: np.ndarray) -> tuple:
-        weights = np.ones(self.feature_dim)
-        for i in range(self.lattice_size):
-            for j in range(self.lattice_size):
-                outcomes = list(self.node_outcomes[(i, j)])
-                if len(outcomes) >= 5:
-                    feature_idx = int(np.argmax(np.abs(self.lattice[i, j])))
-                    weights[feature_idx] += float(np.std(outcomes)) * 0.5
-        
-        weights = np.clip(weights, 0.5, 3.0)
-        weights /= weights.sum()
-        
         diff = self.lattice - vector.reshape(1, 1, -1)
-        weighted_diff = diff * weights.reshape(1, 1, -1)
-        distances = np.sum(weighted_diff ** 2, axis=2)
-        
-        min_idx = np.unravel_index(np.argmin(distances), distances.shape)
-        return min_idx
+        distances = np.sum(diff ** 2, axis=2)
+        return np.unravel_index(np.argmin(distances), distances.shape)
     
     def _update_lattice(self, winner: tuple, vector: np.ndarray, outcome: float = None):
         i, j = winner
         local_lr = self.lr / (1.0 + 0.01 * self.node_activations[i, j])
         self.lattice[i, j] += local_lr * (vector - self.lattice[i, j])
-        
-        for ni in range(self.lattice_size):
-            for nj in range(self.lattice_size):
-                dist = np.sqrt((ni - i)**2 + (nj - j)**2)
-                if dist < 2.0 and (ni, nj) != winner:
-                    influence = np.exp(-dist**2 / 2.0) * local_lr * 0.3
-                    self.lattice[ni, nj] += influence * (vector - self.lattice[ni, nj])
-        
         self.node_activations[i, j] += 1
+        
         if outcome is not None:
-            self.node_outcomes[winner].append(outcome)
+            if outcome > 0:
+                self.node_priors[winner][0] += 1.0  # α update (Win)
+            else:
+                self.node_priors[winner][1] += 1.0  # β update (Loss)
     
-    def classify(self, symbol: str, features: Dict[str, float], current_time: float) -> Dict[str, Any]:
+    def evaluate_fluid_edge(self, symbol: str, features: Dict[str, float], market_regime: str) -> Dict[str, Any]:
         vector = np.array([
             max(0.0, features.get("vol_mult", 1.0)),
             max(0.0, features.get("spread_state", 1.0)),
@@ -137,66 +119,41 @@ class AdaptiveLiquidityEntropySurface:
         ])
         
         winner = self._find_best_matching_unit(vector)
-        
-        last_winner = self.last_winners.get(symbol)
-        streak = self.win_streak.get(symbol, 0)
-        
-        if last_winner == winner:
-            streak += 1
-        else:
-            old_dist = np.linalg.norm(self.lattice[last_winner] - vector) if last_winner else float('inf')
-            new_dist = np.linalg.norm(self.lattice[winner] - vector)
-            if new_dist < old_dist * 0.7 or streak >= 3:
-                streak = 1
-            else:
-                winner = last_winner  
-                streak = max(0, streak - 1)
-        
         self.last_winners[symbol] = winner
-        self.win_streak[symbol] = streak
         
-        outcomes = list(self.node_outcomes[winner])
-        if len(outcomes) >= 10:
-            win_rate = np.mean([1.0 if o > 0 else 0.0 for o in outcomes])
-            base_threshold = 0.35 + (1.0 - win_rate) * 1.0
+        # 🚀 BAYESIAN WIN PROBABILITY CALCULATION
+        alpha, beta = self.node_priors[winner]
+        expected_win_rate = alpha / (alpha + beta)
+        
+        vol_mult = features.get("vol_mult", 1.0)
+        
+        # 🚀 CONTINUOUS LOGISTIC SIGMOID INTEGRATION
+        if market_regime == "TRENDING":
+            # Trending -> High volume required. Shift center to 0.75x
+            midpoint = 0.75
+            k_steepness = 4.0
+            volume_score = 1.0 / (1.0 + math.exp(-k_steepness * (vol_mult - midpoint)))
         else:
-            base_threshold = 0.65 
-        
-        maturity = min(1.0, self.node_activations[winner] / 100.0)
-        threshold_variance = 0.3 * (1.0 - maturity)
-        
-        if len(outcomes) >= 5:
-            outcome_vol = np.std(outcomes)
-            threshold_variance += outcome_vol * 0.2
-        
-        final_threshold = float(np.clip(base_threshold, 0.20, 2.0))
-        
-        predictive_power = 0.0
-        if len(outcomes) >= 20:
-            recent = list(outcomes)[-20:]
-            predictive_power = float(abs(np.mean(recent) - 0.5) * 2.0)
+            # Ranging -> Exhaustion model. Low volume is optimal.
+            midpoint = 0.40
+            k_steepness = -3.5
+            volume_score = 1.0 / (1.0 + math.exp(-k_steepness * (vol_mult - midpoint)))
+            
+        # Composite Fluid Score modulates overall confidence
+        fluid_gating_coefficient = min(1.0, max(0.1, volume_score * (expected_win_rate / 0.50)))
         
         return {
-            "state": f"NODE_{winner[0]}_{winner[1]}",
-            "threshold": round(final_threshold, 4),
-            "confidence": round(predictive_power, 4),
-            "maturity": round(maturity, 4),
-            "win_rate": round(np.mean([1.0 if o > 0 else 0.0 for o in outcomes]) if outcomes else 0.5, 4),
-            "action": self._derive_action(final_threshold, features, predictive_power)
+            "node_id": f"NODE_{winner[0]}_{winner[1]}",
+            "bayesian_win_rate": round(expected_win_rate, 4),
+            "gating_coefficient": round(fluid_gating_coefficient, 4),
+            "action": "PROCEED" if fluid_gating_coefficient >= 0.35 else "STAND_DOWN"
         }
-    
-    def _derive_action(self, threshold: float, features: Dict[str, float], confidence: float) -> str:
-        vol_mult = features.get("vol_mult", 1.0)
-        if vol_mult < 0.15: return "REJECT_CATATONIC"
-        elif threshold > 1.5 and confidence > 0.6: return "REJECT_UNLESS_OVERWHELMING"
-        elif threshold < 0.35 and confidence > 0.5: return "AGGRESSIVE_SCALP"
-        elif features.get("volatility_state", 1.0) > 2.0 and features.get("spread_state", 1.0) > 2.0: return "REJECT_TOXIC"
-        else: return "STANDARD_EVALUATION"
-    
+        
     def feedback(self, symbol: str, outcome: float):
         winner = self.last_winners.get(symbol)
         if winner:
-            self._update_lattice(winner, self.lattice[winner], outcome)
+            dummy_vector = self.lattice[winner]
+            self._update_lattice(winner, dummy_vector, outcome)
 
 
 class DistributedQuantEngine:
@@ -586,7 +543,7 @@ class DistributedQuantEngine:
         price_z_score = (mid_price - median_price) / mad_scaled
         kinetic_efficiency = abs(price_z_score) / max(1.0, vol_mult)
 
-        # 🚀 ALES EXECUTION
+        # 🚀 ALES EXECUTION (BAYESIAN & CONTINUOUS)
         raw_atr = fe.get_computed_atr() if hasattr(fe, 'get_computed_atr') else 0.0
         atr = raw_atr if raw_atr > 0 else mid_price * 0.0125
         baseline_atr = max(self.volatility_baseline.get(symbol, atr), mid_price * 0.001)
@@ -606,17 +563,12 @@ class DistributedQuantEngine:
             "temporal_anomaly": 1.0,
         }
 
-        ales_result = self.ales.classify(symbol, ales_features, current_time)
-
-        if ales_result["action"] == "REJECT_CATATONIC":
-            self._throttled_log("INFO", f"💀 ALES REJECT // {symbol} | Node: {ales_result['state']} | Threshold: {ales_result['threshold']:.2f}x", f"ALES_REJECT_{symbol}", 60)
+        # 🚀 THE NEW CONTINUOUS GATING SYSTEM
+        fluid_manifest = self.ales.evaluate_fluid_edge(symbol, ales_features, market_regime)
+        
+        if fluid_manifest["action"] == "STAND_DOWN":
+            self._throttled_log("INFO", f"💀 DME GATING STAND DOWN // {symbol} | Gating Weight: {fluid_manifest['gating_coefficient']:.2f}", f"DME_GATE_{symbol}", 60)
             return
-
-        if vol_mult < ales_result["threshold"]:
-            self._throttled_log("INFO", f"💀 ALES THRESHOLD // {symbol} | Vol: {vol_mult:.2f}x < {ales_result['threshold']:.2f}x | Confidence: {ales_result['confidence']:.2f}", f"ALES_THRESH_{symbol}", 60)
-            return
-            
-        # 🚀 THE STATIC SPOOFING BLOCK HAS BEEN PURGED. ALES IS SOLE AUTHORITY.
 
         hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
         raw_vol_z = metrics.get("vol_z", 0.0)
@@ -708,10 +660,10 @@ class DistributedQuantEngine:
 
         self.last_execution_timestamps[symbol] = current_time
         mode_label = "🔥 LIVE" if (is_active and not self.test_mode) else "👻 GHOST"
-        logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z: {price_z_score:.2f}")
+        logger.critical(f"{mode_label} PURE EDGE DETECTED // Node: {symbol} | Regime: {market_regime} | Z: {price_z_score:.2f} | Gating: {fluid_manifest['gating_coefficient']:.2f}")
         
         lifecycle_task = asyncio.create_task(self.run_signal_lifecycle(
-            symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, is_golden_setup
+            symbol, trade_direction, mid_price, optimization, real_spread, vol_z_abs, fluid_manifest["gating_coefficient"], is_golden_setup
         ))
         self._daemon_registry.add(lifecycle_task)
         lifecycle_task.add_done_callback(
@@ -1196,7 +1148,7 @@ class DistributedQuantEngine:
         return float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec), \
                float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, is_golden_setup: bool = False):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, fluid_gating_coef: float = 1.0, is_golden_setup: bool = False):
         if symbol in self.active_positions_lock:
             return False
             
@@ -1327,7 +1279,8 @@ class DistributedQuantEngine:
             balance = await self.executor.get_wallet_balance_usdt()
             micro_multiplier = 0.75 if balance < 50.0 else 0.25
 
-            adjusted_kelly = base_kelly * volatility_adjustment * final_regime_multiplier * micro_multiplier
+            # 🚀 FLUID ALLOCATION MODULATION: Continuous fluid gating reduces position sizing smoothly
+            adjusted_kelly = base_kelly * volatility_adjustment * final_regime_multiplier * micro_multiplier * fluid_gating_coef
 
             is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
 
