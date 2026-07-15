@@ -21,7 +21,6 @@ from core.fsm import SystemStateMachine, TradingState
 from features.adaptive_engine import AdaptiveFeatureEngine
 from portfolio.risk_manager import InstitutionalRiskVault
 from execution.sor import SmartOrderRouter
-from liquidity_state import AdaptiveLiquidityEntropySurface  # 🚀 IMPORTED PROPERLY
 
 # External Service Connectors
 from services.ai_router import ResilientAIRouter
