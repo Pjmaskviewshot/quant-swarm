@@ -8,6 +8,10 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
+        # 🚀 STRUCTURAL UPGRADE: Local Orderbook Reconstruction Cache
+        self.local_bids: Dict[float, float] = {}
+        self.local_asks: Dict[float, float] = {}
+
         # Rolling high-frequency buffers (Tick/Update-based memory)
         self.obi_history = deque(maxlen=memory_window_short)
         self.spread_history = deque(maxlen=memory_window_short)
@@ -21,11 +25,25 @@ class AdaptiveFeatureEngine:
         
         # 🛡️ State trackers for FSM and execution pipeline
         self._latest_mid = 0.0
-        self._orderbook_snapshot = {"bids": [], "asks": []}
         
         # 🚀 INSTITUTIONAL UPGRADE: Low-pass Filter for Order Book Jitter
         self.ema_spread = 0.0
         self.spread_alpha = 0.15  # Slower adjustment locks out microsecond flash spikes
+
+    def _prune_book(self):
+        """
+        🛑 CRITICAL FIX: Memory Leak Prevention
+        Removes deep out-of-the-money levels to prevent infinite RAM bloat over long container uptimes.
+        """
+        if len(self.local_bids) > 1000:
+            # Keep only the top 500 bids closest to the spread
+            sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
+            self.local_bids = dict(sorted_bids[:500])
+            
+        if len(self.local_asks) > 1000:
+            # Keep only the top 500 asks closest to the spread
+            sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
+            self.local_asks = dict(sorted_asks[:500])
 
     def detect_market_regime(self) -> str:
         """
@@ -89,18 +107,59 @@ class AdaptiveFeatureEngine:
         tfi = (buy_vol - sell_vol) / (buy_vol + sell_vol) if (buy_vol + sell_vol) > 0 else 0.0
         self.tfi_history.append(tfi)
 
-    def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]]) -> Dict[str, Any]:
+    def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]], is_snapshot: bool = False) -> Dict[str, Any]:
         """
         Consumes raw level 2 structural updates.
         Computes rolling statistical parameters and extracts ML-ready feature arrays.
+        🚀 UPGRADE: Intelligently rebuilds the orderbook state from deltas.
         """
-        if not bids or not asks:
-            return {"valid": False}
+        if is_snapshot:
+            self.local_bids.clear()
+            self.local_asks.clear()
 
         try:
-            # 1. Extract Microstructure Absolute Bounds
-            best_bid = float(bids[0][0])
-            best_ask = float(asks[0][0])
+            # 🛑 CRITICAL FIX: Initialization Race Condition Failsafe
+            # If the local cache is empty, treat incoming data as an ad-hoc snapshot to prevent zero-division errors
+            if not self.local_bids and not self.local_asks and bids and asks:
+                for price_str, size_str in bids:
+                    self.local_bids[float(price_str)] = float(size_str)
+                for price_str, size_str in asks:
+                    self.local_asks[float(price_str)] = float(size_str)
+            else:
+                # 1. Reconstruct Local Dictionary State from Deltas
+                for price_str, size_str in bids:
+                    price, size = float(price_str), float(size_str)
+                    if size == 0.0:
+                        self.local_bids.pop(price, None) # Delta instruction to delete level
+                    else:
+                        self.local_bids[price] = size
+
+                for price_str, size_str in asks:
+                    price, size = float(price_str), float(size_str)
+                    if size == 0.0:
+                        self.local_asks.pop(price, None) # Delta instruction to delete level
+                    else:
+                        self.local_asks[price] = size
+
+            # Memory Manager: Prevent RAM bloat
+            self._prune_book()
+
+            # 2. Sort to find true Top of Book
+            # Bids: Highest price first (Reverse). Asks: Lowest price first.
+            sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
+            sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
+
+            if not sorted_bids or not sorted_asks:
+                return {"valid": False}
+
+            # 3. Extract Microstructure Absolute Bounds
+            best_bid = sorted_bids[0][0]
+            best_ask = sorted_asks[0][0]
+            
+            # Failsafe: Crossed book glitch from websocket delay
+            if best_bid >= best_ask:
+                 return {"valid": False}
+                 
             mid_price = (best_bid + best_ask) / 2.0
             raw_spread = best_ask - best_bid
             
@@ -110,14 +169,13 @@ class AdaptiveFeatureEngine:
             else:
                 self.ema_spread = (raw_spread * self.spread_alpha) + (self.ema_spread * (1.0 - self.spread_alpha))
             
-            # 🛡️ Store latest tick data for orchestrator access
+            # 🛡️ Store latest tick data for the execution engine
             self._latest_mid = mid_price
-            self._orderbook_snapshot = {"bids": bids[:5], "asks": asks[:5]}
 
-            # 2. Compute Volume-Weighted Order Book Imbalance (OBI)
-            # Sample across top 5 high-density institutional liquidity tiers
-            v_b = sum(float(tier[1]) for tier in bids[:5])
-            v_a = sum(float(tier[1]) for tier in asks[:5])
+            # 4. Compute True Volume-Weighted Order Book Imbalance (OBI)
+            # Sample across true top 5 high-density institutional liquidity tiers
+            v_b = sum(s for p, s in sorted_bids[:5])
+            v_a = sum(s for p, s in sorted_asks[:5])
             
             obi = (v_b - v_a) / (v_b + v_a) if (v_b + v_a) > 0 else 0.0
 
@@ -134,7 +192,7 @@ class AdaptiveFeatureEngine:
                 # Prevent zero-division wrap errors in static markets
                 obi_z_score = (obi - median) / (mad * 1.4826 + 1e-6)
 
-            # 4. Machine Learning Feature Matrix Payload Extraction
+            # 5. Machine Learning Feature Matrix Payload Extraction
             features = {
                 "valid": True,
                 "timestamp": time.time(),
@@ -227,5 +285,42 @@ class AdaptiveFeatureEngine:
         return float(atr)
 
     def get_orderbook_snapshot(self) -> Dict[str, List]:
-        """Returns the current order book snapshot for Iceberg execution."""
-        return getattr(self, '_orderbook_snapshot', {"bids": [], "asks": []})
+        """
+        🛑 CRITICAL FIX: Live Dynamic Execution Slicing
+        Extracts the precise top 5 tiers directly from the active sorted cache for the Smart Order Router.
+        """
+        if hasattr(self, 'local_bids') and self.local_bids and self.local_asks:
+            sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
+            sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
+            
+            return {
+                "bids": [[str(p), str(s)] for p, s in sorted_bids[:5]],
+                "asks": [[str(p), str(s)] for p, s in sorted_asks[:5]]
+            }
+            
+        return {"bids": [], "asks": []}
+
+    def get_book_depth_metrics(self) -> Dict[str, float]:
+        """
+        📊 BOOK DEPTH STATISTICS
+        Returns liquidity metrics for risk assessment to prevent "Hollow Book" slippage on execution.
+        """
+        if not self.local_bids or not self.local_asks:
+            return {}
+            
+        sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
+        sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
+        
+        # Calculate volume depth across top 10 tiers
+        bid_depth = sum(s for _, s in sorted_bids[:10])
+        ask_depth = sum(s for _, s in sorted_asks[:10])
+        total_depth = bid_depth + ask_depth
+        
+        return {
+            "bid_depth_10": float(bid_depth),
+            "ask_depth_10": float(ask_depth),
+            "total_depth_10": float(total_depth),
+            "depth_imbalance": float((bid_depth - ask_depth) / (total_depth + 1e-6)),
+            "top_bid": float(sorted_bids[0][0]) if sorted_bids else 0.0,
+            "top_ask": float(sorted_asks[0][0]) if sorted_asks else 0.0
+        }

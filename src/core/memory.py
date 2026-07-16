@@ -44,6 +44,12 @@ class MemoryBank:
                 logger.warning(f"⚠️ Supabase connection transient fault. Retrying in {sleep_time:.2f}s... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(sleep_time)
 
+    def _parse_iso_timestamp(self, ts_str: str) -> datetime:
+        """Robust ISO timestamp parser for Supabase datetimes."""
+        if ts_str.endswith('Z'):
+            ts_str = ts_str.replace('Z', '+00:00')
+        return datetime.fromisoformat(ts_str)
+
     def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
         """Saves a fresh prediction cleanly using the dedicated schema columns."""
         if features is None:
@@ -78,7 +84,6 @@ class MemoryBank:
         }
 
         try:
-            # 🛡️ Wrapped in safe execution
             self._safe_execute(self.supabase.table("quantitative_ledger").insert(payload))
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
@@ -90,7 +95,6 @@ class MemoryBank:
         is_correct = True if net_pnl > 0 else False
         
         try:
-            # 🛡️ Wrapped in safe execution
             response = self._safe_execute(self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)))
             
             if response and response.data:
@@ -103,6 +107,8 @@ class MemoryBank:
                 
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
                 logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
+            else:
+                logger.warning(f"⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
@@ -114,11 +120,13 @@ class MemoryBank:
         resolved_count = 0
 
         try:
-            # 🛡️ Wrapped in safe execution
+            # 🛡️ Limit fetch to 500 rows to protect memory during heavy catch-up syncs
             response = self._safe_execute(
                 self.supabase.table("quantitative_ledger")
                 .select("*")
                 .eq("resolved", False)
+                .order("timestamp", desc=False)
+                .limit(500)
             )
 
             unresolved_rows = response.data if response else []
@@ -138,10 +146,10 @@ class MemoryBank:
                 
                 p_data = current_prices.get(symbol)
                 
-                # 🚀 CRITICAL FIX: If asset is rotated out of memory, fall back to time-based resolution check
+                row_time = self._parse_iso_timestamp(row["timestamp"])
+                elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
+                
                 if p_data is None:
-                    row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
-                    elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
                     if elapsed_minutes >= 60.0:
                         row["resolved"] = True
                         row["actual_outcome"] = "TIMEOUT"
@@ -151,7 +159,6 @@ class MemoryBank:
                         resolved_count += 1
                     continue
 
-                # Parse multi-dimensional arrays out of modern screener payload securely
                 if isinstance(p_data, dict):
                     closes = p_data.get("prices", [])
                     highs = p_data.get("highs", closes)
@@ -167,15 +174,16 @@ class MemoryBank:
                     continue
 
                 current_price = closes[-1]
-                row_time = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
-                elapsed_minutes = (now_ts - row_time).total_seconds() / 60.0
 
                 is_terminated = False
                 actual = "HOLD"
                 exit_price = entry_price
 
-                # Chronological microstructural path verification loop using Highs/Lows for wicks
-                for i in range(len(closes)):
+                # 🛑 The Time-Traveling Evaluator Patch
+                candles_to_check = max(1, int(elapsed_minutes) + 2) 
+                start_index = max(0, len(closes) - candles_to_check)
+
+                for i in range(start_index, len(closes)):
                     high = highs[i]
                     low = lows[i]
                     
@@ -214,9 +222,8 @@ class MemoryBank:
                         actual = "HOLD"
 
                 if is_terminated and actual != "HOLD":
-                    # Calculate nominal statistical return for Ghost Ledger tracking
                     if prediction == "BUY":
-                        net_pnl = ((exit_price - entry_price) / entry_price) * 10.0  # Normalized to an arbitrary $10 unit
+                        net_pnl = ((exit_price - entry_price) / entry_price) * 10.0  
                     else:
                         net_pnl = ((entry_price - exit_price) / entry_price) * 10.0
 
@@ -228,9 +235,8 @@ class MemoryBank:
                     resolved_count += 1
                 
             if update_batch:
-                # 🛡️ Wrapped in safe execution
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(update_batch))
-                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Processed {len(update_batch)} paths via global tracking matrix.")
+                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Processed {len(update_batch)} forward-looking paths.")
                 
             return resolved_count
 
@@ -245,7 +251,6 @@ class MemoryBank:
         Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
         try:
-            # 🛡️ Wrapped in safe execution
             response = self._safe_execute(
                 self.supabase.table("quantitative_ledger")
                 .select("is_correct")
@@ -258,7 +263,6 @@ class MemoryBank:
             results = response.data if response else []
             total_resolved = len(results)
             
-            # 🚀 CRITICAL FIX: Handle the Bayesian Uninformative Prior Baseline
             if total_resolved == 0:
                 return 0.50, 0
 

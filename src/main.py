@@ -83,7 +83,6 @@ class AdaptiveLiquidityEntropySurface:
         
         self.lattice = np.random.randn(lattice_size, lattice_size, feature_dim) * 0.1 + 1.0
         
-        # 🚀 BAYESIAN PRIOR STORAGE: (Alpha, Beta) parameters for conjugate Beta distribution
         self.node_priors: Dict[tuple, List[float]] = {
             (i, j): [2.0, 2.0] for i in range(lattice_size) for j in range(lattice_size)
         }
@@ -103,9 +102,9 @@ class AdaptiveLiquidityEntropySurface:
         
         if outcome is not None:
             if outcome > 0:
-                self.node_priors[winner][0] += 1.0  # α update (Win)
+                self.node_priors[winner][0] += 1.0  
             else:
-                self.node_priors[winner][1] += 1.0  # β update (Loss)
+                self.node_priors[winner][1] += 1.0  
     
     def evaluate_fluid_edge(self, symbol: str, features: Dict[str, float], market_regime: str) -> Dict[str, Any]:
         vector = np.array([
@@ -121,13 +120,11 @@ class AdaptiveLiquidityEntropySurface:
         winner = self._find_best_matching_unit(vector)
         self.last_winners[symbol] = winner
         
-        # 🚀 BAYESIAN WIN PROBABILITY CALCULATION
         alpha, beta = self.node_priors[winner]
         expected_win_rate = alpha / (alpha + beta)
         
         vol_mult = features.get("vol_mult", 1.0)
         
-        # 🚀 CONTINUOUS LOGISTIC SIGMOID INTEGRATION
         if market_regime == "TRENDING":
             midpoint = 0.75
             k_steepness = 4.0
@@ -338,9 +335,13 @@ class DistributedQuantEngine:
         dynamic_z_threshold = 2.5 - (confidence * 1.0)
         liquidity_buffer = 1.0 / math.sqrt(max(0.10, vol_mult))
         
-        # 🛑 CHURN FIX: Hard minimum cooldown is 1 hour
+        # 🛑 CRITICAL FIX: Warmup Cooldown
+        is_warmup = getattr(self, '_warmup_active', True)
+        if hasattr(self, 'global_state_cache'):
+            is_warmup = self.global_state_cache.get("total_resolved", 0) < 30
+            
         optimized = {
-            "cooldown_period": 3600.0,
+            "cooldown_period": 600.0 if is_warmup else 3600.0, 
             "z_score_threshold": dynamic_z_threshold, 
             "position_scaling": 1.0,
             "sl_multiplier": 2.0 + (liquidity_buffer * 0.5), 
@@ -349,8 +350,7 @@ class DistributedQuantEngine:
         }
 
         if market_regime == "TRENDING":
-            # 🛑 TRENDING PERMITTED HIGHER FREQUENCY: 30 mins
-            optimized["cooldown_period"] = 1800.0  
+            optimized["cooldown_period"] = 300.0 if is_warmup else 1800.0  
             optimized["sl_multiplier"] = 1.2 + (liquidity_buffer * 0.3)
             optimized["tp_multiplier"] = 3.0 + (vol_mult * 0.5)      
             if vol_mult >= 3.0:
@@ -393,7 +393,7 @@ class DistributedQuantEngine:
                     logger.info("💤 COMMANDER: Matrix is flat (|Z| < 1.5). API bypassed to save execution costs.")
                     for symbol in batch_payload.keys():
                         self.macro_regimes[symbol] = "HOLD"
-                        self.macro_confidences[symbol] = 0.0
+                        self.macro_confidences[symbol] = 0.35 # Default fallback
                     continue 
 
                 for sym in batch_payload:
@@ -420,7 +420,7 @@ class DistributedQuantEngine:
                             for symbol, data in target_dict.items():
                                 if symbol in self.asset_basket and isinstance(data, dict):
                                     self.macro_regimes[symbol] = data.get("direction", "HOLD")
-                                    self.macro_confidences[symbol] = data.get("confidence", 0.0)
+                                    self.macro_confidences[symbol] = data.get("confidence", 0.35)
                                     logger.info(f"🔄 COMMANDER SYNCED // Target: {symbol} | Bias: {self.macro_regimes[symbol]} | Conf: {self.macro_confidences[symbol]:.2f}")
                                     
                 except asyncio.TimeoutError:
@@ -507,7 +507,7 @@ class DistributedQuantEngine:
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
         
-        live_confidence = self.macro_confidences.get(symbol, 0.0)
+        live_confidence = self.macro_confidences.get(symbol, 0.35) # Default Fallback
         optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics, live_confidence)
 
         if not optimization["execution_verdict"]:
@@ -637,16 +637,14 @@ class DistributedQuantEngine:
                     trade_direction = "SELL"
                     logger.critical(f"🕸️ [LIQUIDITY TRAP] {symbol} Exhausted Pump (Z: {price_z_score:.2f}). Reverting to Mean.")
 
-        # 🛑 CRITICAL FIX: The Calibration Bypass Gate
         is_active = self.fsm.current_state in [TradingState.ACTIVE_TRADING, TradingState.ACTIVE_MEAN_REVERSION]
         
         if not has_pure_edge:
             return
 
-        # Do not trade live capital during calibration
         if not is_active:
             if self.test_mode:
-                is_golden_setup = True  # Only allow ghost trades during calibration
+                is_golden_setup = True  
             else:
                 return 
 
@@ -796,7 +794,6 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         while True:
-            # 🛑 REGIME DETECTOR FIX: Let buffers fill for 4 hours before fast rotation destroys history
             await asyncio.sleep(14400) 
             logger.info("🌍 FAST SATELLITE ROTATION INITIATED. Querying Bybit...")
             
@@ -882,7 +879,7 @@ class DistributedQuantEngine:
                     new_screener_memory[s] = cached_history
 
                 new_macro_regimes[s] = self.macro_regimes.get(s, "HOLD")
-                new_macro_confidences[s] = self.macro_confidences.get(s, 0.0)
+                new_macro_confidences[s] = self.macro_confidences.get(s, 0.35)
                 new_current_atrs[s] = self.current_atrs.get(s, 0.0)
                 new_last_execs[s] = self.last_execution_timestamps.get(s, 0.0)
                 new_screener_metrics[s] = self.screener_metrics.get(s, {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0})
@@ -933,10 +930,9 @@ class DistributedQuantEngine:
         return "RANGING"
 
     async def run_shadow_swarm_scanner(self):
-        # 🛑 FIX: Shadow Swarm Enabled. FSM metrics will now compute accurately.
         logger.info("🦇 SHADOW SWARM: Activated. Simulating background validations to feed the FSM...")
         while True:
-            await asyncio.sleep(300) # Check every 5 minutes
+            await asyncio.sleep(300) 
             if not self.shadow_basket:
                 continue
                 
@@ -945,11 +941,15 @@ class DistributedQuantEngine:
                 t_list = tickers.get("result", {}).get("list", [])
                 price_map = {t["symbol"]: float(t["lastPrice"]) for t in t_list if t["symbol"] in self.shadow_basket}
                 
+                # 🛑 FIX: Shadow Swarm Probability Scaling
+                pool_size = self.global_state_cache.get("total_resolved", 0)
+                shadow_prob = 0.25 if pool_size < 30 else 0.08
+                
                 for sym in self.shadow_basket:
                     if sym not in price_map: 
                         continue
-                    # Simulate a shadow trade randomly to fill the matrix if volatility is present
-                    if random.random() < 0.08: 
+                        
+                    if random.random() < shadow_prob: 
                         price = price_map[sym]
                         direction = random.choice(["BUY", "SELL"])
                         features = {
@@ -1042,7 +1042,6 @@ class DistributedQuantEngine:
                 if "wallet_baseline" not in self.global_state_cache:
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
                 
-                # 🛑 FIX: REAL PNL CALCULATION
                 if "start_of_day_balance" not in self.global_state_cache:
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
                 
@@ -1189,15 +1188,24 @@ class DistributedQuantEngine:
         
         try:
             signal_id = str(uuid.uuid4())
-            confidence = self.macro_confidences.get(symbol, 0.0)
+            # 🛑 FIX: CONFIDENCE FLOOR
+            confidence = self.macro_confidences.get(symbol, 0.35)
             
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             
             raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
+            
+            # 🛑 FIX: ATR FALLBACK
             if raw_atr <= 0:
-                atr = current_price * 0.0125
-                logger.warning(f"⚠️ ATR Fallback: Using 1.25% of price for {symbol}")
+                price_history = self.screener_memory.get(symbol, {}).get("prices", [])
+                if len(price_history) >= 20:
+                    prices = list(price_history)[-20:]
+                    price_range = (max(prices) - min(prices)) / np.mean(prices)
+                    atr = current_price * max(0.008, price_range * 1.5)
+                else:
+                    atr = current_price * 0.015
+                logger.warning(f"⚠️ ATR Fallback: Using {atr/current_price:.2%} of price for {symbol}")
             else:
                 atr = raw_atr
                 
@@ -1211,7 +1219,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return False 
                 
-            # 🛑 FIX: Test Mode Ghost Data properly pushed to FSM
             if self.test_mode:
                 features_dict = {
                     "symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, 
@@ -1249,10 +1256,6 @@ class DistributedQuantEngine:
                                 self.active_positions_lock.discard(symbol)
                                 return False
 
-            # ============================================================
-            # 🚀 PREDICTIVE FIX: Volatility-Adjusted Systemic Kelly Sizing
-            # ============================================================
-
             empirical_p = self.global_state_cache.get("rolling_accuracy", 0.50)
             pool_size = self.global_state_cache.get("total_resolved", 0)
 
@@ -1269,7 +1272,6 @@ class DistributedQuantEngine:
             fat_tail_multiplier = 1.5 + math.exp(min(vol_z_abs, 4.0) / 2.0)
             sl_distance = atr * fat_tail_multiplier
             
-            # 🛑 FIX: ASYMMETRICAL 2:1 BRACKETS (Guarantees Positive Expectancy)
             min_sl_distance = current_price * 0.02
             sl_distance = max(sl_distance, min_sl_distance)
             tp_distance = max(sl_distance * 2.0, current_price * 0.04) 
@@ -1306,7 +1308,6 @@ class DistributedQuantEngine:
 
             balance = await self.executor.get_wallet_balance_usdt()
             
-            # 🛑 FIX: MICRO-ACCOUNT SURVIVAL CLAMP
             if balance < 10.0:
                 logger.critical(f"🛑 ACCOUNT TOO SMALL (${balance:.2f}). Trading halted to prevent liquidation.")
                 self.active_positions_lock.discard(symbol)
@@ -1340,9 +1341,27 @@ class DistributedQuantEngine:
             position_size = dollar_risk / distance_to_sl
             notional = max(position_size * current_price, 5.50)
 
-            # 🛑 FIX: DYNAMIC LEVERAGE INTEGRATION VIA VAULT
             target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance, base_leverage=5, hard_cap=15)
             await self.executor.adjust_leverage(symbol, target_leverage)
+
+            if hasattr(feature_engine, 'get_book_depth_metrics'):
+                depth_metrics = feature_engine.get_book_depth_metrics()
+                if depth_metrics:
+                    required_liquidity = position_size * 3.0
+                    
+                    if direction == "BUY":
+                        available_liquidity = depth_metrics.get("ask_depth_10", 0.0)
+                    else:
+                        available_liquidity = depth_metrics.get("bid_depth_10", 0.0)
+                        
+                    if available_liquidity < required_liquidity:
+                        logger.warning(
+                            f"⚠️ HOLLOW BOOK DETECTED // Node {symbol} rejected. "
+                            f"Req: {required_liquidity:.2f} tokens | Avail: {available_liquidity:.2f} tokens. "
+                            f"Aborting to prevent extreme slippage."
+                        )
+                        self.active_positions_lock.discard(symbol)
+                        return False
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -1401,7 +1420,7 @@ class DistributedQuantEngine:
             start_time = time.time()
             order_filled = False
             
-            for _ in range(12):  # 🛑 Starvation Mitigation: Check for 60 seconds MAX, then bail
+            for _ in range(12):  
                 await asyncio.sleep(5)
                 try:
                     pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)

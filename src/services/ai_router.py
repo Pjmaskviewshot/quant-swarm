@@ -58,9 +58,10 @@ class ResilientAIRouter:
         # 3. DEEPSEEK NATIVE: The Paid Last Resort
         if deepseek_key:
             self.providers.append({
-                "name": "DEEPSEEK_V4_NATIVE",
+                "name": "DEEPSEEK_V4_FLASH",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                "model": "deepseek-chat",
+                # 🛑 CRITICAL FIX: Updated to the new model string before the July 24th deprecation
+                "model": "deepseek-v4-flash", 
                 "cooldown_until": 0.0,
                 "json_mode": True,
                 "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
@@ -75,30 +76,11 @@ class ResilientAIRouter:
         """🚀 SECURITY FIX: Redacts any string that looks like an API key to prevent log leakage."""
         return re.sub(r'(gsk_[a-zA-Z0-9]{20,}|sk-[a-zA-Z0-9]{20,}|nvapi-[a-zA-Z0-9-_]{20,})', '[REDACTED_API_KEY]', error_str)
 
-    def _is_deepseek_surge_pricing_active(self) -> bool:
-        """
-        Evaluates UTC time to check if DeepSeek's 2x Surge Pricing is currently active.
-        Starts Mid-July 2026. Peak 1: 01:00-04:00 UTC. Peak 2: 06:00-10:00 UTC.
-        """
-        current_utc = datetime.now(timezone.utc)
-        
-        # 🚀 Do not activate the shield if it is before mid-July 2026
-        if current_utc < datetime(2026, 7, 15, tzinfo=timezone.utc):
-            return False
-            
-        h = current_utc.hour
-        return (1 <= h < 4) or (6 <= h < 10)
-
-    def _get_next_healthy_provider(self, allow_surge: bool = False):
-        """Scans the matrix. Skips nodes on cooldown or nodes blocked by surge pricing (unless allow_surge is True)."""
+    def _get_next_healthy_provider(self):
+        """Scans the matrix and skips nodes currently serving time in the penalty box."""
         current_time = time.time()
-        surge_active = self._is_deepseek_surge_pricing_active()
-        
         for p in self.providers:
             if current_time >= p["cooldown_until"]:
-                # 🛑 THE SHIELD: Block DeepSeek during 2x pricing hours UNLESS we are desperate
-                if "DEEPSEEK" in p["name"] and surge_active and not allow_surge:
-                    continue
                 return p
         return None
 
@@ -169,13 +151,10 @@ class ResilientAIRouter:
         MAX_ATTEMPTS = 12 # Will attempt for roughly ~60 seconds before failing
         
         for attempt in range(MAX_ATTEMPTS):
-            # If we've been failing for over 30 seconds, we lift the surge shield. Break the glass.
-            allow_surge_pricing = attempt >= 6 
-            
-            provider = self._get_next_healthy_provider(allow_surge=allow_surge_pricing)
+            provider = self._get_next_healthy_provider()
             
             if not provider:
-                logger.warning(f"⏳ Tactical Pause: All free/tier-1 nodes cooling down. Retrying in 5s (Attempt {attempt+1}/{MAX_ATTEMPTS})...")
+                logger.warning(f"⏳ Tactical Pause: All cascade nodes cooling down. Retrying in 5s (Attempt {attempt+1}/{MAX_ATTEMPTS})...")
                 await asyncio.sleep(5)
                 continue
 
