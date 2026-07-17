@@ -236,6 +236,27 @@ class DistributedQuantEngine:
             elif level == "CRITICAL":
                 logger.critical(message)
 
+    async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
+        """
+        🚀 V5 UPGRADE: Institutional-Grade Telegram Wrapper
+        Survives network drops and includes an HTML formatting fallback (Fixes Reviewer Issue #8).
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if is_html:
+                    await self.telegram.send_html_report(message)
+                else:
+                    await self.telegram.log_message(message, message_type)
+                return
+            except Exception as e:
+                logger.warning(f"⚠️ Telegram dispatch fault (Attempt {attempt+1}/{max_retries}): {e}")
+                if attempt == 0:  
+                    # HTML Fallback: Strip HTML tags if Telegram rejects formatting
+                    message = message.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<i>', '').replace('</i>', '')
+                await asyncio.sleep(2 ** attempt)
+        logger.error("❌ Telegram dispatch permanently failed after 3 attempts.")
+
     async def _fetch_exchange_tick_sizes(self):
         try:
             logger.info("📡 Fetching global tick size matrix from Bybit matching engine...")
@@ -346,7 +367,7 @@ class DistributedQuantEngine:
                     self.global_macro_news_cache = context["news_context"]
                 self.last_news_fetch = current_time
             except Exception as e:
-                pass 
+                logger.debug(f"News fetch transient timeout: {e}") 
 
     async def run_macro_commander(self):
         logger.info("🧠 MACRO COMMANDER ONLINE. Waiting for workers to gather data...")
@@ -446,7 +467,6 @@ class DistributedQuantEngine:
                 self.current_atrs[symbol] = current_price * 0.0125
                 metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
                 
-                # 🚀 V5 REGIME-ISOLATED SYNC
                 regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
                 node_stats = self.node_metrics_cache.get(symbol, {}).get(regime, {})
                 bayesian_acc = node_stats.get("bayesian_edge", 0.50)
@@ -464,7 +484,7 @@ class DistributedQuantEngine:
                     "node_bayesian_edge": f"{bayesian_acc:.2%}" 
                 }
             except Exception as e:
-                pass 
+                logger.debug(f"Data gatherer anomaly for {symbol}: {e}")
                 
             await asyncio.sleep(60.0) 
 
@@ -487,9 +507,7 @@ class DistributedQuantEngine:
         real_spread = features.get("bid_ask_spread", mid_price * 0.0005)
 
         metrics = self.screener_metrics.get(symbol, {"vol_mult": 1.0, "vol_z": 0.0})
-        
         live_confidence = self.macro_confidences.get(symbol, 0.35) 
-        
         optimization = self.calculate_adaptive_regime_parameters(market_regime, metrics, live_confidence)
 
         if not optimization["execution_verdict"]:
@@ -551,11 +569,9 @@ class DistributedQuantEngine:
         hawkes_ratio = hawkes_score / (avg_hawkes + 1e-6)
         raw_vol_z = metrics.get("vol_z", 0.0)
         vol_z_abs = abs(raw_vol_z)
-        
         kinetic_alpha = vol_mult * hawkes_ratio
         
         total_friction = max(real_spread, mid_price * 0.0001) + (real_spread * (1.0 / math.sqrt(max(0.10, vol_mult))))
-        
         dynamic_max_spread = 0.0015 * (1.0 + math.log1p(vol_z_abs))
         
         if spread_pct > dynamic_max_spread:
@@ -619,7 +635,6 @@ class DistributedQuantEngine:
         if not has_pure_edge:
             return
 
-        # 🚀 V5 DYNAMIC ARMING
         node_stats = self.node_metrics_cache.get(symbol, {}).get(market_regime, {})
         is_armed = node_stats.get("is_armed", False)
         bayesian_edge = node_stats.get("bayesian_edge", 0.50)
@@ -904,7 +919,6 @@ class DistributedQuantEngine:
                 t_list = tickers.get("result", {}).get("list", [])
                 price_map = {t["symbol"]: float(t["lastPrice"]) for t in t_list if t["symbol"] in self.shadow_basket}
                 
-                # We can safely shadow test heavily because V5 completely purges SHADOW_SIM from live grading
                 for sym in self.shadow_basket:
                     if sym not in price_map: 
                         continue
@@ -973,14 +987,12 @@ class DistributedQuantEngine:
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours.")
 
             if loop_counter % 5 == 0:
-                # 🚀 V5 UPGRADE: Fetch Per-Node Regime-Isolated Metrics Dict
                 self.node_metrics_cache = await asyncio.to_thread(
                     self.memory.compute_decentralized_node_accuracy,
                     window_size=150, core_basket=self.asset_basket
                 )
                 self.global_state_cache["last_updated"] = time.time()
                 
-                # 🚀 INSTANT LIQUIDITY SYNC
                 current_vault_balance = await self.executor.get_wallet_balance_usdt()
 
                 try:
@@ -995,7 +1007,6 @@ class DistributedQuantEngine:
                 if "start_of_day_balance" not in self.global_state_cache:
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
                     
-                # 🛡️ DELTA-NEUTRAL DEPOSIT DETECTOR
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 
@@ -1025,7 +1036,6 @@ class DistributedQuantEngine:
                     if hasattr(self.risk_vault, 'peak_balance'):
                         self.risk_vault.peak_balance = self.global_state_cache["wallet_baseline"]
 
-                # Actual net PnL is now completely bulletproof against deposits
                 actual_net_pnl = current_vault_balance - self.global_state_cache["start_of_day_balance"]
                 baseline = self.global_state_cache["wallet_baseline"]
                 
@@ -1043,7 +1053,6 @@ class DistributedQuantEngine:
                 self.global_state_cache["drawdown_pct"] = drawdown_pct
                 self.global_state_cache["daily_data"] = data
 
-            # 🚀 HIGH-FREQUENCY TELEMETRY (Every 10 mins instead of 30)
             if loop_counter % 10 == 0:
                 current_vault_balance = self.global_state_cache.get("current_vault_balance", 0.0)
                 actual_net_pnl = self.global_state_cache.get("actual_net_pnl", 0.0)
@@ -1150,9 +1159,8 @@ class DistributedQuantEngine:
                     f"{recent_trades_text}"
                 )
                 
-                report_task = asyncio.create_task(self.telegram.send_html_report(report))
+                report_task = asyncio.create_task(self._safe_telegram_dispatch(report, is_html=True))
                 self._daemon_registry.add(report_task)
-                report_task.add_done_callback(lambda t: logger.error(f"Telegram crash: {t.exception()}") if t.exception() else None)
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, optimization: dict = None, real_spread: float = 0.0, vol_z_abs: float = 0.0, fluid_gating_coef: float = 1.0, is_golden_setup: bool = False):
         if symbol in self.active_positions_lock:
@@ -1174,10 +1182,9 @@ class DistributedQuantEngine:
                 if len(price_history) >= 20:
                     prices = list(price_history)[-20:]
                     price_range = (max(prices) - min(prices)) / np.mean(prices)
-                    # 🚀 UPGRADE: Cap ATR fallback at 0.5% max
                     atr = current_price * min(0.005, max(0.001, price_range * 0.5))
                 else:
-                    atr = current_price * 0.005 # 0.5% absolute default
+                    atr = current_price * 0.005 
                 logger.warning(f"⚠️ ATR Fallback: Using {atr/current_price:.2%} of price for {symbol}")
             else:
                 atr = raw_atr
@@ -1202,7 +1209,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return True
 
-            # 🚀 V5 DYNAMIC ARMING
             node_stats = self.node_metrics_cache.get(symbol, {}).get(market_regime, {})
             bayesian_p = node_stats.get("bayesian_edge", 0.50)
             is_armed = node_stats.get("is_armed", False)
@@ -1245,18 +1251,10 @@ class DistributedQuantEngine:
             volatility_adjustment = max(0.40, min(3.0, volatility_adjustment))
 
             balance = await self.executor.get_wallet_balance_usdt()
-            
-            if balance < 10.0:
-                logger.critical(f"🛑 ACCOUNT TOO SMALL (${balance:.2f}). Trading halted to prevent liquidation.")
-                self.active_positions_lock.discard(symbol)
-                return False
 
-            micro_multiplier = 0.75 if balance < 50.0 else 0.25
+            micro_multiplier = 0.75 if balance < 100.0 else 0.25
             adjusted_kelly = base_kelly * volatility_adjustment * micro_multiplier * fluid_gating_coef
-
-            # 🚀 UPGRADE: QUARTER-KELLY & STRICT 2% RISK CAP
             quarter_kelly = adjusted_kelly * 0.25
-            dynamic_risk_pct = max(0.001, min(0.02, quarter_kelly))
 
             if quarter_kelly <= 0.0 or not is_armed:
                 features_dict = {
@@ -1264,16 +1262,29 @@ class DistributedQuantEngine:
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": real_spread,
                     "virtual_sl": initial_sl, "virtual_tp": target_tp   
                 }
-                
                 await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=True)
                 self.active_positions_lock.discard(symbol)
                 return True
 
-            dollar_risk = balance * dynamic_risk_pct
-            position_size = dollar_risk / distance_to_sl
-            notional = max(position_size * current_price, 5.50)
+            if balance < 1.0:
+                logger.critical(f"🛑 ACCOUNT EMPTY (${balance:.2f}). Need at least $1.00 to cover exchange margin.")
+                self.active_positions_lock.discard(symbol)
+                return False
 
-            if not self.risk_vault.evaluate_portfolio_safety(balance, notional, symbol):
+            if balance < 50.0:
+                notional = 6.00
+                position_size = notional / current_price
+                dollar_risk = position_size * distance_to_sl
+                bypass_vault = True
+                logger.info(f"🔬 MICRO-ACCOUNT MODE // Overriding 2% risk limit. Forcing ${notional:.2f} minimum trade.")
+            else:
+                dynamic_risk_pct = max(0.005, min(0.02, quarter_kelly))
+                dollar_risk = balance * dynamic_risk_pct
+                position_size = dollar_risk / distance_to_sl
+                notional = max(position_size * current_price, 6.00)
+                bypass_vault = False
+
+            if not bypass_vault and not self.risk_vault.evaluate_portfolio_safety(balance, notional, symbol):
                 logger.warning(f"🛡️ RISK VAULT REJECTED // {symbol} notional ${notional:.2f} blocked by portfolio safety gate.")
                 self.active_positions_lock.discard(symbol)
                 return False
@@ -1314,9 +1325,8 @@ class DistributedQuantEngine:
                 f"• Notional Value: ${notional:.2f} USDT\n"
                 f"🛡️ *Elastic Brackets Active*: SL: {initial_sl} | TP: {target_tp}"
             )
-            report_task = asyncio.create_task(self.telegram.log_message(alert_text, "SUCCESS"))
+            report_task = asyncio.create_task(self._safe_telegram_dispatch(alert_text, is_html=False, message_type="SUCCESS"))
             self._daemon_registry.add(report_task)
-            report_task.add_done_callback(lambda t: logger.error(f"Telegram crash: {t.exception()}") if t.exception() else None)
             
             daemon_task = asyncio.create_task(self._position_lifecycle_daemon(
                 symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, {"allocated_value_usdt": notional, "size": position_size}, feature_engine, target_leverage, market_regime
@@ -1444,9 +1454,8 @@ class DistributedQuantEngine:
                         f"💰 <b>Net Return:</b> <code>{net_pnl:.4f} USDT</code>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━"
                     )
-                    report_task = asyncio.create_task(self.telegram.send_html_report(report_message))
+                    report_task = asyncio.create_task(self._safe_telegram_dispatch(report_message, is_html=True))
                     self._daemon_registry.add(report_task)
-                    report_task.add_done_callback(lambda t: logger.error(f"Telegram crash: {t.exception()}") if t.exception() else None)
                     
                     await asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, slippage_drag, settlement['outcome'], exec_details)
                     self.risk_vault.update_position_ledger(symbol, 0.0)
