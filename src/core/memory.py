@@ -293,49 +293,61 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
             return 0
 
-    def compute_rolling_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Tuple[float, int]:
+    def compute_decentralized_node_accuracy(self, window_size: int = 50, core_basket: List[str] = None) -> Dict[str, Dict[str, Any]]:
         """
-        🚀 pillar 2: ADAPTIVE GLOBAL CALIBRATION SELECTOR
-        Grades system rolling accuracy. Dynamically includes the unconstrained background 
-        shadow pool if no production live history exists, allowing the FSM to efficiently bootstrap.
+        🚀 V4 UPGRADE: DECENTRALIZED BAYESIAN NODE GRADING
+        Tracks accuracy individually per asset. Applies Laplace smoothing to prevent 
+        small-sample flukes. Explicitly purges "SHADOW_SIM" background noise.
         """
+        node_metrics = {
+            sym: {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False} 
+            for sym in (core_basket or [])
+        }
+        
         try:
-            # Check if any production, non-shadow live trades exist in the database
-            check_query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True).eq("is_shadow", False)
+            # 🛑 CRITICAL FIX: .neq("market_regime", "SHADOW_SIM") blocks random coin flip pollution
+            query = self.supabase.table("quantitative_ledger")\
+                .select("symbol, is_correct, is_shadow")\
+                .eq("resolved", True)\
+                .neq("market_regime", "SHADOW_SIM")
+                
             if core_basket:
-                check_query = check_query.in_("symbol", core_basket)
-            
-            check_res = self._safe_execute(check_query.limit(5))
-            has_live_history = len(check_res.data) > 0 if check_res else False
-
-            # Instantiate base query context
-            query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True)
-            
-            if has_live_history:
-                # Production Mode: Enforce strict live validation on your selected active core pairs
-                query = query.eq("is_shadow", False)
-                if core_basket:
-                    query = query.in_("symbol", core_basket)
-                logger.debug("FSM Mode: Production (Strict Live Attribution Active)")
-            else:
-                # Calibration Mode Fallback: Unleash calculations over ALL background shadow data across all pairs
-                logger.debug("FSM Mode: Calibration (Shadow Validation Active - Basket Restrictions Lifted)")
+                query = query.in_("symbol", core_basket)
                 
-            response = self._safe_execute(
-                query.order("timestamp", desc=True).limit(window_size)
-            )
-                
+            response = self._safe_execute(query.order("timestamp", desc=True).limit(2000))
             results = response.data if response else []
-            total_resolved = len(results)
             
-            if total_resolved == 0:
-                return 0.50, 0
-
-            correct_array = [1.0 if row.get("is_correct") is True else 0.0 for row in results]
-            stable_accuracy = sum(correct_array) / total_resolved
+            # Group results strictly by node (symbol)
+            history_map = {}
+            for row in results:
+                sym = row.get("symbol")
+                if sym not in history_map:
+                    history_map[sym] = []
+                history_map[sym].append(1.0 if row.get("is_correct") is True else 0.0)
                 
-            return float(stable_accuracy), total_resolved
+            for sym, history in history_map.items():
+                recent_history = history[:window_size]
+                total_trades = len(recent_history)
+                wins = sum(recent_history)
+                
+                if total_trades > 0:
+                    raw_acc = wins / total_trades
+                    # 🧠 Laplace Smoothing: (Wins + 2) / (Total + 4). 
+                    # Pulls small samples towards 50%. A node MUST prove edge over time to reach 55%.
+                    bayesian_edge = (wins + 2.0) / (total_trades + 4.0)
+                    
+                    # 🚀 THE LIVE TRIGGER: Node requires at least 5 AI-verified trades and a smoothed edge >= 55%
+                    is_armed = (total_trades >= 5) and (bayesian_edge >= 0.55)
+                    
+                    node_metrics[sym] = {
+                        "raw_accuracy": round(raw_acc, 4),
+                        "bayesian_edge": round(bayesian_edge, 4),
+                        "trades": total_trades,
+                        "is_armed": is_armed
+                    }
+                    
+            return node_metrics
 
         except Exception as e:
-            logger.error(f"❌ ENGINE HORIZON EVALUATION EXCEPTION: {e}")
-            return 0.50, 0
+            logger.error(f"❌ DECENTRALIZED HORIZON EVALUATION EXCEPTION: {e}")
+            return node_metrics
