@@ -1,5 +1,9 @@
+import os
+import re
+import asyncio
 import aiohttp
 import logging
+from typing import Optional
 
 logger = logging.getLogger("QUANT_CORE.TELEGRAM")
 
@@ -17,10 +21,18 @@ class AsyncTelegramReporter:
         """
         if not self.token:
             return error_msg
-        return error_msg.replace(self.token, "********")
+        return str(error_msg).replace(self.token, "********")
 
-    async def log_message(self, text: str, alert_level: str = "INFO"):
-        """Fires fully compiled markdown alerts downstream to your mobile instance."""
+    def _strip_html(self, text: str) -> str:
+        """
+        🚀 V5 UPGRADE: Robust regex stripper to completely sanitize payloads
+        if Telegram rejects our HTML formatting.
+        """
+        cleaner = re.compile('<.*?>')
+        return re.sub(cleaner, '', text)
+
+    async def log_message(self, text: str, alert_level: str = "INFO", max_retries: int = 3):
+        """Fires fully compiled markdown alerts downstream with Exponential Backoff."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram configuration unpopulated. Aborting reporting pipeline step.")
             return
@@ -28,23 +40,39 @@ class AsyncTelegramReporter:
         emojis = {"INFO": "ℹ️", "SUCCESS": "🟢", "WARNING": "⚠️", "CRITICAL": "🚨"}
         prefix = emojis.get(alert_level.upper(), "🤖")
         
-        formatted_payload = {
+        payload = {
             "chat_id": self.chat_id,
             "text": f"{prefix} *[SYSTEM ALERT]*\n\n{text}",
             "parse_mode": "Markdown"
         }
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.base_url, json=formatted_payload, timeout=4.0) as response:
-                    if response.status != 200:
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.base_url, json=payload, timeout=5.0) as response:
+                        if response.status == 200:
+                            return  # Success! Exit the loop.
+                            
                         raw_err = await response.text()
-                        logger.error(self._sanitize_error(f"Telegram remote rejection payload received: {raw_err}"))
-        except Exception as e:
-            logger.error(self._sanitize_error(f"Unable to cleanly resolve connection context to Telegram API infrastructure: {e}"))
+                        
+                        # If Telegram rejects the Markdown format (HTTP 400), strip it and retry instantly
+                        if response.status == 400 and "parse" in raw_err.lower():
+                            logger.warning("Telegram rejected Markdown. Falling back to plain text.")
+                            payload["parse_mode"] = ""
+                            continue
+                            
+                        logger.error(self._sanitize_error(f"Telegram remote rejection: {raw_err}"))
+                        
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(self._sanitize_error(f"❌ Telegram API permanently unreachable: {e}"))
+                else:
+                    sleep_time = 2 ** attempt
+                    logger.warning(self._sanitize_error(f"⚠️ Telegram network fault: {e}. Retrying in {sleep_time}s..."))
+                    await asyncio.sleep(sleep_time)
 
-    async def send_html_report(self, html_text: str):
-        """Dispatches an explicitly formatted HTML payload to Telegram (used for hourly metrics)."""
+    async def send_html_report(self, html_text: str, max_retries: int = 3):
+        """Dispatches HTML payloads to Telegram with auto-retry and plain-text fallback."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram configuration unpopulated. Aborting HTML report dispatch.")
             return
@@ -55,34 +83,31 @@ class AsyncTelegramReporter:
             "parse_mode": "HTML"
         }
         
-        try:
-            # Using a slightly longer timeout (10s) for the heavier HTML payload
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.base_url, json=payload, timeout=10.0) as response:
-                    if response.status != 200:
+        for attempt in range(max_retries):
+            try:
+                # Using 10s timeout for the heavier HTML payload
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.base_url, json=payload, timeout=10.0) as response:
+                        if response.status == 200:
+                            return  # Success! Exit the loop.
+                            
                         raw_err = await response.text()
                         
                         # 🛑 HTML FALLBACK PATCH: Catch formatting rejections
-                        if response.status == 400:
-                            logger.warning(self._sanitize_error(f"Telegram rejected HTML format. Falling back to plain text. Error: {raw_err}"))
+                        if response.status == 400 and "parse" in raw_err.lower():
+                            logger.warning(self._sanitize_error(f"Telegram rejected HTML format. Stripping tags and retrying. Error: {raw_err}"))
                             
-                            # Strip standard HTML tags from the message
-                            clean_msg = html_text.replace("<b>", "").replace("</b>", "")\
-                                                 .replace("<code>", "").replace("</code>", "")\
-                                                 .replace("<i>", "").replace("</i>", "")
+                            # Instantly convert the payload to clean plain-text
+                            payload["text"] = self._strip_html(html_text)
+                            payload["parse_mode"] = "" 
+                            continue # Try again immediately with the cleaned text
                             
-                            fallback_payload = {
-                                "chat_id": self.chat_id,
-                                "text": clean_msg,
-                                "parse_mode": ""  # Send as raw text
-                            }
-                            
-                            async with session.post(self.base_url, json=fallback_payload, timeout=10.0) as fb_response:
-                                if fb_response.status != 200:
-                                    fb_err = await fb_response.text()
-                                    logger.error(self._sanitize_error(f"Telegram also rejected plain-text fallback: {fb_err}"))
-                        else:
-                            logger.error(self._sanitize_error(f"Telegram API rejected HTML payload: {raw_err}"))
-                            
-        except Exception as e:
-            logger.error(self._sanitize_error(f"Failed to establish connection to Telegram API for HTML report: {e}"))
+                        logger.error(self._sanitize_error(f"Telegram API rejected payload: {raw_err}"))
+                        
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(self._sanitize_error(f"❌ Failed to establish connection to Telegram API: {e}"))
+                else:
+                    sleep_time = 2 ** attempt
+                    logger.warning(self._sanitize_error(f"⚠️ Telegram network drop. Retrying in {sleep_time}s..."))
+                    await asyncio.sleep(sleep_time)
