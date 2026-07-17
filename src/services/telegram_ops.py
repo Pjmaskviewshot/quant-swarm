@@ -61,6 +61,28 @@ class AsyncTelegramReporter:
                 async with session.post(self.base_url, json=payload, timeout=10.0) as response:
                     if response.status != 200:
                         raw_err = await response.text()
-                        logger.error(self._sanitize_error(f"Telegram API rejected HTML payload: {raw_err}"))
+                        
+                        # 🛑 HTML FALLBACK PATCH: Catch formatting rejections
+                        if response.status == 400:
+                            logger.warning(self._sanitize_error(f"Telegram rejected HTML format. Falling back to plain text. Error: {raw_err}"))
+                            
+                            # Strip standard HTML tags from the message
+                            clean_msg = html_text.replace("<b>", "").replace("</b>", "")\
+                                                 .replace("<code>", "").replace("</code>", "")\
+                                                 .replace("<i>", "").replace("</i>", "")
+                            
+                            fallback_payload = {
+                                "chat_id": self.chat_id,
+                                "text": clean_msg,
+                                "parse_mode": ""  # Send as raw text
+                            }
+                            
+                            async with session.post(self.base_url, json=fallback_payload, timeout=10.0) as fb_response:
+                                if fb_response.status != 200:
+                                    fb_err = await fb_response.text()
+                                    logger.error(self._sanitize_error(f"Telegram also rejected plain-text fallback: {fb_err}"))
+                        else:
+                            logger.error(self._sanitize_error(f"Telegram API rejected HTML payload: {raw_err}"))
+                            
         except Exception as e:
             logger.error(self._sanitize_error(f"Failed to establish connection to Telegram API for HTML report: {e}"))
