@@ -10,9 +10,6 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     def __init__(self, db_path: str = None):
-        """
-        Initializes the Cloud-Native Supabase Analytics Engine connection layer.
-        """
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         
@@ -28,10 +25,6 @@ class MemoryBank:
             raise
 
     def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
-        """
-        🛡️ EXPONENTIAL BACKOFF WRAPPER
-        Prevents transient cloud network drops from permanently blinding the quantitative ledger.
-        """
         for attempt in range(max_retries):
             try:
                 return query_builder.execute()
@@ -45,13 +38,11 @@ class MemoryBank:
                 time.sleep(sleep_time)
 
     def _parse_iso_timestamp(self, ts_str: str) -> datetime:
-        """Robust ISO timestamp parser for Supabase datetimes."""
         if ts_str.endswith('Z'):
             ts_str = ts_str.replace('Z', '+00:00')
         return datetime.fromisoformat(ts_str)
 
     def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
-        """Saves a fresh prediction cleanly using the dedicated schema columns."""
         if features is None:
             features = {}
             
@@ -96,7 +87,6 @@ class MemoryBank:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
     def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str, execution_details: Dict[str, Any] = None):
-        """ Updates a live trade signal with actual financial execution data. """
         is_correct = True if net_pnl > 0 else False
         if execution_details is None:
             execution_details = {}
@@ -122,7 +112,8 @@ class MemoryBank:
                         start_dt = self._parse_iso_timestamp(row["timestamp"])
                         duration = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
                         row["holding_minutes"] = round(duration, 2)
-                    except Exception:
+                    except Exception as date_e:
+                        logger.error(f"Date parse error: {date_e}")
                         row["holding_minutes"] = 0.0
                 
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
@@ -143,15 +134,9 @@ class MemoryBank:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
-        """
-        🚀 pillar 1: GLOBAL PATH-TRAVERSAL RESOLUTION ENGINE
-        Optimized to drop narrow asset collection filtering, allowing the background 
-        shadow basket to systematically settle via live candles or the 60-minute time decay layer.
-        """
         resolved_count = 0
 
         try:
-            # 🛑 UNCONSTRAINED APEX: Pulls any active unresolved records to evaluate the full universe
             query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
                 
             response = self._safe_execute(
@@ -221,56 +206,38 @@ class MemoryBank:
                         hit_tp = high >= tp_price
                         hit_sl = low <= sl_price
                         if hit_tp and hit_sl:
-                            actual = "SELL"  
-                            is_terminated = True
-                            exit_price = sl_price
+                            actual, is_terminated, exit_price = "SELL", True, sl_price
                             break
                         elif hit_tp:
-                            actual = "BUY"
-                            is_terminated = True
-                            exit_price = tp_price
+                            actual, is_terminated, exit_price = "BUY", True, tp_price
                             break
                         elif hit_sl:
-                            actual = "SELL"
-                            is_terminated = True
-                            exit_price = sl_price
+                            actual, is_terminated, exit_price = "SELL", True, sl_price
                             break
                     elif prediction == "SELL":
                         hit_tp = low <= tp_price
                         hit_sl = high >= sl_price
                         if hit_tp and hit_sl:
-                            actual = "BUY"  
-                            is_terminated = True
-                            exit_price = sl_price
+                            actual, is_terminated, exit_price = "BUY", True, sl_price
                             break
                         elif hit_tp:
-                            actual = "SELL"
-                            is_terminated = True
-                            exit_price = tp_price
+                            actual, is_terminated, exit_price = "SELL", True, tp_price
                             break
                         elif hit_sl:
-                            actual = "BUY"
-                            is_terminated = True
-                            exit_price = sl_price
+                            actual, is_terminated, exit_price = "BUY", True, sl_price
                             break
 
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     exit_price = current_price
-                    if current_price > entry_price:
-                        actual = "BUY"
-                    elif current_price < entry_price:
-                        actual = "SELL"
-                    else:
-                        actual = "HOLD"
+                    actual = "BUY" if current_price > entry_price else "SELL" if current_price < entry_price else "HOLD"
 
                 if is_terminated and actual != "HOLD":
                     GHOST_LEVERAGE = 10.0
                     TAKER_ROUND_TRIP = 0.0011
-                    if prediction == "BUY":
-                        gross_return = (exit_price - entry_price) / entry_price
-                    else:
-                        gross_return = (entry_price - exit_price) / entry_price
+                    gross_return = abs(exit_price - entry_price) / entry_price
+                    if prediction != actual:
+                        gross_return = -gross_return
                         
                     net_pnl = (gross_return - TAKER_ROUND_TRIP) * GHOST_LEVERAGE
 
@@ -293,61 +260,71 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
             return 0
 
-    def compute_decentralized_node_accuracy(self, window_size: int = 50, core_basket: List[str] = None) -> Dict[str, Dict[str, Any]]:
+    def compute_decentralized_node_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Dict[str, Dict[str, Any]]:
         """
-        🚀 V4 UPGRADE: DECENTRALIZED BAYESIAN NODE GRADING
-        Tracks accuracy individually per asset. Applies Laplace smoothing to prevent 
-        small-sample flukes. Explicitly purges "SHADOW_SIM" background noise.
+        🚀 V5 UPGRADE: REGIME-ISOLATED BAYESIAN GRADING
+        Calculates independent track records for TRENDING vs RANGING markets.
+        Requires a strict 30 trades per regime to arm, preventing small-sample liquidation flukes.
         """
         node_metrics = {
-            sym: {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False} 
+            sym: {
+                "TRENDING": {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False},
+                "RANGING": {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False}
+            } 
             for sym in (core_basket or [])
         }
         
         try:
-            # 🛑 CRITICAL FIX: .neq("market_regime", "SHADOW_SIM") blocks random coin flip pollution
+            # 🛑 NOISE QUARANTINE ACTIVE
             query = self.supabase.table("quantitative_ledger")\
-                .select("symbol, is_correct, is_shadow")\
+                .select("symbol, is_correct, market_regime")\
                 .eq("resolved", True)\
                 .neq("market_regime", "SHADOW_SIM")
                 
             if core_basket:
                 query = query.in_("symbol", core_basket)
                 
-            response = self._safe_execute(query.order("timestamp", desc=True).limit(2000))
+            response = self._safe_execute(query.order("timestamp", desc=True).limit(5000))
             results = response.data if response else []
             
-            # Group results strictly by node (symbol)
+            # Split history strictly by Regime Matrix
             history_map = {}
             for row in results:
                 sym = row.get("symbol")
+                regime = row.get("market_regime", "UNKNOWN")
+                
+                if regime not in ["TRENDING", "RANGING"]:
+                    continue
+                    
                 if sym not in history_map:
-                    history_map[sym] = []
-                history_map[sym].append(1.0 if row.get("is_correct") is True else 0.0)
-                
-            for sym, history in history_map.items():
-                recent_history = history[:window_size]
-                total_trades = len(recent_history)
-                wins = sum(recent_history)
-                
-                if total_trades > 0:
-                    raw_acc = wins / total_trades
-                    # 🧠 Laplace Smoothing: (Wins + 2) / (Total + 4). 
-                    # Pulls small samples towards 50%. A node MUST prove edge over time to reach 55%.
-                    bayesian_edge = (wins + 2.0) / (total_trades + 4.0)
+                    history_map[sym] = {"TRENDING": [], "RANGING": []}
                     
-                    # 🚀 THE LIVE TRIGGER: Node requires at least 5 AI-verified trades and a smoothed edge >= 55%
-                    is_armed = (total_trades >= 5) and (bayesian_edge >= 0.55)
+                history_map[sym][regime].append(1.0 if row.get("is_correct") is True else 0.0)
+                
+            for sym, regimes in history_map.items():
+                for regime, history in regimes.items():
+                    recent_history = history[:window_size]
+                    total_trades = len(recent_history)
+                    wins = sum(recent_history)
                     
-                    node_metrics[sym] = {
-                        "raw_accuracy": round(raw_acc, 4),
-                        "bayesian_edge": round(bayesian_edge, 4),
-                        "trades": total_trades,
-                        "is_armed": is_armed
-                    }
+                    if total_trades > 0:
+                        raw_acc = wins / total_trades
+                        # 🧠 Laplace Smoothing
+                        bayesian_edge = (wins + 2.0) / (total_trades + 4.0)
+                        
+                        # 🚀 THE INSTITUTIONAL TRIGGER: 30 trades required per regime
+                        is_armed = (total_trades >= 30) and (bayesian_edge >= 0.55)
+                        
+                        if sym in node_metrics:
+                            node_metrics[sym][regime] = {
+                                "raw_accuracy": round(raw_acc, 4),
+                                "bayesian_edge": round(bayesian_edge, 4),
+                                "trades": total_trades,
+                                "is_armed": is_armed
+                            }
                     
             return node_metrics
 
         except Exception as e:
-            logger.error(f"❌ DECENTRALIZED HORIZON EVALUATION EXCEPTION: {e}")
+            logger.error(f"❌ REGIME-ISOLATED HORIZON EVALUATION EXCEPTION: {e}")
             return node_metrics
