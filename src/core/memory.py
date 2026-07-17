@@ -144,15 +144,15 @@ class MemoryBank:
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
         """
-        🚀 pillar 1: KINETIC PATH-TRAVERSAL RESOLUTION ENGINE
-        Resolves predictions by scanning the high-frequency price sequences to catch inside-candle bracket hits.
+        🚀 pillar 1: GLOBAL PATH-TRAVERSAL RESOLUTION ENGINE
+        Optimized to drop narrow asset collection filtering, allowing the background 
+        shadow basket to systematically settle via live candles or the 60-minute time decay layer.
         """
         resolved_count = 0
 
         try:
+            # 🛑 UNCONSTRAINED APEX: Pulls any active unresolved records to evaluate the full universe
             query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
-            if assets:
-                query = query.in_("symbol", assets)
                 
             response = self._safe_execute(
                 query.order("timestamp", desc=False).limit(500)
@@ -204,7 +204,6 @@ class MemoryBank:
                     continue
 
                 current_price = closes[-1]
-
                 is_terminated = False
                 actual = "HOLD"
                 exit_price = entry_price
@@ -296,12 +295,12 @@ class MemoryBank:
 
     def compute_rolling_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Tuple[float, int]:
         """
-        🚀 pillar 2: ADAPTIVE WARMUP SELECTION
-        Calculates moving average accuracy. Dynamically includes shadow trades if the core 
-        validation pool is cold, allowing the FSM to naturally calibrate and transition.
+        🚀 pillar 2: ADAPTIVE GLOBAL CALIBRATION SELECTOR
+        Grades system rolling accuracy. Dynamically includes the unconstrained background 
+        shadow pool if no production live history exists, allowing the FSM to efficiently bootstrap.
         """
         try:
-            # First, check if any real, non-shadow live trades exist in the database
+            # Check if any production, non-shadow live trades exist in the database
             check_query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True).eq("is_shadow", False)
             if core_basket:
                 check_query = check_query.in_("symbol", core_basket)
@@ -309,19 +308,18 @@ class MemoryBank:
             check_res = self._safe_execute(check_query.limit(5))
             has_live_history = len(check_res.data) > 0 if check_res else False
 
-            # Build adaptive query
+            # Instantiate base query context
             query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True)
             
             if has_live_history:
-                # Tighten filter to ONLY grade pure production execution once we are past calibration
+                # Production Mode: Enforce strict live validation on your selected active core pairs
                 query = query.eq("is_shadow", False)
+                if core_basket:
+                    query = query.in_("symbol", core_basket)
                 logger.debug("FSM Mode: Production (Strict Live Attribution Active)")
             else:
-                # Calibration fallback: allow background shadow data to seed the validation pool
-                logger.debug("FSM Mode: Calibration (Shadow Validation Active)")
-
-            if core_basket:
-                query = query.in_("symbol", core_basket)
+                # Calibration Mode Fallback: Unleash calculations over ALL background shadow data across all pairs
+                logger.debug("FSM Mode: Calibration (Shadow Validation Active - Basket Restrictions Lifted)")
                 
             response = self._safe_execute(
                 query.order("timestamp", desc=True).limit(window_size)

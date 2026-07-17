@@ -14,10 +14,11 @@ logger = logging.getLogger("QUANT_CORE.AI_ROUTER")
 class ResilientAIRouter:
     def __init__(self, nv_keys: List[str], deepseek_key: str):
         self.providers = []
+        self.current_provider = "INITIALIZING" # 🚀 Added for V3 Telemetry Dashboard Tracking
         
         # 🛡️ HARDENED NETWORK CONFIGURATION FOR CLOUD DEPLOYMENT
         self.custom_http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(12.0, connect=5.0),
+            timeout=httpx.Timeout(30.0, connect=10.0),
             http2=False,  # CRITICAL: Disabling HTTP/2 prevents shared-cloud connection drops
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         )
@@ -95,25 +96,18 @@ class ResilientAIRouter:
     def _evaluate_deterministic_rules(self, data: Dict[str, Any]) -> str:
         """
         🚀 P1-3 FIX: DETERMINISTIC RULES ENGINE
-        Evaluates the clear-cut thresholds instantly to save 5-60s of LLM latency.
+        Strictly filters out flat market noise to save API costs. Any anomaly
+        is forcefully routed to the neural cascade for institutional evaluation.
         """
         z_score = data.get("volatility_z_score", 0.0)
-        tfi = data.get("trade_flow_imbalance", 0.0)
+        vol_mult = data.get("volume_multiplier", 1.0)
         
-        # Rule 1: Noise / Flat Market
-        if -2.0 < z_score < 2.0:
-            return "HOLD"
+        # 🛑 FIX: Any structural volume or volatility anomaly MUST be evaluated by AI
+        if abs(z_score) >= 2.0 or vol_mult >= 1.5:
+            return "EVALUATE"
             
-        # Rule 2: Aggressive Buying
-        if z_score <= -2.40 and tfi > 0.15:
-            return "BUY"
-            
-        # Rule 3: Aggressive Selling
-        if z_score >= 2.40 and tfi < -0.15:
-            return "SELL"
-            
-        # Edge cases (between 2.0 and 2.40) or mixed signals require AI evaluation
-        return "EVALUATE"
+        # If the market is completely flat, bypass the AI safely.
+        return "HOLD"
 
     async def extract_market_verdict(self, batched_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -188,6 +182,7 @@ class ResilientAIRouter:
                 await asyncio.sleep(5)
                 continue
 
+            self.current_provider = provider['name'] # 🚀 Updates Telemetry state in real-time
             logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
             
             try:
