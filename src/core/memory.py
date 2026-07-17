@@ -66,7 +66,6 @@ class MemoryBank:
 
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
-        # 🚀 UPGRADE V2: Map default placeholder values for new forensic tracking metrics
         payload = {
             "signal_id": str(signal_id),
             "timestamp": iso_timestamp,
@@ -113,7 +112,6 @@ class MemoryBank:
                 row["slippage_drag"] = float(slippage)
                 row["is_correct"] = is_correct
                 
-                # 🚀 UPGRADE V2: Extract actual structural fee/funding metrics from live execution parameters
                 row["fees_usdt"] = float(execution_details.get("fees_usdt", 0.0))
                 row["funding_usdt"] = float(execution_details.get("funding_usdt", 0.0))
                 row["leverage"] = float(execution_details.get("leverage", 1.0))
@@ -129,7 +127,6 @@ class MemoryBank:
                 
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
                 
-                # 🛡️ VERIFICATION STEP: Ensure the database physically accepted the upsert
                 verify = self._safe_execute(
                     self.supabase.table("quantitative_ledger")
                     .select("resolved")
@@ -153,12 +150,10 @@ class MemoryBank:
         resolved_count = 0
 
         try:
-            # 🚀 Apply the optimized `assets` batch parameters to save database bandwidth limits
             query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
             if assets:
                 query = query.in_("symbol", assets)
                 
-            # 🛡️ Limit fetch to 500 rows to protect memory during heavy catch-up syncs
             response = self._safe_execute(
                 query.order("timestamp", desc=False).limit(500)
             )
@@ -215,7 +210,6 @@ class MemoryBank:
                 exit_price = entry_price
                 bars_held = 0
 
-                # 🛑 The Time-Traveling Evaluator Patch
                 candles_to_check = max(1, int(elapsed_minutes) + 2) 
                 start_index = max(0, len(closes) - candles_to_check)
 
@@ -228,7 +222,7 @@ class MemoryBank:
                         hit_tp = high >= tp_price
                         hit_sl = low <= sl_price
                         if hit_tp and hit_sl:
-                            actual = "SELL"  # assume stop-out (worst case)
+                            actual = "SELL"  
                             is_terminated = True
                             exit_price = sl_price
                             break
@@ -246,7 +240,7 @@ class MemoryBank:
                         hit_tp = low <= tp_price
                         hit_sl = high >= sl_price
                         if hit_tp and hit_sl:
-                            actual = "BUY"  # assume stop-out (worst case)
+                            actual = "BUY"  
                             is_terminated = True
                             exit_price = sl_price
                             break
@@ -261,7 +255,6 @@ class MemoryBank:
                             exit_price = sl_price
                             break
 
-                # Handle Master Timeout (60-minute window cutoff)
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     exit_price = current_price
@@ -273,7 +266,6 @@ class MemoryBank:
                         actual = "HOLD"
 
                 if is_terminated and actual != "HOLD":
-                    # 🛑 FIX: ghost PnL is fee-aware. Deducts a taker round-trip (0.055% x 2)
                     GHOST_LEVERAGE = 10.0
                     TAKER_ROUND_TRIP = 0.0011
                     if prediction == "BUY":
@@ -294,7 +286,7 @@ class MemoryBank:
                 
             if update_batch:
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(update_batch))
-                logger.info(f"<b>📊 GHOST FORENSICS:</b> Traversed and settled {len(update_batch)} predictive ledger paths.")
+                logger.info(f"📊 GHOST FORENSICS: Traversed and settled {len(update_batch)} predictive ledger paths.")
                 
             return resolved_count
 
@@ -304,18 +296,30 @@ class MemoryBank:
 
     def compute_rolling_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Tuple[float, int]:
         """
-        🚀 pillar 2: STABILIZED HORIZON MANAGEMENT
-        Calculates a true rolling moving average accuracy over the fixed sample size.
-        Strictly ignores shadow/background trades to grade the FSM purely on core assets.
+        🚀 pillar 2: ADAPTIVE WARMUP SELECTION
+        Calculates moving average accuracy. Dynamically includes shadow trades if the core 
+        validation pool is cold, allowing the FSM to naturally calibrate and transition.
         """
         try:
-            # 🚀 Force FSM accuracy evaluation to ONLY consider the active core basket pairs.
-            query = (
-                self.supabase.table("quantitative_ledger")
-                .select("is_correct")
-                .eq("resolved", True)
-                .eq("is_shadow", False)
-            )
+            # First, check if any real, non-shadow live trades exist in the database
+            check_query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True).eq("is_shadow", False)
+            if core_basket:
+                check_query = check_query.in_("symbol", core_basket)
+            
+            check_res = self._safe_execute(check_query.limit(5))
+            has_live_history = len(check_res.data) > 0 if check_res else False
+
+            # Build adaptive query
+            query = self.supabase.table("quantitative_ledger").select("is_correct").eq("resolved", True)
+            
+            if has_live_history:
+                # Tighten filter to ONLY grade pure production execution once we are past calibration
+                query = query.eq("is_shadow", False)
+                logger.debug("FSM Mode: Production (Strict Live Attribution Active)")
+            else:
+                # Calibration fallback: allow background shadow data to seed the validation pool
+                logger.debug("FSM Mode: Calibration (Shadow Validation Active)")
+
             if core_basket:
                 query = query.in_("symbol", core_basket)
                 

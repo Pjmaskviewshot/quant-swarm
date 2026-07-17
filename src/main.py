@@ -1121,7 +1121,7 @@ class DistributedQuantEngine:
                             
                             recent_trades_text += f"{outcome_icon} {t.get('symbol')} | {t.get('predicted_direction')} | Ghost PnL: {pnl_val:+.4f}\n"
                     else:
-                        recent_trades_text = "• <i>Waiting for first maturity cycle...</i>\n"
+                        recent_trades_text = "• <i>Waiting for first historical validation cycle...</i>\n"
 
                 except Exception as db_err:
                     logger.error(f"Failed to compile Supabase data for Telegram report: {db_err}")
@@ -1139,38 +1139,48 @@ class DistributedQuantEngine:
                         bias = self.macro_regimes.get(ticker, "HOLD")
                         diagnostic_nodes.append(
                             f"• 📡 <b>{ticker}</b> | Z: <code>{metrics.get('vol_z', 0.0):+.2f}</code> | "
-                            f"Vol: <code>{metrics.get('vol_mult', 1.0):.2f}x</code> | Bias: <code>{bias}</code>"
+                            f"Vol: <code>{metrics.get('vol_mult', 1.0):.2f}x</code> | Bias: ── <b>{bias}</b> ──"
                         )
                 except Exception:
                     diagnostic_nodes = ["• <i>Diagnostic matrix initializing...</i>"]
 
                 diagnostic_block = "\n".join(diagnostic_nodes)
 
+                # 🚀 ADVANCED TELEMETRY V3 PROGRESS math
+                resolved_pool = pool
+                warmup_target = dyn_win
+                filled_bars = min(15, int((resolved_pool / warmup_target) * 15)) if warmup_target > 0 else 0
+                calibration_bar = "█" * filled_bars + "░" * (15 - filled_bars)
+                
+                # Active AI state detection
+                active_provider = "GROQ_LLAMA_3_3_70B"
+                if hasattr(self, 'ai_router') and hasattr(self.ai_router, 'providers') and self.ai_router.providers:
+                    active_provider = getattr(self.ai_router, 'current_provider', "GROQ_LLAMA_3_3_70B")
+
                 report = (
-                    f"📊 <b>PJMASK EMPIRE ADVANCED QUANT PULSE</b>\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 𝗢𝗦</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏱ <b>Engine Run Uptime:</b> <code>{uptime_hours:.2f} Hours</code>\n"
-                    f"🎛 <b>FSM State Gear:</b> <code>{state}</code>\n"
-                    f"🎯 <b>Rolling Edge Accuracy:</b> <code>{acc:.2%}</code>\n"
-                    f"📏 <b>Active Memory Horizon:</b> <code>{dyn_win} Trades Required</code>\n"
-                    f"🏊‍♂️ <b>Database Validation Pool:</b> <code>{pool} Resolved</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💳 <b>Net Wallet Liquidity:</b> <code>{current_vault_balance:.4f} USDT</code>\n"
-                    f"📈 <b>24H Calendar Net Return:</b> <code>{actual_net_pnl:+.4f} USDT</code>\n"
-                    f"📉 <b>Drawdown Profile Status:</b> <code>{drawdown_pct:.2%}</code>\n"
-                    f"🎚 <b>Risk Horizon Bar:</b>\n<code>[{drawdown_bar}]</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔬 <b>DAILY REGIME PROFILE:</b>\n"
-                    f"{regime_breakdown_text}"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔥 <b>LIVE HIGHEST-MOMENTUM MOVERS:</b>\n"
-                    f"{diagnostic_block}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🏁 <b>RECENT SESSION RESOLUTIONS:</b>\n"
+                    f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live • {len(self.shadow_basket)} Shadow</code>\n\n"
+                    f"⚙️ <b>𝗙𝗦𝗠 𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦</b>\n"
+                    f"• Operational State: ── [ <b>{state}</b> ] ──\n"
+                    f"• Warmup Progress:   <code>[{calibration_bar}] {resolved_pool}/{warmup_target} Resolved</code>\n"
+                    f"• Rolling Accuracy:   <code>{acc:.2%}</code>\n\n"
+                    f"🌐 <b>𝗔𝗜 𝗖𝗔𝗦𝗖𝗔𝗗𝗘 𝗧𝗘𝗟𝗘𝗠𝗘𝗧𝗥𝗬</b>\n"
+                    f"• Active Router Path: <code>{active_provider}</code>\n"
+                    f"• Global News Flow:   <i>{self.global_macro_news_cache[:45]}...</i>\n\n"
+                    f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
+                    f"• Total Liquidity: <code>{current_vault_balance:.4f} USDT</code>\n"
+                    f"• Session Return:  <code>{actual_net_pnl:+.4f} USDT</code>\n"
+                    f"• Peak Drawdown:   <code>{drawdown_pct:.2%}</code>\n"
+                    f"• Risk Buffer:     <code>[{drawdown_bar}]</code>\n\n"
+                    f"🔬 <b>𝗗𝗔𝗜𝗟𝗬 𝗥𝗘𝗚𝗜𝗠𝗘 𝗣𝗥𝗢𝗙𝗜𝗟𝗘:</b>\n"
+                    f"{regime_breakdown_text}\n"
+                    f"🔥 <b>𝗛𝗜𝗚𝗛𝗘𝗦𝗧-𝗠𝗢𝗠𝗘𝗡𝗧𝗨𝗠 𝗠𝗢𝗩𝗘𝗥𝗦</b>\n"
+                    f"{diagnostic_block}\n\n"
+                    f"🏁 <b>𝗥𝗘𝗖𝗘𝗡𝗧 𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗠𝗔𝗧𝗨𝗥𝗜𝗧𝗜𝗘𝗦</b>\n"
                     f"{recent_trades_text}"
-                    f"📡 <b>Nodes:</b> <code>{len(self.asset_basket)} Live</code> | <code>{len(self.shadow_basket)} Shadow</code>\n"
-                    f"🧠 <b>AI Core:</b> <code>Hardened NV-KIMI/DeepSeek/Groq Cascade</code>"
                 )
+                
                 report_task = asyncio.create_task(self.telegram.send_html_report(report))
                 self._daemon_registry.add(report_task)
                 report_task.add_done_callback(lambda t: logger.error(f"Telegram crash: {t.exception()}") if t.exception() else None)
