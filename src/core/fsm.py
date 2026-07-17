@@ -49,14 +49,10 @@ class SystemStateMachine:
                 
         # 4. Underperformance / Regime Shift Response
         else:
-            # If the breakout strategy is losing but the market is visibly chopping sideways,
-            # we don't lock down—we deploy the Accumulation/Mean Reversion strategy.
-            if market_regime == "RANGING":
-                self.current_state = TradingState.ACTIVE_MEAN_REVERSION
-            else:
-                # If the market is trending but we are still losing, the logic is compromised.
-                # Trigger a hard safety decoupling lock.
-                self.current_state = TradingState.EMERGENCY_LOCK
+            # 🛑 CRITICAL LOGIC FIX: The FSM must protect capital.
+            # Previously, the bot would stay ACTIVE_MEAN_REVERSION simply because the market was RANGING,
+            # even if rolling accuracy dropped to catastrophic levels. Now, if edge is lost, it locks down unconditionally.
+            self.current_state = TradingState.EMERGENCY_LOCK
 
         if old_state != self.current_state:
             logger.critical(f"STATE TRANSITION DETECTED: {old_state.value} ➡️ {self.current_state.value} | Accuracy: {rolling_accuracy:.2%} | Target: {effective_threshold:.2%} | Regime: {market_regime}")

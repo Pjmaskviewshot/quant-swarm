@@ -32,6 +32,9 @@ class HighVelocityMultiFeed:
         
         # 🛡️ UPGRADE: Timestamp tracker for the Resiliency Watchdog
         self.last_msg_timestamp = time.time()
+        
+        # 🚀 PHASE 2 UPGRADE: Orderbook Sequence Tracker to prevent L2 Cache Corruption
+        self.orderbook_sequences: Dict[str, int] = {}
 
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
@@ -103,8 +106,37 @@ class HighVelocityMultiFeed:
                                 # Route incoming bytes instantly to the correct processing channel thread
                                 if topic.startswith("tickers"):
                                     await self.screener_callback(data)
+                                    
                                 elif topic.startswith("orderbook"):
-                                    await self.orderbook_callback(data)
+                                    symbol = data.get("s")
+                                    u_sequence = data.get("u")
+                                    msg_type = payload.get("type", "delta")
+                                    
+                                    # 🚀 PHASE 2 UPGRADE: L2 Cache Continuity Guard
+                                    # If a packet is dropped by the cloud router, 'u' will be out of sequence.
+                                    if msg_type == "snapshot":
+                                        self.orderbook_sequences[symbol] = u_sequence
+                                    elif msg_type == "delta":
+                                        last_u = self.orderbook_sequences.get(symbol)
+                                        if last_u is not None and u_sequence <= last_u:
+                                            logger.critical(
+                                                f"⚠️ SEQUENCE ANOMALY // {symbol} Orderbook dropped a packet "
+                                                f"(Got u:{u_sequence} <= Last:{last_u}). Forcing hot-reboot to prevent corrupted L2 state."
+                                            )
+                                            # Safely severe the connection to trigger the clean reconnection loop
+                                            await ws.close()
+                                            break
+                                        self.orderbook_sequences[symbol] = u_sequence
+
+                                    # Forward the envelope so the adaptive engine can safely rebuild
+                                    await self.orderbook_callback({
+                                        "s": symbol,
+                                        "b": data.get("b", []),
+                                        "a": data.get("a", []),
+                                        "u": u_sequence,
+                                        "type": msg_type
+                                    })
+                                    
                                 elif topic.startswith("kline"):
                                     # Normalize candle metadata envelope structure for the orchestrator
                                     await self.kline_callback({
@@ -112,6 +144,7 @@ class HighVelocityMultiFeed:
                                         "symbol": topic.split(".")[2],
                                         "candle_data": data[0]
                                     })
+                                    
                                 # 🚀 TFI UPGRADE: Route the live execution prints to the Tape Reader
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]

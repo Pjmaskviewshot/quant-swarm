@@ -28,7 +28,14 @@ CREATE TABLE quantitative_ledger (
     actual_outcome TEXT,
     is_correct BOOLEAN DEFAULT FALSE,
     net_pnl NUMERIC DEFAULT 0.0,
-    slippage_drag NUMERIC DEFAULT 0.0
+    slippage_drag NUMERIC DEFAULT 0.0,
+
+    -- 🚀 NEW v2: true economics attribution (all optional, backward compatible)
+    fees_usdt NUMERIC DEFAULT 0.0,        -- taker/maker fees actually paid
+    funding_usdt NUMERIC DEFAULT 0.0,     -- perpetual funding paid/received
+    leverage NUMERIC DEFAULT 1.0,         -- leverage used on the live leg
+    holding_minutes NUMERIC DEFAULT 0.0,  -- trade duration for expectancy-by-horizon analysis
+    execution_mode TEXT DEFAULT 'GHOST'   -- GHOST | MAKER_PEG | FLASH_STRIKE | RECOVERY
 );
 
 -- 3. Create high-speed indexes for the Telegram reporting queries

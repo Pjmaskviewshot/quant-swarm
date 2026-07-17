@@ -134,15 +134,22 @@ class InstitutionalRiskVault:
         self.active_positions.clear()
         logger.info("💼 PORTFOLIO LEDGER PURGED SATELLITE MATRIX CLEAR.")
 
-    def calculate_dynamic_leverage(self, notional_position_usdt: float, account_balance: float, base_leverage: int = 5, hard_cap: int = 15) -> int:
+    def calculate_dynamic_leverage(self, notional_position_usdt: float, account_balance: float, base_leverage: int = 5, hard_cap: int = 15, sl_distance_pct: float = None) -> int:
         """
         🚀 CENTRALIZED LEVERAGE AUTHORITY
         Dynamically scales leverage required to execute the ideal Kelly fraction while strictly adhering to safety bounds.
-        Contains un-bypassable micro-account scaling rules.
+        Contains un-bypassable micro-account scaling rules and a Liquidation Reality Check.
         """
         if account_balance <= 0 or notional_position_usdt <= 0:
             return 1
             
+        # 🛑 P1-6 FIX: LIQUIDATION REALITY CHECK
+        # Guarantees the leverage applied will never put the liquidation price inside the Stop Loss bracket.
+        if sl_distance_pct and sl_distance_pct > 0:
+            # Force the liquidation price to be at least 1.5x further away than the Stop Loss
+            max_safe_leverage = int(1.0 / (sl_distance_pct * 1.5))
+            hard_cap = min(hard_cap, max_safe_leverage)
+
         # 🛑 MICRO-ACCOUNT SURVIVAL CLAMP
         # A tiny account cannot handle 15x leverage without imminent liquidation risk from standard volatility.
         if account_balance < 10.0:
@@ -156,114 +163,3 @@ class InstitutionalRiskVault:
         
         # Apply institutional safety bounds to prevent liquidation cascades
         return int(min(max(1, calculated_leverage), hard_cap))
-
-    def compute_variance_adjusted_kelly(self, account_balance: float, win_rate: float, win_loss_ratio: float, asset_volatility_atr: float, current_price: float, ai_confidence: float = 0.5, market_regime: str = "TRENDING") -> Dict[str, Any]:
-        """
-        Calculates position sizes using the Kelly Criterion, dynamically adjusting operating limits 
-        to ensure infinite scalability from tiny seed funds up to institutional account tiers.
-        """
-        if self.emergency_circuit_breaker:
-            return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
-
-        if current_price <= 0 or asset_volatility_atr < 0:
-            logger.error("Invalid pricing vectors passed to Kelly optimization module.")
-            return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
-
-        # ====================================================================
-        # 🚀 ADJUSTMENT: ADAPTIVE COMPOUNDING HARVESTER
-        # ====================================================================
-        if account_balance > 50.0:
-            dynamic_baseline = self.peak_balance * 0.85
-            effective_balance = min(account_balance, dynamic_baseline)
-            harvested_yield = max(0.0, account_balance - effective_balance)
-            
-            if harvested_yield > 0:
-                logger.info(
-                    f"💰 DYNAMIC HARVESTING ACTIVE // Total Balance: ${account_balance:.2f} USDT | "
-                    f"Protected Trailing Reserve: ${harvested_yield:.2f} USDT | Active Kelly Compounding Base: ${effective_balance:.2f} USDT"
-                )
-        else:
-            effective_balance = account_balance
-
-        # Standard Kelly Formula: f = p - (q / b)
-        p = max(0.0, min(1.0, win_rate))
-        q = 1.0 - p
-        b = win_loss_ratio
-        
-        raw_kelly = p - (q / b) if b > 0 else 0.0
-        
-        if raw_kelly <= 0:
-            return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
-
-        # --- DYNAMIC CEILING CONFIGURATION ---
-        dynamic_risk_ceiling = self.max_single_risk + (0.13 * ai_confidence)
-        dynamic_risk_ceiling = min(dynamic_risk_ceiling, 0.15)
-
-        # Apply institutional fraction modifier (Quarter-Kelly) along with variance scaling
-        variance_penalty_factor = 1.0 - (asset_volatility_atr / current_price)
-        safe_fraction = raw_kelly * 0.25 * max(0.1, variance_penalty_factor)
-        
-        # Scale sizing fraction directly based on AI context conviction
-        safe_fraction = safe_fraction * (1.0 + max(0.0, ai_confidence))
-        
-        # REGIME-SPECIFIC RISK CONTRACTION
-        if market_regime == "RANGING":
-            safe_fraction = safe_fraction * 0.50
-            dynamic_risk_ceiling = dynamic_risk_ceiling * 0.60
-            logger.debug("🛡️ RANGING REGIME DETECTED: Risk parameters actively compressed.")
-            
-        safe_fraction = min(safe_fraction, dynamic_risk_ceiling)
-        
-        # Calculate market structural distance thresholds
-        stop_loss_distance_ticks = asset_volatility_atr * 2.0
-        risk_per_token_pct = stop_loss_distance_ticks / current_price
-        
-        # Volatility-derived cap to prevent liquidation before your stop loss is triggered
-        max_safe_leverage_by_vol = int(1.0 / max(0.01, risk_per_token_pct))
-        
-        # REGIME-SPECIFIC LEVERAGE CLAMP
-        if market_regime == "RANGING":
-            leverage_cap = min(8, max(2, max_safe_leverage_by_vol))
-        else:
-            leverage_cap = min(15, max(2, max_safe_leverage_by_vol))
-            
-        base_leverage = min(5, leverage_cap)
-        
-        # Target capital deployment
-        margin_allocated = effective_balance * safe_fraction
-        calculated_notional = margin_allocated * base_leverage
-        
-        # --- MICRO-ACCOUNT ADAPTIVE LEVERAGE ENGINE ---
-        if calculated_notional < self.exchange_min_notional:
-            # Check the central authority so micro-accounts are governed securely
-            recommended_leverage = self.calculate_dynamic_leverage(self.exchange_min_notional, effective_balance, base_leverage, leverage_cap)
-            required_margin = self.exchange_min_notional / recommended_leverage
-            required_fraction = required_margin / effective_balance
-            
-            # Safety Check
-            if required_fraction <= dynamic_risk_ceiling and required_margin < (effective_balance * self.max_drawdown_pct):
-                logger.info(
-                    f"🔄 Micro-balance optimization active. Scaling parameters -> "
-                    f"Margin: {required_fraction:.2%} (${required_margin:.2f}) | Leverage: {recommended_leverage}x"
-                )
-                safe_fraction = required_fraction
-                notional_position_usdt = self.exchange_min_notional
-            else:
-                logger.warning(
-                    f"⚠️ Scale-to-minimum rejected: Required risk fraction ({required_fraction:.2%}) "
-                    f"or required margin (${required_margin:.2f}) breaches absolute safety bounds."
-                )
-                return {"approved": False, "size": 0.0, "recommended_leverage": 1, "allocated_value_usdt": 0.0, "target_fraction": 0.0}
-        else:
-            recommended_leverage = self.calculate_dynamic_leverage(calculated_notional, effective_balance, base_leverage, leverage_cap)
-            notional_position_usdt = calculated_notional
-
-        token_quantity = notional_position_usdt / current_price
-
-        return {
-            "approved": True,
-            "target_fraction": safe_fraction,
-            "recommended_leverage": recommended_leverage,
-            "size": round(token_quantity, 4),
-            "allocated_value_usdt": round(notional_position_usdt, 2)
-        }

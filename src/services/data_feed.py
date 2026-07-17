@@ -31,7 +31,10 @@ class AsynchronousDataFeed:
     async def _execute_snapshot(self, session: aiohttp.ClientSession, symbol: str, interval: str) -> Optional[Dict[str, Any]]:
         """Internal execution core for compiling market and narrative arrays."""
         try:
-            market_task = self._get_bybit_klines(session, symbol, interval)
+            # 🛑 P1-5 FIX: Only request a limit of "1" candle instead of "30".
+            # The orchestrator only calls this function to refresh the news cache and 
+            # extract the current price. Fetching 30 candles wasted API rate limits.
+            market_task = self._get_bybit_klines(session, symbol, interval, limit="1")
             news_task = self._get_finnhub_news(session)
             
             klines, news_headlines = await asyncio.gather(market_task, news_task, return_exceptions=True)
@@ -55,13 +58,13 @@ class AsynchronousDataFeed:
             logger.error(f"Systemic ingestion pipeline fault: {e}")
             return None
 
-    async def _get_bybit_klines(self, session: aiohttp.ClientSession, symbol: str, interval: str) -> List[List[str]]:
+    async def _get_bybit_klines(self, session: aiohttp.ClientSession, symbol: str, interval: str, limit: str = "1") -> List[List[str]]:
         """Fetches historical data to build the baseline, with strict error fallbacks."""
         params = {
             "category": "linear",
             "symbol": symbol,
             "interval": interval,
-            "limit": "30"
+            "limit": limit  # Applied the optimized limit parameter
         }
         
         for attempt in range(3):

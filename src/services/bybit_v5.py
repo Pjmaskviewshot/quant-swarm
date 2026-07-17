@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 from pybit.unified_trading import HTTP
 
 logger = logging.getLogger("QUANT_CORE.EXECUTION")
@@ -37,6 +37,9 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+        # Store key for error-scrubbing purposes (P2-5 Fix)
+        self.api_key = api_key
+        
         # Instantiate the official V5 client
         self.client = HTTP(
             testnet=testnet,
@@ -47,12 +50,44 @@ class BybitUnifiedExecutor:
         # 🛡️ UPGRADE: Initialize the global API rate limiter (10 burst, 5 per sec sustained)
         self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
 
+    async def _safe_api_call(self, func, *args, **kwargs) -> Any:
+        """
+        🛡️ UNIFIED API GATEWAY (P1-7 & P2-5 Fix)
+        All exchange interactions pass through here to ensure rate-limiting, 
+        automatic retries on system load errors, and credential scrubbing.
+        """
+        await self.rate_limiter.acquire()
+        
+        for attempt in range(3):
+            try:
+                response = await asyncio.to_thread(func, *args, **kwargs)
+                
+                # Check for Bybit-specific system load codes natively
+                ret_code = response.get("retCode") if isinstance(response, dict) else 0
+                if ret_code in [10006, 10002, 10016]: 
+                    logger.warning(f"⚠️ Bybit System Load (Code: {ret_code}). Backoff...")
+                    await asyncio.sleep(2.0)
+                    continue
+                
+                return response
+                
+            except Exception as e:
+                # 🛑 P2-5 FIX: SECRETS HYGIENE
+                # Scrub API key from any network errors before they hit standard output
+                error_str = str(e)
+                if self.api_key and self.api_key in error_str:
+                    error_str = error_str.replace(self.api_key, "********")
+                    
+                if attempt == 2:
+                    logger.error(f"❌ Bybit API call failed after 3 attempts: {error_str}")
+                    raise Exception(error_str)
+                await asyncio.sleep(1.0)
+
     async def get_wallet_balance_usdt(self) -> float:
         """Fetches available margin balance from the Unified Trading Account."""
         try:
-            await self.rate_limiter.acquire()
-            # Shift synchronous network call to a background thread pool
-            response = await asyncio.to_thread(
+            # Shift synchronous network call to our safe thread pool wrapper
+            response = await self._safe_api_call(
                 self.client.get_wallet_balance,
                 accountType="UNIFIED",
                 coin="USDT"
@@ -64,7 +99,7 @@ class BybitUnifiedExecutor:
                     return float(coin_info.get("walletBalance", 0.0))
             return 0.0
         except Exception as e:
-            logger.error(f"Failed to fetch Bybit wallet balance metrics: {e}")
+            logger.error(f"Failed to fetch Bybit wallet balance metrics.")
             return 0.0
 
     async def adjust_leverage(self, symbol: str, leverage: int) -> bool:
@@ -73,8 +108,7 @@ class BybitUnifiedExecutor:
         Attempts to set leverage, gracefully clamping to exchange maximums if rejected.
         """
         try:
-            await self.rate_limiter.acquire()
-            await asyncio.to_thread(
+            await self._safe_api_call(
                 self.client.set_leverage,
                 category="linear",
                 symbol=symbol,
@@ -96,8 +130,7 @@ class BybitUnifiedExecutor:
             if "110013" in error_msg:
                 try:
                     # 🛑 CRITICAL FIX: Deterministic API Query instead of fragile Regex parsing
-                    await self.rate_limiter.acquire()
-                    info = await asyncio.to_thread(
+                    info = await self._safe_api_call(
                         self.client.get_instruments_info,
                         category="linear",
                         symbol=symbol
@@ -110,8 +143,7 @@ class BybitUnifiedExecutor:
                     logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
                     
                     # Immediately retry the exchange request with the safely capped maximum
-                    await self.rate_limiter.acquire()
-                    await asyncio.to_thread(
+                    await self._safe_api_call(
                         self.client.set_leverage,
                         category="linear",
                         symbol=symbol,
@@ -120,10 +152,10 @@ class BybitUnifiedExecutor:
                     )
                     return True
                 except Exception as fallback_err:
-                    logger.error(f"Leverage auto-clamping failed for {symbol}: {fallback_err}")
+                    logger.error(f"Leverage auto-clamping failed for {symbol}.")
                     return False
                     
-            logger.error(f"❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
+            logger.error(f"❌ Failed to synchronize leverage matrix for {symbol}.")
             return False
 
     async def get_top_volatile_assets(self, limit: int = 15, min_turnover: float = 50_000_000) -> list:
@@ -132,9 +164,8 @@ class BybitUnifiedExecutor:
         Acts as the engine's autonomous global satellite radar.
         """
         try:
-            await self.rate_limiter.acquire()
-            # 1. Fetch 24-hour statistics for all tickers on the exchange via thread pool
-            response = await asyncio.to_thread(
+            # 1. Fetch 24-hour statistics for all tickers on the exchange safely
+            response = await self._safe_api_call(
                 self.client.get_tickers,
                 category="linear"
             )
@@ -178,7 +209,7 @@ class BybitUnifiedExecutor:
             return top_symbols
             
         except Exception as e:
-            logger.error(f"❌ Failed to fetch global market tickers: {e}")
+            logger.error(f"❌ Failed to fetch global market tickers.")
             return []
 
     async def dispatch_market_order(self, symbol: str, direction: str, qty: float, tp: float, sl: float) -> str:
@@ -186,9 +217,8 @@ class BybitUnifiedExecutor:
         side = "Buy" if direction == "BUY" else "Sell"
         
         try:
-            await self.rate_limiter.acquire()
-            # Order payload parameters matching string schemas for the V5 specification
-            order_payload = await asyncio.to_thread(
+            # 🛑 P2-8 FIX: Removed redundant/misleading timeInForce="IOC" on pure Market orders.
+            order_payload = await self._safe_api_call(
                 self.client.place_order,
                 category="linear",
                 symbol=symbol,
@@ -198,7 +228,6 @@ class BybitUnifiedExecutor:
                 takeProfit=str(tp),
                 stopLoss=str(sl),
                 tpslMode="Full",
-                timeInForce="IOC",
                 positionIdx=0  # Fixed: Resolves exchange rejection error 10001
             )
             
@@ -207,7 +236,7 @@ class BybitUnifiedExecutor:
             return order_id
             
         except Exception as e:
-            logger.error(f"Order routing execution failed at exchange interface level: {e}")
+            logger.error(f"Order routing execution failed at exchange interface level.")
             return ""
 
     async def dispatch_limit_order(self, symbol: str, direction: str, qty: float, price: float, tp: float, sl: float) -> str:
@@ -218,8 +247,7 @@ class BybitUnifiedExecutor:
         side = "Buy" if direction == "BUY" else "Sell"
         
         try:
-            await self.rate_limiter.acquire()
-            order_payload = await asyncio.to_thread(
+            order_payload = await self._safe_api_call(
                 self.client.place_order,
                 category="linear",
                 symbol=symbol,
@@ -239,7 +267,7 @@ class BybitUnifiedExecutor:
             return order_id
             
         except Exception as e:
-            logger.error(f"Limit order routing execution failed at exchange interface level: {e}")
+            logger.error(f"Limit order routing execution failed at exchange interface level.")
             return ""
 
     async def check_recent_settlement(self, symbol: str, lookback_seconds: int = 60) -> Dict[str, Any]:
@@ -248,8 +276,7 @@ class BybitUnifiedExecutor:
         Returns formatted trade metrics if a trade closed within the lookback window.
         """
         try:
-            await self.rate_limiter.acquire()
-            response = await asyncio.to_thread(
+            response = await self._safe_api_call(
                 self.client.get_closed_pnl,
                 category="linear",
                 symbol=symbol,
@@ -290,5 +317,5 @@ class BybitUnifiedExecutor:
             return {"closed": False}
             
         except Exception as e:
-            logger.error(f"Failed to pull closed PnL metrics for {symbol}: {e}")
+            logger.error(f"Failed to pull closed PnL metrics for {symbol}.")
             return {"closed": False}

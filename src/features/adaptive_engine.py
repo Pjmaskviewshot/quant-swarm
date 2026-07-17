@@ -19,8 +19,10 @@ class AdaptiveFeatureEngine:
         # 🚀 TFI UPGRADE: Rolling memory for Aggressive Trade Flow Imbalance
         self.tfi_history = deque(maxlen=memory_window_short)
         
-        # Multi-Timeframe micro-aggregates (1m, 5m, 15m)
-        self.timeframes = {"1m": deque(maxlen=100), "5m": deque(maxlen=300), "15m": deque(maxlen=900)}
+        # Multi-Timeframe micro-aggregates (keys match Bybit topic intervals: "1", "5", "15")
+        # 🛑 FIX: previously keyed "1m"/"5m"/"15m" while main.py passes "1"/"5"/"15",
+        # which silently starved regime detection and ATR of all candle data.
+        self.timeframes = {"1": deque(maxlen=100), "5": deque(maxlen=300), "15": deque(maxlen=900)}
         self.long_window = memory_window_long
         
         # 🛡️ State trackers for FSM and execution pipeline
@@ -52,10 +54,11 @@ class AdaptiveFeatureEngine:
         Dynamically scales the lookback window so the bot doesn't fly blind upon boot.
         """
         # 1. Tiered Data Degradation: Use 5m if we have decent data, fallback to 1m, or hard fail.
-        if len(self.timeframes["5m"]) >= 45:
-            candles = list(self.timeframes["5m"])
-        elif len(self.timeframes["1m"]) >= 20:
-            candles = list(self.timeframes["1m"])
+        # 🛑 CRITICAL KEY FIX: Ensure we use the exact string keys ("5" and "1") initialized above.
+        if len(self.timeframes["5"]) >= 45:
+            candles = list(self.timeframes["5"])
+        elif len(self.timeframes["1"]) >= 20:
+            candles = list(self.timeframes["1"])
         else:
             return "RANGING"  # Absolute cold-boot fallback
 
@@ -119,7 +122,6 @@ class AdaptiveFeatureEngine:
 
         try:
             # 🛑 CRITICAL FIX: Initialization Race Condition Failsafe
-            # If the local cache is empty, treat incoming data as an ad-hoc snapshot to prevent zero-division errors
             if not self.local_bids and not self.local_asks and bids and asks:
                 for price_str, size_str in bids:
                     self.local_bids[float(price_str)] = float(size_str)
@@ -145,7 +147,6 @@ class AdaptiveFeatureEngine:
             self._prune_book()
 
             # 2. Sort to find true Top of Book
-            # Bids: Highest price first (Reverse). Asks: Lowest price first.
             sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
             sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
 
@@ -173,7 +174,6 @@ class AdaptiveFeatureEngine:
             self._latest_mid = mid_price
 
             # 4. Compute True Volume-Weighted Order Book Imbalance (OBI)
-            # Sample across true top 5 high-density institutional liquidity tiers
             v_b = sum(s for p, s in sorted_bids[:5])
             v_a = sum(s for p, s in sorted_asks[:5])
             
@@ -181,7 +181,7 @@ class AdaptiveFeatureEngine:
 
             # Update structural historical data vaults
             self.obi_history.append(obi)
-            self.spread_history.append(raw_spread)  # Keep raw spread here to preserve raw volatility flags
+            self.spread_history.append(raw_spread)  
 
             # 🚀 STRUCTURAL UPGRADE: Robust Z-Score Generation using MAD
             obi_z_score = 0.0
@@ -189,7 +189,6 @@ class AdaptiveFeatureEngine:
                 obi_array = np.array(self.obi_history)
                 median = np.median(obi_array)
                 mad = np.median(np.abs(obi_array - median))
-                # Prevent zero-division wrap errors in static markets
                 obi_z_score = (obi - median) / (mad * 1.4826 + 1e-6)
 
             # 5. Machine Learning Feature Matrix Payload Extraction
@@ -214,8 +213,9 @@ class AdaptiveFeatureEngine:
 
     def update_multi_timeframe_candle(self, timeframe: str, open_p: float, high_p: float, low_p: float, close_p: float, volume: float):
         """Injects micro-candle snapshots to maintain multi-timeframe synchronization."""
-        if timeframe in self.timeframes:
-            self.timeframes[timeframe].append({
+        tf_key = str(timeframe).rstrip("m")
+        if tf_key in self.timeframes:
+            self.timeframes[tf_key].append({
                 "open": open_p, "high": high_p, "low": low_p, "close": close_p, "volume": volume
             })
 
@@ -229,7 +229,6 @@ class AdaptiveFeatureEngine:
             
             current_close = candles[-1]["close"]
             historical_close = candles[0]["close"]
-            # Log returning percentage returns across lookback boundaries
             momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / historical_close
             
         return momentum_matrix
@@ -256,10 +255,11 @@ class AdaptiveFeatureEngine:
         Filters out noise by relying on a statistically significant 14-period lookback.
         """
         # Tiered Data Degradation for Volatility
-        if len(self.timeframes["5m"]) >= period + 1:
-            candles = list(self.timeframes["5m"])
-        elif len(self.timeframes["1m"]) >= period + 1:
-            candles = list(self.timeframes["1m"])
+        # 🛑 CRITICAL KEY FIX: Ensure we use the exact string keys ("5" and "1") initialized above.
+        if len(self.timeframes["5"]) >= period + 1:
+            candles = list(self.timeframes["5"])
+        elif len(self.timeframes["1"]) >= period + 1:
+            candles = list(self.timeframes["1"])
         else:
             return 0.0  # Failsafe: Triggers default ATR fallback in main.py
 

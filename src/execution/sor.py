@@ -15,6 +15,43 @@ class SmartOrderRouter:
         # 🧠 DYNAMIC CACHE: Stores Bybit's exact lot limits and step sizes for any coin it encounters
         self.instrument_cache: Dict[str, Dict[str, float]] = {}
 
+    async def _safe_api_call(self, func, *args, **kwargs) -> Any:
+        """
+        🛡️ RATE-LIMIT WRAPPER (P1-7 Fix)
+        Catches HTTP 429 and Bybit RetCode 10006 (Too Many Requests).
+        Prevents the Smart Order Router from breaching Bybit's UID limits during high-volatility swarm chases.
+        """
+        for attempt in range(4):
+            try:
+                response = await asyncio.to_thread(func, *args, **kwargs)
+                
+                # Catch native Bybit API soft-rejections
+                if isinstance(response, dict):
+                    ret_code = response.get("retCode")
+                    if ret_code in [10006, 10002, 10016]:  # 10006=Rate Limit, 10002=System Error, 10016=Server Under Load
+                        sleep_time = 0.5 * (1.5 ** attempt)
+                        logger.warning(f"⚠️ Bybit API Limit/Load (Code: {ret_code}). Throttling SOR for {sleep_time:.2f}s... (Attempt {attempt+1})")
+                        await asyncio.sleep(sleep_time)
+                        continue
+                        
+                return response
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Catch hard network-level rate limits and timeouts
+                if "rate limit" in error_msg or "429" in error_msg or "timeout" in error_msg:
+                    sleep_time = 0.5 * (1.5 ** attempt)
+                    logger.warning(f"⚠️ Bybit Network Rate Limit/Timeout. Throttling SOR for {sleep_time:.2f}s... (Attempt {attempt+1})")
+                    await asyncio.sleep(sleep_time)
+                    continue
+                    
+                if attempt == 3:
+                    logger.error(f"❌ SOR API Call failed permanently after 4 attempts: {e}")
+                    raise e
+                    
+                await asyncio.sleep(0.5)
+        return {}
+
     def _get_precision(self, step_size: float) -> int:
         """Mathematically determines the number of decimal places required for a given step size."""
         if step_size >= 1.0:
@@ -27,8 +64,8 @@ class SmartOrderRouter:
             return
 
         try:
-            # Ping Bybit's V5 instruments endpoint dynamically
-            info = await asyncio.to_thread(
+            # Ping Bybit's V5 instruments endpoint dynamically using safe wrapper
+            info = await self._safe_api_call(
                 self.executor.client.get_instruments_info,
                 category="linear",
                 symbol=symbol
@@ -109,7 +146,7 @@ class SmartOrderRouter:
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         try:
-            response = await asyncio.to_thread(
+            response = await self._safe_api_call(
                 self.executor.client.place_order,
                 category="linear",
                 symbol=symbol,
@@ -150,6 +187,12 @@ class SmartOrderRouter:
         final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
         final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
 
+        # 🛑 CRITICAL FIX: chase anchor. Previously the peg amended to the top of book
+        # forever with no price bound, so a breakout could drag our passive order into a
+        # fill far worse than the signal price (unbounded negative slippage).
+        anchor_price = None
+        max_chase_deviation = 0.0075  # 0.75% max drift from the signal-time top of book
+
         while time.time() - start_time < timeout:
             try:
                 # 🚀 1. ZERO-LATENCY RAM CHECK: Fetch live top of book from memory
@@ -164,8 +207,12 @@ class SmartOrderRouter:
                         await asyncio.sleep(1.5)
                         continue
                 else:
-                    # Fallback to REST only if memory fails
-                    ob_response = await asyncio.to_thread(self.executor.client.get_orderbook, category="linear", symbol=symbol)
+                    # Fallback to REST only if memory fails (now safely rate-limited)
+                    ob_response = await self._safe_api_call(
+                        self.executor.client.get_orderbook, 
+                        category="linear", 
+                        symbol=symbol
+                    )
                     ob_data = ob_response.get("result", {})
                     try:
                         best_bid = float(ob_data.get("b", [[0]])[0][0])
@@ -175,13 +222,23 @@ class SmartOrderRouter:
                         continue
                 
                 target_price = best_bid if direction.upper() == "BUY" else best_ask
-                
+
+                if anchor_price is None:
+                    anchor_price = target_price
+
+                if direction.upper() == "BUY" and target_price > anchor_price * (1 + max_chase_deviation):
+                    logger.warning(f"🏃 CHASE ABORTED // {symbol} ran +{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
+                    break
+                if direction.upper() == "SELL" and target_price < anchor_price * (1 - max_chase_deviation):
+                    logger.warning(f"🏃 CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
+                    break
+
                 cleaned_qty = self._apply_dynamic_exchange_limits(qty, target_price, symbol)
                 final_target_price = self._format_dynamic_price(target_price, symbol)
                 
                 # 2. Place order if we don't have one active
                 if not current_order_id:
-                    place_response = await asyncio.to_thread(
+                    place_response = await self._safe_api_call(
                         self.executor.client.place_order,
                         category="linear", symbol=symbol, side=side, orderType="Limit",
                         qty=str(cleaned_qty), price=str(final_target_price), timeInForce="PostOnly", 
@@ -197,7 +254,7 @@ class SmartOrderRouter:
                 
                 # 3. Assess and Amend Order
                 if current_order_id:
-                    status_response = await asyncio.to_thread(
+                    status_response = await self._safe_api_call(
                         self.executor.client.get_open_orders,
                         category="linear", symbol=symbol, orderId=current_order_id
                     )
@@ -205,7 +262,11 @@ class SmartOrderRouter:
                     
                     if not order_list:
                         # Order is gone from open orders. Check if it became a live position.
-                        pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                        pos_response = await self._safe_api_call(
+                            self.executor.client.get_positions, 
+                            category="linear", 
+                            symbol=symbol
+                        )
                         pos_size = float(pos_response.get("result", {}).get("list", [{}])[0].get("size", 0))
                         if pos_size > 0:
                             logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely at optimal Maker fees.")
@@ -226,7 +287,7 @@ class SmartOrderRouter:
                     elif order_status in ["New", "PartiallyFilled"]:
                         # 4. The Chase: If the book moved away, pull our order and move it to the new top
                         if final_target_price != current_peg_price:
-                            await asyncio.to_thread(
+                            await self._safe_api_call(
                                 self.executor.client.amend_order,
                                 category="linear", symbol=symbol, orderId=current_order_id,
                                 price=str(final_target_price)
@@ -241,7 +302,12 @@ class SmartOrderRouter:
         if current_order_id:
             logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
             try:
-                await asyncio.to_thread(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
+                await self._safe_api_call(
+                    self.executor.client.cancel_order, 
+                    category="linear", 
+                    symbol=symbol, 
+                    orderId=current_order_id
+                )
             except Exception:
                 pass
         return False

@@ -92,6 +92,29 @@ class ResilientAIRouter:
             return raw_text.split("```")[1].split("```")[0].strip()
         return raw_text.strip()
 
+    def _evaluate_deterministic_rules(self, data: Dict[str, Any]) -> str:
+        """
+        🚀 P1-3 FIX: DETERMINISTIC RULES ENGINE
+        Evaluates the clear-cut thresholds instantly to save 5-60s of LLM latency.
+        """
+        z_score = data.get("volatility_z_score", 0.0)
+        tfi = data.get("trade_flow_imbalance", 0.0)
+        
+        # Rule 1: Noise / Flat Market
+        if -2.0 < z_score < 2.0:
+            return "HOLD"
+            
+        # Rule 2: Aggressive Buying
+        if z_score <= -2.40 and tfi > 0.15:
+            return "BUY"
+            
+        # Rule 3: Aggressive Selling
+        if z_score >= 2.40 and tfi < -0.15:
+            return "SELL"
+            
+        # Edge cases (between 2.0 and 2.40) or mixed signals require AI evaluation
+        return "EVALUATE"
+
     async def extract_market_verdict(self, batched_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Orchestrates structured intent extraction via Cascade Matrix.
@@ -100,22 +123,27 @@ class ResilientAIRouter:
         assets_data = batched_payload.get("ASSET_MATRIX", batched_payload)
         
         # ---------------------------------------------------------
-        # 🛑 1. CONDITIONAL PRE-FILTER (Local Math Check)
+        # 🚀 1. P1-3 FIX: DETERMINISTIC FAST-PATH (PRIMARY BIAS)
         # ---------------------------------------------------------
-        is_market_active = False
+        final_verdicts = {}
+        assets_to_evaluate = {}
+        
         for ticker, data in assets_data.items():
             if isinstance(data, dict):
-                z_score = data.get("volatility_z_score", 0.0)
-                # 🛑 ALIGNED WITH LLM PROMPT: Ensure we don't pay for guaranteed HOLDs
-                if abs(z_score) >= 2.0: 
-                    is_market_active = True
-                    break
-        
-        if not is_market_active:
-            logger.info("💤 Local Pre-Filter: Matrix is flat (|Z| < 2.0). Skipping AI matrix to save rate limits.")
-            return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
+                local_verdict = self._evaluate_deterministic_rules(data)
+                if local_verdict != "EVALUATE":
+                    final_verdicts[ticker] = {
+                        "direction": local_verdict, 
+                        "confidence": 0.85 if local_verdict != "HOLD" else 0.0
+                    }
+                else:
+                    assets_to_evaluate[ticker] = data
+                    
+        if not assets_to_evaluate:
+            logger.info(f"⚡ FAST-PATH: All assets resolved deterministically. Bypassing AI Cascade.")
+            return final_verdicts
 
-        logger.info("🚨 Local Pre-Filter: Structural Anomaly Detected. Waking up AI Cascade Matrix...")
+        logger.info(f"🚨 EDGE CASE DETECTED: Routing {len(assets_to_evaluate)} ambiguous assets to AI Cascade Matrix...")
 
         # ---------------------------------------------------------
         # 🛑 2. STATIC SYSTEM PREFIX (Cache Target)
@@ -138,7 +166,9 @@ class ResilientAIRouter:
             "Valid directions are strictly: BUY, SELL, HOLD. Every asset in the payload must have an entry in the response."
         )
 
-        prompt = f"LIVE MARKET DATA BATCH:\n{json.dumps(batched_payload, indent=2)}"
+        eval_payload = batched_payload.copy()
+        eval_payload["ASSET_MATRIX"] = assets_to_evaluate
+        prompt = f"LIVE MARKET DATA BATCH:\n{json.dumps(eval_payload, indent=2)}"
 
         messages = [
             {"role": "system", "content": system_instruction},
@@ -146,7 +176,7 @@ class ResilientAIRouter:
         ]
 
         # ---------------------------------------------------------
-        # 🔄 4. RELENTLESS RETRY CASCADE (Never surrender to rate limits)
+        # 🔄 3. RELENTLESS RETRY CASCADE (Never surrender to rate limits)
         # ---------------------------------------------------------
         MAX_ATTEMPTS = 12 # Will attempt for roughly ~60 seconds before failing
         
@@ -177,7 +207,18 @@ class ResilientAIRouter:
                 
                 raw_content = response.choices[0].message.content
                 cleaned_content = self._clean_json_output(raw_content)
-                return json.loads(cleaned_content)
+                llm_response = json.loads(cleaned_content)
+                
+                # 🛑 P1-3 FIX: Merge LLM response and handle missing keys dynamically
+                for ticker, verdict in llm_response.items():
+                    final_verdicts[ticker] = verdict
+                    
+                for ticker in assets_to_evaluate.keys():
+                    if ticker not in final_verdicts:
+                        logger.warning(f"⚠️ AI missed {ticker} in JSON payload. Defaulting to HOLD.")
+                        final_verdicts[ticker] = {"direction": "HOLD", "confidence": 0.0}
+                        
+                return final_verdicts
                 
             except Exception as e:
                 error_str = self._sanitize_error(str(e).lower())
@@ -196,5 +237,18 @@ class ResilientAIRouter:
                 provider["cooldown_until"] = time.time() + penalty
                 logger.info(f"🔄 Rotating matrix. {provider['name']} placed in penalty box for {penalty}s.")
 
-        logger.critical("🛑 Systemic AI Network Blackout. Exhausted all retries. Executing emergency tactical HOLD.")
-        return {symbol: {"direction": "HOLD", "confidence": 0.0} for symbol in assets_data.keys() if isinstance(assets_data[symbol], dict)}
+        logger.critical("🛑 Systemic AI Network Blackout. Exhausted all retries. Falling back to deterministic volume rules.")
+        
+        # 🛑 P1-3 FIX: Hard Rule Fallback for systemic LLM failures
+        for ticker, data in assets_to_evaluate.items():
+            vol_mult = data.get("volume_multiplier", 1.0)
+            z_score = data.get("volatility_z_score", 0.0)
+            
+            if vol_mult >= 2.0 and z_score <= -2.0:
+                final_verdicts[ticker] = {"direction": "BUY", "confidence": 0.50}
+            elif vol_mult >= 2.0 and z_score >= 2.0:
+                final_verdicts[ticker] = {"direction": "SELL", "confidence": 0.50}
+            else:
+                final_verdicts[ticker] = {"direction": "HOLD", "confidence": 0.0}
+                
+        return final_verdicts

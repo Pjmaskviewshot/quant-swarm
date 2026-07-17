@@ -66,6 +66,7 @@ class MemoryBank:
 
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
+        # 🚀 UPGRADE V2: Map default placeholder values for new forensic tracking metrics
         payload = {
             "signal_id": str(signal_id),
             "timestamp": iso_timestamp,
@@ -80,7 +81,12 @@ class MemoryBank:
             "resolved": False,
             "virtual_sl": sl_price,  
             "virtual_tp": tp_price,  
-            "is_shadow": is_shadow   
+            "is_shadow": is_shadow,
+            "fees_usdt": 0.0,
+            "funding_usdt": 0.0,
+            "leverage": 1.0,
+            "holding_minutes": 0.0,
+            "execution_mode": "GHOST"
         }
 
         try:
@@ -90,10 +96,12 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
 
-    def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str):
+    def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str, execution_details: Dict[str, Any] = None):
         """ Updates a live trade signal with actual financial execution data. """
         is_correct = True if net_pnl > 0 else False
-        
+        if execution_details is None:
+            execution_details = {}
+            
         try:
             response = self._safe_execute(self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)))
             
@@ -105,8 +113,33 @@ class MemoryBank:
                 row["slippage_drag"] = float(slippage)
                 row["is_correct"] = is_correct
                 
+                # 🚀 UPGRADE V2: Extract actual structural fee/funding metrics from live execution parameters
+                row["fees_usdt"] = float(execution_details.get("fees_usdt", 0.0))
+                row["funding_usdt"] = float(execution_details.get("funding_usdt", 0.0))
+                row["leverage"] = float(execution_details.get("leverage", 1.0))
+                row["execution_mode"] = str(execution_details.get("execution_mode", "GHOST")).upper()
+                
+                if "timestamp" in row:
+                    try:
+                        start_dt = self._parse_iso_timestamp(row["timestamp"])
+                        duration = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
+                        row["holding_minutes"] = round(duration, 2)
+                    except Exception:
+                        row["holding_minutes"] = 0.0
+                
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
-                logger.info(f"🎯 ATTRIBUTION MATCHED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f}")
+                
+                # 🛡️ VERIFICATION STEP: Ensure the database physically accepted the upsert
+                verify = self._safe_execute(
+                    self.supabase.table("quantitative_ledger")
+                    .select("resolved")
+                    .eq("signal_id", str(signal_id))
+                )
+                
+                if verify and verify.data and verify.data[0].get("resolved"):
+                    logger.info(f"🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {row['execution_mode']}")
+                else:
+                    logger.error(f"❌ VERIFICATION FAILED: Ledger did not save outcome for signal {signal_id}")
             else:
                 logger.warning(f"⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
         except Exception as e:
@@ -120,13 +153,14 @@ class MemoryBank:
         resolved_count = 0
 
         try:
+            # 🚀 Apply the optimized `assets` batch parameters to save database bandwidth limits
+            query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
+            if assets:
+                query = query.in_("symbol", assets)
+                
             # 🛡️ Limit fetch to 500 rows to protect memory during heavy catch-up syncs
             response = self._safe_execute(
-                self.supabase.table("quantitative_ledger")
-                .select("*")
-                .eq("resolved", False)
-                .order("timestamp", desc=False)
-                .limit(500)
+                query.order("timestamp", desc=False).limit(500)
             )
 
             unresolved_rows = response.data if response else []
@@ -155,6 +189,7 @@ class MemoryBank:
                         row["actual_outcome"] = "TIMEOUT"
                         row["is_correct"] = False
                         row["net_pnl"] = 0.0
+                        row["holding_minutes"] = round(elapsed_minutes, 2)
                         update_batch.append(row)
                         resolved_count += 1
                     continue
@@ -178,33 +213,49 @@ class MemoryBank:
                 is_terminated = False
                 actual = "HOLD"
                 exit_price = entry_price
+                bars_held = 0
 
                 # 🛑 The Time-Traveling Evaluator Patch
                 candles_to_check = max(1, int(elapsed_minutes) + 2) 
                 start_index = max(0, len(closes) - candles_to_check)
 
-                for i in range(start_index, len(closes)):
+                for idx, i in enumerate(range(start_index, len(closes))):
                     high = highs[i]
                     low = lows[i]
-                    
+                    bars_held = idx
+
                     if prediction == "BUY":
-                        if high >= tp_price:
+                        hit_tp = high >= tp_price
+                        hit_sl = low <= sl_price
+                        if hit_tp and hit_sl:
+                            actual = "SELL"  # assume stop-out (worst case)
+                            is_terminated = True
+                            exit_price = sl_price
+                            break
+                        elif hit_tp:
                             actual = "BUY"
                             is_terminated = True
                             exit_price = tp_price
                             break
-                        elif low <= sl_price:
+                        elif hit_sl:
                             actual = "SELL"
                             is_terminated = True
                             exit_price = sl_price
                             break
                     elif prediction == "SELL":
-                        if low <= tp_price:
+                        hit_tp = low <= tp_price
+                        hit_sl = high >= sl_price
+                        if hit_tp and hit_sl:
+                            actual = "BUY"  # assume stop-out (worst case)
+                            is_terminated = True
+                            exit_price = sl_price
+                            break
+                        elif hit_tp:
                             actual = "SELL"
                             is_terminated = True
                             exit_price = tp_price
                             break
-                        elif high >= sl_price:
+                        elif hit_sl:
                             actual = "BUY"
                             is_terminated = True
                             exit_price = sl_price
@@ -222,21 +273,28 @@ class MemoryBank:
                         actual = "HOLD"
 
                 if is_terminated and actual != "HOLD":
+                    # 🛑 FIX: ghost PnL is fee-aware. Deducts a taker round-trip (0.055% x 2)
+                    GHOST_LEVERAGE = 10.0
+                    TAKER_ROUND_TRIP = 0.0011
                     if prediction == "BUY":
-                        net_pnl = ((exit_price - entry_price) / entry_price) * 10.0  
+                        gross_return = (exit_price - entry_price) / entry_price
                     else:
-                        net_pnl = ((entry_price - exit_price) / entry_price) * 10.0
+                        gross_return = (entry_price - exit_price) / entry_price
+                        
+                    net_pnl = (gross_return - TAKER_ROUND_TRIP) * GHOST_LEVERAGE
 
                     row["resolved"] = True
                     row["actual_outcome"] = "WIN" if prediction == actual else "LOSS"
                     row["is_correct"] = (prediction == actual)
                     row["net_pnl"] = float(net_pnl)
+                    row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held)), 2)
+                    row["execution_mode"] = "GHOST"
                     update_batch.append(row)
                     resolved_count += 1
                 
             if update_batch:
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(update_batch))
-                logger.info(f"⚡ KINETIC RESOLUTION CYCLE: Processed {len(update_batch)} forward-looking paths.")
+                logger.info(f"<b>📊 GHOST FORENSICS:</b> Traversed and settled {len(update_batch)} predictive ledger paths.")
                 
             return resolved_count
 
@@ -251,13 +309,18 @@ class MemoryBank:
         Strictly ignores shadow/background trades to grade the FSM purely on core assets.
         """
         try:
-            response = self._safe_execute(
+            # 🚀 Force FSM accuracy evaluation to ONLY consider the active core basket pairs.
+            query = (
                 self.supabase.table("quantitative_ledger")
                 .select("is_correct")
                 .eq("resolved", True)
                 .eq("is_shadow", False)
-                .order("timestamp", desc=True)
-                .limit(window_size)
+            )
+            if core_basket:
+                query = query.in_("symbol", core_basket)
+                
+            response = self._safe_execute(
+                query.order("timestamp", desc=True).limit(window_size)
             )
                 
             results = response.data if response else []

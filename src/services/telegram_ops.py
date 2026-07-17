@@ -9,6 +9,16 @@ class AsyncTelegramReporter:
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{token}/sendMessage"
 
+    def _sanitize_error(self, error_msg: str) -> str:
+        """
+        🛑 P2-5 FIX: SECRETS HYGIENE
+        Scrubs the Telegram bot token from log outputs to prevent aiohttp 
+        exceptions from leaking credentials into plain-text server logs.
+        """
+        if not self.token:
+            return error_msg
+        return error_msg.replace(self.token, "********")
+
     async def log_message(self, text: str, alert_level: str = "INFO"):
         """Fires fully compiled markdown alerts downstream to your mobile instance."""
         if not self.token or not self.chat_id:
@@ -29,9 +39,9 @@ class AsyncTelegramReporter:
                 async with session.post(self.base_url, json=formatted_payload, timeout=4.0) as response:
                     if response.status != 200:
                         raw_err = await response.text()
-                        logger.error(f"Telegram remote rejection payload received: {raw_err}")
+                        logger.error(self._sanitize_error(f"Telegram remote rejection payload received: {raw_err}"))
         except Exception as e:
-            logger.error(f"Unable to cleanly resolve connection context to Telegram API infrastructure: {e}")
+            logger.error(self._sanitize_error(f"Unable to cleanly resolve connection context to Telegram API infrastructure: {e}"))
 
     async def send_html_report(self, html_text: str):
         """Dispatches an explicitly formatted HTML payload to Telegram (used for hourly metrics)."""
@@ -51,6 +61,6 @@ class AsyncTelegramReporter:
                 async with session.post(self.base_url, json=payload, timeout=10.0) as response:
                     if response.status != 200:
                         raw_err = await response.text()
-                        logger.error(f"Telegram API rejected HTML payload: {raw_err}")
+                        logger.error(self._sanitize_error(f"Telegram API rejected HTML payload: {raw_err}"))
         except Exception as e:
-            logger.error(f"Failed to establish connection to Telegram API for HTML report: {e}")
+            logger.error(self._sanitize_error(f"Failed to establish connection to Telegram API for HTML report: {e}"))
