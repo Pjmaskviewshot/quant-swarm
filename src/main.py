@@ -107,7 +107,9 @@ class DistributedQuantEngine:
         self.macro_regimes: Dict[str, str] = {s: "HOLD" for s in self.asset_basket}
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
-        self.last_execution_timestamps: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
+        
+        # 🚀 APEX UPGRADE: Track execution by Volume Buckets, not Chronological Time
+        self.last_execution_buckets: Dict[str, int] = {s: 0 for s in self.asset_basket}
         
         self.volatility_baseline: Dict[str, float] = {}
         self.volatility_window = 100
@@ -140,6 +142,7 @@ class DistributedQuantEngine:
         self.last_news_fetch: float = 0.0
 
         self.global_state_cache = {"last_updated": 0.0}
+        self.node_metrics_cache: Dict[str, Dict[str, Any]] = {}
 
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
         self.ai_router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=os.getenv("DEEPSEEK_API_KEY"))
@@ -274,7 +277,6 @@ class DistributedQuantEngine:
         asks = depth_data.get("a", [])
         is_snapshot = depth_data.get("type") == "snapshot"
         
-        # 🚀 V6 PIPELINE: Just update the feature engine so we have fresh OBI when VPIN spikes.
         self.feature_engines[symbol].push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
@@ -323,7 +325,6 @@ class DistributedQuantEngine:
             history["highs"].append(c_high)
             history["lows"].append(c_low)
             
-            # 🚀 V6 PIPELINE: Feed capital volume into the VPIN Clock
             is_seller_initiated = c_close < c_open 
             
             if symbol not in self.vpin_clocks:
@@ -335,7 +336,6 @@ class DistributedQuantEngine:
                 if manifest.get("valid"):
                     asyncio.create_task(self.evaluate_vpin_anomaly(symbol, manifest))
             
-            # Maintain structural metrics for KNN DNA mapping
             current_raw_atr = self.feature_engines[symbol].get_computed_atr() if hasattr(self.feature_engines[symbol], 'get_computed_atr') else (c_high - c_low)
             if current_raw_atr > 0:
                 history["atr_history"].append(current_raw_atr)
@@ -356,14 +356,14 @@ class DistributedQuantEngine:
         🚀 V6 APEX PIPELINE: Triggered only when the Volume Clock fills a bucket.
         Quarantines noise, fetches KNN Latent DNA, and runs Adversarial Debate.
         """
-        vpin_z = vpin_manifest.get("vpin_z_score", 0.0)
+        vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         
         # Institutional Filter: Ignore anything under 2.0 Standard Deviations
         if abs(vpin_z) < 2.0:
             return
             
-        current_time = time.time()
-        if (current_time - self.last_execution_timestamps.get(symbol, 0)) < 1800:
+        current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
+        if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15:
             return
             
         if symbol in self.active_positions_lock:
@@ -374,7 +374,6 @@ class DistributedQuantEngine:
         try:
             logger.warning(f"🚨 VPIN ANOMALY TRIGGERED // {symbol} Z-Score: {vpin_z} | Compiling structural DNA...")
             
-            # 1. Compile Current Microstructure DNA
             feature_engine = self.feature_engines.get(symbol)
             c_obi = feature_engine.obi_history[-1] if feature_engine and len(feature_engine.obi_history) > 0 else 0.0
             metrics = self.screener_metrics.get(symbol, {})
@@ -384,19 +383,32 @@ class DistributedQuantEngine:
                 "spread_pct": 0.0005 
             }
             
-            # 2. Query the KNN Latent Embedding Engine
             dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
             
-            # 3. Route to Adversarial Debate Matrix
             macro_context = self.global_macro_news_cache
+            
+            # 🚀 APEX UPGRADE: Execution Drift Shield (Latency Arbitrage Guard)
+            debate_start_time = time.time()
             verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, macro_context)
+            debate_latency = time.time() - debate_start_time
             
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
+            # Re-check the live market price *after* the LLM finishes thinking
+            post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
+            price_drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
+            
+            if price_drift_pct > 0.0025:  # 0.25% drift tolerance
+                logger.critical(f"🛡️ EXECUTION DRIFT SHIELD ACTIVATED // {symbol} drifted {price_drift_pct:.2%} during {debate_latency:.2f}s AI computation. Aborting to prevent slippage trap.")
+                self.active_positions_lock.discard(symbol)
+                return
+            
             if action in ["BUY", "SELL"] and confidence >= 0.55:
-                self.last_execution_timestamps[symbol] = current_time
-                await self.run_signal_lifecycle(symbol, action, vpin_manifest["current_price"], confidence, dna_stats)
+                self.last_execution_buckets[symbol] = current_bucket_count
+                
+                # Fire and forget the lifecycle task to prevent blocking the ingestion pipeline
+                asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
             else:
                 logger.info(f"🛑 DEBATE QUARANTINE // Matrix rejected {symbol}. Reason: {verdict.get('reasoning')}")
                 self.active_positions_lock.discard(symbol)
@@ -441,8 +453,10 @@ class DistributedQuantEngine:
 
             new_feature_engines = {}
             new_screener_memory = {}
+            new_last_buckets = {}
             for s in self.asset_basket:
                 new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+                new_last_buckets[s] = self.last_execution_buckets.get(s, 0)
                 cached_history = self.screener_memory.get(s)
                 if not cached_history:
                     new_screener_memory[s] = {"prices": deque(maxlen=150), "highs": deque(maxlen=150), "lows": deque(maxlen=150), "macro_prices": deque(maxlen=48), "volumes": deque(maxlen=150), "atr_history": deque(maxlen=self.volatility_window), "last_update_time": 0.0}
@@ -450,6 +464,7 @@ class DistributedQuantEngine:
 
             self.feature_engines = new_feature_engines
             self.screener_memory = new_screener_memory
+            self.last_execution_buckets = new_last_buckets
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED.")
             self.stream_restart_event.set()
@@ -502,7 +517,6 @@ class DistributedQuantEngine:
             
             if loop_counter % 5 == 0:
                 try:
-                    logger.info("⚡ Executing high-frequency database resolution sweep...")
                     age_cutoff_time = time.time() - 1800 
                     valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
                     
@@ -593,13 +607,13 @@ class DistributedQuantEngine:
                     regime_breakdown_text = "• ⚠️ <i>Supabase ledger context error.</i>\n"
                     recent_trades_text = "• <i>Unavailable</i>\n"
 
-                # 🚀 V6 TELEMETRY: Show Active VPIN Clocks & Matrix History
                 clock_states = []
                 active_clocks = [s for s, c in self.vpin_clocks.items() if len(c.vpin_history) > 0]
                 for sym in active_clocks[:3]:
                     c = self.vpin_clocks[sym]
                     z = c.vpin_history[-1]
-                    clock_states.append(f"• ⏱️ <b>{sym}</b> | Vol-Clock Z: <code>{z:.2f}</code>")
+                    b_count = c.total_buckets_closed
+                    clock_states.append(f"• ⏱️ <b>{sym}</b> | Vol-Clock Z: <code>{z:.2f}</code> | Blks: {b_count}")
                 
                 if not clock_states:
                     clock_states = ["• <i>Volume Buckets filling...</i>"]
@@ -612,6 +626,8 @@ class DistributedQuantEngine:
                 
                 if not debate_string:
                     debate_string = "• <i>Waiting for VPIN anomaly to trigger Matrix...</i>\n"
+                    
+                news_safe = self.global_macro_news_cache[:50].replace("<", "").replace(">", "")
 
                 report = (
                     f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 𝗢𝗦 (V6 APEX)</b>\n"
@@ -622,7 +638,7 @@ class DistributedQuantEngine:
                     f"{debate_string}\n"
                     f"🌐 <b>𝗔𝗜 𝗖𝗔𝗦𝗖𝗔𝗗𝗘 𝗧𝗘𝗟𝗘𝗠𝗘𝗧𝗥𝗬</b>\n"
                     f"• Active Router Path: <code>llama-3.3-70b-versatile</code>\n"
-                    f"• Global News Flow:   <i>{self.global_macro_news_cache[:45]}...</i>\n\n"
+                    f"• Global News Flow:   <i>{news_safe}...</i>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
                     f"• Total Liquidity: <code>{current_vault_balance:.4f} USDT</code>\n"
                     f"• Session Return:  <code>{actual_net_pnl:+.4f} USDT</code>\n"
@@ -639,7 +655,7 @@ class DistributedQuantEngine:
                 report_task = asyncio.create_task(self._safe_telegram_dispatch(report, is_html=True))
                 self._daemon_registry.add(report_task)
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, vpin_z: float = 0.0):
         """
         🚀 V6 APEX: Executes trades fully armed by the Debate Matrix.
         Calculates Kelly Sizing against structural KNN DNA win-rates.
@@ -666,7 +682,11 @@ class DistributedQuantEngine:
             is_armed = dna_stats.get("is_armed", False)
 
             sl_distance = max(atr * 2.0, current_price * 0.02)
-            tp_distance = max(sl_distance * 2.0, current_price * 0.04) 
+            
+            # 🚀 APEX UPGRADE: Kinetic Take-Profit Expansion
+            # Logarithmically stretches the TP target based on the severity of the institutional volume anomaly.
+            kinetic_multiplier = 1.0 + math.log1p(max(0, abs(vpin_z) - 2.0))
+            tp_distance = max(sl_distance * 2.0, current_price * 0.04) * kinetic_multiplier
             
             if direction == "BUY":
                 initial_sl = current_price - sl_distance
@@ -688,8 +708,8 @@ class DistributedQuantEngine:
 
             balance = await self.executor.get_wallet_balance_usdt()
 
-            micro_multiplier = 0.75 if balance < 100.0 else 0.25
-            quarter_kelly = base_kelly * micro_multiplier * 0.25
+            account_scaling = 0.75 if balance < 100.0 else 1.0
+            quarter_kelly = base_kelly * account_scaling * 0.25
 
             if quarter_kelly <= 0.0 or not is_armed:
                 features_dict = {"symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, "liquidity_density_ratio": 1.0, "bid_ask_spread": 0.001, "virtual_sl": initial_sl, "virtual_tp": target_tp}
@@ -721,7 +741,10 @@ class DistributedQuantEngine:
             target_leverage = self.risk_vault.calculate_dynamic_leverage(
                 notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(distance_to_sl / current_price)
             )
+            
+            # 🚀 APEX UPGRADE: Leverage Settlement Buffer (Fixes Auditor Issue #15)
             await self.executor.adjust_leverage(symbol, target_leverage)
+            await asyncio.sleep(0.2) # Allow matching engine to settle the margin requirement internally
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -897,6 +920,15 @@ class DistributedQuantEngine:
 
         except Exception as daemon_error:
             logger.error(f"☠️ FATAL DAEMON CRASH on {symbol}: {daemon_error}")
+            # 🚀 P1 FIX: Emergency Crash Recovery
+            logger.critical(f"🚑 EMERGENCY INTERVENTION // Attempting to flatten {symbol} position to protect capital.")
+            try:
+                flatten_side = "Sell" if direction == "BUY" else "Buy"
+                await asyncio.to_thread(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC")
+                logger.critical(f"✅ EMERGENCY FLATTEN SUCCESSFUL for {symbol}.")
+            except Exception as flatten_e:
+                logger.error(f"❌ EMERGENCY FLATTEN FAILED for {symbol}: {flatten_e}")
+                
         finally:
             self.active_positions_lock.discard(symbol)
             self.risk_vault.update_position_ledger(symbol, 0.0)
@@ -928,7 +960,10 @@ class DistributedQuantEngine:
             self.macro_regimes = {s: "HOLD" for s in self.asset_basket}
             self.macro_confidences = {s: 0.0 for s in self.asset_basket}
             self.current_atrs = {s: 0.0 for s in self.asset_basket}
+            
             self.last_execution_timestamps = {s: 0.0 for s in self.asset_basket}
+            self.last_execution_buckets = {s: 0 for s in self.asset_basket}
+            
             self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0} for s in self.asset_basket}
             self.volatility_baseline = {s: 0.0 for s in self.asset_basket}
             

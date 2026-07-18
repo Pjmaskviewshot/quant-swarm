@@ -25,6 +25,10 @@ class MemoryBank:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}")
             raise
 
+        # 🚀 APEX UPGRADE: High-Speed KNN Cache to prevent Database DDoS
+        self.dna_cache = {} 
+        self.cache_ttl_seconds = 60.0 
+
     def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
         for attempt in range(max_retries):
             try:
@@ -234,13 +238,16 @@ class MemoryBank:
                     actual = "BUY" if current_price > entry_price else "SELL" if current_price < entry_price else "HOLD"
 
                 if is_terminated and actual != "HOLD":
-                    GHOST_LEVERAGE = 10.0
+                    # 🚀 APEX UPGRADE: Dynamic Leverage matching for Ghost Forensics
+                    # Evaluates shadow performance at the exact leverage the Risk Vault would have assigned
+                    simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
                     TAKER_ROUND_TRIP = 0.0011
+                    
                     gross_return = abs(exit_price - entry_price) / entry_price
                     if prediction != actual:
                         gross_return = -gross_return
                         
-                    net_pnl = (gross_return - TAKER_ROUND_TRIP) * GHOST_LEVERAGE
+                    net_pnl = (gross_return - TAKER_ROUND_TRIP) * simulated_leverage
 
                     row["resolved"] = True
                     row["actual_outcome"] = "WIN" if prediction == actual else "LOSS"
@@ -263,11 +270,24 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 THE APEX UPGRADE (V6): Transfer Learning via KNN Latent Embedding.
-        Finds the 'K' most mathematically similar historical setups across the entire 
-        market universe using Euclidean distance, and calculates the Bayesian Edge of that exact profile.
+        🚀 THE APEX UPGRADE (V6): Transfer Learning via KNN Latent Embedding + Local RAM Cache.
         """
+        # 1. Generate a normalized, deterministic structural hash
+        c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
+        c_obi = current_dna.get("z_obi", 0.0)
+        c_spread = current_dna.get("spread_pct", 0.001) * 1000 
+        
+        dna_hash = f"{round(c_vol, 1)}_{round(c_obi, 1)}_{round(c_spread, 4)}"
+        current_time = time.time()
+        
+        # 2. Check Local RAM to prevent Supabase Rate-Limiting during volatility
+        if dna_hash in self.dna_cache:
+            cached_time, cached_result = self.dna_cache[dna_hash]
+            if current_time - cached_time < self.cache_ttl_seconds:
+                return cached_result
+
         try:
+            # 3. Query the live global ledger
             query = self.supabase.table("quantitative_ledger")\
                 .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
                 .eq("resolved", True)\
@@ -279,14 +299,9 @@ class MemoryBank:
             historical_data = response.data if response else []
             
             if len(historical_data) < k_neighbors:
-                return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": len(historical_data)}
-
-            c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
-            c_obi = current_dna.get("z_obi", 0.0)
-            c_spread = current_dna.get("spread_pct", 0.001) * 1000 
+                return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": len(historical_data), "cluster_win_rate": 0.50}
 
             distances = []
-            
             for row in historical_data:
                 h_vol = min(float(row.get("vol_mult", 1.0)), 10.0)
                 h_obi = float(row.get("z_obi", 0.0))
@@ -317,13 +332,17 @@ class MemoryBank:
             # 🏛️ Arming Trigger: Does the AI beat the market on this specific mathematical profile?
             is_armed = bayesian_edge >= 0.55
             
-            return {
+            result_payload = {
                 "bayesian_edge": round(bayesian_edge, 4),
                 "is_armed": is_armed,
                 "matched_samples": total,
                 "cluster_win_rate": round(wins / total, 4)
             }
+            
+            # 4. Save result to high-speed cache
+            self.dna_cache[dna_hash] = (current_time, result_payload)
+            return result_payload
 
         except Exception as e:
             logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}")
-            return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0}
+            return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0, "cluster_win_rate": 0.50}

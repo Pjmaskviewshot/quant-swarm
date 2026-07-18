@@ -1,11 +1,10 @@
 import os
-import time
+import re
 import json
+import time
+import asyncio
 import logging
 import httpx
-import asyncio
-import re
-from datetime import datetime, timezone
 from typing import Dict, Any, List
 from openai import AsyncOpenAI
 
@@ -14,7 +13,7 @@ logger = logging.getLogger("QUANT_CORE.AI_ROUTER")
 class ResilientAIRouter:
     def __init__(self, nv_keys: List[str], deepseek_key: str):
         self.providers = []
-        self.current_provider = "INITIALIZING" # 🚀 Added for V3 Telemetry Dashboard Tracking
+        self.current_provider = "INITIALIZING" 
         
         # 🛡️ HARDENED NETWORK CONFIGURATION FOR CLOUD DEPLOYMENT
         self.custom_http_client = httpx.AsyncClient(
@@ -27,20 +26,20 @@ class ResilientAIRouter:
         groq_key = os.getenv("GROQ_API_KEY")
         if groq_key:
             self.providers.append({
-                "name": "GROQ_LLAMA_3_1_8B",
-                "client": AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key, http_client=self.custom_http_client, max_retries=0),
-                "model": "llama-3.1-8b-instant",
-                "cooldown_until": 0.0,
-                "json_mode": True,
-                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
-            })
-            self.providers.append({
                 "name": "GROQ_LLAMA_3_3_70B",
                 "client": AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key, http_client=self.custom_http_client, max_retries=0),
                 "model": "llama-3.3-70b-versatile",
                 "cooldown_until": 0.0,
                 "json_mode": True,
-                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
+                "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
+            })
+            self.providers.append({
+                "name": "GROQ_LLAMA_3_1_8B",
+                "client": AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key, http_client=self.custom_http_client, max_retries=0),
+                "model": "llama-3.1-8b-instant",
+                "cooldown_until": 0.0,
+                "json_mode": True,
+                "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
             })
 
         # 2. NVIDIA NIM: Running Moonshot Kimi K2.6 (Institutional Heavy-Lifter)
@@ -52,26 +51,24 @@ class ResilientAIRouter:
                     "model": "moonshotai/kimi-k2.6",
                     "cooldown_until": 0.0,
                     "json_mode": False, # 🚀 Bypassed to prevent 400 Bad Request errors on Kimi
-                    # 🚀 CRITICAL FIX: Temperature locked to 0.0 for strict quantitative determinism
-                    "params": {"temperature": 0.0, "top_p": 0.10, "max_tokens": 16384}
+                    "params": {"temperature": 0.1, "top_p": 0.10, "max_tokens": 8192}
                 })
 
         # 3. DEEPSEEK NATIVE: The Paid Last Resort
         if deepseek_key:
             self.providers.append({
-                "name": "DEEPSEEK_V4_FLASH",
+                "name": "DEEPSEEK_NATIVE",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                # 🛑 CRITICAL FIX: Updated to the new model string before the July 24th deprecation
-                "model": "deepseek-v4-flash", 
+                "model": "deepseek-chat", 
                 "cooldown_until": 0.0,
                 "json_mode": True,
-                "params": {"temperature": 0.0, "top_p": 0.95, "max_tokens": 2048}
+                "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
             })
 
         if not self.providers:
             logger.critical("❌ NO AI PROVIDERS CONFIGURED. THE ROUTER IS BLIND.")
         else:
-            logger.info(f"✅ Cascade Matrix initialized with {len(self.providers)} failover nodes (Hardened Network Mode Active)")
+            logger.info(f"✅ Universal Cascade Matrix initialized with {len(self.providers)} failover nodes.")
 
     def _sanitize_error(self, error_str: str) -> str:
         """🚀 SECURITY FIX: Redacts any string that looks like an API key to prevent log leakage."""
@@ -93,86 +90,13 @@ class ResilientAIRouter:
             return raw_text.split("```")[1].split("```")[0].strip()
         return raw_text.strip()
 
-    def _evaluate_deterministic_rules(self, data: Dict[str, Any]) -> str:
+    async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 12.0) -> str:
         """
-        🚀 P1-3 FIX: DETERMINISTIC RULES ENGINE
-        Strictly filters out flat market noise to save API costs. Any anomaly
-        is forcefully routed to the neural cascade for institutional evaluation.
+        🚀 V6 APEX: Universal Inference Engine
+        Replaces the obsolete V5 batched-dictionary system. Now serves as the indestructible 
+        backend for the Adversarial Debate Matrix (Predator/Skeptic/Judge).
         """
-        z_score = data.get("volatility_z_score", 0.0)
-        vol_mult = data.get("volume_multiplier", 1.0)
-        
-        # 🛑 FIX: Any structural volume or volatility anomaly MUST be evaluated by AI
-        if abs(z_score) >= 2.0 or vol_mult >= 1.5:
-            return "EVALUATE"
-            
-        # If the market is completely flat, bypass the AI safely.
-        return "HOLD"
-
-    async def extract_market_verdict(self, batched_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Orchestrates structured intent extraction via Cascade Matrix.
-        Implements Relentless Retries. We do not surrender to rate limits.
-        """
-        assets_data = batched_payload.get("ASSET_MATRIX", batched_payload)
-        
-        # ---------------------------------------------------------
-        # 🚀 1. P1-3 FIX: DETERMINISTIC FAST-PATH (PRIMARY BIAS)
-        # ---------------------------------------------------------
-        final_verdicts = {}
-        assets_to_evaluate = {}
-        
-        for ticker, data in assets_data.items():
-            if isinstance(data, dict):
-                local_verdict = self._evaluate_deterministic_rules(data)
-                if local_verdict != "EVALUATE":
-                    final_verdicts[ticker] = {
-                        "direction": local_verdict, 
-                        "confidence": 0.85 if local_verdict != "HOLD" else 0.0
-                    }
-                else:
-                    assets_to_evaluate[ticker] = data
-                    
-        if not assets_to_evaluate:
-            logger.info(f"⚡ FAST-PATH: All assets resolved deterministically. Bypassing AI Cascade.")
-            return final_verdicts
-
-        logger.info(f"🚨 EDGE CASE DETECTED: Routing {len(assets_to_evaluate)} ambiguous assets to AI Cascade Matrix...")
-
-        # ---------------------------------------------------------
-        # 🛑 2. STATIC SYSTEM PREFIX (Cache Target)
-        # ---------------------------------------------------------
-        system_instruction = (
-            "You are an elite institutional algorithmic execution core operating a Dual-Gate MIEG+TFI architecture.\n"
-            "Your objective is to analyze order book imbalances (obi_z_score), trade flow imbalance (trade_flow_imbalance), and volatility.\n\n"
-            "EXECUTION RULES:\n"
-            "1. If |volatility_z_score| is strictly between -2.0 and 2.0, output HOLD.\n"
-            "2. If volatility_z_score <= -2.40 AND trade_flow_imbalance > 0.15 (aggressive buying), output BUY.\n"
-            "3. If volatility_z_score >= 2.40 AND trade_flow_imbalance < -0.15 (aggressive selling), output SELL.\n"
-            "4. For edge cases between 2.0 and 2.40, evaluate structural volume.\n\n"
-            "You MUST return ONLY a raw, valid JSON dictionary mapping the asset ticker symbol to its verdict. "
-            "Do not include markdown formatting tags, wrapping blocks, or prose.\n"
-            "Format exactly like this example:\n"
-            "{\n"
-            "  \"BTCUSDT\": {\"direction\": \"BUY\", \"confidence\": 0.85},\n"
-            "  \"ETHUSDT\": {\"direction\": \"HOLD\", \"confidence\": 0.00}\n"
-            "}\n"
-            "Valid directions are strictly: BUY, SELL, HOLD. Every asset in the payload must have an entry in the response."
-        )
-
-        eval_payload = batched_payload.copy()
-        eval_payload["ASSET_MATRIX"] = assets_to_evaluate
-        prompt = f"LIVE MARKET DATA BATCH:\n{json.dumps(eval_payload, indent=2)}"
-
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": prompt}
-        ]
-
-        # ---------------------------------------------------------
-        # 🔄 3. RELENTLESS RETRY CASCADE (Never surrender to rate limits)
-        # ---------------------------------------------------------
-        MAX_ATTEMPTS = 12 # Will attempt for roughly ~60 seconds before failing
+        MAX_ATTEMPTS = 10 
         
         for attempt in range(MAX_ATTEMPTS):
             provider = self._get_next_healthy_provider()
@@ -182,48 +106,45 @@ class ResilientAIRouter:
                 await asyncio.sleep(5)
                 continue
 
-            self.current_provider = provider['name'] # 🚀 Updates Telemetry state in real-time
-            logger.info(f"🧠 Routing inference to {provider['name']} [{provider['model']}]...")
+            self.current_provider = provider['name'] 
             
             try:
                 kwargs = {
                     "model": provider["model"],
                     "messages": messages,
-                    "temperature": provider.get("params", {}).get("temperature", 0.0),
+                    "temperature": provider.get("params", {}).get("temperature", 0.1),
                     "top_p": provider.get("params", {}).get("top_p", 0.95),
                     "max_tokens": provider.get("params", {}).get("max_tokens", 2048),
                 }
                 
-                # Apply OpenAI Strict JSON structure only if the model explicitly supports it
-                if provider.get("json_mode", False):
+                # Apply OpenAI Strict JSON structure only if the model explicitly supports it AND it's requested by the Agent
+                if require_json and provider.get("json_mode", False):
                     kwargs["response_format"] = {"type": "json_object"}
 
-                response = await provider["client"].chat.completions.create(**kwargs)
+                response = await asyncio.wait_for(
+                    provider["client"].chat.completions.create(**kwargs),
+                    timeout=timeout
+                )
                 
                 raw_content = response.choices[0].message.content
-                cleaned_content = self._clean_json_output(raw_content)
-                llm_response = json.loads(cleaned_content)
                 
-                # 🛑 P1-3 FIX: Merge LLM response and handle missing keys dynamically
-                for ticker, verdict in llm_response.items():
-                    final_verdicts[ticker] = verdict
+                if require_json and not provider.get("json_mode", False):
+                    # Clean markdown manually for models (like Kimi) that don't support hardware JSON mode
+                    return self._clean_json_output(raw_content)
                     
-                for ticker in assets_to_evaluate.keys():
-                    if ticker not in final_verdicts:
-                        logger.warning(f"⚠️ AI missed {ticker} in JSON payload. Defaulting to HOLD.")
-                        final_verdicts[ticker] = {"direction": "HOLD", "confidence": 0.0}
-                        
-                return final_verdicts
+                return raw_content
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️ {provider['name']} Timed Out after {timeout}s. Penalizing node.")
+                provider["cooldown_until"] = time.time() + 15.0
                 
             except Exception as e:
                 error_str = self._sanitize_error(str(e).lower())
-                logger.warning(f"⚠️ {provider['name']} Failed: {error_str}")
+                logger.warning(f"⚠️ {provider['name']} Inference Failed: {error_str}")
                 
-                # Dynamic Penalty Box Logic
+                # Dynamic Penalty Box Logic based on API failure types
                 if "rate limit" in error_str or "429" in error_str or "413" in error_str:
                     penalty = 30.0
-                elif "timeout" in error_str:
-                    penalty = 15.0
                 elif "connection" in error_str or "network" in error_str:
                     penalty = 20.0
                 else:
@@ -232,18 +153,5 @@ class ResilientAIRouter:
                 provider["cooldown_until"] = time.time() + penalty
                 logger.info(f"🔄 Rotating matrix. {provider['name']} placed in penalty box for {penalty}s.")
 
-        logger.critical("🛑 Systemic AI Network Blackout. Exhausted all retries. Falling back to deterministic volume rules.")
-        
-        # 🛑 P1-3 FIX: Hard Rule Fallback for systemic LLM failures
-        for ticker, data in assets_to_evaluate.items():
-            vol_mult = data.get("volume_multiplier", 1.0)
-            z_score = data.get("volatility_z_score", 0.0)
-            
-            if vol_mult >= 2.0 and z_score <= -2.0:
-                final_verdicts[ticker] = {"direction": "BUY", "confidence": 0.50}
-            elif vol_mult >= 2.0 and z_score >= 2.0:
-                final_verdicts[ticker] = {"direction": "SELL", "confidence": 0.50}
-            else:
-                final_verdicts[ticker] = {"direction": "HOLD", "confidence": 0.0}
-                
-        return final_verdicts
+        logger.critical("🛑 Systemic AI Network Blackout. Exhausted all cascade retries.")
+        return "NODE_FAULT"
