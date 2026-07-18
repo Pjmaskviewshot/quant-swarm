@@ -148,6 +148,10 @@ class DistributedQuantEngine:
         self.active_positions_lock = set()
         self.evaluation_lock = set() 
         
+        # 🚀 APEX UPGRADE: Database Throttling Caches
+        self.dna_cache: Dict[str, dict] = {}
+        self.last_dna_fetch: Dict[str, float] = {}
+        
         self._daemon_registry = weakref.WeakSet()
         self._log_throttle_cache: Dict[str, float] = {}
         
@@ -289,17 +293,15 @@ class DistributedQuantEngine:
             await self._update_global_news_cache()
             
             try:
-                # The LLM assesses Global Market Regime using BTC as the macro proxy
                 verdict = await self.debate_matrix.execute_debate_cycle("BTCUSDT", {"vpin_z_score": 0.0, "current_price": 0.0}, {}, self.global_macro_news_cache)
                 macro_action = verdict.get("action", "HOLD")
                 
-                # Shift the Hawkes Engine baselines based on LLM Sentiment
                 for symbol, engine in self.hawkes_engines.items():
                     if hasattr(engine, 'base_mu'):
                         if macro_action == "BUY":
-                            engine.base_mu = np.array([0.15, 0.05]) # Bias toward Buy cascades
+                            engine.base_mu = np.array([0.15, 0.05])
                         elif macro_action == "SELL":
-                            engine.base_mu = np.array([0.05, 0.15]) # Bias toward Sell cascades
+                            engine.base_mu = np.array([0.05, 0.15])
                         else:
                             engine.base_mu = np.array([0.1, 0.1])
                             
@@ -310,13 +312,16 @@ class DistributedQuantEngine:
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
         """
         ⚡ HFT PIPELINE: O(1) Hawkes Execution
-        Receives real-time public trade ticks and triggers execution instantly if 
-        an algorithmic cascade footprint is detected.
+        Receives real-time public trade ticks and triggers execution instantly.
         """
         symbol = trade_data.get("symbol")
         if not symbol or symbol not in self.asset_basket: return
         
         try:
+            # 🚀 SAFETY FIX: Safe Dictionary Lookup
+            hawkes = self.hawkes_engines.get(symbol)
+            if not hawkes: return
+            
             price = float(trade_data.get("price", 0.0))
             volume = float(trade_data.get("size", 0.0))
             side = str(trade_data.get("side", "")).upper()
@@ -325,9 +330,7 @@ class DistributedQuantEngine:
             ts_raw = float(trade_data.get("timestamp", time.time() * 1000))
             timestamp = ts_raw / 1000.0
             
-            hawkes = self.hawkes_engines[symbol]
             hawkes.apply_tick(timestamp, is_buy, volume)
-            
             delta = hawkes.calculate_imbalance_delta()
             
             # 🚀 EXECUTION TRIGGER: 85% Statistical Probability Imbalance
@@ -350,13 +353,19 @@ class DistributedQuantEngine:
     async def _execute_hawkes_trigger(self, symbol: str, action: str, price: float, current_dna: dict):
         """Bypasses the AI Matrix to execute a Hawkes trigger instantly."""
         try:
-            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+            # 🚀 SAFETY FIX: Use DNA Cache so HFT triggers don't DDoS the database
+            now = time.time()
+            if now - self.last_dna_fetch.get(symbol, 0) > 300:
+                self.dna_cache[symbol] = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+                self.last_dna_fetch[symbol] = now
+                
+            dna_stats = self.dna_cache.get(symbol, {"is_armed": False})
             
             await self.run_signal_lifecycle(
                 symbol=symbol, 
                 direction=action, 
                 current_price=price, 
-                confidence=0.90, # Absolute mathematical confidence
+                confidence=0.90, 
                 dna_stats=dna_stats, 
                 vpin_z=4.0 
             )
@@ -374,15 +383,21 @@ class DistributedQuantEngine:
         # 🚀 APEX UPGRADE: Update Orderbook Microstructure Gate Instantly
         if bids and asks:
             try:
-                best_bid, bid_size = float(bids[0][0]), float(bids[0][1])
-                best_ask, ask_size = float(asks[0][0]), float(asks[0][1])
-                mid_price = (best_bid + best_ask) / 2.0
-                self.edge_gates[symbol].update_orderbook_state(best_bid, bid_size, best_ask, ask_size, mid_price)
+                # 🚀 SAFETY FIX: Ensure edge gate exists
+                gate = self.edge_gates.get(symbol)
+                if gate:
+                    best_bid, bid_size = float(bids[0][0]), float(bids[0][1])
+                    best_ask, ask_size = float(asks[0][0]), float(asks[0][1])
+                    mid_price = (best_bid + best_ask) / 2.0
+                    gate.update_orderbook_state(best_bid, bid_size, best_ask, ask_size, mid_price)
             except Exception as e:
                 pass
 
         is_snapshot = depth_data.get("type") == "snapshot"
-        self.feature_engines[symbol].push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+        
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
 
     async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
@@ -410,10 +425,12 @@ class DistributedQuantEngine:
         c_vol = float(candle.get("volume", 0))
 
         if not candle.get("confirm", False): return
-
-        self.feature_engines[symbol].update_multi_timeframe_candle(
-            timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol
-        )
+        
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.update_multi_timeframe_candle(
+                timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol
+            )
         
         if symbol not in self.screener_memory:
             self.screener_memory[symbol] = {
@@ -435,13 +452,14 @@ class DistributedQuantEngine:
             if symbol not in self.vpin_clocks:
                 self.vpin_clocks[symbol] = VolumeSynchronizedClock(bucket_volume=1_000_000.0)
                 
-            manifests = self.vpin_clocks[symbol].process_tick(c_close, c_vol, is_seller_initiated)
+            clock = self.vpin_clocks.get(symbol)
+            if clock:
+                manifests = clock.process_tick(c_close, c_vol, is_seller_initiated)
+                for manifest in manifests:
+                    if manifest.get("valid"):
+                        asyncio.create_task(self.evaluate_vpin_anomaly(symbol, manifest))
             
-            for manifest in manifests:
-                if manifest.get("valid"):
-                    asyncio.create_task(self.evaluate_vpin_anomaly(symbol, manifest))
-            
-            current_raw_atr = self.feature_engines[symbol].get_computed_atr() if hasattr(self.feature_engines[symbol], 'get_computed_atr') else (c_high - c_low)
+            current_raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else (c_high - c_low)
             if current_raw_atr > 0:
                 history["atr_history"].append(current_raw_atr)
                 if len(history["atr_history"]) >= 20:
@@ -460,18 +478,20 @@ class DistributedQuantEngine:
         """
         🚀 V7 APEX: AI Matrix Completely Removed.
         Structural execution is now governed purely by Microstructure Physics 
-        (Kyle's Lambda & Order Flow Imbalance). Time to execute: < 1ms.
+        (Kyle's Lambda & Order Flow Imbalance). 
         """
+        # 🚀 SAFETY FIX: Ensure clock exists
+        clock = self.vpin_clocks.get(symbol)
+        if not clock: return
+        
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         if abs(vpin_z) < 2.0: return
             
-        current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
+        current_bucket_count = clock.total_buckets_closed
         if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
         
         last_update = self.screener_memory.get(symbol, {}).get("last_update_time", 0.0)
-        if time.time() - last_update > 8.0:
-            logger.warning(f"⏰ STALE DATA REJECTION // {symbol} stream lag ({time.time()-last_update:.2f}s).")
-            return
+        if time.time() - last_update > 8.0: return
             
         if symbol in self.active_positions_lock: return
         if symbol in self.evaluation_lock: return 
@@ -481,7 +501,9 @@ class DistributedQuantEngine:
         
         try:
             feature_engine = self.feature_engines.get(symbol)
-            market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
+            if not feature_engine: return
+            
+            market_regime = feature_engine.detect_market_regime()
             atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
             
             ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
@@ -489,17 +511,26 @@ class DistributedQuantEngine:
             best_ask = float(ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])[0][0])
             spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
             
-            metrics = self.screener_metrics.get(symbol, {})
-            current_dna = {
-                "vol_mult": metrics.get("vol_mult", 1.0), 
-                "z_obi": feature_engine.obi_history[-1] if feature_engine and feature_engine.obi_history else 0.0, 
-                "spread_pct": spread_cost
-            }
-            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+            # 🚀 SAFETY FIX: 5-Minute Database Cache to prevent Rate Limiting
+            now = time.time()
+            if now - self.last_dna_fetch.get(symbol, 0) > 300:
+                metrics = self.screener_metrics.get(symbol, {})
+                current_dna = {
+                    "vol_mult": metrics.get("vol_mult", 1.0), 
+                    "z_obi": feature_engine.obi_history[-1] if feature_engine.obi_history else 0.0, 
+                    "spread_pct": spread_cost
+                }
+                self.dna_cache[symbol] = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+                self.last_dna_fetch[symbol] = now
+                
+            dna_stats = self.dna_cache.get(symbol, {"is_armed": False})
             
-            # 🚀 APEX UPGRADE: Deterministic Mathematical Execution (No LLMs)
+            # 🚀 DETERMINISTIC PHYSICS EXECUTION
+            edge_gate = self.edge_gates.get(symbol)
+            if not edge_gate: return
+            
             debate_start_time = time.time()
-            verdict = self.edge_gates[symbol].evaluate_structural_edge(symbol, vpin_z)
+            verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
             debate_latency = time.time() - debate_start_time
             
             action = verdict.get("action", "HOLD")
@@ -568,14 +599,20 @@ class DistributedQuantEngine:
             new_vpin_clocks = {}
             new_hawkes_engines = {}
             new_edge_gates = {}
+            new_dna_cache = {}
+            new_last_dna = {}
             for s in self.asset_basket:
                 new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=1_000_000.0))
                 new_hawkes_engines[s] = self.hawkes_engines.get(s, BivariateHawkesEngine(calibration_window=500))
                 new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate())
+                new_dna_cache[s] = self.dna_cache.get(s, {})
+                new_last_dna[s] = self.last_dna_fetch.get(s, 0.0)
                 
             self.vpin_clocks = new_vpin_clocks
             self.hawkes_engines = new_hawkes_engines
             self.edge_gates = new_edge_gates
+            self.dna_cache = new_dna_cache
+            self.last_dna_fetch = new_last_dna
 
             new_feature_engines = {}
             new_screener_memory = {}
@@ -760,7 +797,7 @@ class DistributedQuantEngine:
                     f"• Risk Buffer:     <code>[{drawdown_bar}]</code>\n\n"
                     f"🔬 <b>𝗗𝗔𝗜𝗟𝗬 𝗥𝗘𝗚𝗜𝗠𝗘 𝗣𝗥𝗢𝗙𝗜𝗟𝗘:</b>\n"
                     f"{regime_breakdown_text}\n"
-                    f"🔥 <b>𝗔𝗖𝗧𝗜𝗩𝗘 𝗩𝗣𝗜𝗡 𝗩𝗢𝗟𝗨𝗠𝗘 𝗖𝗟𝗢𝗖𝗞𝗦</b>\n"
+                    f"🔥 <b>𝗔𝗖𝗧𝗜𝗩𝗘 𝗩𝗣𝗜𝗡 𝗩𝗢𝗟𝗨𝗠𝗘 𝗖𝗟𝗢Clock</b>\n"
                     f"{chr(10).join(clock_states)}\n\n"
                     f"🏁 <b>𝗥𝗘𝗖𝗘𝗡𝗧 𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗠𝗔𝗧𝗨𝗥𝗜𝗧𝗜𝗘𝗦</b>\n"
                     f"{recent_trades_text}"
