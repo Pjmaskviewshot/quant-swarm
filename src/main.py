@@ -120,6 +120,9 @@ class DistributedQuantEngine:
         self.volatility_baseline: Dict[str, float] = {}
         self.volatility_window = 100
         
+        # 🚀 NEW: Anti-Spam Throttle Log
+        self.last_vpin_eval_time: Dict[str, float] = {}
+        
         self.active_positions_lock = set()
         self.evaluation_lock = set() 
         
@@ -170,6 +173,7 @@ class DistributedQuantEngine:
             if s not in self.last_execution_buckets: self.last_execution_buckets[s] = 0
             if s not in self.volatility_baseline: self.volatility_baseline[s] = 0.0
             if s not in self.ram_dna_cache: self.ram_dna_cache[s] = {"is_armed": True, "win_rate": 0.50}
+            if s not in self.last_vpin_eval_time: self.last_vpin_eval_time[s] = 0.0 # 🚀 Initialize Throttle
 
     def _throttled_log(self, level: str, message: str, category: str = None, throttle_seconds: int = 30):
         current_time = time.time()
@@ -485,13 +489,16 @@ class DistributedQuantEngine:
                 weights = np.exp(np.linspace(-1., 0., len(vol_array[:-1])))
                 weights /= weights.sum()
                 ewm_vol = max(np.sum(vol_array[:-1] * weights), 1.0) 
-                vol_mult = c_vol / ewm_vol
-                
-                self.screener_metrics[symbol] = {"vol_mult": float(vol_mult), "vol_z": 0.0, "smoothed_price": c_close, "hawkes_score": 0.0}
+                self.screener_metrics[symbol] = {"vol_mult": float(c_vol / ewm_vol), "vol_z": 0.0, "smoothed_price": c_close, "hawkes_score": 0.0}
 
     async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         clock = self.vpin_clocks.get(symbol)
         if not clock: return
+        
+        # 🚀 ANTI-SPAM THROTTLE: Stop 10 buckets evaluating in the exact same millisecond
+        now = time.time()
+        if now - self.last_vpin_eval_time.get(symbol, 0.0) < 2.0: return
+        self.last_vpin_eval_time[symbol] = now
         
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         if abs(vpin_z) < 2.0: return
