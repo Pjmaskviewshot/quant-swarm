@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 
 # Core & Feature Modules
 from core.memory import MemoryBank
-from core.hawkes_engine import BivariateHawkesEngine  # 🚀 APEX UPGRADE: Hawkes Math Core
-from core.structural_edge_gate import MicrostructureEdgeGate # 🚀 APEX UPGRADE: Order Flow Physics Gate
+from core.hawkes_engine import BivariateHawkesEngine  
+from core.structural_edge_gate import MicrostructureEdgeGate 
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock
 from portfolio.risk_manager import InstitutionalRiskVault
@@ -120,11 +120,11 @@ class DistributedQuantEngine:
         self.volatility_baseline: Dict[str, float] = {}
         self.volatility_window = 100
         
-        # 🚀 NEW: Anti-Spam Throttle Log
-        self.last_vpin_eval_time: Dict[str, float] = {}
-        
         self.active_positions_lock = set()
         self.evaluation_lock = set() 
+        
+        # 🚀 NEW: Anti-Spam Throttle Log
+        self.last_vpin_eval_time: Dict[str, float] = {}
         
         self._daemon_registry = weakref.WeakSet()
         self._log_throttle_cache: Dict[str, float] = {}
@@ -495,7 +495,7 @@ class DistributedQuantEngine:
         clock = self.vpin_clocks.get(symbol)
         if not clock: return
         
-        # 🚀 ANTI-SPAM THROTTLE: Stop 10 buckets evaluating in the exact same millisecond
+        # 🚀 ANTI-SPAM THROTTLE: Stop buckets evaluating in the exact same millisecond
         now = time.time()
         if now - self.last_vpin_eval_time.get(symbol, 0.0) < 2.0: return
         self.last_vpin_eval_time[symbol] = now
@@ -552,9 +552,12 @@ class DistributedQuantEngine:
             net_alpha = (confidence * (expected_roi - spread_cost)) - drift_pct
             
             if net_alpha < 0.002:
-                logger.critical(
-                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | "
-                    f"Net Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%} | Latency: {debate_latency:.4f}s. Aborting."
+                # 🚀 LOGGING FIX: Uses _throttled_log to stop printing to the terminal every 2 seconds during chop
+                self._throttled_log(
+                    "CRITICAL", 
+                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | Net Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%} | Latency: {debate_latency:.4f}s. Aborting.",
+                    category=f"alpha_decay_{symbol}",
+                    throttle_seconds=15
                 )
                 return
             
@@ -601,8 +604,43 @@ class DistributedQuantEngine:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
                 self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
             
-            # 🚀 SAFELY INITIALIZE MISSING STRUCTURES WITHOUT DELETING RAM
-            self._initialize_symbol_structures(self.asset_basket)
+            # 🚀 MEMORY FIX: Cleanly swaps out old symbols to prevent RAM leaks
+            new_vpin_clocks = {}
+            new_hawkes_engines = {}
+            new_edge_gates = {}
+            new_dna_cache = {}
+            new_last_dna = {}
+            new_last_eval = {}
+            
+            for s in self.asset_basket:
+                new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=1_000_000.0))
+                new_hawkes_engines[s] = self.hawkes_engines.get(s, BivariateHawkesEngine(calibration_window=500))
+                new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate())
+                new_dna_cache[s] = self.ram_dna_cache.get(s, {})
+                new_last_dna[s] = self.last_dna_fetch.get(s, 0.0)
+                new_last_eval[s] = self.last_vpin_eval_time.get(s, 0.0)
+                
+            self.vpin_clocks = new_vpin_clocks
+            self.hawkes_engines = new_hawkes_engines
+            self.edge_gates = new_edge_gates
+            self.ram_dna_cache = new_dna_cache
+            self.last_dna_fetch = new_last_dna
+            self.last_vpin_eval_time = new_last_eval
+
+            new_feature_engines = {}
+            new_screener_memory = {}
+            new_last_buckets = {}
+            for s in self.asset_basket:
+                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+                new_last_buckets[s] = self.last_execution_buckets.get(s, 0)
+                cached_history = self.screener_memory.get(s)
+                if not cached_history:
+                    new_screener_memory[s] = {"prices": deque(maxlen=150), "highs": deque(maxlen=150), "lows": deque(maxlen=150), "macro_prices": deque(maxlen=48), "volumes": deque(maxlen=150), "atr_history": deque(maxlen=self.volatility_window), "last_update_time": 0.0}
+                else: new_screener_memory[s] = cached_history
+
+            self.feature_engines = new_feature_engines
+            self.screener_memory = new_screener_memory
+            self.last_execution_buckets = new_last_buckets
             
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED.")
             self.stream_restart_event.set()
