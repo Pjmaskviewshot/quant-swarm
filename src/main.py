@@ -353,47 +353,51 @@ class DistributedQuantEngine:
 
     async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
-        🚀 V6.2 APEX PIPELINE: Adaptive Alpha-Decay Optimizer
-        Calculates Net Expected Value (EV) in real-time by subtracting volatility-adjusted
-        execution costs (Spread + Drift) from the predicted Alpha window.
+        🚀 V6.3 APEX PIPELINE: Alpha-Decay & Institutional Edge-Gate
+        Calculates Net Alpha = (Confidence * Volatility_Adjusted_ROI) - (Spread + Drift).
+        Ensures execution only occurs if the trade covers its own execution friction.
         """
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         
-        # 1. Structural Filters
+        # 1. Institutional Filters
         if abs(vpin_z) < 2.0: return
             
         current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
         if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
+        
+        # Verify stream freshness (Aborts if data is stale > 2s)
+        last_update = self.screener_memory.get(symbol, {}).get("last_update_time", 0.0)
+        if time.time() - last_update > 2.0:
+            logger.warning(f"⏰ STALE DATA REJECTION // {symbol} stream lag ({time.time()-last_update:.2f}s).")
+            return
             
         if symbol in self.active_positions_lock: return
         self.active_positions_lock.add(symbol)
         
-        # Initialize drift variables to prevent NameError
         drift_pct = 0.0
         
         try:
-            # 2. Gather Context & Dynamic Regime Data
+            # 2. Context Assembly
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
             
-            # Fetch real-time spread (Liquidity Cost)
-            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {}
-            bids = ob_snapshot.get("bids", [[vpin_manifest["current_price"]]])
-            asks = ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])
-            best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
+            # Real-time Liquidity Cost (Spread)
+            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
+            best_bid = float(ob_snapshot.get("bids", [[vpin_manifest["current_price"]]])[0][0])
+            best_ask = float(ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])[0][0])
             spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
             
+            # KNN Latent DNA Lookup
             metrics = self.screener_metrics.get(symbol, {})
             current_dna = {
                 "vol_mult": metrics.get("vol_mult", 1.0), 
                 "z_obi": feature_engine.obi_history[-1] if feature_engine and feature_engine.obi_history else 0.0, 
                 "spread_pct": spread_cost
             }
-            
             dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
             
-            # 3. Debate Logic
+            # 3. Adversarial Debate Matrix
             debate_start_time = time.time()
             verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, self.global_macro_news_cache)
             debate_latency = time.time() - debate_start_time
@@ -401,17 +405,22 @@ class DistributedQuantEngine:
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
-            # 4. 🚀 APEX UPGRADE: Alpha-Decay Logic
+            # 4. 🚀 APEX UPGRADE: Institutional Alpha-Decay Model
             post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
             drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
+            # Volatility-Scaled Alpha: Higher VPIN Z-score = Higher Conviction in the Breakout
+            # Z-score of 2.0 (Threshold) = 1.0x factor. Z-score of 4.0+ = 1.5x factor.
+            z_impact = min(1.5, 1.0 + (max(0, abs(vpin_z) - 2.0) * 0.25))
             regime_multiplier = 2.5 if market_regime == "TRENDING" else 1.2
-            expected_roi = (atr / vpin_manifest["current_price"]) * regime_multiplier
             
-            # Net Alpha = (Confidence * Expected_Edge) - Costs
+            expected_roi = (atr / vpin_manifest["current_price"]) * regime_multiplier * z_impact
+            
+            # Expected Value Equation: [Prob * (Reward - Cost)] - Drift
             net_alpha = (confidence * (expected_roi - spread_cost)) - drift_pct
             
-            if net_alpha < 0.003: # 0.3% Net Edge Floor
+            # Execution Threshold: If Net Alpha < 0.2%, trade is "leaky"
+            if net_alpha < 0.002:
                 logger.critical(
                     f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | "
                     f"Net Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%} | Latency: {debate_latency:.2f}s. Aborting."
@@ -419,7 +428,7 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
             
-            # 5. Execution Trigger
+            # 5. Execution
             if action in ["BUY", "SELL"] and confidence >= 0.55:
                 self.last_execution_buckets[symbol] = current_bucket_count
                 asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
