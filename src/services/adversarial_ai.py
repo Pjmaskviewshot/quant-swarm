@@ -4,18 +4,21 @@ import time
 import asyncio
 import logging
 from typing import Dict, Any
-from groq import AsyncGroq
+from services.ai_router import ResilientAIRouter
 
 logger = logging.getLogger("QUANT_CORE.ADVERSARIAL_AI")
 
 class AdversarialDebateMatrix:
-    def __init__(self):
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            logger.critical("⚠️ Configuration Fault: GROQ_API_KEY missing.")
+    def __init__(self, router_override: ResilientAIRouter = None):
+        # 🚀 APEX UPGRADE: Universal Router Integration
+        # Bypasses hardcoded Groq limits to utilize the full NVIDIA/DeepSeek cascade matrix.
+        if router_override:
+            self.router = router_override
+        else:
+            nv_keys = [os.getenv("NVIDIA_API_KEY_1", ""), os.getenv("NVIDIA_API_KEY_2", "")]
+            deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+            self.router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=deepseek_key)
             
-        self.client = AsyncGroq(api_key=api_key)
-        self.model = "llama-3.3-70b-versatile"
         self.debate_history = [] # Temporal Memory Loopback
 
     def _calibrate_confidence(self, vpin_data: dict, judge_confidence: float, dna_stats: dict) -> float:
@@ -44,36 +47,24 @@ class AdversarialDebateMatrix:
 
     async def _query_agent(self, role_prompt: str, data_context: str, timeout: float = 12.0, require_json: bool = False) -> str:
         """
-        🚀 APEX UPGRADE: Hardware-Level JSON Enforcement
-        Uses Groq's native response_format to guarantee pure JSON outputs for the Judge,
-        eliminating the need for fragile regex stripping.
+        Routes the LLM prompt through the Universal Resilient Router.
+        Automatically handles failovers, rate-limits, and hardware JSON enforcement.
         """
         messages = [
             {"role": "system", "content": role_prompt},
             {"role": "user", "content": data_context}
         ]
         
-        kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.1,  # Ultra-low temperature for strict logical deduction
-            "max_tokens": 400
-        }
-        
-        if require_json:
-            kwargs["response_format"] = {"type": "json_object"}
-
         try:
-            response = await asyncio.wait_for(
-                self.client.chat.completions.create(**kwargs),
+            # Push payload through the failover cascade
+            response_text = await self.router.execute_inference(
+                messages=messages, 
+                require_json=require_json, 
                 timeout=timeout
             )
-            return response.choices[0].message.content
-        except asyncio.TimeoutError:
-            logger.error("⏳ AI Agent Query Timed Out.")
-            return "TIMEOUT"
+            return response_text
         except Exception as e:
-            logger.error(f"❌ AI Agent API Error: {e}")
+            logger.error(f"❌ Cascade Router Exception: {e}")
             return "NODE_FAULT"
 
     def _get_temporal_memory(self, symbol: str) -> str:
@@ -88,7 +79,7 @@ class AdversarialDebateMatrix:
     async def execute_debate_cycle(self, symbol: str, vpin_data: dict, dna_stats: dict, macro_context: str) -> Dict[str, Any]:
         """
         Runs full multi-agent debate layered with KNN neighborhood data, Systemic Context, 
-        and the new VPIN Whale Absorption Metrics.
+        and the VPIN Whale Absorption Metrics.
         """
         vpin_score = vpin_data.get('vpin_score', 0)
         vpin_z = vpin_data.get('vpin_z_score', 0)
@@ -96,7 +87,6 @@ class AdversarialDebateMatrix:
         suggested_dir = vpin_data.get('suggested_direction', 'HOLD')
         price = vpin_data.get('current_price', 0)
         
-        # 🚀 APEX UPGRADE: Extracting new Footprint metrics
         is_absorption = vpin_data.get('is_absorption_anomaly', False)
         avg_trade_size = vpin_data.get('avg_trade_size', 0)
         absorption_str = "CRITICAL ALERT: Hidden Whale Limit Wall absorbing all volume." if is_absorption else "Normal Flow"
@@ -140,7 +130,7 @@ class AdversarialDebateMatrix:
         if skeptic_critique in ["NODE_FAULT", "TIMEOUT"]:
             return self._execute_deterministic_fallback("Skeptic Defect", vpin_data)
 
-        # Phase 3: Judge (Now armed with Native JSON format)
+        # Phase 3: Judge (Routed through Hardware JSON Mode)
         judge_prompt = (
             "You are the Chief Investment Officer. Weigh the Predator's structural expansion thesis against the "
             "Skeptic's risk-quarantine critique. Factor in your Temporal Memory (Past Rulings) to maintain logical consistency. "
@@ -152,15 +142,12 @@ class AdversarialDebateMatrix:
         raw_verdict = await self._query_agent(judge_prompt, debate_log, require_json=True)
 
         try:
-            # No regex stripping required. Groq guarantees pure JSON.
             verdict_json = json.loads(raw_verdict)
             
-            # Calibrate confidence using raw metrics layer
             raw_conf = float(verdict_json.get("confidence", 0.50))
             calibrated_conf = self._calibrate_confidence(vpin_data, raw_conf, dna_stats)
             verdict_json["confidence"] = calibrated_conf
             
-            # Record tracking entry for memory context logs (Keep last 100 total)
             self.debate_history.append({
                 "timestamp": time.time(), "symbol": symbol, "action": verdict_json.get("action"), "vpin": vpin_score
             })
@@ -182,7 +169,6 @@ class AdversarialDebateMatrix:
         vpin_z = vpin_data.get("vpin_z_score", 0.0)
         directional_bias = vpin_data.get("directional_bias", 0.0)
 
-        # If API dies, only trade on extremely obvious systemic imbalances
         if abs(vpin_z) >= 2.5 and abs(directional_bias) >= 0.08 and not vpin_data.get("is_absorption_anomaly"):
             action = "BUY" if directional_bias > 0 else "SELL"
             confidence = min(0.65, abs(vpin_z) / 4.5)
