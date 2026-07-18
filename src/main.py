@@ -353,41 +353,37 @@ class DistributedQuantEngine:
 
     async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
-        🚀 V6 APEX PIPELINE: Alpha-Decay Optimizer
-        Calculates real-time execution edge. Aborts only if the debate latency 
-        destroys the trade's statistical Expected Value (EV), allowing profitable 
-        trades to execute even through slippage.
+        🚀 V6.2 APEX PIPELINE: Adaptive Alpha-Decay Optimizer
+        Calculates Net Expected Value (EV) in real-time by subtracting volatility-adjusted
+        execution costs (Spread + Drift) from the predicted Alpha window.
         """
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         
-        # Institutional Filter: Ignore anything under 2.0 Standard Deviations
-        if abs(vpin_z) < 2.0:
-            return
+        # 1. Structural Filters
+        if abs(vpin_z) < 2.0: return
             
         current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
-        if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15:
-            return
+        if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
             
-        if symbol in self.active_positions_lock:
-            return
-            
+        if symbol in self.active_positions_lock: return
         self.active_positions_lock.add(symbol)
         
         try:
-            logger.warning(f"🚨 VPIN ANOMALY TRIGGERED // {symbol} Z-Score: {vpin_z} | Compiling structural DNA...")
-            
+            # 2. Adaptive Context Assembly
             feature_engine = self.feature_engines.get(symbol)
-            c_obi = feature_engine.obi_history[-1] if feature_engine and len(feature_engine.obi_history) > 0 else 0.0
-            metrics = self.screener_metrics.get(symbol, {})
-            current_dna = {
-                "vol_mult": metrics.get("vol_mult", 1.0),
-                "z_obi": c_obi,
-                "spread_pct": 0.0005 
-            }
+            # Fetch Regime & Volatility Baseline
+            market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
+            atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
             
-            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+            # Fetch Live Spread (Liquidity Cost)
+            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
+            best_bid = float(ob_snapshot.get("bids", [[0,0]])[0][0]) if ob_snapshot.get("bids") else vpin_manifest["current_price"]
+            best_ask = float(ob_snapshot.get("asks", [[0,0]])[0][0]) if ob_snapshot.get("asks") else vpin_manifest["current_price"]
+            spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
             
-            # 1. Start Debate
+            # 3. Debate Matrix
+            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, {"vol_mult": self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0), "z_obi": feature_engine.obi_history[-1] if feature_engine and feature_engine.obi_history else 0.0, "spread_pct": spread_cost}, 30)
+            
             debate_start_time = time.time()
             verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, self.global_macro_news_cache)
             debate_latency = time.time() - debate_start_time
@@ -395,30 +391,29 @@ class DistributedQuantEngine:
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
-            # 2. 🚀 APEX UPGRADE: ALPHA-DECAY OPTIMIZER
-            # If the AI Debate took too long, the trade edge has decayed. 
-            # We calculate: (Confidence * Expected_ROI) - Drift_Cost
+            # 4. 🚀 APEX UPGRADE: Adaptive Alpha-Decay Equation
             post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
-            drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
+            drift_cost = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
-            # Estimated profit window (2% target)
-            expected_roi = 0.02 
-            # Calculate remaining alpha: [Target - Drift Cost] * Success Probability
-            realized_alpha = (expected_roi - drift_pct) * confidence
+            # Adaptive Target: Trending markets capture larger moves (2.5x ATR), Ranging markets scalp tighter (1.2x ATR)
+            regime_multiplier = 2.5 if market_regime == "TRENDING" else 1.2
+            expected_roi = (atr / vpin_manifest["current_price"]) * regime_multiplier
             
-            # If remaining alpha is < 0.3%, the trade is mathematically "leaky" (Net cost/risk too high)
-            if realized_alpha < 0.003: 
+            # Formula: Net Alpha = (Probability * Potential) - Friction
+            net_alpha = (confidence * (expected_roi - spread_cost)) - drift_cost
+            
+            # Threshold: Reject "leaky" trades where execution costs/drift consume the edge
+            if net_alpha < 0.003: # 0.3% Net Edge Floor
                 logger.critical(
-                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} realized_alpha ({realized_alpha:.2%}) "
-                    f"too low after {debate_latency:.2f}s debate. Drift: {drift_pct:.2%}. Aborting."
+                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | Net Alpha: {net_alpha:.2%} | "
+                    f"Drift: {drift_pct:.2%} | Spread Cost: {spread_cost:.2%} | Aborting."
                 )
                 self.active_positions_lock.discard(symbol)
                 return
             
+            # 5. Execution Trigger
             if action in ["BUY", "SELL"] and confidence >= 0.55:
                 self.last_execution_buckets[symbol] = current_bucket_count
-                
-                # Fire and forget the lifecycle task to prevent blocking the ingestion pipeline
                 asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
             else:
                 logger.info(f"🛑 DEBATE QUARANTINE // Matrix rejected {symbol}. Reason: {verdict.get('reasoning')}")
