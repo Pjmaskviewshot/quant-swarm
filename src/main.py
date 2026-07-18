@@ -368,22 +368,32 @@ class DistributedQuantEngine:
         if symbol in self.active_positions_lock: return
         self.active_positions_lock.add(symbol)
         
+        # Initialize drift variables to prevent NameError
+        drift_pct = 0.0
+        
         try:
-            # 2. Adaptive Context Assembly
+            # 2. Gather Context & Dynamic Regime Data
             feature_engine = self.feature_engines.get(symbol)
-            # Fetch Regime & Volatility Baseline
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
             
-            # Fetch Live Spread (Liquidity Cost)
-            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
-            best_bid = float(ob_snapshot.get("bids", [[0,0]])[0][0]) if ob_snapshot.get("bids") else vpin_manifest["current_price"]
-            best_ask = float(ob_snapshot.get("asks", [[0,0]])[0][0]) if ob_snapshot.get("asks") else vpin_manifest["current_price"]
+            # Fetch real-time spread (Liquidity Cost)
+            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {}
+            bids = ob_snapshot.get("bids", [[vpin_manifest["current_price"]]])
+            asks = ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])
+            best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
             spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
             
-            # 3. Debate Matrix
-            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, {"vol_mult": self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0), "z_obi": feature_engine.obi_history[-1] if feature_engine and feature_engine.obi_history else 0.0, "spread_pct": spread_cost}, 30)
+            metrics = self.screener_metrics.get(symbol, {})
+            current_dna = {
+                "vol_mult": metrics.get("vol_mult", 1.0), 
+                "z_obi": feature_engine.obi_history[-1] if feature_engine and feature_engine.obi_history else 0.0, 
+                "spread_pct": spread_cost
+            }
             
+            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+            
+            # 3. Debate Logic
             debate_start_time = time.time()
             verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, self.global_macro_news_cache)
             debate_latency = time.time() - debate_start_time
@@ -391,22 +401,20 @@ class DistributedQuantEngine:
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
-            # 4. 🚀 APEX UPGRADE: Adaptive Alpha-Decay Equation
+            # 4. 🚀 APEX UPGRADE: Alpha-Decay Logic
             post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
-            drift_cost = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
+            drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
-            # Adaptive Target: Trending markets capture larger moves (2.5x ATR), Ranging markets scalp tighter (1.2x ATR)
             regime_multiplier = 2.5 if market_regime == "TRENDING" else 1.2
             expected_roi = (atr / vpin_manifest["current_price"]) * regime_multiplier
             
-            # Formula: Net Alpha = (Probability * Potential) - Friction
-            net_alpha = (confidence * (expected_roi - spread_cost)) - drift_cost
+            # Net Alpha = (Confidence * Expected_Edge) - Costs
+            net_alpha = (confidence * (expected_roi - spread_cost)) - drift_pct
             
-            # Threshold: Reject "leaky" trades where execution costs/drift consume the edge
             if net_alpha < 0.003: # 0.3% Net Edge Floor
                 logger.critical(
-                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | Net Alpha: {net_alpha:.2%} | "
-                    f"Drift: {drift_pct:.2%} | Spread Cost: {spread_cost:.2%} | Aborting."
+                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | "
+                    f"Net Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%} | Latency: {debate_latency:.2f}s. Aborting."
                 )
                 self.active_positions_lock.discard(symbol)
                 return
