@@ -14,9 +14,10 @@ class ResilientAIRouter:
         self.providers = []
         self.current_provider = "INITIALIZING" 
         
-        # 🛡️ HARDENED NETWORK CONFIGURATION (Increased limits to prevent Event Loop Choke)
+        # 🛡️ HARDENED NETWORK CONFIGURATION 
+        # Upgraded to 90s to accommodate DeepSeek V4 Flash Chain-of-Thought reasoning
         self.custom_http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(90.0, connect=10.0),
             http2=False,  
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50) 
         )
@@ -108,7 +109,8 @@ class ResilientAIRouter:
             return raw_text.split("```")[1].split("```")[0].strip()
         return raw_text.strip()
 
-    async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 15.0) -> str:
+    # 🚀 APEX UPGRADE: Increased default execution timeout from 15.0 to 60.0 seconds
+    async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 60.0) -> str:
         # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks
         MAX_ATTEMPTS = 4 
         
@@ -148,7 +150,8 @@ class ResilientAIRouter:
                 # 🚀 APEX UPGRADE: Capture DeepSeek's internal reasoning chain (CoT)
                 reasoning = getattr(msg_obj, "reasoning", None) or getattr(msg_obj, "reasoning_content", None)
                 if reasoning:
-                    logger.debug(f"🧠 {provider['name']} Deep-Thought Logic: {reasoning[:150]}...")
+                    logger.info(f"🧠 {provider['name']} Deep-Thought Logic Completed successfully.")
+                    logger.debug(f"Reasoning Trace: {reasoning[:150]}...")
                 
                 raw_content = msg_obj.content
                 
