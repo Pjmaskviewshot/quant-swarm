@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import logging
 import numpy as np
 from datetime import datetime, timezone
@@ -260,71 +261,69 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
             return 0
 
-    def compute_decentralized_node_accuracy(self, window_size: int = 150, core_basket: List[str] = None) -> Dict[str, Dict[str, Any]]:
+    def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V5 UPGRADE: REGIME-ISOLATED BAYESIAN GRADING
-        Calculates independent track records for TRENDING vs RANGING markets.
-        Requires a strict 30 trades per regime to arm, preventing small-sample liquidation flukes.
+        🚀 THE APEX UPGRADE (V6): Transfer Learning via KNN Latent Embedding.
+        Finds the 'K' most mathematically similar historical setups across the entire 
+        market universe using Euclidean distance, and calculates the Bayesian Edge of that exact profile.
         """
-        node_metrics = {
-            sym: {
-                "TRENDING": {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False},
-                "RANGING": {"raw_accuracy": 0.50, "bayesian_edge": 0.50, "trades": 0, "is_armed": False}
-            } 
-            for sym in (core_basket or [])
-        }
-        
         try:
-            # 🛑 NOISE QUARANTINE ACTIVE
             query = self.supabase.table("quantitative_ledger")\
-                .select("symbol, is_correct, market_regime")\
+                .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
                 .eq("resolved", True)\
-                .neq("market_regime", "SHADOW_SIM")
+                .neq("market_regime", "SHADOW_SIM")\
+                .order("timestamp", desc=True)\
+                .limit(2000)
                 
-            if core_basket:
-                query = query.in_("symbol", core_basket)
-                
-            response = self._safe_execute(query.order("timestamp", desc=True).limit(5000))
-            results = response.data if response else []
+            response = self._safe_execute(query)
+            historical_data = response.data if response else []
             
-            # Split history strictly by Regime Matrix
-            history_map = {}
-            for row in results:
-                sym = row.get("symbol")
-                regime = row.get("market_regime", "UNKNOWN")
+            if len(historical_data) < k_neighbors:
+                return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": len(historical_data)}
+
+            c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
+            c_obi = current_dna.get("z_obi", 0.0)
+            c_spread = current_dna.get("spread_pct", 0.001) * 1000 
+
+            distances = []
+            
+            for row in historical_data:
+                h_vol = min(float(row.get("vol_mult", 1.0)), 10.0)
+                h_obi = float(row.get("z_obi", 0.0))
+                h_price = float(row.get("price_at_prediction", 1.0))
+                h_spread_raw = float(row.get("spread", 0.0))
+                h_spread_pct = (h_spread_raw / h_price) * 1000 if h_price > 0 else 0.001
                 
-                if regime not in ["TRENDING", "RANGING"]:
-                    continue
-                    
-                if sym not in history_map:
-                    history_map[sym] = {"TRENDING": [], "RANGING": []}
-                    
-                history_map[sym][regime].append(1.0 if row.get("is_correct") is True else 0.0)
+                # Weighted Euclidean Distance (Prioritizing OBI and Volume bursts)
+                dist = math.sqrt(
+                    (1.5 * (c_vol - h_vol))**2 + 
+                    (2.0 * (c_obi - h_obi))**2 + 
+                    (1.0 * (c_spread - h_spread_pct))**2
+                )
                 
-            for sym, regimes in history_map.items():
-                for regime, history in regimes.items():
-                    recent_history = history[:window_size]
-                    total_trades = len(recent_history)
-                    wins = sum(recent_history)
-                    
-                    if total_trades > 0:
-                        raw_acc = wins / total_trades
-                        # 🧠 Laplace Smoothing
-                        bayesian_edge = (wins + 2.0) / (total_trades + 4.0)
-                        
-                        # 🚀 THE INSTITUTIONAL TRIGGER: 30 trades required per regime
-                        is_armed = (total_trades >= 30) and (bayesian_edge >= 0.55)
-                        
-                        if sym in node_metrics:
-                            node_metrics[sym][regime] = {
-                                "raw_accuracy": round(raw_acc, 4),
-                                "bayesian_edge": round(bayesian_edge, 4),
-                                "trades": total_trades,
-                                "is_armed": is_armed
-                            }
-                    
-            return node_metrics
+                distances.append({
+                    "distance": dist,
+                    "is_correct": 1.0 if row.get("is_correct") is True else 0.0
+                })
+
+            distances.sort(key=lambda x: x["distance"])
+            nearest_neighbors = distances[:k_neighbors]
+            
+            wins = sum(n["is_correct"] for n in nearest_neighbors)
+            total = len(nearest_neighbors)
+            
+            bayesian_edge = (wins + 2.0) / (total + 4.0)
+            
+            # 🏛️ Arming Trigger: Does the AI beat the market on this specific mathematical profile?
+            is_armed = bayesian_edge >= 0.55
+            
+            return {
+                "bayesian_edge": round(bayesian_edge, 4),
+                "is_armed": is_armed,
+                "matched_samples": total,
+                "cluster_win_rate": round(wins / total, 4)
+            }
 
         except Exception as e:
-            logger.error(f"❌ REGIME-ISOLATED HORIZON EVALUATION EXCEPTION: {e}")
-            return node_metrics
+            logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}")
+            return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0}
