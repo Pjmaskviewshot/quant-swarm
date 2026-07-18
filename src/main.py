@@ -351,10 +351,12 @@ class DistributedQuantEngine:
                 
                 self.screener_metrics[symbol] = {"vol_mult": float(vol_mult), "vol_z": 0.0, "smoothed_price": c_close, "hawkes_score": 0.0}
 
-    async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
+async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
-        🚀 V6 APEX PIPELINE: Triggered only when the Volume Clock fills a bucket.
-        Quarantines noise, fetches KNN Latent DNA, and runs Adversarial Debate.
+        🚀 V6 APEX PIPELINE: Alpha-Decay Optimizer
+        Calculates real-time execution edge. Aborts only if the debate latency 
+        destroys the trade's statistical Expected Value (EV), allowing profitable 
+        trades to execute even through slippage.
         """
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         
@@ -385,22 +387,31 @@ class DistributedQuantEngine:
             
             dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
             
-            macro_context = self.global_macro_news_cache
-            
-            # 🚀 APEX UPGRADE: Execution Drift Shield (Latency Arbitrage Guard)
+            # 1. Start Debate
             debate_start_time = time.time()
-            verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, macro_context)
+            verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, self.global_macro_news_cache)
             debate_latency = time.time() - debate_start_time
             
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
-            # Re-check the live market price *after* the LLM finishes thinking
+            # 2. 🚀 APEX UPGRADE: ALPHA-DECAY OPTIMIZER
+            # If the AI Debate took too long, the trade edge has decayed. 
+            # We calculate: (Confidence * Expected_ROI) - Drift_Cost
             post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
-            price_drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
+            drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
-            if price_drift_pct > 0.0025:  # 0.25% drift tolerance
-                logger.critical(f"🛡️ EXECUTION DRIFT SHIELD ACTIVATED // {symbol} drifted {price_drift_pct:.2%} during {debate_latency:.2f}s AI computation. Aborting to prevent slippage trap.")
+            # Estimated profit window (2% target)
+            expected_roi = 0.02 
+            # Calculate remaining alpha: [Target - Drift Cost] * Success Probability
+            realized_alpha = (expected_roi - drift_pct) * confidence
+            
+            # If remaining alpha is < 0.3%, the trade is mathematically "leaky" (Net cost/risk too high)
+            if realized_alpha < 0.003: 
+                logger.critical(
+                    f"🛡️ ALPHA DECAY ACTIVATED // {symbol} realized_alpha ({realized_alpha:.2%}) "
+                    f"too low after {debate_latency:.2f}s debate. Drift: {drift_pct:.2%}. Aborting."
+                )
                 self.active_positions_lock.discard(symbol)
                 return
             
