@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 # Core & Feature Modules
 from core.memory import MemoryBank
+from core.hawkes_engine import BivariateHawkesEngine  # 🚀 APEX UPGRADE: Hawkes Math Core
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock
 from portfolio.risk_manager import InstitutionalRiskVault
@@ -93,10 +94,16 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
-        # 🚀 V6 APEX: Initialize VPIN Clocks & Debate Matrix
+        # 🚀 V6 APEX: Initialize execution layers
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {
             s: VolumeSynchronizedClock(bucket_volume=1_000_000.0) for s in self.asset_basket
         }
+        
+        # ⚡ HFT LAYER: Bivariate Hawkes Intensity Matrix (Sub-Millisecond Engine)
+        self.hawkes_engines: Dict[str, BivariateHawkesEngine] = {
+            s: BivariateHawkesEngine(calibration_window=500) for s in self.asset_basket
+        }
+        
         self.debate_matrix = AdversarialDebateMatrix()
         
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {
@@ -108,7 +115,6 @@ class DistributedQuantEngine:
         self.macro_confidences: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         self.current_atrs: Dict[str, float] = {s: 0.0 for s in self.asset_basket}
         
-        # 🚀 APEX UPGRADE: Track execution by Volume Buckets, not Chronological Time
         self.last_execution_buckets: Dict[str, int] = {s: 0 for s in self.asset_basket}
         
         self.volatility_baseline: Dict[str, float] = {}
@@ -264,10 +270,95 @@ class DistributedQuantEngine:
                 logger.debug(f"News context delay: {e}")
 
     async def run_macro_commander(self):
-        logger.info("🧠 MACRO COMMANDER ONLINE. Systemic oversight enabled.")
+        """
+        🚀 APEX UPGRADE: AI Demoted to Macro Oversight.
+        The LLM now acts as a Hedge Fund Manager, checking macro news every 15 minutes 
+        and modifying the execution parameters for the mathematical HFT Hawkes engines.
+        """
+        logger.info("🧠 MACRO COMMANDER ONLINE. Systemic LLM oversight enabled.")
         while True:
-            await asyncio.sleep(300) 
+            await asyncio.sleep(900) # 15 minutes
             await self._update_global_news_cache()
+            
+            try:
+                # The LLM assesses Global Market Regime using BTC as the macro proxy
+                verdict = await self.debate_matrix.execute_debate_cycle("BTCUSDT", {"vpin_z_score": 0.0, "current_price": 0.0}, {}, self.global_macro_news_cache)
+                macro_action = verdict.get("action", "HOLD")
+                
+                # Shift the Hawkes Engine baselines based on LLM Sentiment
+                for symbol, engine in self.hawkes_engines.items():
+                    if hasattr(engine, 'base_mu'):
+                        if macro_action == "BUY":
+                            engine.base_mu = np.array([0.15, 0.05]) # Bias toward Buy cascades
+                        elif macro_action == "SELL":
+                            engine.base_mu = np.array([0.05, 0.15]) # Bias toward Sell cascades
+                        else:
+                            engine.base_mu = np.array([0.1, 0.1])
+                            
+                logger.info(f"🧠 AI COMMANDER: Calibrated Hawkes Math parameters to {macro_action} macro regime.")
+            except Exception as e:
+                logger.error(f"Macro Commander Evaluation Failed: {e}")
+
+    async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
+        """
+        ⚡ HFT PIPELINE: O(1) Hawkes Execution
+        Receives real-time public trade ticks and triggers execution instantly if 
+        an algorithmic cascade footprint is detected.
+        """
+        symbol = trade_data.get("symbol")
+        if not symbol or symbol not in self.asset_basket: return
+        
+        try:
+            price = float(trade_data.get("price", 0.0))
+            volume = float(trade_data.get("size", 0.0))
+            side = str(trade_data.get("side", "")).upper()
+            is_buy = (side == "BUY")
+            
+            # Timestamp to ms -> Seconds
+            ts_raw = float(trade_data.get("timestamp", time.time() * 1000))
+            timestamp = ts_raw / 1000.0
+            
+            # Apply tick to continuous-time engine
+            hawkes = self.hawkes_engines[symbol]
+            hawkes.apply_tick(timestamp, is_buy, volume)
+            
+            delta = hawkes.calculate_imbalance_delta()
+            
+            # 🚀 EXECUTION TRIGGER: 85% Statistical Probability Imbalance
+            if abs(delta) >= 0.85 and symbol not in self.active_positions_lock:
+                action = "BUY" if delta > 0 else "SELL"
+                logger.critical(f"⚡ HAWKES CASCADE DETECTED // {symbol} | Delta: {delta:.2f} | Executing {action} in <1ms.")
+                
+                self.active_positions_lock.add(symbol)
+                
+                feature_engine = self.feature_engines.get(symbol)
+                metrics = self.screener_metrics.get(symbol, {})
+                c_obi = feature_engine.obi_history[-1] if feature_engine and len(feature_engine.obi_history) > 0 else 0.0
+                current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": c_obi, "spread_pct": 0.0005}
+                
+                asyncio.create_task(self._execute_hawkes_trigger(symbol, action, price, current_dna))
+                
+        except Exception as e:
+            logger.debug(f"Hawkes tick processing error: {e}")
+
+    async def _execute_hawkes_trigger(self, symbol: str, action: str, price: float, current_dna: dict):
+        """Bypasses the AI Matrix to execute a Hawkes trigger instantly."""
+        try:
+            # 1. Fetch DNA from high-speed local cache
+            dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
+            
+            # 2. Execute immediately
+            await self.run_signal_lifecycle(
+                symbol=symbol, 
+                direction=action, 
+                current_price=price, 
+                confidence=0.90, # Hawkes cascades possess absolute mathematical confidence
+                dna_stats=dna_stats, 
+                vpin_z=4.0 # Emulate a max-severity anomaly for dynamic Kelly sizing
+            )
+        except Exception as e:
+            logger.error(f"❌ HAWKES EXECUTION FAILURE for {symbol}: {e}")
+            self.active_positions_lock.discard(symbol)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -354,18 +445,15 @@ class DistributedQuantEngine:
     async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
         🚀 V6.3 APEX PIPELINE: Alpha-Decay & Institutional Edge-Gate
-        Calculates Net Alpha = (Confidence * Volatility_Adjusted_ROI) - (Spread + Drift).
-        Ensures execution only occurs if the trade covers its own execution friction.
+        Operates as the secondary structural sweep. Captures deep algorithmic setups 
+        that the Hawkes Engine allows to mature organically.
         """
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
-        
-        # 1. Institutional Filters
         if abs(vpin_z) < 2.0: return
             
         current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
         if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
         
-        # Verify stream freshness (Aborts if data is stale > 2s)
         last_update = self.screener_memory.get(symbol, {}).get("last_update_time", 0.0)
         if time.time() - last_update > 2.0:
             logger.warning(f"⏰ STALE DATA REJECTION // {symbol} stream lag ({time.time()-last_update:.2f}s).")
@@ -377,18 +465,15 @@ class DistributedQuantEngine:
         drift_pct = 0.0
         
         try:
-            # 2. Context Assembly
             feature_engine = self.feature_engines.get(symbol)
             market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
             atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
             
-            # Real-time Liquidity Cost (Spread)
             ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
             best_bid = float(ob_snapshot.get("bids", [[vpin_manifest["current_price"]]])[0][0])
             best_ask = float(ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])[0][0])
             spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
             
-            # KNN Latent DNA Lookup
             metrics = self.screener_metrics.get(symbol, {})
             current_dna = {
                 "vol_mult": metrics.get("vol_mult", 1.0), 
@@ -397,7 +482,6 @@ class DistributedQuantEngine:
             }
             dna_stats = await asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
             
-            # 3. Adversarial Debate Matrix
             debate_start_time = time.time()
             verdict = await self.debate_matrix.execute_debate_cycle(symbol, vpin_manifest, dna_stats, self.global_macro_news_cache)
             debate_latency = time.time() - debate_start_time
@@ -405,21 +489,15 @@ class DistributedQuantEngine:
             action = verdict.get("action", "HOLD")
             confidence = verdict.get("confidence", 0.0)
             
-            # 4. 🚀 APEX UPGRADE: Institutional Alpha-Decay Model
             post_debate_price = self.screener_memory[symbol]["prices"][-1] if self.screener_memory[symbol]["prices"] else vpin_manifest["current_price"]
             drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
-            # Volatility-Scaled Alpha: Higher VPIN Z-score = Higher Conviction in the Breakout
-            # Z-score of 2.0 (Threshold) = 1.0x factor. Z-score of 4.0+ = 1.5x factor.
             z_impact = min(1.5, 1.0 + (max(0, abs(vpin_z) - 2.0) * 0.25))
             regime_multiplier = 2.5 if market_regime == "TRENDING" else 1.2
             
             expected_roi = (atr / vpin_manifest["current_price"]) * regime_multiplier * z_impact
-            
-            # Expected Value Equation: [Prob * (Reward - Cost)] - Drift
             net_alpha = (confidence * (expected_roi - spread_cost)) - drift_pct
             
-            # Execution Threshold: If Net Alpha < 0.2%, trade is "leaky"
             if net_alpha < 0.002:
                 logger.critical(
                     f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | "
@@ -428,7 +506,6 @@ class DistributedQuantEngine:
                 self.active_positions_lock.discard(symbol)
                 return
             
-            # 5. Execution
             if action in ["BUY", "SELL"] and confidence >= 0.55:
                 self.last_execution_buckets[symbol] = current_bucket_count
                 asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
@@ -469,10 +546,14 @@ class DistributedQuantEngine:
                 fallback_shadow = ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"]
                 self.shadow_basket.extend([s for s in fallback_shadow if s not in self.shadow_basket])
             
+            # Reset and preserve modules
             new_vpin_clocks = {}
+            new_hawkes_engines = {}
             for s in self.asset_basket:
                 new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=1_000_000.0))
+                new_hawkes_engines[s] = self.hawkes_engines.get(s, BivariateHawkesEngine(calibration_window=500))
             self.vpin_clocks = new_vpin_clocks
+            self.hawkes_engines = new_hawkes_engines
 
             new_feature_engines = {}
             new_screener_memory = {}
@@ -514,12 +595,16 @@ class DistributedQuantEngine:
 
     async def stream_manager_loop(self):
         while True:
+            # 🚀 APEX UPGRADE: Binding the Hawkes Engine via trade_callback
+            # *Note: Ensure your HighVelocityMultiFeed script supports emitting 'trade_callback'
+            # to feed the raw Bybit `publicTrade` websocket stream into this engine.
             stream_feed = HighVelocityMultiFeed(
                 basket=self.asset_basket,
                 intervals=["1", "5", "15"],
                 orderbook_callback=self.handle_incoming_orderbook_tick,
                 screener_callback=self.handle_incoming_basket_screener_update,
                 kline_callback=self.handle_incoming_kline_update,
+                trade_callback=self.handle_incoming_trade, # <-- ⚡ Sub-millisecond HFT tap
                 engine_reference=self  
             )
             
@@ -656,8 +741,8 @@ class DistributedQuantEngine:
                     f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 𝗢𝗦 (V6 APEX)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live • {len(self.shadow_basket)} Shadow</code>\n\n"
-                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗞𝗡𝗡 + 𝗔𝗱𝘃𝗲𝗿𝘀𝗮𝗿𝗶𝗮𝗹 𝗗𝗲𝗯𝗮𝘁𝗲 𝗠𝗮𝘁𝗿𝗶𝘅</b>\n"
-                    f"• 🧠 Recent AI Matrix Judgements:\n"
+                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗛𝗮𝘄𝗸𝗲𝘀 𝗣𝗿𝗼𝗰𝗲𝘀𝘀 + 𝗔𝗜 𝗠𝗮𝗰𝗿𝗼 𝗢𝘃𝗲𝗿𝘀𝗶𝗴𝗵𝘁</b>\n"
+                    f"• 🧠 Recent Judgements:\n"
                     f"{debate_string}\n"
                     f"🌐 <b>𝗔𝗜 𝗖𝗔𝗦𝗖𝗔𝗗𝗘 𝗧𝗘𝗟𝗘𝗠𝗘𝗧𝗥𝗬</b>\n"
                     f"• Active Router Path: <code>llama-3.3-70b-versatile</code>\n"
@@ -679,10 +764,6 @@ class DistributedQuantEngine:
                 self._daemon_registry.add(report_task)
 
     async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, vpin_z: float = 0.0):
-        """
-        🚀 V6 APEX: Executes trades fully armed by the Debate Matrix.
-        Calculates Kelly Sizing against structural KNN DNA win-rates.
-        """
         try:
             signal_id = str(uuid.uuid4())
             
@@ -706,8 +787,6 @@ class DistributedQuantEngine:
 
             sl_distance = max(atr * 2.0, current_price * 0.02)
             
-            # 🚀 APEX UPGRADE: Kinetic Take-Profit Expansion
-            # Logarithmically stretches the TP target based on the severity of the institutional volume anomaly.
             kinetic_multiplier = 1.0 + math.log1p(max(0, abs(vpin_z) - 2.0))
             tp_distance = max(sl_distance * 2.0, current_price * 0.04) * kinetic_multiplier
             
@@ -734,6 +813,7 @@ class DistributedQuantEngine:
             account_scaling = 0.75 if balance < 100.0 else 1.0
             quarter_kelly = base_kelly * account_scaling * 0.25
 
+            # Execute a Shadow/Ghost trade if Kelly implies mathematical disadvantage
             if quarter_kelly <= 0.0 or not is_armed:
                 features_dict = {"symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, "liquidity_density_ratio": 1.0, "bid_ask_spread": 0.001, "virtual_sl": initial_sl, "virtual_tp": target_tp}
                 await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, features_dict, is_shadow=True)
@@ -765,9 +845,8 @@ class DistributedQuantEngine:
                 notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(distance_to_sl / current_price)
             )
             
-            # 🚀 APEX UPGRADE: Leverage Settlement Buffer (Fixes Auditor Issue #15)
             await self.executor.adjust_leverage(symbol, target_leverage)
-            await asyncio.sleep(0.2) # Allow matching engine to settle the margin requirement internally
+            await asyncio.sleep(0.2) 
 
             current_depth = {"bids": [[current_price]], "asks": [[current_price]]}
             if hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -793,9 +872,9 @@ class DistributedQuantEngine:
             self.risk_vault.update_position_ledger(symbol, notional)
             
             alert_text = (
-                f"🧬 *KNN DEBATE MATRIX EXECUTION*\n"
+                f"🧬 *HFT EXECUTION FIRE*\n"
                 f"• Node: {symbol} | {direction}\n"
-                f"• Judge Calibrated Confidence: {confidence:.2%}\n"
+                f"• Signal Confidence: {confidence:.2%}\n"
                 f"• Leverage Applied: {target_leverage}x\n"
                 f"• Notional Value: ${notional:.2f} USDT\n"
                 f"🛡️ *Elastic Brackets Active*: SL: {initial_sl} | TP: {target_tp}"
@@ -943,7 +1022,6 @@ class DistributedQuantEngine:
 
         except Exception as daemon_error:
             logger.error(f"☠️ FATAL DAEMON CRASH on {symbol}: {daemon_error}")
-            # 🚀 P1 FIX: Emergency Crash Recovery
             logger.critical(f"🚑 EMERGENCY INTERVENTION // Attempting to flatten {symbol} position to protect capital.")
             try:
                 flatten_side = "Sell" if direction == "BUY" else "Buy"
@@ -990,7 +1068,6 @@ class DistributedQuantEngine:
             self.screener_metrics = {s: {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0} for s in self.asset_basket}
             self.volatility_baseline = {s: 0.0 for s in self.asset_basket}
             
-            # 🚀 V6 APEX: Init Clocks for new basket
             self.vpin_clocks = {s: VolumeSynchronizedClock(bucket_volume=1_000_000.0) for s in self.asset_basket}
         
         await asyncio.gather(

@@ -15,6 +15,7 @@ class HighVelocityMultiFeed:
         orderbook_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]], 
         screener_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         kline_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
+        trade_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]] = None, # 🚀 APEX UPGRADE: HFT Hook
         engine_reference: Any = None 
     ):
         self.basket = [symbol.upper() for symbol in basket]
@@ -23,6 +24,7 @@ class HighVelocityMultiFeed:
         self.orderbook_callback = orderbook_callback
         self.screener_callback = screener_callback
         self.kline_callback = kline_callback
+        self.trade_callback = trade_callback 
         self.engine_reference = engine_reference
         
         self.ws_url = "wss://stream.bybit.com/v5/public/linear"
@@ -123,7 +125,7 @@ class HighVelocityMultiFeed:
                                         "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                     })
                                     
-                                # 🚀 APEX UPGRADE: Microsecond-Precision Raw Tick Feeding for VPIN
+                                # 🚀 APEX UPGRADE: Microsecond-Precision Raw Tick Feeding
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]
                                     
@@ -132,14 +134,27 @@ class HighVelocityMultiFeed:
                                         p = float(tick.get("p", 0.0))
                                         v = float(tick.get("v", 0.0))
                                         side = tick.get("S", "Buy")
+                                        ts = float(tick.get("T", time.time() * 1000))
                                         
+                                        # 1. ⚡ Send tick directly to the Hawkes Process Execution Hook
+                                        if self.trade_callback:
+                                            tick_payload = {
+                                                "symbol": symbol,
+                                                "price": p,
+                                                "size": v,
+                                                "side": side,
+                                                "timestamp": ts
+                                            }
+                                            # Create task so it doesn't block the websocket listener
+                                            asyncio.create_task(self.trade_callback(tick_payload))
+                                        
+                                        # 2. Feed the Structural VPIN Clocks
                                         # In Bybit V5: S="Buy" represents taker buy, S="Sell" represents taker sell
                                         is_buyer_maker = (side == "Sell")
                                         
                                         if self.engine_reference and hasattr(self.engine_reference, "vpin_clocks"):
                                             clock = self.engine_reference.vpin_clocks.get(symbol)
                                             if clock:
-                                                # Feed raw ticks straight to the Volume Clock bypassing the 1-minute candle proxy entirely
                                                 manifests = clock.process_tick(p, v, is_buyer_maker)
                                                 for manifest in manifests:
                                                     if manifest.get("valid"):
