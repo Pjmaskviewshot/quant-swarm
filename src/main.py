@@ -351,7 +351,7 @@ class DistributedQuantEngine:
                 
                 self.screener_metrics[symbol] = {"vol_mult": float(vol_mult), "vol_z": 0.0, "smoothed_price": c_close, "hawkes_score": 0.0}
 
-async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
+    async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
         🚀 V6 APEX PIPELINE: Alpha-Decay Optimizer
         Calculates real-time execution edge. Aborts only if the debate latency 
