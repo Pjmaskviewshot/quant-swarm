@@ -15,7 +15,7 @@ class ResilientAIRouter:
         self.current_provider = "INITIALIZING" 
         
         # 🛡️ HARDENED NETWORK CONFIGURATION 
-        # Upgraded to 90s to accommodate DeepSeek V4 Flash Chain-of-Thought reasoning
+        # 🚀 UPGRADED to 90.0s so the connection doesn't drop while DeepSeek is thinking
         self.custom_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=10.0),
             http2=False,  
