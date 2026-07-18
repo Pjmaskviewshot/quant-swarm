@@ -138,7 +138,10 @@ class DistributedQuantEngine:
         
         self.pending_macro_payloads: Dict[str, dict] = {}
         self.active_workers: Dict[str, asyncio.Task] = {}
+        
+        # 🚀 APEX UPGRADE: Separate Evaluation and Execution locks to prevent thread choke
         self.active_positions_lock = set()
+        self.evaluation_lock = set() 
         
         self._daemon_registry = weakref.WeakSet()
         self._log_throttle_cache: Dict[str, float] = {}
@@ -444,9 +447,8 @@ class DistributedQuantEngine:
 
     async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
         """
-        🚀 V6.3 APEX PIPELINE: Alpha-Decay & Institutional Edge-Gate
-        Operates as the secondary structural sweep. Captures deep algorithmic setups 
-        that the Hawkes Engine allows to mature organically.
+        🚀 V6.4 APEX: Thread-Safe Alpha Decay
+        Prevents event loop choke by locking the evaluation thread per asset.
         """
         vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
         if abs(vpin_z) < 2.0: return
@@ -454,13 +456,17 @@ class DistributedQuantEngine:
         current_bucket_count = self.vpin_clocks[symbol].total_buckets_closed
         if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
         
+        # 🚀 APEX UPGRADE: Expanded to 8.0s to survive cloud CPU scheduling pauses
         last_update = self.screener_memory.get(symbol, {}).get("last_update_time", 0.0)
-        if time.time() - last_update > 2.0:
+        if time.time() - last_update > 8.0:
             logger.warning(f"⏰ STALE DATA REJECTION // {symbol} stream lag ({time.time()-last_update:.2f}s).")
             return
             
         if symbol in self.active_positions_lock: return
-        self.active_positions_lock.add(symbol)
+        
+        # 🚀 APEX UPGRADE: Evaluation Lock to prevent Thread Starvation
+        if symbol in self.evaluation_lock: return 
+        self.evaluation_lock.add(symbol)
         
         drift_pct = 0.0
         
@@ -503,19 +509,23 @@ class DistributedQuantEngine:
                     f"🛡️ ALPHA DECAY ACTIVATED // {symbol} [{market_regime}] | "
                     f"Net Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%} | Latency: {debate_latency:.2f}s. Aborting."
                 )
-                self.active_positions_lock.discard(symbol)
                 return
             
             if action in ["BUY", "SELL"] and confidence >= 0.55:
+                # Double-check that Hawkes didn't steal the trade while AI was thinking!
+                if symbol in self.active_positions_lock: return 
+                
+                self.active_positions_lock.add(symbol)
                 self.last_execution_buckets[symbol] = current_bucket_count
                 asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
             else:
                 logger.info(f"🛑 DEBATE QUARANTINE // Matrix rejected {symbol}. Reason: {verdict.get('reasoning')}")
-                self.active_positions_lock.discard(symbol)
                 
         except Exception as e:
             logger.error(f"❌ VPIN Anomaly evaluation failed for {symbol}: {e}")
-            self.active_positions_lock.discard(symbol)
+        finally:
+            # 🚀 Guaranteed to release, preventing permanent thread deadlocks
+            self.evaluation_lock.discard(symbol)
 
     async def run_universe_refresher(self):
         while True:
@@ -596,8 +606,6 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             # 🚀 APEX UPGRADE: Binding the Hawkes Engine via trade_callback
-            # *Note: Ensure your HighVelocityMultiFeed script supports emitting 'trade_callback'
-            # to feed the raw Bybit `publicTrade` websocket stream into this engine.
             stream_feed = HighVelocityMultiFeed(
                 basket=self.asset_basket,
                 intervals=["1", "5", "15"],

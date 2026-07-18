@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import time
 import asyncio
 import logging
@@ -15,11 +14,11 @@ class ResilientAIRouter:
         self.providers = []
         self.current_provider = "INITIALIZING" 
         
-        # 🛡️ HARDENED NETWORK CONFIGURATION
+        # 🛡️ HARDENED NETWORK CONFIGURATION (Increased limits to prevent Event Loop Choke)
         self.custom_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             http2=False,  
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50) 
         )
 
         # 1. GROQ: The Speed King 
@@ -44,29 +43,38 @@ class ResilientAIRouter:
                 "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
             })
 
-        # 2. NVIDIA NIM: Native Llama-3.3 (Kimi is restricted/404ing on Nvidia NIM)
+        # 2. NVIDIA NIM: 🚀 APEX UPGRADE -> DeepSeek V4 Flash with Reasoning Engine
         for i, key in enumerate(nv_keys):
             if key:
                 self.providers.append({
-                    "name": f"NVIDIA_NIM_LLAMA3_{i+1}",
+                    "name": f"NVIDIA_NIM_DEEPSEEK_FLASH_{i+1}",
                     "client": AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key, http_client=self.custom_http_client, max_retries=0),
-                    "model": "meta/llama-3.3-70b-instruct",
+                    "model": "deepseek-ai/deepseek-v4-flash",
                     "cooldown_until": 0.0,
                     "last_used": 0.0,
-                    "json_mode": True, 
-                    "params": {"temperature": 0.1, "top_p": 0.10, "max_tokens": 2048}
+                    "json_mode": False, # DeepSeek reasoning works best when extracting JSON from markdown fences
+                    "params": {
+                        "temperature": 1.0, 
+                        "top_p": 0.95, 
+                        "max_tokens": 8192, 
+                        "extra_body": {"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}}
+                    }
                 })
 
         # 3. DEEPSEEK NATIVE: The Paid Last Resort
         if deepseek_key:
             self.providers.append({
-                "name": "DEEPSEEK_NATIVE",
+                "name": "DEEPSEEK_V4_FLASH",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                "model": "deepseek-chat", 
+                "model": "deepseek-v4-flash", 
                 "cooldown_until": 0.0,
                 "last_used": 0.0,
-                "json_mode": True,
-                "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
+                "json_mode": False,
+                "params": {
+                    "temperature": 1.0, 
+                    "top_p": 0.95, 
+                    "max_tokens": 8192
+                }
             })
 
         if not self.providers:
@@ -80,13 +88,12 @@ class ResilientAIRouter:
     def _get_next_healthy_provider(self):
         """
         🚀 APEX UPGRADE: Least-Recently-Used (LRU) Round-Robin Routing.
-        Prevents Node Starvation. If Groq dies, it guarantees DeepSeek gets its turn.
+        Prevents Node Starvation. 
         """
         current_time = time.time()
         healthy_providers = [p for p in self.providers if current_time >= p["cooldown_until"]]
         
         if healthy_providers:
-            # Sort by last_used to cycle through them evenly
             healthy_providers.sort(key=lambda x: x.get("last_used", 0.0))
             selected = healthy_providers[0]
             selected["last_used"] = current_time
@@ -101,9 +108,8 @@ class ResilientAIRouter:
             return raw_text.split("```")[1].split("```")[0].strip()
         return raw_text.strip()
 
-    async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 12.0) -> str:
-        # 🚀 APEX UPGRADE: Reduced max attempts to 4. 
-        # If 4 nodes fail, fail FAST to trigger the mathematical fallback before the price drifts.
+    async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 15.0) -> str:
+        # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks
         MAX_ATTEMPTS = 4 
         
         for attempt in range(MAX_ATTEMPTS):
@@ -125,6 +131,10 @@ class ResilientAIRouter:
                     "max_tokens": provider.get("params", {}).get("max_tokens", 2048),
                 }
                 
+                # 🚀 APEX UPGRADE: Inject NVIDIA Extra Body params for DeepSeek Reasoning
+                if "extra_body" in provider.get("params", {}):
+                    kwargs["extra_body"] = provider["params"]["extra_body"]
+                
                 if require_json and provider.get("json_mode", False):
                     kwargs["response_format"] = {"type": "json_object"}
 
@@ -133,7 +143,14 @@ class ResilientAIRouter:
                     timeout=timeout
                 )
                 
-                raw_content = response.choices[0].message.content
+                msg_obj = response.choices[0].message
+                
+                # 🚀 APEX UPGRADE: Capture DeepSeek's internal reasoning chain (CoT)
+                reasoning = getattr(msg_obj, "reasoning", None) or getattr(msg_obj, "reasoning_content", None)
+                if reasoning:
+                    logger.debug(f"🧠 {provider['name']} Deep-Thought Logic: {reasoning[:150]}...")
+                
+                raw_content = msg_obj.content
                 
                 if require_json and not provider.get("json_mode", False):
                     return self._clean_json_output(raw_content)
@@ -141,7 +158,7 @@ class ResilientAIRouter:
                 return raw_content
                 
             except asyncio.TimeoutError:
-                # 🚀 APEX UPGRADE: Harsh 60-second penalty for Timeouts to prevent Death Loops
+                # Harsh 60-second penalty for Timeouts to prevent Death Loops
                 logger.warning(f"⚠️ {provider['name']} Timed Out after {timeout}s. Penalizing node for 60s.")
                 provider["cooldown_until"] = time.time() + 60.0
                 
