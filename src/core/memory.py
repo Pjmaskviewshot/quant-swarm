@@ -11,7 +11,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V19 GENESIS: ATOMIC MEMORY LEDGER
+    🌌 V19.2 GENESIS UNLOCKED: ATOMIC MEMORY LEDGER
     Hyper-optimized Supabase connector. Single-trip atomic updates.
     Full Shadow Swarm continuous learning integration.
     """
@@ -197,7 +197,6 @@ class MemoryBank:
 
                 current_price = closes[-1]
                 is_terminated = False
-                actual = "HOLD"
                 exit_price = entry_price
                 bars_held = 0
 
@@ -213,46 +212,53 @@ class MemoryBank:
                         hit_tp = high >= tp_price
                         hit_sl = low <= sl_price
                         if hit_tp and hit_sl:
-                            actual, is_terminated, exit_price = "SELL", True, sl_price
+                            is_terminated, exit_price = True, sl_price
                             break
                         elif hit_tp:
-                            actual, is_terminated, exit_price = "BUY", True, tp_price
+                            is_terminated, exit_price = True, tp_price
                             break
                         elif hit_sl:
-                            actual, is_terminated, exit_price = "SELL", True, sl_price
+                            is_terminated, exit_price = True, sl_price
                             break
                     elif prediction == "SELL":
                         hit_tp = low <= tp_price
                         hit_sl = high >= sl_price
                         if hit_tp and hit_sl:
-                            actual, is_terminated, exit_price = "BUY", True, sl_price
+                            is_terminated, exit_price = True, sl_price
                             break
                         elif hit_tp:
-                            actual, is_terminated, exit_price = "SELL", True, tp_price
+                            is_terminated, exit_price = True, tp_price
                             break
                         elif hit_sl:
-                            actual, is_terminated, exit_price = "BUY", True, sl_price
+                            is_terminated, exit_price = True, sl_price
                             break
 
+                # 🚀 V19.2 FIX: Force resolution on 60m timeouts regardless of breakeven
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     exit_price = current_price
-                    actual = "BUY" if current_price > entry_price else "SELL" if current_price < entry_price else "HOLD"
 
-                if is_terminated and actual != "HOLD":
+                if is_terminated:
                     # Evaluates shadow performance at the exact leverage the Risk Vault would have assigned
                     simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
                     TAKER_ROUND_TRIP = 0.0011
                     
                     gross_return = abs(exit_price - entry_price) / entry_price
-                    if prediction != actual:
+                    
+                    is_win = False
+                    if prediction == "BUY" and exit_price > entry_price:
+                        is_win = True
+                    elif prediction == "SELL" and exit_price < entry_price:
+                        is_win = True
+                        
+                    if not is_win:
                         gross_return = -gross_return
                         
                     net_pnl = (gross_return - TAKER_ROUND_TRIP) * simulated_leverage
 
                     row["resolved"] = True
-                    row["actual_outcome"] = "WIN" if prediction == actual else "LOSS"
-                    row["is_correct"] = (prediction == actual)
+                    row["actual_outcome"] = "WIN" if is_win else "LOSS"
+                    row["is_correct"] = is_win
                     row["net_pnl"] = float(net_pnl)
                     row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held)), 2)
                     
