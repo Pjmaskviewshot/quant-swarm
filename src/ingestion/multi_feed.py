@@ -8,6 +8,12 @@ from typing import Dict, Any, Callable, Coroutine, List
 logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
+    """
+    🚀 V14.1 PRODUCTION INGESTION LAYER
+    A pure, high-speed multiplexed data pipe. 
+    Strips out all redundant math processing to prevent double-counting.
+    Routes ticks directly to Omni-Core.
+    """
     def __init__(
         self, 
         basket: List[str], 
@@ -15,7 +21,7 @@ class HighVelocityMultiFeed:
         orderbook_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]], 
         screener_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         kline_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
-        trade_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]] = None, # 🚀 APEX UPGRADE: HFT Hook
+        trade_callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]] = None, 
         engine_reference: Any = None 
     ):
         self.basket = [symbol.upper() for symbol in basket]
@@ -49,7 +55,7 @@ class HighVelocityMultiFeed:
             "args": args_payload
         }
 
-        # 🚀 APEX UPGRADE: Exponential Backoff Reconnect Guard to prevent connection storms
+        # 🚀 Exponential Backoff Reconnect Guard to prevent connection storms
         reconnect_delay = 1.0
         max_reconnect_delay = 30.0
 
@@ -97,7 +103,7 @@ class HighVelocityMultiFeed:
                                 if not data:
                                     continue
 
-                                # Route incoming bytes instantly to the correct processing channel thread
+                                # 🚀 Route incoming bytes instantly to the correct processing channel thread
                                 if topic.startswith("tickers"):
                                     await self.screener_callback(data)
                                     
@@ -125,41 +131,22 @@ class HighVelocityMultiFeed:
                                         "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                     })
                                     
-                                # 🚀 APEX UPGRADE: Microsecond-Precision Raw Tick Feeding
+                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V14.1 Omni-Core
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]
                                     
-                                    # Process each individual trade tick sequentially as it hits the tape
                                     for tick in data:
-                                        p = float(tick.get("p", 0.0))
-                                        v = float(tick.get("v", 0.0))
-                                        side = tick.get("S", "Buy")
-                                        ts = float(tick.get("T", time.time() * 1000))
-                                        
-                                        # 1. ⚡ Send tick directly to the Hawkes Process Execution Hook
                                         if self.trade_callback:
                                             tick_payload = {
                                                 "symbol": symbol,
-                                                "price": p,
-                                                "size": v,
-                                                "side": side,
-                                                "timestamp": ts
+                                                "price": float(tick.get("p", 0.0)),
+                                                "size": float(tick.get("v", 0.0)),
+                                                "side": tick.get("S", "Buy"),
+                                                "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
-                                            # Create task so it doesn't block the websocket listener
+                                            # Fire and forget directly to main.py's math engine
                                             asyncio.create_task(self.trade_callback(tick_payload))
-                                        
-                                        # 2. Feed the Structural VPIN Clocks
-                                        # In Bybit V5: S="Buy" represents taker buy, S="Sell" represents taker sell
-                                        is_buyer_maker = (side == "Sell")
-                                        
-                                        if self.engine_reference and hasattr(self.engine_reference, "vpin_clocks"):
-                                            clock = self.engine_reference.vpin_clocks.get(symbol)
-                                            if clock:
-                                                manifests = clock.process_tick(p, v, is_buyer_maker)
-                                                for manifest in manifests:
-                                                    if manifest.get("valid"):
-                                                        asyncio.create_task(self.engine_reference.evaluate_vpin_anomaly(symbol, manifest))
-                                    
+                                            
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
                                 
