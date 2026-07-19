@@ -43,7 +43,7 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V19.1 GENESIS: PRODUCTION QUANTITATIVE NODE
+    🔬 V19.2 GENESIS UNLOCKED: PRODUCTION QUANTITATIVE NODE
     True 4-State OFI, Continuous Fuzzy Regime Transitions, Multi-Lag Hurst Convolution,
     and Asymmetric Expected Value (EV) projections.
     """
@@ -376,6 +376,27 @@ class DistributedQuantEngine:
                         self.ram_dna_cache[sym] = result
             except Exception as e:
                 logger.error(f"DNA Pre-Warmer iteration failed: {e}", exc_info=True)
+
+    async def run_shadow_resolution_daemon(self):
+        logger.info("👻 GHOST FORENSICS ONLINE: Actively resolving shadow matrix outcomes.")
+        while True:
+            await asyncio.sleep(300)  # Sweep the database every 5 minutes
+            try:
+                current_prices = {}
+                for sym in self.asset_basket + self.shadow_basket:
+                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
+                        current_prices[sym] = list(self.screener_memory[sym]["prices"])
+                
+                if current_prices:
+                    async with self.db_semaphore:
+                        await asyncio.to_thread(
+                            self.memory.resolve_batch_historical_predictions,
+                            list(current_prices.keys()),
+                            current_prices,
+                            60.0
+                        )
+            except Exception as e:
+                logger.error(f"Shadow resolution daemon failed: {e}", exc_info=True)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -744,6 +765,9 @@ class DistributedQuantEngine:
             dollar_risk = balance * quarter_kelly
             position_size = dollar_risk / sl_distance
             notional = max(position_size * current_price, 6.00) 
+            
+            # 🚀 THE FIX: Update the quantity of coins to match the $6.00 limit!
+            position_size = notional / current_price
 
             if not self.risk_vault.evaluate_portfolio_safety(balance, notional, symbol):
                 self.active_positions_lock.discard(symbol)
@@ -989,7 +1013,8 @@ class DistributedQuantEngine:
                 self.run_dna_prewarmer(), 
                 self.stream_manager_loop(),
                 self.run_system_heartbeat(),
-                self.cleanup_stale_locks() 
+                self.cleanup_stale_locks(),
+                self.run_shadow_resolution_daemon()  # 🚀 THIS IS THE FIX
             )
         except Exception as global_err:
             logger.critical(f"FATAL SYSTEM ERROR: {global_err}. Initiating emergency flatten...", exc_info=True)
