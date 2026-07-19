@@ -10,6 +10,11 @@ from supabase import create_client, Client
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
+    """
+    🌌 V19 GENESIS: ATOMIC MEMORY LEDGER
+    Hyper-optimized Supabase connector. Single-trip atomic updates.
+    Full Shadow Swarm continuous learning integration.
+    """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
@@ -22,21 +27,21 @@ class MemoryBank:
             self.supabase: Client = create_client(url, key)
             logger.info("🛰️ CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
         except Exception as e:
-            logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}")
+            logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
             raise
 
         # 🚀 APEX UPGRADE: High-Speed KNN Cache to prevent Database DDoS
         self.dna_cache = {} 
-        # Extended TTL to 120s to heavily absorb network traffic during volatility storms
         self.cache_ttl_seconds = 120.0 
 
     def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
+        """Executes Supabase queries with exponential backoff on transient network faults."""
         for attempt in range(max_retries):
             try:
                 return query_builder.execute()
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"❌ SUPABASE FATAL: Operation failed permanently after {max_retries} attempts. {e}")
+                    logger.error(f"❌ SUPABASE FATAL: Operation failed permanently after {max_retries} attempts. {e}", exc_info=True)
                     raise e
                 
                 sleep_time = base_delay * (1.5 ** attempt)
@@ -58,6 +63,7 @@ class MemoryBank:
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
         
+        # 🚀 FIX: Accept true mathematically derived stops if provided, else safe default
         sl_price = float(features.get("virtual_sl", price * 0.99))
         tp_price = float(features.get("virtual_tp", price * 1.015))
 
@@ -82,7 +88,7 @@ class MemoryBank:
             "funding_usdt": 0.0,
             "leverage": 1.0,
             "holding_minutes": 0.0,
-            "execution_mode": "GHOST"
+            "execution_mode": "SHADOW" if is_shadow else "LIVE"
         }
 
         try:
@@ -90,64 +96,59 @@ class MemoryBank:
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
-            logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}")
+            logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
     def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str, execution_details: Dict[str, Any] = None):
+        """
+        🚀 V19 OPTIMIZATION: Single-trip atomic database update. 
+        Cuts database I/O latency in half.
+        """
         is_correct = True if net_pnl > 0 else False
         if execution_details is None:
             execution_details = {}
             
         try:
-            response = self._safe_execute(self.supabase.table("quantitative_ledger").select("*").eq("signal_id", str(signal_id)))
+            # 1. Fetch exactly what we need (timestamp) to calculate holding time
+            response = self._safe_execute(self.supabase.table("quantitative_ledger").select("timestamp").eq("signal_id", str(signal_id)))
             
             if response and response.data:
-                row = response.data[0]
-                row["resolved"] = True
-                row["actual_outcome"] = str(outcome)
-                row["net_pnl"] = float(net_pnl)
-                row["slippage_drag"] = float(slippage)
-                row["is_correct"] = is_correct
+                start_dt = self._parse_iso_timestamp(response.data[0]["timestamp"])
+                duration = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
                 
-                row["fees_usdt"] = float(execution_details.get("fees_usdt", 0.0))
-                row["funding_usdt"] = float(execution_details.get("funding_usdt", 0.0))
-                row["leverage"] = float(execution_details.get("leverage", 1.0))
-                row["execution_mode"] = str(execution_details.get("execution_mode", "GHOST")).upper()
+                # 2. Atomic Update Payload
+                update_payload = {
+                    "resolved": True,
+                    "actual_outcome": str(outcome),
+                    "net_pnl": float(net_pnl),
+                    "slippage_drag": float(slippage),
+                    "is_correct": is_correct,
+                    "fees_usdt": float(execution_details.get("fees_usdt", 0.0)),
+                    "funding_usdt": float(execution_details.get("funding_usdt", 0.0)),
+                    "leverage": float(execution_details.get("leverage", 1.0)),
+                    "execution_mode": str(execution_details.get("execution_mode", "LIVE")).upper(),
+                    "holding_minutes": round(duration, 2)
+                }
                 
-                if "timestamp" in row:
-                    try:
-                        start_dt = self._parse_iso_timestamp(row["timestamp"])
-                        duration = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
-                        row["holding_minutes"] = round(duration, 2)
-                    except Exception as date_e:
-                        logger.error(f"Date parse error: {date_e}")
-                        row["holding_minutes"] = 0.0
+                # 3. Fire and verify in one network trip
+                update_res = self._safe_execute(self.supabase.table("quantitative_ledger").update(update_payload).eq("signal_id", str(signal_id)))
                 
-                self._safe_execute(self.supabase.table("quantitative_ledger").upsert(row))
-                
-                verify = self._safe_execute(
-                    self.supabase.table("quantitative_ledger")
-                    .select("resolved")
-                    .eq("signal_id", str(signal_id))
-                )
-                
-                if verify and verify.data and verify.data[0].get("resolved"):
-                    logger.info(f"🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {row['execution_mode']}")
+                if update_res and update_res.data:
+                    logger.info(f"🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
                 else:
-                    logger.error(f"❌ VERIFICATION FAILED: Ledger did not save outcome for signal {signal_id}")
+                    logger.error(f"❌ VERIFICATION FAILED: Ledger rejected update for signal {signal_id}")
             else:
                 logger.warning(f"⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
+                
         except Exception as e:
-            logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}")
+            logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
         resolved_count = 0
 
         try:
+            # Only pull unresolved rows
             query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
-                
-            response = self._safe_execute(
-                query.order("timestamp", desc=False).limit(500)
-            )
+            response = self._safe_execute(query.order("timestamp", desc=False).limit(500))
 
             unresolved_rows = response.data if response else []
             if not unresolved_rows:
@@ -239,7 +240,6 @@ class MemoryBank:
                     actual = "BUY" if current_price > entry_price else "SELL" if current_price < entry_price else "HOLD"
 
                 if is_terminated and actual != "HOLD":
-                    # 🚀 APEX UPGRADE: Dynamic Leverage matching for Ghost Forensics
                     # Evaluates shadow performance at the exact leverage the Risk Vault would have assigned
                     simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
                     TAKER_ROUND_TRIP = 0.0011
@@ -255,7 +255,7 @@ class MemoryBank:
                     row["is_correct"] = (prediction == actual)
                     row["net_pnl"] = float(net_pnl)
                     row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held)), 2)
-                    row["execution_mode"] = "GHOST"
+                    
                     update_batch.append(row)
                     resolved_count += 1
                 
@@ -266,41 +266,39 @@ class MemoryBank:
             return resolved_count
 
         except Exception as e:
-            logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}")
+            logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}", exc_info=True)
             return 0
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 THE APEX UPGRADE (V6): Transfer Learning via KNN Latent Embedding + Local RAM Cache.
+        🚀 TRANSFER LEARNING UPGRADE:
+        Now learns correctly from ALL resolved executions (Shadow AND Live).
+        Provides real-time mathematical validation of strategy variants.
         """
         c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
         c_obi = current_dna.get("z_obi", 0.0)
         c_spread = current_dna.get("spread_pct", 0.001) * 1000 
         
-        # 🚀 APEX UPGRADE: Structural Neighborhoods
         # Aggressive rounding merges micro-variations into the same high-speed RAM hash bucket.
-        # This completely drops the Supabase API load by >95% during hyper-volatility.
-        vol_bucket = round(c_vol * 2.0) / 2.0  # Groups into [1.0, 1.5, 2.0, etc.]
-        obi_bucket = round(c_obi * 2.0) / 2.0  # Groups into [0.5, 1.0, 1.5, etc.]
+        vol_bucket = round(c_vol * 2.0) / 2.0  
+        obi_bucket = round(c_obi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
         
         dna_hash = f"{vol_bucket}_{obi_bucket}_{spread_bucket}"
         current_time = time.time()
         
-        # 2. Check Local RAM to prevent Supabase Rate-Limiting during volatility
+        # 1. Check Local RAM to prevent Supabase Rate-Limiting during volatility
         if dna_hash in self.dna_cache:
             cached_time, cached_result = self.dna_cache[dna_hash]
             if current_time - cached_time < self.cache_ttl_seconds:
-                # Silently log cache hits for debugging without spamming the console
-                logger.debug(f"⚡ RAM CACHE HIT // Retrieved DNA edge for profile {dna_hash} at zero latency.")
                 return cached_result
 
         try:
-            # 3. Query the live global ledger
+            # 2. Query the live global ledger
+            # 🚀 BUG FIX: We actively WANT to learn from Shadow Swarm executions. Filter removed.
             query = self.supabase.table("quantitative_ledger")\
                 .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
                 .eq("resolved", True)\
-                .neq("market_regime", "SHADOW_SIM")\
                 .order("timestamp", desc=True)\
                 .limit(2000)
                 
@@ -348,10 +346,10 @@ class MemoryBank:
                 "cluster_win_rate": round(wins / total, 4)
             }
             
-            # 4. Save result to high-speed cache
+            # 3. Save result to high-speed cache
             self.dna_cache[dna_hash] = (current_time, result_payload)
             return result_payload
 
         except Exception as e:
-            logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}")
+            logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}", exc_info=True)
             return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0, "cluster_win_rate": 0.50}

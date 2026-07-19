@@ -12,7 +12,6 @@ from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
 
 # Core & Feature Modules
 from core.memory import MemoryBank
@@ -44,8 +43,8 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V18 ZENITH: PRODUCTION QUANTITATIVE NODE
-    True 4-State OFI, Continuous Fuzzy Regime Transitions, Multi-Lag Hurst,
+    🔬 V19 GENESIS: PRODUCTION QUANTITATIVE NODE
+    True 4-State OFI, Continuous Fuzzy Regime Transitions, Multi-Lag Hurst Convolution,
     and Asymmetric Expected Value (EV) projections.
     """
     def __init__(self, memory_depth=500):
@@ -120,10 +119,11 @@ class ContinuousMicrostructureEngine:
             rets = np.array(self.log_returns)
             var_1 = np.var(rets)
             if var_1 > 1e-12:
+                # 🚀 V19 FIX: Correct multi-lag convolution
                 hurst_estimates = []
                 for k in [2, 4, 8]:
-                    if len(rets) > k:
-                        rets_k = rets[k:] + rets[1:-k+1] 
+                    if len(rets) >= k:
+                        rets_k = np.convolve(rets, np.ones(k), 'valid')
                         vr = np.var(rets_k) / (k * var_1)
                         h_est = 0.5 + 0.5 * math.log(vr + 1e-9) / math.log(k)
                         hurst_estimates.append(max(0.1, min(0.9, h_est)))
@@ -178,7 +178,6 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
-        self.thread_pool = ThreadPoolExecutor(max_workers=20)
         self.api_semaphore = asyncio.Semaphore(15)
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(10)
@@ -230,7 +229,6 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     def track_task(self, coro: Any):
-        """Safely tracks fire-and-forget daemon tasks to prevent garbage collection mid-flight."""
         task = asyncio.create_task(coro)
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
@@ -296,7 +294,8 @@ class DistributedQuantEngine:
                 symbol = pos["symbol"]
                 self._initialize_symbol_structures([symbol]) 
                 
-                qty, entry_price = float(pos["size"]), float(pos["avgPrice"])
+                qty = float(pos["size"])
+                entry_price = float(pos["avgPrice"])
                 direction = "BUY" if pos["side"].upper() == "BUY" else "SELL"
                 
                 atr = entry_price * 0.015 
@@ -333,7 +332,7 @@ class DistributedQuantEngine:
                 if context and "news_context" in context: self.global_macro_news_cache = context["news_context"]
                 self.last_news_fetch = time.time()
             except Exception as e:
-                logger.debug(f"News fetch skipped: {e}")
+                logger.error(f"News fetch skipped: {e}")
 
     async def run_macro_commander(self):
         logger.info("🧠 MACRO COMMANDER ONLINE. Systemic LLM oversight enabled.")
@@ -426,7 +425,6 @@ class DistributedQuantEngine:
             manifests = clock.process_tick(price, volume, not is_buy)
             valid_manifests = [m for m in manifests if m.get("valid")]
             
-            # 🚀 DYNAMIC VPIN CALCULATION FIX
             if valid_manifests:
                 vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
             elif clock.vpin_history:
@@ -681,7 +679,7 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V18: ZENITH)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V19: GENESIS)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
                     f"• Orderflow Filter: <code>True 4-State Cont OFI</code>\n"
@@ -751,7 +749,6 @@ class DistributedQuantEngine:
 
             target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(sl_distance / current_price))
             
-            # 🚀 BUG 1 & 2 FIX: Calculate explicit SL/TP directly for the SOR Execution layer
             initial_sl_price = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
             target_tp_price = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
             
@@ -759,6 +756,13 @@ class DistributedQuantEngine:
                 logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price}")
                 execution_success = True
             else:
+                # 🚀 V19 FIX: Commit Live Trade to Ledger BEFORE execution 
+                try:
+                    async with self.db_semaphore:
+                        await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime}, False) 
+                except Exception as e:
+                    logger.error(f"Failed to commit live signal to DB: {e}")
+
                 try:
                     async with self.api_semaphore:
                         await asyncio.to_thread(self.executor.adjust_leverage, symbol, target_leverage)
@@ -809,8 +813,9 @@ class DistributedQuantEngine:
             order_filled = False
             actual_entry = current_price
             
-            for _ in range(12):  
-                await asyncio.sleep(5)
+            # V19 FIX: Shortened wait to 15 seconds (Stops natively armed)
+            for _ in range(5):  
+                await asyncio.sleep(3)
                 try:
                     async with self.api_semaphore:
                         pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
@@ -824,7 +829,7 @@ class DistributedQuantEngine:
                     continue
 
             if not order_filled:
-                logger.critical(f"🔓 PORTFOLIO UNLOCKED // SOR failed to fill {symbol} within 60s. Canceling.")
+                logger.critical(f"🔓 PORTFOLIO UNLOCKED // SOR failed to fill {symbol} within 15s. Canceling.")
                 try: 
                     async with self.api_semaphore:
                         await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)

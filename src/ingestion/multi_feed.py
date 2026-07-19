@@ -9,10 +9,10 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V18 ZENITH: PRODUCTION INGESTION LAYER
+    🚀 V19 GENESIS: PRODUCTION INGESTION LAYER
     A pure, high-speed multiplexed data pipe. 
     Strips out all redundant math processing to prevent double-counting.
-    Routes ticks instantly via non-blocking tasks to the Omni-Core.
+    Utilizes strong task referencing to prevent Python 3.11+ garbage collection drops.
     """
     def __init__(
         self, 
@@ -37,6 +37,16 @@ class HighVelocityMultiFeed:
         self.is_running = False
         self.last_msg_timestamp = time.time()
         self.orderbook_sequences: Dict[str, int] = {}
+        
+        # 🚀 ENGINEERING HARDENING: Prevent Python from garbage-collecting background tasks
+        self._active_tasks = set()
+
+    def track_task(self, coro: Coroutine):
+        """Safely tracks fire-and-forget daemon tasks to prevent GC mid-flight."""
+        task = asyncio.create_task(coro)
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+        return task
 
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
@@ -86,7 +96,7 @@ class HighVelocityMultiFeed:
                                 # Normal behavior when the socket drops and we cancel the watchdog
                                 pass
                                     
-                        watchdog_task = asyncio.create_task(connection_watchdog())
+                        watchdog_task = self.track_task(connection_watchdog())
 
                         await ws.send_str(json.dumps(subscription_request))
                         logger.info(f"Successfully multiplexed topics for tracking matrix: {self.basket}")
@@ -136,7 +146,7 @@ class HighVelocityMultiFeed:
                                         "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                     })
                                     
-                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V18 Zenith Core
+                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V19 Genesis Core
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]
                                     
@@ -149,8 +159,8 @@ class HighVelocityMultiFeed:
                                                 "side": tick.get("S", "Buy"),
                                                 "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
-                                            # Fire and forget directly to main.py's math engine without blocking the socket
-                                            asyncio.create_task(self.trade_callback(tick_payload))
+                                            # 🚀 V19 FIX: Strong Task Referencing so Python doesn't delete ticks
+                                            self.track_task(self.trade_callback(tick_payload))
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
@@ -172,3 +182,8 @@ class HighVelocityMultiFeed:
         """Performs structural teardown actions across active streaming context pipelines."""
         self.is_running = False
         logger.warning("Terminating multiplexed ingestion pipelines cleanly.")
+        
+        # Clean up any lingering background tasks
+        for task in list(self._active_tasks):
+            if not task.done():
+                task.cancel()
