@@ -43,7 +43,7 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V19 GENESIS: PRODUCTION QUANTITATIVE NODE
+    🔬 V19.1 GENESIS: PRODUCTION QUANTITATIVE NODE
     True 4-State OFI, Continuous Fuzzy Regime Transitions, Multi-Lag Hurst Convolution,
     and Asymmetric Expected Value (EV) projections.
     """
@@ -119,7 +119,6 @@ class ContinuousMicrostructureEngine:
             rets = np.array(self.log_returns)
             var_1 = np.var(rets)
             if var_1 > 1e-12:
-                # 🚀 V19 FIX: Correct multi-lag convolution
                 hurst_estimates = []
                 for k in [2, 4, 8]:
                     if len(rets) >= k:
@@ -542,7 +541,8 @@ class DistributedQuantEngine:
             try:
                 await self._fetch_exchange_tick_sizes()
                 async with self.api_semaphore:
-                    full_market = await asyncio.to_thread(self.executor.get_top_volatile_assets, 100, 10_000_000)
+                    # 🚀 BUG FIX: We directly await custom wrapper functions
+                    full_market = await self.executor.get_top_volatile_assets(100, 10_000_000)
                 if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
             except Exception as e:
                 logger.error(f"Failed to fetch market data via REST: {e}")
@@ -628,7 +628,8 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 try:
                     async with self.api_semaphore:
-                        current_vault_balance = await asyncio.to_thread(self.executor.get_wallet_balance_usdt)
+                        # 🚀 BUG FIX: Directly await async wrapper
+                        current_vault_balance = await self.executor.get_wallet_balance_usdt()
                 except Exception as e:
                     logger.error(f"Failed to fetch balance during heartbeat: {e}", exc_info=True)
                     continue
@@ -679,7 +680,7 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V19: GENESIS)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V19.1: LIVE FIRE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
                     f"• Orderflow Filter: <code>True 4-State Cont OFI</code>\n"
@@ -705,7 +706,8 @@ class DistributedQuantEngine:
 
             try:
                 async with self.api_semaphore:
-                    balance = await asyncio.to_thread(self.executor.get_wallet_balance_usdt)
+                    # 🚀 BUG FIX: Directly await async wrapper
+                    balance = await self.executor.get_wallet_balance_usdt()
             except Exception as e:
                 logger.error(f"Failed to fetch balance for execution sizing: {e}", exc_info=True)
                 self.active_positions_lock.discard(symbol)
@@ -756,7 +758,6 @@ class DistributedQuantEngine:
                 logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price}")
                 execution_success = True
             else:
-                # 🚀 V19 FIX: Commit Live Trade to Ledger BEFORE execution 
                 try:
                     async with self.db_semaphore:
                         await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime}, False) 
@@ -765,7 +766,8 @@ class DistributedQuantEngine:
 
                 try:
                     async with self.api_semaphore:
-                        await asyncio.to_thread(self.executor.adjust_leverage, symbol, target_leverage)
+                        # 🚀 BUG FIX: Directly await async wrapper
+                        await self.executor.adjust_leverage(symbol, target_leverage)
                         await asyncio.sleep(0.2) 
                 except Exception as e:
                     logger.error(f"Leverage adjustment failed: {e}. Aborting trade.", exc_info=True)
@@ -813,7 +815,6 @@ class DistributedQuantEngine:
             order_filled = False
             actual_entry = current_price
             
-            # V19 FIX: Shortened wait to 15 seconds (Stops natively armed)
             for _ in range(5):  
                 await asyncio.sleep(3)
                 try:
@@ -895,7 +896,8 @@ class DistributedQuantEngine:
 
                 try:
                     async with self.api_semaphore:
-                        settlement = await asyncio.to_thread(self.executor.check_recent_settlement, symbol, 300) 
+                        # 🚀 BUG FIX: Directly await async wrapper
+                        settlement = await self.executor.check_recent_settlement(symbol, 300) 
                     if settlement.get("closed"):
                         net_pnl = float(settlement.get('pnl', 0.0))
                         self.track_task(self._safe_telegram_dispatch(f"🔔 <b>EXCHANGE EXECUTION TERMINATION</b>\n━━━━━━━━━━━━━━━━━━━━━━\n📈 <b>Asset Node:</b> <code>{symbol}</code>\n📊 <b>Outcome:</b> {'🟢 PROFIT' if net_pnl > 0 else '🔴 LOSS'}\n💰 <b>Net Return:</b> <code>{net_pnl:.4f} USDT</code>\n━━━━━━━━━━━━━━━━━━━━━━", is_html=True))
@@ -971,7 +973,7 @@ class DistributedQuantEngine:
         
         try: 
             async with self.api_semaphore:
-                full_market = await asyncio.to_thread(self.executor.get_top_volatile_assets, 100, 10_000_000)
+                full_market = await self.executor.get_top_volatile_assets(100, 10_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
         except Exception: 
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
