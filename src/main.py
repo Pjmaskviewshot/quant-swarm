@@ -42,85 +42,134 @@ logging.basicConfig(
 logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 
-class StochasticHJBControlEngine:
+class OmniCoreEnsembleEngine:
     """
-    🌌 V10 OMNIPRESENT UPGRADE: Hamilton-Jacobi-Bellman (HJB) Stochastic Control & Rough Volatility
-    Replaces static thresholds with continuous-time optimal control. Solves the exact
-    mathematical path to maximize terminal wealth across a fractional Heston volatility surface.
+    🌌 V13 APEX OMNI-CORE
+    Fuses continuous EWMA tick-level speed with HJB mathematical safety.
+    Restores Shannon Entropy for stealth accumulation detection.
     """
     def __init__(self, memory_depth=500):
+        # 1. Order Flow Imbalance (OFI)
+        self.prev_bid = 0.0
+        self.prev_bid_size = 0.0
+        self.prev_ask = 0.0
+        self.prev_ask_size = 0.0
+        self.rolling_ofi = 0.0  # 🚀 BUG FIX: Engaged OFI Tensor State
+        self.ofi_ewma = 0.0
+        self.ofi_ewmvar = 1.0
+        
+        # 2. Hawkes Trade Arrival Imbalance
+        self.trade_timestamps = deque()
+        self.hawkes_decay = 2.0  
+        self.hawkes_ewma = 0.0
+        self.hawkes_ewmvar = 1.0
+        
+        # 3. Hurst, Rough Volatility & Shannon Entropy
         self.prices = deque(maxlen=memory_depth)
-        self.times = deque(maxlen=memory_depth)
-        
-        # 1. Rough Volatility State (Fractional Heston)
-        self.rough_hurst = 0.1  # Empirical HFT roughness parameter
+        self.log_returns = deque(maxlen=memory_depth)
+        self.vol_ewma = 0.001
         self.inst_variance = 1e-6
+        self.hurst = 0.5
+        self.shannon_entropy = 1.0
         
-        # 2. Cross-Exciting Hawkes Process (Mutually Exciting Microstructure)
-        self.lambda_buy = 0.0
-        self.lambda_sell = 0.0
-        self.decay = 5.0  # Fast decay for micro-ticks
-        
-        # 3. HJB Control Parameters
-        self.gamma = 0.1  # Asymptotic Risk Aversion
-        self.kappa = 1.5  # Liquidity Depth Decay
+        self.alpha = 0.05
+        self.gamma = 0.1  # HJB Risk Aversion
+        self.kappa = 1.5  # HJB Liquidity Decay
 
-    def push_tick(self, price: float, is_buy: bool, volume: float, current_time: float):
+    def update_orderbook(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
+        delta_W = 0.0
+        if best_bid >= self.prev_bid:
+            delta_W += bid_vol if best_bid > self.prev_bid else (bid_vol - self.prev_bid_size)
+        if best_ask <= self.prev_ask:
+            delta_W -= ask_vol if best_ask < self.prev_ask else (ask_vol - self.prev_ask_size)
+            
+        self.prev_bid, self.prev_bid_size = best_bid, bid_vol
+        self.prev_ask, self.prev_ask_size = best_ask, ask_vol
+        
+        self.rolling_ofi = delta_W  # 🚀 BUG FIX: Map live physical delta to tensor state
+        self.ofi_ewma = (1 - self.alpha) * self.ofi_ewma + self.alpha * delta_W
+        self.ofi_ewmvar = (1 - self.alpha) * self.ofi_ewmvar + self.alpha * (delta_W - self.ofi_ewma)**2
+
+    def update_trades(self, price: float, volume: float, is_buy: bool, current_time: float):
         self.prices.append(price)
-        self.times.append(current_time)
-        
-        # 🚀 Cross-Exciting Order Flow: A buy order excites future buys AND mean-reverting sells
-        if len(self.times) > 1:
-            dt = max(current_time - self.times[-2], 0.001)
-            self.lambda_buy *= math.exp(-self.decay * dt)
-            self.lambda_sell *= math.exp(-self.decay * dt)
-            
-        if is_buy:
-            self.lambda_buy += volume
-            self.lambda_sell += volume * 0.2  # 20% Cross-excitation (Mean reversion force)
-        else:
-            self.lambda_sell += volume
-            self.lambda_buy += volume * 0.2
-            
-        # 🚀 Rough Volatility Update
-        if len(self.prices) > 10:
-            returns = np.diff(list(self.prices)[-10:]) / np.array(list(self.prices)[-10:-1])
-            self.inst_variance = np.var(returns) + 1e-9
+        if len(self.prices) > 2:
+            ret = math.log(self.prices[-1] / self.prices[-2])
+            if not math.isnan(ret) and not math.isinf(ret):
+                self.log_returns.append(ret)
+                self.vol_ewma = (1 - 0.01) * self.vol_ewma + 0.01 * abs(ret)
+                
+        if len(self.log_returns) > 10:
+            self.inst_variance = np.var(list(self.log_returns)[-10:]) + 1e-9
 
-    def solve_hjb_optimal_trajectory(self, current_price: float, action: str, spread_pct: float, vpin_z: float) -> tuple:
-        """
-        Solves the HJB Equation to find the mathematical Reservation Price.
-        If executing places us on the optimal utility trajectory, it returns a positive advantage.
-        """
-        # 1. Order Flow Imbalance Pressure
-        total_intensity = self.lambda_buy + self.lambda_sell + 1e-9
-        imbalance = (self.lambda_buy - self.lambda_sell) / total_intensity
+        self.trade_timestamps.append((current_time, volume if is_buy else -volume))
+        while self.trade_timestamps and current_time - self.trade_timestamps[0][0] >= 60:
+            self.trade_timestamps.popleft()
+            
+        hawkes_pressure = 0.0
+        for t_time, t_vol in self.trade_timestamps:
+            hawkes_pressure += t_vol * math.exp(-self.hawkes_decay * (current_time - t_time))
+            
+        self.hawkes_ewma = (1 - self.alpha) * self.hawkes_ewma + self.alpha * hawkes_pressure
+        self.hawkes_ewmvar = (1 - self.alpha) * self.hawkes_ewmvar + self.alpha * (hawkes_pressure - self.hawkes_ewma)**2
+
+    def calculate_hurst_and_entropy(self) -> tuple:
+        """Calculates Fractal Memory and Shannon Entropy (Stealth Detection)"""
+        if len(self.log_returns) < 30: return 0.5, 1.0
+        rets = np.array(self.log_returns)
+        var_1 = np.var(rets)
+        if var_1 < 1e-12: return 0.5, 1.0
         
-        # 2. The Avellaneda-Stoikov Reservation Price (Adapted for Directional Taking)
-        # This is the mathematically "True" price of the asset right now, factoring in rough variance.
+        # 1. Hurst Exponent
+        rets_k = rets[2:] + rets[1:-1]
+        var_k = np.var(rets_k)
+        vr = var_k / (2.0 * var_1)
+        self.hurst = max(0.1, min(0.9, 0.5 + 0.5 * math.log(vr + 1e-9) / math.log(2)))
+        
+        # 2. Shannon Entropy
+        hist, _ = np.histogram(rets, bins=10, density=True)
+        p = hist[hist > 0] * (np.max(rets) - np.min(rets)) / 10
+        self.shannon_entropy = -np.sum(p * np.log2(p))
+        
+        return self.hurst, self.shannon_entropy
+
+    def solve_hjb_advantage(self, current_price: float, action: str, spread_pct: float) -> float:
+        """HJB Control Filter: Ensures the trade is mathematically EV+ before execution."""
+        total_intensity = abs(self.hawkes_ewma) + 1e-9
+        imbalance = self.hawkes_ewma / total_intensity
+        
         reservation_price = current_price + (imbalance * self.inst_variance * self.gamma * current_price)
-        
-        # 3. Optimal Execution Barrier
-        # The mathematical cost of crossing the spread scaled by risk aversion
         optimal_barrier = (self.gamma * self.inst_variance) + (2 / self.kappa) * math.log(1 + self.kappa / self.gamma)
         
-        # 4. HJB Utility Advantage Matrix
         if action == "BUY":
-            # Is the true Reservation Price mathematically higher than what we pay?
-            trajectory_advantage = (reservation_price - current_price) / current_price - (spread_pct * optimal_barrier)
-            if vpin_z > 2.0: trajectory_advantage += (vpin_z * self.inst_variance) # VPIN Breakout Boost
+            return (reservation_price - current_price) / current_price - (spread_pct * optimal_barrier)
         else:
-            # Is the true Reservation Price mathematically lower than what we receive?
-            trajectory_advantage = (current_price - reservation_price) / current_price - (spread_pct * optimal_barrier)
-            if vpin_z > 2.0: trajectory_advantage += (vpin_z * self.inst_variance)
-                
-        return trajectory_advantage, reservation_price
+            return (current_price - reservation_price) / current_price - (spread_pct * optimal_barrier)
+
+    def get_ensemble_signal(self) -> dict:
+        hurst_val, entropy_val = self.calculate_hurst_and_entropy()
+        
+        ofi_z = (self.rolling_ofi - self.ofi_ewma) / (math.sqrt(self.ofi_ewmvar) + 1e-9)
+        hawkes_z = (self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9) if self.hawkes_ewmvar > 0 else 0.0
+        
+        signal_vector = (ofi_z * 0.4) + (hawkes_z * 0.6)
+        regime = "TRENDING" if hurst_val > 0.55 else ("RANGING" if hurst_val < 0.45 else "NEUTRAL")
+        
+        # 🦇 Predator Shift: Fade the traps in Ranging markets
+        if regime == "RANGING":
+            signal_vector = -signal_vector
+            
+        return {
+            "vector": signal_vector, 
+            "regime": regime, 
+            "hurst": hurst_val, 
+            "entropy": entropy_val, 
+            "volatility": self.vol_ewma
+        }
 
 
 class DistributedQuantEngine:
     def __init__(self):
         load_dotenv()
-        
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode:
@@ -130,9 +179,7 @@ class DistributedQuantEngine:
         
         self.asset_basket: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
-        
         self.shadow_basket: List[str] = []
-        self.shadow_cooldown: Dict[str, float] = {}
         
         self.stream_restart_event = asyncio.Event()
         self.force_dna_refresh = asyncio.Event() 
@@ -140,41 +187,30 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
-        # 🚀 CORE DATA STRUCTURES
+        # 🌌 V13 OMNI-CORE ENGINES
+        self.omni_engines: Dict[str, OmniCoreEnsembleEngine] = {} 
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {}
-        self.hawkes_engines: Dict[str, BivariateHawkesEngine] = {}
         self.edge_gates: Dict[str, MicrostructureEdgeGate] = {}
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {}
-        
-        # 🌌 V10 HJB ENGINES
-        self.hjb_engines: Dict[str, StochasticHJBControlEngine] = {} 
-        
         self.screener_memory: Dict[str, Dict[str, Any]] = {}
         self.screener_metrics: Dict[str, Dict[str, float]] = {}
+        self.orderbook_snapshots: Dict[str, dict] = {}
         
         self.ram_dna_cache: Dict[str, dict] = {}
         self.debate_matrix = AdversarialDebateMatrix() 
         
         self.macro_regimes: Dict[str, str] = {}
-        self.macro_confidences: Dict[str, float] = {}
-        self.current_atrs: Dict[str, float] = {}
-        self.last_execution_buckets: Dict[str, int] = {}
         self.volatility_baseline: Dict[str, float] = {}
-        self.volatility_window = 100
-        
         self.active_positions_lock = set()
-        self.evaluation_lock = set() 
         
-        self.last_vpin_eval_time: Dict[str, float] = {}
-        self.last_dna_fetch: Dict[str, float] = {}
-        
+        # Cooldown & Throttle Logic
+        self.last_eval_time: Dict[str, float] = {}
         self._daemon_registry = weakref.WeakSet()
         self._log_throttle_cache: Dict[str, float] = {}
         
         self.tick_sizes: Dict[str, float] = {}
         self.global_macro_news_cache: str = "No significant macro shifts detected."
         self.last_news_fetch: float = 0.0
-
         self.global_state_cache = {"last_updated": 0.0}
         
         self._initialize_symbol_structures(self.asset_basket)
@@ -192,28 +228,23 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
-        """🚀 ATOMIC STATE MANAGER"""
+        """ATOMIC STATE MANAGER"""
         for s in symbols:
+            if s not in self.omni_engines: self.omni_engines[s] = OmniCoreEnsembleEngine()
             if s not in self.vpin_clocks: self.vpin_clocks[s] = VolumeSynchronizedClock(bucket_volume=1_000_000.0)
-            if s not in self.hawkes_engines: self.hawkes_engines[s] = BivariateHawkesEngine(calibration_window=500)
             if s not in self.edge_gates: self.edge_gates[s] = MicrostructureEdgeGate()
             if s not in self.feature_engines: self.feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
             
-            # 🌌 Initialize V10 HJB Engine
-            if s not in self.hjb_engines: self.hjb_engines[s] = StochasticHJBControlEngine()
-            
             if s not in self.screener_memory:
                 self.screener_memory[s] = {
-                    "prices": deque(maxlen=150), "highs": deque(maxlen=150), "lows": deque(maxlen=150), 
-                    "macro_prices": deque(maxlen=48), "volumes": deque(maxlen=150), 
-                    "atr_history": deque(maxlen=self.volatility_window), "last_update_time": 0.0
+                    "prices": deque(maxlen=150), "volumes": deque(maxlen=150), 
+                    "atr_history": deque(maxlen=100), "last_update_time": 0.0
                 }
-            if s not in self.screener_metrics: self.screener_metrics[s] = {"vol_mult": 1.0, "vol_z": 0.0, "smoothed_price": 0.0, "hawkes_score": 0.0}
-            if s not in self.last_execution_buckets: self.last_execution_buckets[s] = 0
+            if s not in self.screener_metrics: self.screener_metrics[s] = {"vol_mult": 1.0, "smoothed_price": 0.0}
             if s not in self.volatility_baseline: self.volatility_baseline[s] = 0.0
             if s not in self.ram_dna_cache: self.ram_dna_cache[s] = {"is_armed": True, "win_rate": 0.50}
-            if s not in self.last_vpin_eval_time: self.last_vpin_eval_time[s] = 0.0 
-            if s not in self.last_dna_fetch: self.last_dna_fetch[s] = 0.0
+            if s not in self.last_eval_time: self.last_eval_time[s] = 0.0 
+            if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
     def _throttled_log(self, level: str, message: str, category: str = None, throttle_seconds: int = 30):
         current_time = time.time()
@@ -267,7 +298,7 @@ class DistributedQuantEngine:
                 daemon_task = asyncio.create_task(self._position_lifecycle_daemon(
                     symbol, f"RECOVERY-{str(uuid.uuid4())[:8]}", direction, entry_price, current_sl, 
                     entry_price * 1.05 if direction == "BUY" else entry_price * 0.95, atr, 
-                    risk_matrix, self.feature_engines[symbol], 8, "RANGING"
+                    risk_matrix, 8, "RANGING"
                 ))
                 self._daemon_registry.add(daemon_task)
         except Exception: pass
@@ -292,20 +323,17 @@ class DistributedQuantEngine:
             except Exception: pass
 
     async def run_macro_commander(self):
+        """🧠 AI MACRO OVERSIGHT RESTORED"""
         logger.info("🧠 MACRO COMMANDER ONLINE. Systemic LLM oversight enabled.")
         while True:
             await asyncio.sleep(900) 
             await self._update_global_news_cache()
             try:
                 verdict = await self.debate_matrix.execute_debate_cycle("BTCUSDT", {"vpin_z_score": 0.0, "current_price": 0.0}, {}, self.global_macro_news_cache)
-                macro_action = verdict.get("action", "HOLD")
-                for symbol, engine in self.hawkes_engines.items():
-                    if hasattr(engine, 'base_mu'):
-                        engine.base_mu = np.array([0.15, 0.05]) if macro_action == "BUY" else (np.array([0.05, 0.15]) if macro_action == "SELL" else np.array([0.1, 0.1]))
+                self.macro_regimes["BTCUSDT"] = verdict.get("action", "HOLD")
             except Exception: pass
 
     async def run_dna_prewarmer(self):
-        """🚀 CONCURRENT DATABASE BATCHING DEPLOYED"""
         logger.info("🔥 RAM PRE-WARMER ONLINE: Actively pre-fetching database edge logic.")
         while True:
             try:
@@ -316,15 +344,8 @@ class DistributedQuantEngine:
             try:
                 fetch_tasks = {}
                 for symbol in list(self.asset_basket):
-                    feature_engine = self.feature_engines.get(symbol)
                     metrics = self.screener_metrics.get(symbol, {})
-                    if not feature_engine: continue
-                    
-                    current_dna = {
-                        "vol_mult": metrics.get("vol_mult", 1.0), 
-                        "z_obi": feature_engine.obi_history[-1] if feature_engine.obi_history else 0.0, 
-                        "spread_pct": 0.001
-                    }
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": 0.0, "spread_pct": 0.001}
                     fetch_tasks[symbol] = asyncio.to_thread(self.memory.compute_latent_dna_edge, current_dna, 30)
                 
                 if not fetch_tasks: continue
@@ -339,54 +360,23 @@ class DistributedQuantEngine:
                         self.ram_dna_cache[sym] = result
             except Exception: pass
 
-    async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
-        symbol = trade_data.get("symbol")
-        if not symbol or symbol not in self.asset_basket: return
-        
-        try:
-            hawkes = self.hawkes_engines.get(symbol)
-            hjb = self.hjb_engines.get(symbol)
-            if not hawkes or not hjb: return
-            
-            price = float(trade_data.get("price", 0.0))
-            volume = float(trade_data.get("size", 0.0))
-            is_buy = (str(trade_data.get("side", "")).upper() == "BUY")
-            timestamp = float(trade_data.get("timestamp", time.time() * 1000)) / 1000.0
-            
-            # 🌌 Push to HJB Stochastic Matrix
-            hjb.push_tick(price, is_buy, volume, timestamp)
-            
-            hawkes.apply_tick(timestamp, is_buy, volume)
-            delta = hawkes.calculate_imbalance_delta()
-            
-            if abs(delta) >= 0.85 and symbol not in self.active_positions_lock:
-                action = "BUY" if delta > 0 else "SELL"
-                self.active_positions_lock.add(symbol)
-                asyncio.create_task(self._execute_hawkes_trigger(symbol, action, price))
-                
-        except Exception: pass
-
-    async def _execute_hawkes_trigger(self, symbol: str, action: str, price: float):
-        try:
-            dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
-            await self.run_signal_lifecycle(symbol=symbol, direction=action, current_price=price, confidence=0.90, dna_stats=dna_stats, vpin_z=4.0)
-        except Exception as e:
-            logger.error(f"❌ HAWKES EXECUTION FAILURE for {symbol}: {e}")
-            self.active_positions_lock.discard(symbol)
-
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
-        if not symbol or symbol not in self.asset_basket: return
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
 
         bids, asks = depth_data.get("b", []), depth_data.get("a", [])
         if bids and asks:
             try:
                 best_bid, bid_size = float(bids[0][0]), float(bids[0][1])
                 best_ask, ask_size = float(asks[0][0]), float(asks[0][1])
-                mid_price = (best_bid + best_ask) / 2.0
+                
+                self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "best_ask": best_ask}
+                
+                engine = self.omni_engines.get(symbol)
+                if engine: engine.update_orderbook(best_bid, bid_size, best_ask, ask_size)
                 
                 gate = self.edge_gates.get(symbol)
-                if gate: gate.update_orderbook_state(best_bid, bid_size, best_ask, ask_size, mid_price)
+                if gate: gate.update_orderbook_state(best_bid, bid_size, best_ask, ask_size, (best_bid + best_ask) / 2.0)
             except Exception: pass
 
         is_snapshot = depth_data.get("type") == "snapshot"
@@ -394,140 +384,122 @@ class DistributedQuantEngine:
         if feature_engine:
             feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
 
-    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        symbol = data.get("symbol")
-        if not symbol or symbol not in self.asset_basket: return
-        self._initialize_symbol_structures([symbol]) 
-        self.screener_memory[symbol]["last_update_time"] = time.time()
+    async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
+        symbol = trade_data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        
+        try:
+            omni = self.omni_engines.get(symbol)
+            clock = self.vpin_clocks.get(symbol)
+            if not omni or not clock: return
+            
+            price = float(trade_data.get("price", 0.0))
+            volume = float(trade_data.get("size", 0.0))
+            is_buy = (str(trade_data.get("side", "")).upper() == "BUY")
+            timestamp = float(trade_data.get("timestamp", time.time() * 1000)) / 1000.0
+            
+            # 1. Update Omni-Core Mathematics
+            omni.update_trades(price, volume, is_buy, timestamp)
+            
+            # 2. Update VPIN (Informed Flow Detection)
+            manifests = clock.process_tick(price, volume, not is_buy)
+            valid_manifests = [m for m in manifests if m.get("valid")]
+            vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0)) if valid_manifests else (clock.vpin_history[-1] if clock.vpin_history else 0.0)
+            
+            # 3. Throttle execution parsing to save CPU
+            now = time.time()
+            if now - self.last_eval_time.get(symbol, 0.0) < 1.0: return
+            
+            # 🚀 TICK-LEVEL GRAND UNIFICATION EVALUATION
+            signal_data = omni.get_ensemble_signal()
+            vector_z = signal_data["vector"]
+            regime = signal_data["regime"]
+            entropy = signal_data["entropy"]
+            
+            # 🚀 REALISTIC SHADOW SWARM
+            # Feeds shadow symbols into the actual math engine, drastically improving database accuracy
+            is_shadow_asset = symbol in self.shadow_basket
+            if is_shadow_asset:
+                if abs(vector_z) >= 2.0 and random.random() < 0.1: # 10% sample rate to save DB writes
+                    direction = "BUY" if vector_z > 0 else "SELL"
+                    asyncio.create_task(asyncio.to_thread(self.memory.commit_prediction, str(uuid.uuid4()), time.time(), price, direction, 0.6, {"symbol": symbol, "market_regime": regime}, is_shadow=True))
+                return # Do not execute live
+            
+            if symbol in self.active_positions_lock: return
+            
+            # If the vector isn't screaming, ignore it to save fees
+            if abs(vector_z) < 2.5: return
+            
+            # 🐋 VPIN CONFIRMATION: The bot MUST see informed institutional footprints
+            if abs(vpin_z) < 1.5: return
+            
+            action = "BUY" if vector_z > 0 else "SELL"
+            
+            # 🛡️ HJB TRAJECTORY FILTER: Ensure mathematical EV+ before paying the spread
+            spread_cost = abs(self.orderbook_snapshots.get(symbol, {}).get("best_ask", price) - self.orderbook_snapshots.get(symbol, {}).get("best_bid", price)) / price
+            hjb_advantage = omni.solve_hjb_advantage(price, action, spread_cost)
+            
+            if hjb_advantage <= 0.0:
+                self._throttled_log("INFO", f"🛑 HJB FILTER // {symbol} Trajectory is EV-. Aborting.", category=f"hjb_{symbol}", throttle_seconds=15)
+                return
+            
+            # ⚖️ STRUCTURAL EDGE GATE CONFIRMATION
+            gate = self.edge_gates.get(symbol)
+            verdict = gate.evaluate_structural_edge(symbol, vpin_z) if gate else {"confidence": 0.50}
+            confidence = verdict.get("confidence", 0.50)
+            
+            # 🕵️ SHANNON ENTROPY BOOST: Stealth Accumulation Detected
+            if entropy < 0.5:
+                confidence += 0.10
+                logger.info(f"🕵️ STEALTH ACCUMULATION // {symbol} Shannon Entropy dropped. Institutional footprint detected.")
+            
+            if confidence < 0.45: return
+            
+            logger.critical(
+                f"🌌 OMNI-CORE TRIGGER // {symbol} [{regime}] "
+                f"| Vector: {vector_z:+.2f} | VPIN: {vpin_z:+.2f} | HJB Adv: {hjb_advantage:.4f} | Executing: {action}"
+            )
+            
+            self.last_eval_time[symbol] = now
+            self.active_positions_lock.add(symbol)
+            asyncio.create_task(self.execute_ensemble_signal(symbol, action, price, signal_data, hjb_advantage, confidence))
+                
+        except Exception: pass
+
+    async def execute_ensemble_signal(self, symbol: str, action: str, price: float, signal_data: dict, hjb_adv: float, confidence: float):
+        try:
+            dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+            atr = max(price * 0.005, price * signal_data["volatility"] * 3)
+            
+            await self.run_signal_lifecycle(
+                symbol=symbol, 
+                direction=action, 
+                current_price=price, 
+                confidence=confidence, 
+                dna_stats=dna_stats, 
+                atr=atr,
+                regime=signal_data["regime"],
+                hjb_adv=hjb_adv
+            )
+        except Exception as e:
+            logger.error(f"❌ EXECUTION ROUTING FAILURE for {symbol}: {e}")
+            self.active_positions_lock.discard(symbol)
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
-        if not symbol or symbol not in self.asset_basket: return
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
         self._initialize_symbol_structures([symbol]) 
             
         interval = data["interval"]
         candle = data["candle_data"]
         c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
 
-        if not candle.get("confirm", False): return
-        
         feature_engine = self.feature_engines.get(symbol)
         if feature_engine:
             feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
-        
-        history = self.screener_memory.get(symbol)
-        if not history: return
 
-        if str(interval) == "1":
-            history["volumes"].append(c_vol)
-            history["prices"].append(c_close)
-            history["highs"].append(c_high)
-            history["lows"].append(c_low)
-            
-            is_seller_initiated = c_close < c_open 
-            
-            clock = self.vpin_clocks.get(symbol)
-            if clock:
-                manifests = clock.process_tick(c_close, c_vol, is_seller_initiated)
-                valid_manifests = [m for m in manifests if m.get("valid")]
-                
-                # 🚀 APEX VECTOR COALESCER
-                if valid_manifests:
-                    dominant_manifest = max(valid_manifests, key=lambda x: abs(float(x.get("vpin_z_score", 0.0))))
-                    asyncio.create_task(self.evaluate_vpin_anomaly(symbol, dominant_manifest))
-            
-            current_raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else (c_high - c_low)
-            if current_raw_atr > 0:
-                history["atr_history"].append(current_raw_atr)
-                if len(history["atr_history"]) >= 20:
-                    self.volatility_baseline[symbol] = np.mean(list(history["atr_history"]))
-                
-            if len(history["volumes"]) >= 15:
-                vol_array = np.array(list(history["volumes"]))
-                weights = np.exp(np.linspace(-1., 0., len(vol_array[:-1])))
-                weights /= weights.sum()
-                ewm_vol = max(np.sum(vol_array[:-1] * weights), 1.0) 
-                self.screener_metrics[symbol] = {"vol_mult": float(c_vol / ewm_vol), "vol_z": 0.0, "smoothed_price": c_close, "hawkes_score": 0.0}
-
-    async def evaluate_vpin_anomaly(self, symbol: str, vpin_manifest: dict):
-        clock = self.vpin_clocks.get(symbol)
-        if not clock: return
-        
-        # 🚀 ANTI-SPAM THROTTLE
-        now = time.time()
-        if now - self.last_vpin_eval_time.get(symbol, 0.0) < 2.0: return
-        self.last_vpin_eval_time[symbol] = now
-        
-        vpin_z = float(vpin_manifest.get("vpin_z_score", 0.0))
-        if abs(vpin_z) < 2.0: return
-            
-        current_bucket_count = clock.total_buckets_closed
-        if (current_bucket_count - self.last_execution_buckets.get(symbol, 0)) < 15: return
-        if time.time() - self.screener_memory.get(symbol, {}).get("last_update_time", 0.0) > 8.0: return
-            
-        if symbol in self.active_positions_lock or symbol in self.evaluation_lock: return 
-        
-        self.evaluation_lock.add(symbol)
-        
-        try:
-            feature_engine = self.feature_engines.get(symbol)
-            hjb_engine = self.hjb_engines.get(symbol)
-            if not feature_engine or not hjb_engine: return
-            
-            market_regime = feature_engine.detect_market_regime()
-            atr = feature_engine.get_computed_atr() if hasattr(feature_engine, 'get_computed_atr') else (vpin_manifest["current_price"] * 0.01)
-            
-            ob_snapshot = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[0,0]], "asks": [[0,0]]}
-            best_bid = float(ob_snapshot.get("bids", [[vpin_manifest["current_price"]]])[0][0])
-            best_ask = float(ob_snapshot.get("asks", [[vpin_manifest["current_price"]]])[0][0])
-            spread_cost = (best_ask - best_bid) / vpin_manifest["current_price"]
-            
-            dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
-            edge_gate = self.edge_gates.get(symbol)
-            if not edge_gate: return
-            
-            verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
-            action, confidence = verdict.get("action", "HOLD"), verdict.get("confidence", 0.0)
-            
-            prices_list = self.screener_memory.get(symbol, {}).get("prices", [])
-            post_debate_price = prices_list[-1] if prices_list else vpin_manifest["current_price"]
-            
-            # 🌌 GOD-MODE: HAMILTON-JACOBI-BELLMAN OPTIMAL TRAJECTORY
-            # Rather than checking static thresholds, we solve the HJB differential equation
-            # to calculate the exact, mathematical 'Reservation Price' of the asset right now.
-            trajectory_advantage, reservation_price = hjb_engine.solve_hjb_optimal_trajectory(
-                current_price=post_debate_price,
-                action=action,
-                spread_pct=spread_cost,
-                vpin_z=vpin_z
-            )
-            
-            # If solving the HJB equation yields a mathematical advantage, execution is optimal
-            is_optimal_trajectory = trajectory_advantage > 0.0001
-            
-            if not is_optimal_trajectory:
-                self._throttled_log(
-                    "CRITICAL", 
-                    f"🛡️ HJB TRAJECTORY DECAY // {symbol} [{market_regime}] | Advantage: {trajectory_advantage:.4f} < 0.0001 | Res Price: {reservation_price:.4f}. Aborting.",
-                    category=f"hjb_decay_{symbol}",
-                    throttle_seconds=15
-                )
-                return
-            
-            # 🚀 DYNAMIC CONFIDENCE GATE
-            min_confidence = 0.45 if is_optimal_trajectory else 0.55
-            
-            if action in ["BUY", "SELL"] and confidence >= min_confidence:
-                self.active_positions_lock.add(symbol)
-                self.last_execution_buckets[symbol] = current_bucket_count
-                asyncio.create_task(self.run_signal_lifecycle(symbol, action, post_debate_price, confidence, dna_stats, vpin_z))
-            else:
-                self._throttled_log("INFO", f"🛑 EDGE GATE QUARANTINE // Math rejected {symbol}. Reason: {verdict.get('reasoning')}", category=f"quarantine_{symbol}", throttle_seconds=20)
-                
-        except Exception as e:
-            logger.error(f"❌ VPIN Anomaly evaluation failed for {symbol}: {e}")
-        finally:
-            self.evaluation_lock.discard(symbol)
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        pass
 
     async def run_universe_refresher(self):
         while True:
@@ -554,66 +526,41 @@ class DistributedQuantEngine:
             
             # 🚀 ATOMIC MATRIX SWAP (Ensures total state-sync across satellite shifts)
             new_vpin_clocks = {}
-            new_hawkes_engines = {}
             new_edge_gates = {}
-            new_hjb = {}
+            new_omni = {}
             new_dna_cache = {}
-            new_last_dna = {}
             new_last_eval = {}
+            new_orderbooks = {}
+            new_feature_engines = {}
             
-            for s in self.asset_basket:
+            all_symbols = self.asset_basket + self.shadow_basket
+            
+            for s in all_symbols:
                 new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=1_000_000.0))
-                new_hawkes_engines[s] = self.hawkes_engines.get(s, BivariateHawkesEngine(calibration_window=500))
                 new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate())
-                new_hjb[s] = self.hjb_engines.get(s, StochasticHJBControlEngine())
+                new_omni[s] = self.omni_engines.get(s, OmniCoreEnsembleEngine())
                 new_dna_cache[s] = self.ram_dna_cache.get(s, {})
-                new_last_dna[s] = self.last_dna_fetch.get(s, 0.0)
-                new_last_eval[s] = self.last_vpin_eval_time.get(s, 0.0)
+                new_last_eval[s] = self.last_eval_time.get(s, 0.0)
+                new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
+                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
                 
             self.vpin_clocks = new_vpin_clocks
-            self.hawkes_engines = new_hawkes_engines
             self.edge_gates = new_edge_gates
-            self.hjb_engines = new_hjb
+            self.omni_engines = new_omni
             self.ram_dna_cache = new_dna_cache
-            self.last_dna_fetch = new_last_dna
-            self.last_vpin_eval_time = new_last_eval
-
-            new_feature_engines = {}
-            new_screener_memory = {}
-            new_last_buckets = {}
-            for s in self.asset_basket:
-                new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
-                new_last_buckets[s] = self.last_execution_buckets.get(s, 0)
-                cached_history = self.screener_memory.get(s)
-                if not cached_history:
-                    new_screener_memory[s] = {"prices": deque(maxlen=150), "highs": deque(maxlen=150), "lows": deque(maxlen=150), "macro_prices": deque(maxlen=48), "volumes": deque(maxlen=150), "atr_history": deque(maxlen=self.volatility_window), "last_update_time": 0.0}
-                else: new_screener_memory[s] = cached_history
-
+            self.last_eval_time = new_last_eval
+            self.orderbook_snapshots = new_orderbooks
             self.feature_engines = new_feature_engines
-            self.screener_memory = new_screener_memory
-            self.last_execution_buckets = new_last_buckets
 
             logger.info(f"🌌 QUANT UNIVERSE MATRIX RE-CALIBRATED.")
             self.stream_restart_event.set()
             self.force_dna_refresh.set() 
 
-    async def run_shadow_swarm_scanner(self):
-        logger.info("🦇 SHADOW SWARM: Activated.")
-        while True:
-            await asyncio.sleep(300) 
-            if not self.shadow_basket: continue
-            try:
-                price_map = {t["symbol"]: float(t["lastPrice"]) for t in (await asyncio.to_thread(self.executor.client.get_tickers, category="linear")).get("result", {}).get("list", []) if t["symbol"] in self.shadow_basket}
-                for sym in self.shadow_basket:
-                    if sym in price_map and random.random() < 0.15: 
-                        price = price_map[sym]
-                        await asyncio.to_thread(self.memory.commit_prediction, str(uuid.uuid4()), time.time(), price, random.choice(["BUY", "SELL"]), 0.50, {"symbol": sym, "virtual_sl": price * 0.98, "virtual_tp": price * 1.04, "market_regime": "SHADOW_SIM", "adaptive_obi_z": 0.0, "liquidity_density_ratio": 1.0}, is_shadow=True)
-            except Exception: pass
-
     async def stream_manager_loop(self):
         while True:
+            # 🚀 FIX: Feed the shadow basket into the actual high-speed websocket stream for mathematical shadow testing
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket, intervals=["1", "5", "15"],
+                basket=self.asset_basket + self.shadow_basket[:10], intervals=["1", "5", "15"],
                 orderbook_callback=self.handle_incoming_orderbook_tick, screener_callback=self.handle_incoming_basket_screener_update,
                 kline_callback=self.handle_incoming_kline_update, trade_callback=self.handle_incoming_trade, engine_reference=self  
             )
@@ -630,13 +577,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(60) 
             loop_counter += 1
             uptime_hours = (time.time() - start_time) / 3600
-            
-            if loop_counter % 5 == 0:
-                try:
-                    age_cutoff_time = time.time() - 1800 
-                    valid_assets = [sym for sym in self.asset_basket if self.screener_memory.get(sym, {}).get("prices")]
-                    if valid_assets: await asyncio.to_thread(self.memory.resolve_batch_historical_predictions, assets=list(valid_assets), current_prices={sym: self.screener_memory[sym] for sym in valid_assets}, age_cutoff=age_cutoff_time)
-                except Exception: pass
 
             logger.info(f"💓 SWARM HEARTBEAT: Matrix is active. Uptime: {uptime_hours:.2f} hours.")
 
@@ -683,61 +623,56 @@ class DistributedQuantEngine:
                     recent_trades = "".join([f"{'✅' if t.get('actual_outcome') == 'WIN' else '🔴'} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n" for t in sorted(data, key=lambda x: x.get('timestamp', ''))[-5:]]) or "• <i>Waiting for first live execution cycle...</i>\n"
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
-                clock_states = [f"• ⏱️ <b>{s}</b> | Vol-Clock Z: <code>{self.vpin_clocks[s].vpin_history[-1]:.2f}</code> | Blks: {self.vpin_clocks[s].total_buckets_closed}" for s in [k for k, v in self.vpin_clocks.items() if len(v.vpin_history) > 0][:3]] or ["• <i>Volume Buckets filling...</i>"]
-
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 𝗢𝗦 (V10 HJB OMNIPRESENT)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live • {len(self.shadow_basket)} Shadow</code>\n\n"
-                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗛𝗝𝗕 𝗦𝘁𝗼𝗰𝗵𝗮𝘀𝘁𝗶𝗰 𝗖𝗼𝗻𝘁𝗿𝗼𝗹 + 𝗥𝗼𝘂𝗴𝗵 𝗩𝗼𝗹𝗮𝘁𝗶𝗹𝗶𝘁𝘆</b>\n"
-                    f"• Micro-Structure: <code>Heston Fractional Jump-Diffusion</code>\n"
-                    f"• Optimal Control: <code>Hamilton-Jacobi-Bellman Trajectory</code>\n"
-                    f"• Execution Mapping: <code>Avellaneda-Stoikov Fluidity</code>\n\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V13: APEX OMNI-CORE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
+                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗚𝗿𝗮𝗻𝗱 𝗨𝗻𝗶𝗳𝗶𝗰𝗮𝘁𝗶𝗼𝗻 𝗔𝗿𝗺𝗲𝗱</b>\n"
+                    f"• VPIN & Shannon Entropy: <code>Detecting Whale Footprints</code>\n"
+                    f"• HJB Trajectory Filter: <code>Active (Mathematical Safety)</code>\n"
+                    f"• Execution Mode: <code>Tick-Level Dynamic Kelly Scalp</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
                     f"• Total Liquidity: <code>{cv:.4f} USDT</code>\n"
                     f"• Session Return:  <code>{actual:+.4f} USDT</code>\n"
                     f"• Peak Drawdown:   <code>{dd:.2%}</code>\n"
                     f"• Risk Buffer:     <code>[{dd_bar}]</code>\n\n"
                     f"🔬 <b>𝗗𝗔𝗜𝗟𝗬 𝗥𝗘𝗚𝗜𝗠𝗘 𝗣𝗥𝗢𝗙𝗜𝗟𝗘:</b>\n{regime_text}\n"
-                    f"🔥 <b>𝗔𝗖𝗧𝗜𝗩𝗘 𝗩𝗣𝗜𝗡 𝗩𝗢𝗟𝗨𝗠𝗘 𝗖𝗟𝗢𝗖𝗞𝗦</b>\n{chr(10).join(clock_states)}\n\n"
                     f"🏁 <b>𝗥𝗘𝗖𝗘𝗡𝗧 𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗠𝗔𝗧𝗨𝗥𝗜𝗧𝗜𝗘𝗦</b>\n{recent_trades}"
                 )
                 self._daemon_registry.add(asyncio.create_task(self._safe_telegram_dispatch(report, is_html=True)))
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, vpin_z: float = 0.0):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, hjb_adv: float):
         try:
             signal_id = str(uuid.uuid4())
-            feature_engine = self.feature_engines.get(symbol)
-            market_regime = feature_engine.detect_market_regime() if feature_engine else "RANGING"
-            
-            raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
-            if raw_atr <= 0:
-                prices = list(self.screener_memory.get(symbol, {}).get("prices", []))[-20:]
-                atr = current_price * min(0.005, max(0.001, (max(prices) - min(prices)) / np.mean(prices))) if len(prices) >= 20 else current_price * 0.005 
-            else: atr = raw_atr
-
-            bayesian_p = confidence 
             is_armed = dna_stats.get("is_armed", False)
 
-            sl_distance = max(atr * 2.0, current_price * 0.02)
-            tp_distance = max(sl_distance * 2.0, current_price * 0.04) * (1.0 + math.log1p(max(0, abs(vpin_z) - 2.0)))
+            # 🚀 TICK-LEVEL SCALPING TIGHT STOPS
+            sl_distance = max(atr * 1.5, current_price * 0.01)
+            tp_distance = sl_distance * 2.0 
             
             initial_sl = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
-            target_tp = current_price + tp_distance + (current_price * 0.0011) if direction == "BUY" else current_price - tp_distance - (current_price * 0.0011)
+            target_tp = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
                 
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
             initial_sl = float((Decimal(str(initial_sl)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
             target_tp = float((Decimal(str(target_tp)) / tick_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * tick_dec)
 
-            distance_to_sl = max(abs(current_price - initial_sl), current_price * 0.015)
-            quarter_kelly = (bayesian_p - ((1.0 - bayesian_p) / max(0.1, abs(target_tp - current_price) / distance_to_sl))) * (0.75 if (balance := await self.executor.get_wallet_balance_usdt()) < 100.0 else 1.0) * 0.25
+            balance = await self.executor.get_wallet_balance_usdt()
+            
+            # 🚀 RESTORED DYNAMIC KELLY RISK MODEL
+            reward_risk = tp_distance / sl_distance
+            base_kelly = confidence - ((1.0 - confidence) / max(0.1, reward_risk))
+            account_scaling = 0.75 if balance < 100.0 else 1.0
+            
+            # Risk scales with mathematical advantage (HJB)
+            hjb_boost = 1.0 + min(1.0, hjb_adv * 10)
+            quarter_kelly = max(0.005, min(0.025, base_kelly * 0.25 * account_scaling * hjb_boost))
 
             if quarter_kelly <= 0.0 or not is_armed:
-                await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": market_regime, "adaptive_obi_z": 0.0, "liquidity_density_ratio": 1.0, "bid_ask_spread": 0.001, "virtual_sl": initial_sl, "virtual_tp": target_tp}, is_shadow=True)
+                await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime}, is_shadow=True)
                 self.active_positions_lock.discard(symbol)
                 return True
 
             if balance < 1.0:
-                logger.critical(f"🛑 ACCOUNT EMPTY (${balance:.2f}). Need at least $1.00 to cover exchange margin.")
                 self.active_positions_lock.discard(symbol)
                 return False
 
@@ -745,21 +680,24 @@ class DistributedQuantEngine:
                 notional, bypass_vault = 6.00, True
                 position_size = notional / current_price
             else:
-                dollar_risk = balance * max(0.005, min(0.02, quarter_kelly))
-                position_size = dollar_risk / distance_to_sl
+                dollar_risk = balance * quarter_kelly
+                position_size = dollar_risk / sl_distance
                 notional, bypass_vault = max(position_size * current_price, 6.00), False
 
             if not bypass_vault and not self.risk_vault.evaluate_portfolio_safety(balance, notional, symbol):
                 self.active_positions_lock.discard(symbol)
                 return False
 
-            target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(distance_to_sl / current_price))
+            target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(sl_distance / current_price))
             await self.executor.adjust_leverage(symbol, target_leverage)
             await asyncio.sleep(0.2) 
 
-            current_depth = feature_engine.get_orderbook_snapshot() if hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price]], "asks": [[current_price]]}
+            # 🚀 RESTORED FEATURE ENGINE FOR SOR
+            feature_engine = self.feature_engines.get(symbol)
+            cached_depth = self.orderbook_snapshots.get(symbol, {"best_bid": current_price, "best_ask": current_price})
+            current_depth = {"bids": [[cached_depth["best_bid"]]], "asks": [[cached_depth["best_ask"]]]}
 
-            if market_regime == "TRENDING": execution_success = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=position_size, current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp, depth_snapshot=current_depth, vol_z=0.0, vol_mult=1.0, feature_engine=feature_engine)
+            if regime == "TRENDING": execution_success = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=position_size, current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp, depth_snapshot=current_depth, vol_z=0.0, vol_mult=1.0, feature_engine=feature_engine)
             else: execution_success = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=position_size, current_mid_price=current_price, stop_loss=initial_sl, take_profit=target_tp, depth_snapshot=current_depth, vol_z=0.0, vol_mult=1.0, feature_engine=feature_engine)
             
             if not execution_success:
@@ -769,7 +707,7 @@ class DistributedQuantEngine:
             self.risk_vault.update_position_ledger(symbol, notional)
             
             self._daemon_registry.add(asyncio.create_task(self._safe_telegram_dispatch(f"🧬 *HFT EXECUTION FIRE*\n• Node: {symbol} | {direction}\n• Signal Confidence: {confidence:.2%}\n• Leverage Applied: {target_leverage}x\n• Notional Value: ${notional:.2f} USDT\n🛡️ *Elastic Brackets Active*: SL: {initial_sl} | TP: {target_tp}", is_html=False, message_type="SUCCESS")))
-            self._daemon_registry.add(asyncio.create_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, {"allocated_value_usdt": notional, "size": position_size}, feature_engine, target_leverage, market_regime)))
+            self._daemon_registry.add(asyncio.create_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, initial_sl, target_tp, atr, {"allocated_value_usdt": notional, "size": position_size}, target_leverage, regime)))
             
             return True
 
@@ -778,7 +716,7 @@ class DistributedQuantEngine:
             self.active_positions_lock.discard(symbol)
             return False
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, target_tp_price: float, atr: float, risk_matrix: dict, feature_engine, target_leverage: int = 8, market_regime: str = "TRENDING"):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, initial_sl: float, target_tp_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING"):
         logger.info(f"👻 APEX MONITOR ARMED // Native Exchange Hand-off for {symbol}")
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if "RECOVERY" in signal_id else ("GHOST" if self.test_mode else "LIVE")}
         
@@ -883,12 +821,10 @@ class DistributedQuantEngine:
             self._initialize_symbol_structures(self.asset_basket)
         
         await asyncio.gather(
-            self.run_macro_commander(),        
-            self.run_universe_refresher(),
+            self.run_macro_commander(),
             self.run_dna_prewarmer(), 
             self.stream_manager_loop(),
             self.run_system_heartbeat(),
-            self.run_shadow_swarm_scanner(),
             self.cleanup_stale_locks() 
         )
 
