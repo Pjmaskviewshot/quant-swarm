@@ -44,11 +44,11 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 class PreCognitiveFractionalEngine:
     """
     🚀 APEX UPGRADE: Fractional Brownian Motion & Order Flow Fluid Dynamics
-    Replaces basic math with predictive Hurst Exponent estimations and 
-    Elastic Order Flow Tensors for pre-cognitive market mapping.
+    Tracks fractal memory (Hurst Exponent) and Elastic Order Flow Tensors 
+    for pre-cognitive micro-market structural modeling.
     """
     def __init__(self, memory_depth=500):
-        # Kalman-Bucy Variance Squeezer
+        # Kalman-Bucy Variance Squeezer State
         self.k_est = 0.0
         self.k_err = 1.0
         self.q = 0.01  
@@ -56,12 +56,12 @@ class PreCognitiveFractionalEngine:
         self.trade_timestamps = deque() 
         self.decay_factor = 0.5  
         
-        # Fractional Memory (Hurst) Array
+        # Fractal Memory (Hurst) Deques
         self.prices = deque(maxlen=memory_depth)
         self.log_returns = deque(maxlen=memory_depth)
-        self.hurst_exponent = 0.5 # 0.5 = Random Walk
+        self.hurst_exponent = 0.5 
         
-        # Order Flow Imbalance (OFI) Elastic Tensor
+        # Order Flow Imbalance (OFI) Elastic Tensor Fields
         self.rolling_ofi = 0.0
         self.ofi_variance = 1.0
         self.prev_bid = 0.0
@@ -94,13 +94,11 @@ class PreCognitiveFractionalEngine:
                 var_k = np.var(rets_k)
                 vr = var_k / (2.0 * var_1)
                 h_est = 0.5 + 0.5 * math.log(vr + 1e-9) / math.log(2)
-                # Bound Hurst to physical market realities
                 self.hurst_exponent = max(0.1, min(0.9, h_est))
         return self.hurst_exponent
 
     def apply_orderbook_fluid_dynamics(self, best_bid, bid_vol, best_ask, ask_vol) -> float:
         delta_W = 0.0
-        # Calculate instantaneous physical pressure
         if best_bid >= self.prev_bid:
             delta_W += bid_vol if best_bid > self.prev_bid else (bid_vol - self.prev_bid_size)
         if best_ask <= self.prev_ask:
@@ -109,7 +107,6 @@ class PreCognitiveFractionalEngine:
         self.prev_bid, self.prev_bid_size = best_bid, bid_vol
         self.prev_ask, self.prev_ask_size = best_ask, ask_vol
         
-        # Exponentially Weighted Moving Average of Pressure
         alpha = 0.1
         self.rolling_ofi = (1 - alpha) * self.rolling_ofi + alpha * delta_W
         self.ofi_variance = (1 - alpha) * self.ofi_variance + alpha * (delta_W - self.rolling_ofi)**2
@@ -145,25 +142,24 @@ class DistributedQuantEngine:
         self.shadow_cooldown: Dict[str, float] = {}
         
         self.stream_restart_event = asyncio.Event()
-        self.force_dna_refresh = asyncio.Event() # 🚀 Instant Event Trigger
+        self.force_dna_refresh = asyncio.Event() 
         
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         
-        # 🚀 CORE DATA STRUCTURES
+        # CORE MATRIX CONNECTIONS
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {}
         self.hawkes_engines: Dict[str, BivariateHawkesEngine] = {}
         self.edge_gates: Dict[str, MicrostructureEdgeGate] = {}
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {}
-        self.fractional_engines: Dict[str, PreCognitiveFractionalEngine] = {} # 🚀 UPGRADED ENGINE
+        self.fractional_engines: Dict[str, PreCognitiveFractionalEngine] = {} 
         self.screener_memory: Dict[str, Dict[str, Any]] = {}
         self.screener_metrics: Dict[str, Dict[str, float]] = {}
-        
-        # 🚀 THE RAM PRE-WARMER CACHE
         self.ram_dna_cache: Dict[str, dict] = {}
+        self.last_vpin_eval_time: Dict[str, float] = {}
+        self.last_dna_fetch: Dict[str, float] = {}
         
         self.debate_matrix = AdversarialDebateMatrix() 
-        
         self.macro_regimes: Dict[str, str] = {}
         self.macro_confidences: Dict[str, float] = {}
         self.current_atrs: Dict[str, float] = {}
@@ -174,19 +170,14 @@ class DistributedQuantEngine:
         self.active_positions_lock = set()
         self.evaluation_lock = set() 
         
-        # 🚀 Anti-Spam Throttle Log
-        self.last_vpin_eval_time: Dict[str, float] = {}
-        
         self._daemon_registry = weakref.WeakSet()
         self._log_throttle_cache: Dict[str, float] = {}
         
         self.tick_sizes: Dict[str, float] = {}
         self.global_macro_news_cache: str = "No significant macro shifts detected."
         self.last_news_fetch: float = 0.0
-
         self.global_state_cache = {"last_updated": 0.0}
         
-        # 🚀 SAFELY INITIALIZE EVERYTHING UPFRONT
         self._initialize_symbol_structures(self.asset_basket)
 
         nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
@@ -202,7 +193,7 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
-        """ATOMIC STATE MANAGER"""
+        """🚀 ATOMIC STATE MANAGER"""
         for s in symbols:
             if s not in self.vpin_clocks: self.vpin_clocks[s] = VolumeSynchronizedClock(bucket_volume=1_000_000.0)
             if s not in self.hawkes_engines: self.hawkes_engines[s] = BivariateHawkesEngine(calibration_window=500)
@@ -220,7 +211,8 @@ class DistributedQuantEngine:
             if s not in self.last_execution_buckets: self.last_execution_buckets[s] = 0
             if s not in self.volatility_baseline: self.volatility_baseline[s] = 0.0
             if s not in self.ram_dna_cache: self.ram_dna_cache[s] = {"is_armed": True, "win_rate": 0.50}
-            if s not in self.last_vpin_eval_time: self.last_vpin_eval_time[s] = 0.0 
+            if s not in self.last_vpin_eval_time: self.last_vpin_eval_time[s] = 0.0
+            if s not in self.last_dna_fetch: self.last_dna_fetch[s] = 0.0
 
     def _throttled_log(self, level: str, message: str, category: str = None, throttle_seconds: int = 30):
         current_time = time.time()
@@ -240,8 +232,7 @@ class DistributedQuantEngine:
                 if is_html: await self.telegram.send_html_report(message)
                 else: await self.telegram.log_message(message, message_type)
                 return
-            except Exception as e:
-                logger.warning(f"⚠️ Telegram dispatch fault: {e}")
+            except Exception:
                 await asyncio.sleep(2 ** attempt)
 
     async def _fetch_exchange_tick_sizes(self):
@@ -313,6 +304,7 @@ class DistributedQuantEngine:
             except Exception: pass
 
     async def run_dna_prewarmer(self):
+        """🚀 CONCURRENT DATABASE BATCHING DEPLOYED"""
         logger.info("🔥 RAM PRE-WARMER ONLINE: Actively pre-fetching database edge logic.")
         while True:
             try:
@@ -341,7 +333,6 @@ class DistributedQuantEngine:
                 
                 for sym, result in zip(symbols, results):
                     if isinstance(result, Exception):
-                        self._throttled_log("WARNING", f"⚠️ DNA pre-warm failed for {sym}: {result}. Retaining previous edge state.")
                         self.ram_dna_cache[sym] = self.ram_dna_cache.get(sym, {"is_armed": True, "win_rate": 0.50})
                     else:
                         self.ram_dna_cache[sym] = result
@@ -361,7 +352,7 @@ class DistributedQuantEngine:
             is_buy = (str(trade_data.get("side", "")).upper() == "BUY")
             timestamp = float(trade_data.get("timestamp", time.time() * 1000)) / 1000.0
             
-            # 🚀 Online Pre-Cognitive Updates
+            # 🚀 Online Microstate Estimation updates
             frac_engine.update_hurst_online(price)
             frac_engine.kalman_update(price)
             
@@ -387,7 +378,6 @@ class DistributedQuantEngine:
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
         if not symbol or symbol not in self.asset_basket: return
-
         bids, asks = depth_data.get("b", []), depth_data.get("a", [])
         if bids and asks:
             try:
@@ -398,7 +388,7 @@ class DistributedQuantEngine:
                 gate = self.edge_gates.get(symbol)
                 if gate: gate.update_orderbook_state(best_bid, bid_size, best_ask, ask_size, mid_price)
                 
-                # 🚀 Fluid Dynamics Update
+                # 🚀 Orderbook Microstructure Fluid Dynamics
                 frac_engine = self.fractional_engines.get(symbol)
                 if frac_engine: frac_engine.apply_orderbook_fluid_dynamics(best_bid, bid_size, best_ask, ask_size)
                     
@@ -498,18 +488,14 @@ class DistributedQuantEngine:
             edge_gate = self.edge_gates.get(symbol)
             if not edge_gate: return
             
-            debate_start_time = time.time()
             verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
-            debate_latency = time.time() - debate_start_time
-            
-            action = verdict.get("action", "HOLD")
-            confidence = verdict.get("confidence", 0.0)
+            action, confidence = verdict.get("action", "HOLD"), verdict.get("confidence", 0.0)
             
             prices_list = self.screener_memory.get(symbol, {}).get("prices", [])
             post_debate_price = prices_list[-1] if prices_list else vpin_manifest["current_price"]
             drift_pct = abs(post_debate_price - vpin_manifest["current_price"]) / vpin_manifest["current_price"]
             
-            # 🚀 PRE-COGNITIVE FRACTAL EDGE CALCULATIONS (The Brains)
+            # 🚀 PRE-COGNITIVE FRACTAL EDGE CALCULATIONS
             fractal_engine = self.fractional_engines.get(symbol)
             hurst_H = fractal_engine.hurst_exponent if fractal_engine else 0.5
             ofi_z = (fractal_engine.rolling_ofi / (math.sqrt(fractal_engine.ofi_variance) + 1e-9)) if fractal_engine else 0.0
@@ -519,12 +505,12 @@ class DistributedQuantEngine:
             
             z_impact = min(1.5, 1.0 + (max(0, abs(vpin_z) - 2.0) * 0.25))
             
-            # Massive combat upgrades
+            # Dynamic execution parameters
             if predicted_regime == "FRACTAL_TREND":
                 regime_multiplier = 3.5  # Heavy breakout allocation
-                dynamic_threshold = max(0.0003, spread_cost) # Execute immediately
+                dynamic_threshold = max(0.0003, spread_cost) # Execute aggressively
             elif predicted_regime == "FRACTAL_RANGE":
-                regime_multiplier = 1.8  # Counter-trend scalp
+                regime_multiplier = 1.8  # Counter-trend micro scalp
                 dynamic_threshold = max(0.0005, spread_cost + 0.0002)
             else:
                 regime_multiplier = 2.0
@@ -535,13 +521,13 @@ class DistributedQuantEngine:
             # OFI Elastic Confirmation (Order flow confirms structural edge)
             if action == "BUY" and ofi_z > 1.5: confidence += 0.08
             if action == "SELL" and ofi_z < -1.5: confidence += 0.08
-            if action == "BUY" and ofi_z < -1.0: confidence -= 0.15 # Institutional trap fading detected
+            if action == "BUY" and ofi_z < -1.0: confidence -= 0.15 # Institutional fading protection
             if action == "SELL" and ofi_z > 1.0: confidence -= 0.15
             
             net_alpha = (confidence * (expected_roi - spread_cost)) - drift_pct
             
             if net_alpha < dynamic_threshold:
-                # 🚀 LOGGING FIX: Uses _throttled_log to stop printing to the terminal every 2 seconds during chop
+                # 🚀 THROTTLED CONSOLE SECURITY LOGGING
                 self._throttled_log(
                     "CRITICAL", 
                     f"🛡️ PRE-COGNITIVE DECAY // {symbol} [{predicted_regime} | H={hurst_H:.2f}] | Alpha: {net_alpha:.2%} | Drift: {drift_pct:.2%}. Aborting.",
@@ -550,7 +536,7 @@ class DistributedQuantEngine:
                 )
                 return
             
-            # 🚀 DYNAMIC CONFIDENCE GATE
+            # 🚀 DYNAMIC CONFIDENCE SURFACE 
             min_confidence = 0.48 if predicted_regime == "FRACTAL_TREND" else 0.54
             if abs(vpin_z) >= 3.5: min_confidence -= 0.08
             
@@ -589,7 +575,7 @@ class DistributedQuantEngine:
             if len(self.shadow_basket) < 10:
                 self.shadow_basket.extend([s for s in ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"] if s not in self.shadow_basket])
             
-            # 🚀 ATOMIC RE-ALLOCATION (Fixes memory leaks)
+            # 🚀 ATOMIC MATRIX SWAP (Ensures total state-sync across satellite shifts)
             new_vpin_clocks = {}
             new_hawkes_engines = {}
             new_edge_gates = {}
@@ -735,7 +721,7 @@ class DistributedQuantEngine:
                     f"• Peak Drawdown:   <code>{dd:.2%}</code>\n"
                     f"• Risk Buffer:     <code>[{dd_bar}]</code>\n\n"
                     f"🔬 <b>𝗗𝗔𝗜𝗟𝗬 𝗥𝗘𝗚𝗜𝗠𝗘 𝗣𝗥𝗢𝗙𝗜𝗟𝗘:</b>\n{regime_text}\n"
-                    f"🔥 <b>𝗔𝗖𝗧𝗜𝗩𝗘 𝗩𝗣𝗜𝗡 𝗩𝗢𝗟𝗨𝗠𝗘 𝗖𝗟𝗢𝗖𝗞𝗦</b>\n{chr(10).join(clock_states)}\n\n"
+                    f"🔥 <b>𝗔𝗖𝗧𝗜𝗩Ｅ 𝗩𝗣𝗜𝗡 𝗩𝗢𝗟𝗨𝗠Ｅ 𝗖𝗟𝗢𝗖𝗞𝗦</b>\n{chr(10).join(clock_states)}\n\n"
                     f"🏁 <b>𝗥𝗘𝗖𝗘𝗡𝗧 𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗠𝗔𝗧𝗨𝗥𝗜𝗧𝗜𝗘𝗦</b>\n{recent_trades}"
                 )
                 self._daemon_registry.add(asyncio.create_task(self._safe_telegram_dispatch(report, is_html=True)))
