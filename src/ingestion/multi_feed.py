@@ -9,10 +9,10 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V14.1 PRODUCTION INGESTION LAYER
+    🚀 V18 ZENITH: PRODUCTION INGESTION LAYER
     A pure, high-speed multiplexed data pipe. 
     Strips out all redundant math processing to prevent double-counting.
-    Routes ticks directly to Omni-Core.
+    Routes ticks instantly via non-blocking tasks to the Omni-Core.
     """
     def __init__(
         self, 
@@ -60,6 +60,7 @@ class HighVelocityMultiFeed:
         max_reconnect_delay = 30.0
 
         while self.is_running:
+            watchdog_task = None
             try:
                 logger.info(f"Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
                 async with aiohttp.ClientSession() as session:
@@ -69,17 +70,21 @@ class HighVelocityMultiFeed:
                         reconnect_delay = 1.0
                         
                         async def connection_watchdog():
-                            while not ws.closed and self.is_running:
-                                await asyncio.sleep(20)
-                                try:
-                                    await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
-                                    if time.time() - self.last_msg_timestamp > 45.0:
-                                        logger.error("🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
-                                        await ws.close()
+                            try:
+                                while not ws.closed and self.is_running:
+                                    await asyncio.sleep(20)
+                                    try:
+                                        await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
+                                        if time.time() - self.last_msg_timestamp > 45.0:
+                                            logger.error("🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
+                                            await ws.close()
+                                            break
+                                    except Exception as e:
+                                        logger.debug(f"Watchdog ping failed dynamically: {e}")
                                         break
-                                except Exception as e:
-                                    logger.debug(f"Watchdog ping failed dynamically: {e}")
-                                    break
+                            except asyncio.CancelledError:
+                                # Normal behavior when the socket drops and we cancel the watchdog
+                                pass
                                     
                         watchdog_task = asyncio.create_task(connection_watchdog())
 
@@ -103,7 +108,7 @@ class HighVelocityMultiFeed:
                                 if not data:
                                     continue
 
-                                # 🚀 Route incoming bytes instantly to the correct processing channel thread
+                                # 🚀 Route incoming bytes instantly to the correct processing channel
                                 if topic.startswith("tickers"):
                                     await self.screener_callback(data)
                                     
@@ -131,7 +136,7 @@ class HighVelocityMultiFeed:
                                         "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                     })
                                     
-                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V14.1 Omni-Core
+                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V18 Zenith Core
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]
                                     
@@ -144,16 +149,17 @@ class HighVelocityMultiFeed:
                                                 "side": tick.get("S", "Buy"),
                                                 "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
-                                            # Fire and forget directly to main.py's math engine
+                                            # Fire and forget directly to main.py's math engine without blocking the socket
                                             asyncio.create_task(self.trade_callback(tick_payload))
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
                                 
-                        watchdog_task.cancel()
+                        if watchdog_task and not watchdog_task.done():
+                            watchdog_task.cancel()
                         
             except Exception as e:
-                logger.error(f"Critical connection failure caught in multiplex ingestion loop: {e}")
+                logger.error(f"Critical connection failure caught in multiplex ingestion loop: {e}", exc_info=True)
                 
             if not self.is_running:
                 break
