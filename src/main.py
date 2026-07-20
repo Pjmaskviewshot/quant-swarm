@@ -41,7 +41,7 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V20.1 HOT-PATH OPTIMIZED: PRODUCTION QUANTITATIVE NODE
+    🔬 V20.2 HOT-PATH OPTIMIZED: PRODUCTION QUANTITATIVE NODE
     Neural Perceptron removed. Restored stable 40/40/20 statistical logit.
     Dead CPU weight (Structural Edge Gate) purged.
     """
@@ -429,7 +429,6 @@ class DistributedQuantEngine:
         if self.circuit_breakers.get(symbol, 0.0) > now: return
 
         try:
-            # 🚀 V20.1 FIX: Feed the Trade Flow Imbalance (TFI) pipeline
             feature_engine = self.feature_engines.get(symbol)
             if feature_engine and hasattr(feature_engine, 'push_trade_tick'):
                 feature_engine.push_trade_tick([trade_data])
@@ -505,9 +504,10 @@ class DistributedQuantEngine:
                 
                 if ev < 0.0001: return 
                 
+                # 🚀 V20.2 FIX: Convert decimal Advantage to Basis Points (bps) for human readability
                 logger.critical(
                     f"🔬 INSTITUTIONAL TRIGGER // {symbol} [{regime}] "
-                    f"| {action} | Baye-Prob: {prob_success:.2%} | EV: {ev:.4f} | HJB Adv: {hjb_advantage:.4f}"
+                    f"| {action} | Baye-Prob: {prob_success:.2%} | EV: {ev:.4f} | HJB Adv: {hjb_advantage * 10000:.2f} bps"
                 )
                 
                 self.last_eval_time[symbol] = now
@@ -698,7 +698,7 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.1: HOT-PATH)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.2: HOT-PATH)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
                     f"• Orderflow Filter: <code>True 4-State Cont OFI</code>\n"
@@ -788,9 +788,13 @@ class DistributedQuantEngine:
                         await self.executor.adjust_leverage(symbol, target_leverage)
                         await asyncio.sleep(0.2) 
                 except Exception as e:
-                    logger.error(f"Leverage adjustment failed: {e}. Aborting trade.", exc_info=True)
-                    self.active_positions_lock.discard(symbol)
-                    return False
+                    # 🚀 V20.2 FIX: Safely ignore the "leverage not modified" error to prevent false aborts
+                    if "110043" in str(e):
+                        pass
+                    else:
+                        logger.error(f"Leverage adjustment failed: {e}. Aborting trade.", exc_info=True)
+                        self.active_positions_lock.discard(symbol)
+                        return False
 
                 feature_engine = self.feature_engines.get(symbol)
                 if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
