@@ -9,10 +9,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V19 GENESIS: PRODUCTION INGESTION LAYER
+    🚀 V20.2 GENESIS: PRODUCTION INGESTION LAYER
     A pure, high-speed multiplexed data pipe. 
-    Strips out all redundant math processing to prevent double-counting.
-    Utilizes strong task referencing to prevent Python 3.11+ garbage collection drops.
+    Strict chronological awaits implemented to prevent L2/L3 state race conditions.
     """
     def __init__(
         self, 
@@ -38,7 +37,6 @@ class HighVelocityMultiFeed:
         self.last_msg_timestamp = time.time()
         self.orderbook_sequences: Dict[str, int] = {}
         
-        # 🚀 ENGINEERING HARDENING: Prevent Python from garbage-collecting background tasks
         self._active_tasks = set()
 
     def track_task(self, coro: Coroutine):
@@ -131,8 +129,9 @@ class HighVelocityMultiFeed:
                                         self.orderbook_sequences[symbol] = u_sequence
                                     elif msg_type == "delta":
                                         last_u = self.orderbook_sequences.get(symbol)
-                                        if last_u is not None and u_sequence <= last_u:
-                                            logger.critical(f"⚠️ SEQUENCE ANOMALY // {symbol} Orderbook dropped a packet (Got u:{u_sequence} <= Last:{last_u}). Forcing clean disconnect recovery.")
+                                        # 🚀 V20.2 FIX: Changed <= to < to survive Bybit's duplicate heartbeat sequence numbers
+                                        if last_u is not None and u_sequence < last_u:
+                                            logger.critical(f"⚠️ SEQUENCE ANOMALY // {symbol} Orderbook dropped a packet (Got u:{u_sequence} < Last:{last_u}). Forcing clean disconnect recovery.")
                                             await ws.close()
                                             break
                                         self.orderbook_sequences[symbol] = u_sequence
@@ -146,7 +145,7 @@ class HighVelocityMultiFeed:
                                         "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                     })
                                     
-                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V19 Genesis Core
+                                # ⚡ PURE HFT PIPELINE: Raw tick feeding directly to V20.2 Core
                                 elif topic.startswith("publicTrade"):
                                     symbol = topic.split(".")[-1]
                                     
@@ -159,8 +158,9 @@ class HighVelocityMultiFeed:
                                                 "side": tick.get("S", "Buy"),
                                                 "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
-                                            # 🚀 V19 FIX: Strong Task Referencing so Python doesn't delete ticks
-                                            self.track_task(self.trade_callback(tick_payload))
+                                            # 🚀 V20.2 FIX: Await sequentially to preserve strict chronological order.
+                                            # No async tasks. Prevents lethal race conditions in state updates.
+                                            await self.trade_callback(tick_payload)
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break

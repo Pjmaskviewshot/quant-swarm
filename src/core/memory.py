@@ -11,9 +11,9 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V19.2 GENESIS UNLOCKED: ATOMIC MEMORY LEDGER
+    🌌 V19.3 GENESIS: ATOMIC MEMORY LEDGER
     Hyper-optimized Supabase connector. Single-trip atomic updates.
-    Full Shadow Swarm continuous learning integration.
+    Standardized KNN Feature Matrix.
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -30,12 +30,10 @@ class MemoryBank:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
             raise
 
-        # 🚀 APEX UPGRADE: High-Speed KNN Cache to prevent Database DDoS
         self.dna_cache = {} 
         self.cache_ttl_seconds = 120.0 
 
     def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
-        """Executes Supabase queries with exponential backoff on transient network faults."""
         for attempt in range(max_retries):
             try:
                 return query_builder.execute()
@@ -63,7 +61,6 @@ class MemoryBank:
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
         
-        # 🚀 FIX: Accept true mathematically derived stops if provided, else safe default
         sl_price = float(features.get("virtual_sl", price * 0.99))
         tp_price = float(features.get("virtual_tp", price * 1.015))
 
@@ -99,23 +96,17 @@ class MemoryBank:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
     def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str, execution_details: Dict[str, Any] = None):
-        """
-        🚀 V19 OPTIMIZATION: Single-trip atomic database update. 
-        Cuts database I/O latency in half.
-        """
         is_correct = True if net_pnl > 0 else False
         if execution_details is None:
             execution_details = {}
             
         try:
-            # 1. Fetch exactly what we need (timestamp) to calculate holding time
             response = self._safe_execute(self.supabase.table("quantitative_ledger").select("timestamp").eq("signal_id", str(signal_id)))
             
             if response and response.data:
                 start_dt = self._parse_iso_timestamp(response.data[0]["timestamp"])
                 duration = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
                 
-                # 2. Atomic Update Payload
                 update_payload = {
                     "resolved": True,
                     "actual_outcome": str(outcome),
@@ -129,7 +120,6 @@ class MemoryBank:
                     "holding_minutes": round(duration, 2)
                 }
                 
-                # 3. Fire and verify in one network trip
                 update_res = self._safe_execute(self.supabase.table("quantitative_ledger").update(update_payload).eq("signal_id", str(signal_id)))
                 
                 if update_res and update_res.data:
@@ -146,7 +136,6 @@ class MemoryBank:
         resolved_count = 0
 
         try:
-            # Only pull unresolved rows
             query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
             response = self._safe_execute(query.order("timestamp", desc=False).limit(500))
 
@@ -233,13 +222,11 @@ class MemoryBank:
                             is_terminated, exit_price = True, sl_price
                             break
 
-                # 🚀 V19.2 FIX: Force resolution on 60m timeouts regardless of breakeven
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     exit_price = current_price
 
                 if is_terminated:
-                    # Evaluates shadow performance at the exact leverage the Risk Vault would have assigned
                     simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
                     TAKER_ROUND_TRIP = 0.0011
                     
@@ -276,16 +263,10 @@ class MemoryBank:
             return 0
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
-        """
-        🚀 TRANSFER LEARNING UPGRADE:
-        Now learns correctly from ALL resolved executions (Shadow AND Live).
-        Provides real-time mathematical validation of strategy variants.
-        """
         c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
         c_obi = current_dna.get("z_obi", 0.0)
         c_spread = current_dna.get("spread_pct", 0.001) * 1000 
         
-        # Aggressive rounding merges micro-variations into the same high-speed RAM hash bucket.
         vol_bucket = round(c_vol * 2.0) / 2.0  
         obi_bucket = round(c_obi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
@@ -293,15 +274,12 @@ class MemoryBank:
         dna_hash = f"{vol_bucket}_{obi_bucket}_{spread_bucket}"
         current_time = time.time()
         
-        # 1. Check Local RAM to prevent Supabase Rate-Limiting during volatility
         if dna_hash in self.dna_cache:
             cached_time, cached_result = self.dna_cache[dna_hash]
             if current_time - cached_time < self.cache_ttl_seconds:
                 return cached_result
 
         try:
-            # 2. Query the live global ledger
-            # 🚀 BUG FIX: We actively WANT to learn from Shadow Swarm executions. Filter removed.
             query = self.supabase.table("quantitative_ledger")\
                 .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
                 .eq("resolved", True)\
@@ -322,11 +300,16 @@ class MemoryBank:
                 h_spread_raw = float(row.get("spread", 0.0))
                 h_spread_pct = (h_spread_raw / h_price) * 1000 if h_price > 0 else 0.001
                 
-                # Weighted Euclidean Distance (Prioritizing OBI and Volume bursts)
+                # 🚀 V19.3 FIX: STANDARDIZED EUCLIDEAN METRIC (Issue #14)
+                # Prevents massive spread spikes from overpowering the OBI vector
+                norm_vol = (c_vol - h_vol) / 2.0
+                norm_obi = (c_obi - h_obi) / 1.5
+                norm_spread = (c_spread - h_spread_pct) / 5.0
+                
                 dist = math.sqrt(
-                    (1.5 * (c_vol - h_vol))**2 + 
-                    (2.0 * (c_obi - h_obi))**2 + 
-                    (1.0 * (c_spread - h_spread_pct))**2
+                    (1.5 * norm_vol)**2 + 
+                    (2.0 * norm_obi)**2 + 
+                    (1.0 * norm_spread)**2
                 )
                 
                 distances.append({
@@ -342,7 +325,6 @@ class MemoryBank:
             
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
-            # 🏛️ Arming Trigger: Does the AI beat the market on this specific mathematical profile?
             is_armed = bayesian_edge >= 0.55
             
             result_payload = {
@@ -352,7 +334,6 @@ class MemoryBank:
                 "cluster_win_rate": round(wins / total, 4)
             }
             
-            # 3. Save result to high-speed cache
             self.dna_cache[dna_hash] = (current_time, result_payload)
             return result_payload
 

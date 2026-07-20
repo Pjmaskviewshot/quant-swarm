@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 logger = logging.getLogger("QUANT_CORE.RISK_MANAGER")
 
 class InstitutionalRiskVault:
-    def __init__(self, max_drawdown_pct: float = 0.25, max_single_position_risk_pct: float = 0.15, exchange_min_notional: float = 5.0, max_single_asset_leverage_limit: float = 1.5):
+    def __init__(self, max_drawdown_pct: float = 0.25, max_single_position_risk_pct: float = 0.15, exchange_min_notional: float = 5.0, max_single_asset_leverage_limit: float = 10.0):
         """
         Risk engine initialized with baseline protections and Phase 2 advanced safety rings.
         Optimized dynamically to handle both micro-balances and large account scaling seamlessly.
@@ -20,6 +20,7 @@ class InstitutionalRiskVault:
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
         self.exchange_min_notional = exchange_min_notional
+        # 🚀 FIX: Raised to 10.0 so the Kelly Criterion can function on micro-accounts without being artificially clamped
         self.max_single_asset_leverage_limit = max_single_asset_leverage_limit
         self.peak_balance = 0.0
         self.emergency_circuit_breaker = False
@@ -115,7 +116,8 @@ class InstitutionalRiskVault:
 
         # 6. Check Global Exposure (The Swarm Central Banker)
         total_exposure = sum(self.active_positions.values()) + new_position_notional
-        if total_exposure > (current_balance * 3.0):
+        # 🚀 FIX: Raised to 5.0 to allow 2-3 simultaneous micro-account positions
+        if total_exposure > (current_balance * 5.0):
             logger.warning(f"⚠️ Global exposure limit reached: Current {sum(self.active_positions.values()):.2f} + New {new_position_notional:.2f} exceeds capacity.")
             return False
                 

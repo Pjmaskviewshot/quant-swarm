@@ -102,8 +102,8 @@ class SmartOrderRouter:
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float):
         """
-        ⚡ THE FLASH STRIKE (V6 P2-9 FIX)
-        Aggressive multi-step IOC escalation.
+        ⚡ THE FLASH STRIKE
+        Aggressive multi-step IOC escalation. Used strictly during breakouts.
         """
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} is experiencing severe structural fracture. Executing aggressive escalation.")
         
@@ -145,7 +145,7 @@ class SmartOrderRouter:
         logger.error(f"❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated.")
         return False
 
-    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, timeout: int = 60):
+    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60):
         """
         🛡️ HIGH-FREQUENCY MAKER PEGGING
         Bypasses spoofing dust and dynamically throttles its own loop speed based on RAM availability.
@@ -165,16 +165,18 @@ class SmartOrderRouter:
             loop_delay = 1.5 # Default to safe REST throttling limit
 
             try:
-                # 🚀 1. TOB FETCH: Local RAM vs REST Fallback
+                # 🚀 V20.2 FIX: Use depth_snapshot efficiently instead of discarding it
                 target_price = 0.0
-                if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
+                if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
+                    target_price = self._get_meaningful_tob(depth_snapshot, side)
+                    if target_price > 0.0: loop_delay = 0.2
+                    
+                if target_price <= 0.0 and feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
                     ob_data = feature_engine.get_orderbook_snapshot()
                     target_price = self._get_meaningful_tob(ob_data, side)
-                    if target_price > 0.0:
-                        loop_delay = 0.2  # 🚀 RAM is free! Accelerate loop cycle by 700%
-                    else:
-                        target_price = await self._fetch_rest_tob(symbol, side)
-                else:
+                    if target_price > 0.0: loop_delay = 0.2
+                    
+                if target_price <= 0.0:
                     target_price = await self._fetch_rest_tob(symbol, side)
                     
                 if target_price <= 0:
@@ -243,14 +245,28 @@ class SmartOrderRouter:
             except Exception: pass
         return False
 
-    async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, vol_z: float = 0.0, vol_mult: float = 1.0, **kwargs) -> bool:
+    async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
+        """
+        🚀 V20.2 REGIME FIX: TRENDING
+        Lower thresholds for crossing the spread. Shorter timeout for maker pegging.
+        """
         await self._fetch_exchange_limits(symbol)
-        v_z, v_m, fe = kwargs.get("vol_z", vol_z), kwargs.get("vol_mult", vol_mult), kwargs.get("feature_engine") 
-        if abs(v_z) >= 3.0 and v_m >= 2.5: return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
-        else: return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=fe)
+        
+        logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
+        
+        if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
+            return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
+        else:
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=30)
 
-    async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, vol_z: float = 0.0, vol_mult: float = 1.0, **kwargs) -> bool:
+    async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
+        """
+        🕸️ V20.2 REGIME FIX: RANGING
+        Forced Maker peg to harvest the spread. Longer timeout patience.
+        """
         await self._fetch_exchange_limits(symbol)
-        v_z, v_m, fe = kwargs.get("vol_z", vol_z), kwargs.get("vol_mult", vol_mult), kwargs.get("feature_engine")
-        if abs(v_z) >= 3.0 and v_m >= 2.5: return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
-        else: return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=fe)
+        
+        logger.info(f"🕸️ RANGING REGIME ROUTING // Forcing Maker Peg on {symbol}")
+        
+        # Strict passive maker execution to harvest spread
+        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=60)
