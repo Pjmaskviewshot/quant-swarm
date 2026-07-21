@@ -41,7 +41,7 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V20.3 INSTITUTIONAL UPGRADE: PRODUCTION QUANTITATIVE NODE
+    🔬 V20.4 HOT-PATH OPTIMIZED: PRODUCTION QUANTITATIVE NODE
     Neural Perceptron removed. Restored stable 40/40/20 statistical logit.
     Dead CPU weight purged.
     """
@@ -200,8 +200,9 @@ class DistributedQuantEngine:
         self.macro_regimes: Dict[str, str] = {}
         self.volatility_baseline: Dict[str, float] = {}
         
-        # V20.3 FIX: Safe atomic position tracking
-        self.active_positions_lock = set()
+        # 🚀 V20.4 FIX: Real atomic per-symbol locks (prevents async race conditions)
+        self.symbol_locks: Dict[str, asyncio.Lock] = {}
+        self.active_positions_lock = set()  # Retained for legacy set compatibility
         
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
@@ -225,6 +226,17 @@ class DistributedQuantEngine:
             testnet=os.getenv("BYBIT_TESTNET", "false").lower() == "true"
         )
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        if symbol not in self.symbol_locks:
+            self.symbol_locks[symbol] = asyncio.Lock()
+        return self.symbol_locks[symbol]
+
+    def _release_symbol_lock(self, symbol: str):
+        self.active_positions_lock.discard(symbol)
+        lock = self.symbol_locks.get(symbol)
+        if lock and lock.locked():
+            lock.release()
 
     def _on_task_done(self, task):
         self._active_tasks.discard(task)
@@ -302,7 +314,12 @@ class DistributedQuantEngine:
                 
                 atr = entry_price * 0.015 
                 
+                # Lock symbol atomically
+                sym_lock = self._get_symbol_lock(symbol)
+                if not sym_lock.locked():
+                    await sym_lock.acquire()
                 self.active_positions_lock.add(symbol)
+                
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 8}
                 
                 self.track_task(self._position_lifecycle_daemon(
@@ -316,13 +333,15 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(300) 
             try:
-                for symbol in list(self.active_positions_lock):
-                    if not hasattr(self.risk_vault, 'active_positions') or symbol not in self.risk_vault.active_positions:
-                        async with self.api_semaphore:
-                            pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        if pos_response.get("retCode") == 0:
-                            if not any(float(p.get("size", 0.0)) > 0 for p in pos_response.get("result", {}).get("list", [])):
-                                self.active_positions_lock.discard(symbol)
+                for symbol in list(self.symbol_locks.keys()):
+                    sym_lock = self.symbol_locks[symbol]
+                    if sym_lock.locked():
+                        if not hasattr(self.risk_vault, 'active_positions') or symbol not in self.risk_vault.active_positions:
+                            async with self.api_semaphore:
+                                pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                            if pos_response.get("retCode") == 0:
+                                if not any(float(p.get("size", 0.0)) > 0 for p in pos_response.get("result", {}).get("list", [])):
+                                    self._release_symbol_lock(symbol)
             except Exception as e:
                 logger.error(f"Stale lock cleanup error: {e}", exc_info=True)
 
@@ -357,7 +376,10 @@ class DistributedQuantEngine:
             try:
                 async def _safe_fetch(sym, dna):
                     async with self.db_semaphore:
-                        return await asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30)
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30),
+                            timeout=10.0
+                        )
 
                 fetch_tasks = {}
                 for symbol in list(self.asset_basket):
@@ -391,11 +413,14 @@ class DistributedQuantEngine:
                 
                 if current_prices:
                     async with self.db_semaphore:
-                        await asyncio.to_thread(
-                            self.memory.resolve_batch_historical_predictions,
-                            list(current_prices.keys()),
-                            current_prices,
-                            60.0
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self.memory.resolve_batch_historical_predictions,
+                                list(current_prices.keys()),
+                                current_prices,
+                                60.0
+                            ),
+                            timeout=15.0
                         )
             except Exception as e:
                 logger.error(f"Shadow resolution daemon failed: {e}", exc_info=True)
@@ -479,13 +504,19 @@ class DistributedQuantEngine:
                 if is_shadow_asset:
                     if prob_success > 0.65: 
                         async def _shadow_commit():
-                            async with self.db_semaphore:
-                                await asyncio.to_thread(self.memory.commit_prediction, str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime}, True)
+                            try:
+                                async with self.db_semaphore:
+                                    await asyncio.wait_for(
+                                        asyncio.to_thread(self.memory.commit_prediction, str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime}, True),
+                                        timeout=10.0
+                                    )
+                            except Exception as e: logger.debug(f"Shadow commit error: {e}")
                         self.track_task(_shadow_commit())
                     return 
                 
-                # 🚀 V20.3 FIX: Safe atomic position tracking (prevents double execution)
-                if symbol in self.active_positions_lock: return
+                # 🚀 V20.4 FIX: Fast-path non-blocking check using true asyncio.Lock
+                sym_lock = self._get_symbol_lock(symbol)
+                if sym_lock.locked(): return
                 
                 min_threshold = max(0.55, self.ram_dna_cache.get(symbol, {}).get("win_rate", 0.60))
                 if prob_success < min_threshold: return 
@@ -513,7 +544,10 @@ class DistributedQuantEngine:
                 )
                 
                 self.last_eval_time[symbol] = now
-                self.active_positions_lock.add(symbol) # Safely acquire lock
+                
+                # 🚀 V20.4 FIX: Atomically acquire per-symbol lock before execution hand-off
+                await sym_lock.acquire()
+                self.active_positions_lock.add(symbol)
                 self.track_task(self.execute_statistical_signal(symbol, action, price, prob_success, regime, hjb_advantage, atr))
                 
         except Exception as e:
@@ -528,7 +562,7 @@ class DistributedQuantEngine:
         try:
             dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
             
-            await self.run_signal_lifecycle(
+            success = await self.run_signal_lifecycle(
                 symbol=symbol, 
                 direction=action, 
                 current_price=price, 
@@ -538,9 +572,11 @@ class DistributedQuantEngine:
                 regime=regime,
                 hjb_adv=hjb_adv
             )
+            if not success:
+                self._release_symbol_lock(symbol)
         except Exception as e:
             logger.error(f"❌ EXECUTION ROUTING FAILURE for {symbol}: {e}", exc_info=True)
-            self.active_positions_lock.discard(symbol)
+            self._release_symbol_lock(symbol)
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
@@ -655,9 +691,16 @@ class DistributedQuantEngine:
                     continue
 
                 if "wallet_baseline" not in self.global_state_cache: self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
-                if "start_of_day_balance" not in self.global_state_cache: self.global_state_cache["start_of_day_balance"] = current_vault_balance
-                    
-                today_start_iso = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                
+                # 🚀 V20.4 FIX: Midnight UTC balance baseline reset (prevents baseline drift)
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                current_day = now_utc.strftime("%Y-%m-%d")
+                if self.global_state_cache.get("current_day") != current_day:
+                    self.global_state_cache["current_day"] = current_day
+                    self.global_state_cache["start_of_day_balance"] = current_vault_balance
+                    logger.info(f"🌅 MIDNIGHT UTC RESET: New start of day balance = {current_vault_balance:.4f} USDT")
+
+                today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 
                 try:
                     def _fetch(): return self.memory.supabase.table("quantitative_ledger").select("market_regime, net_pnl, symbol, predicted_direction, actual_outcome").eq("resolved", True).eq("is_shadow", False).gte("timestamp", today_start_iso).execute()
@@ -665,15 +708,8 @@ class DistributedQuantEngine:
                         data = (await asyncio.to_thread(_fetch)).data or []
                 except Exception:
                     data = []
-                
-                db_daily_pnl = sum(float(row.get("net_pnl", 0.0)) for row in data)
-                discrepancy = current_vault_balance - (self.global_state_cache["start_of_day_balance"] + db_daily_pnl)
-                
-                if discrepancy > 5.0 or discrepancy < -5.0:
-                    self.global_state_cache["start_of_day_balance"] += discrepancy
-                    self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01) if discrepancy < -5.0 else self.global_state_cache["wallet_baseline"] + discrepancy
 
-                actual_net_pnl = current_vault_balance - self.global_state_cache["start_of_day_balance"]
+                actual_net_pnl = current_vault_balance - self.global_state_cache.get("start_of_day_balance", current_vault_balance)
                 baseline = self.global_state_cache["wallet_baseline"]
                 
                 if current_vault_balance > baseline:
@@ -700,12 +736,12 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.3: INSTITUTIONAL UPGRADE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦Kc 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.4: HARDENED CORE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
-                    f"• Execution Guard: <code>Daily 10% Circuit Breaker Active</code>\n"
-                    f"• Database Engine: <code>Async Non-Blocking Commits</code>\n"
-                    f"• Monitoring Lock: <code>Infinite Lifecycle Extension</code>\n\n"
+                    f"• Concurrency Engine: <code>Atomic asyncio.Lock per Symbol</code>\n"
+                    f"• Circuit Breaker: <code>Strict Midnight UTC Baseline (10% Max Loss)</code>\n"
+                    f"• Monitoring Lock: <code>Infinite Liveness Polling</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
                     f"• Total Liquidity: <code>{cv:.4f} USDT</code>\n"
                     f"• Session Return:  <code>{actual:+.4f} USDT</code>\n"
@@ -716,7 +752,7 @@ class DistributedQuantEngine:
                 )
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, hjb_adv: float):
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, hjb_adv: float) -> bool:
         try:
             signal_id = str(uuid.uuid4())
             is_armed = dna_stats.get("is_armed", False)
@@ -732,16 +768,13 @@ class DistributedQuantEngine:
                     balance = await self.executor.get_wallet_balance_usdt()
             except Exception as e:
                 logger.error(f"Failed to fetch balance for execution sizing: {e}", exc_info=True)
-                self.active_positions_lock.discard(symbol)
                 return False
                 
-            # 🚀 V20.3 FIX: Daily Loss Limit (10% Circuit Breaker)
-            if "start_of_day_balance" in self.global_state_cache:
-                start_bal = self.global_state_cache["start_of_day_balance"]
-                if start_bal > 0 and balance < (start_bal * 0.90):
-                    logger.critical(f"🛑 DAILY LOSS LIMIT TRIGGERED. Balance dropped below 90% of start-of-day ({start_bal:.2f}). Trading halted.")
-                    self.active_positions_lock.discard(symbol)
-                    return False
+            # 🚀 V20.4 FIX: Daily Loss Limit (10% Hard Cap off unmutated Start of Day Balance)
+            start_bal = self.global_state_cache.get("start_of_day_balance", balance)
+            if start_bal > 0 and balance < (start_bal * 0.90):
+                logger.critical(f"🛑 DAILY LOSS LIMIT TRIGGERED. Balance ({balance:.2f}) dropped below 90% of start-of-day ({start_bal:.2f}). Trading halted.")
+                return False
             
             correlation_penalty = 1.0
             if hasattr(self.risk_vault, "correlation_groups"):
@@ -762,15 +795,15 @@ class DistributedQuantEngine:
                 async def _shadow_commit():
                     try:
                         async with self.db_semaphore:
-                            await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, True)
-                    except Exception as e:
-                        logger.debug(f"Shadow commit failed: {e}")
+                            await asyncio.wait_for(
+                                asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, True),
+                                timeout=10.0
+                            )
+                    except Exception as e: logger.debug(f"Shadow commit failed: {e}")
                 self.track_task(_shadow_commit())
-                self.active_positions_lock.discard(symbol)
-                return True
+                return False
 
             if balance < 1.0:
-                self.active_positions_lock.discard(symbol)
                 return False
 
             dollar_risk = balance * quarter_kelly
@@ -780,7 +813,6 @@ class DistributedQuantEngine:
             position_size = notional / current_price
 
             if not self.risk_vault.evaluate_portfolio_safety(balance, notional, symbol):
-                self.active_positions_lock.discard(symbol)
                 return False
 
             target_leverage = self.risk_vault.calculate_dynamic_leverage(notional, balance, base_leverage=5, hard_cap=15, sl_distance_pct=(sl_distance / current_price))
@@ -798,7 +830,6 @@ class DistributedQuantEngine:
                         pass
                     else:
                         logger.error(f"Leverage adjustment failed: {e}. Aborting trade.", exc_info=True)
-                        self.active_positions_lock.discard(symbol)
                         return False
 
                 feature_engine = self.feature_engines.get(symbol)
@@ -812,17 +843,18 @@ class DistributedQuantEngine:
                 else: execution_success = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=0.0, vol_mult=1.0, feature_engine=feature_engine)
             
             if not execution_success:
-                self.active_positions_lock.discard(symbol)
                 return False 
                 
-            # 🚀 V20.3 FIX: Asynchronous DB Commits (Fires after execution logic)
+            # 🚀 V20.4 FIX: Timeout-guarded async DB logging
             if not self.test_mode:
                 async def _live_db_commit():
                     try:
                         async with self.db_semaphore:
-                            await asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False) 
-                    except Exception as e:
-                        logger.error(f"Failed to async commit live signal to DB: {e}")
+                            await asyncio.wait_for(
+                                asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False),
+                                timeout=10.0
+                            )
+                    except Exception as e: logger.error(f"Failed to async commit live signal to DB: {e}")
                 self.track_task(_live_db_commit())
                 
             self.risk_vault.update_position_ledger(symbol, notional)
@@ -834,7 +866,6 @@ class DistributedQuantEngine:
 
         except Exception as e:
             logger.error(f"Distributed swarm execution routing failed for {symbol}: {e}", exc_info=True)
-            self.active_positions_lock.discard(symbol)
             return False
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING"):
@@ -844,7 +875,7 @@ class DistributedQuantEngine:
         if self.test_mode:
             await asyncio.sleep(60)
             logger.critical(f"📜 PAPER TRADE CLOSED: {symbol}")
-            self.active_positions_lock.discard(symbol)
+            self._release_symbol_lock(symbol)
             return
 
         try:
@@ -874,7 +905,7 @@ class DistributedQuantEngine:
                 except Exception: pass
                 
                 self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
-                self.active_positions_lock.discard(symbol)
+                self._release_symbol_lock(symbol)
                 return
 
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
@@ -910,7 +941,7 @@ class DistributedQuantEngine:
                 flatten_side = "Sell" if direction == "BUY" else "Buy"
                 async with self.api_semaphore:
                     await asyncio.to_thread(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC", reduceOnly=True)
-                self.active_positions_lock.discard(symbol)
+                self._release_symbol_lock(symbol)
                 return
 
             act_raw = actual_entry + (atr * 0.8) if direction == "BUY" else actual_entry - (atr * 0.8)
@@ -924,8 +955,8 @@ class DistributedQuantEngine:
             except Exception as e: 
                 logger.error(f"Failed to arm trailing stop: {e}", exc_info=True)
 
-            # 🚀 V20.3 FIX: Infinite Daemon Polling (up to 24 hours max)
-            while time.time() - start_time < 86400: 
+            # 🚀 V20.4 FIX: Infinite daemon liveness loop (runs until exchange position strictly = 0)
+            while True: 
                 await asyncio.sleep(10)
                 try:
                     async with self.api_semaphore:
@@ -945,7 +976,10 @@ class DistributedQuantEngine:
                         async def _settlement_db_commit():
                             try:
                                 async with self.db_semaphore:
-                                    await asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details)
+                                    await asyncio.wait_for(
+                                        asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details),
+                                        timeout=10.0
+                                    )
                             except Exception as db_err: logger.error(f"Settlement log error: {db_err}")
                         self.track_task(_settlement_db_commit())
                         self.risk_vault.update_position_ledger(symbol, 0.0)
@@ -964,15 +998,15 @@ class DistributedQuantEngine:
                     async def _reconciled_db_commit():
                         try: 
                             async with self.db_semaphore:
-                                await asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, 0.0, "RECONCILED", exec_details)
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, 0.0, "RECONCILED", exec_details),
+                                    timeout=10.0
+                                )
                         except Exception: pass
                     self.track_task(_reconciled_db_commit())
                     
                     self.risk_vault.update_position_ledger(symbol, 0.0)
                     break
-            else:
-                logger.error(f"⏰ DAEMON TIMEOUT // {symbol} monitor exceeded 24h constraint. Forcing reconciliation sequence.")
-                self.risk_vault.update_position_ledger(symbol, 0.0)
 
         except Exception as daemon_error:
             logger.error(f"☠️ FATAL DAEMON CRASH on {symbol}: {daemon_error}", exc_info=True)
@@ -985,12 +1019,12 @@ class DistributedQuantEngine:
             except Exception as flatten_e: logger.error(f"❌ EMERGENCY FLATTEN FAILED for {symbol}: {flatten_e}", exc_info=True)
                 
         finally:
-            self.active_positions_lock.discard(symbol)
+            self._release_symbol_lock(symbol)
             self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
-        for symbol in list(self.active_positions_lock):
+        for symbol in list(self.symbol_locks.keys()):
             try:
                 async with self.api_semaphore:
                     await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
@@ -1017,6 +1051,18 @@ class DistributedQuantEngine:
             
         try: await self.synchronize_exchange_state()
         except Exception as e: logger.error(f"Boot sequence sync error: {e}", exc_info=True)
+        
+        # 🚀 V20.4 FIX: Lock start-of-day balance baseline immediately on boot
+        try:
+            async with self.api_semaphore:
+                boot_bal = await self.executor.get_wallet_balance_usdt()
+                self.global_state_cache["start_of_day_balance"] = boot_bal
+                self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
+                self.global_state_cache["last_updated"] = time.time()
+                self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+                logger.info(f"💵 INITIAL VAULT BASELINE LOCKED: {boot_bal:.4f} USDT")
+        except Exception as boot_bal_err:
+            logger.error(f"Boot balance initialization failed: {boot_bal_err}")
         
         try: 
             async with self.api_semaphore:

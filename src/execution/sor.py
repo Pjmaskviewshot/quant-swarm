@@ -76,11 +76,12 @@ class SmartOrderRouter:
         stepped_price = round(price / tick_size) * tick_size
         return round(stepped_price, self._get_precision(tick_size))
 
-    def _get_meaningful_tob(self, ob_data: Dict, side: str, min_notional: float = 250.0) -> float:
+    def _get_meaningful_tob(self, ob_data: Dict, side: str, min_notional: float = 5.0) -> float:
         """
         🚀 HFT ANTI-SPOOFING FILTER
-        Scans past high-frequency 'dust' orders at the very top of the book. 
-        Pegs strictly behind real liquidity to prevent market makers from dragging the fill price.
+        V20.3 FIX: Adjusted min_notional down to $5.0. 
+        Allows micro-account Maker pegging to securely touch the absolute Top of Book
+        instead of burying orders behind deep whale walls.
         """
         levels = ob_data.get("bids" if side == "BUY" else "asks", [[0, 0]])
         for level in levels:
