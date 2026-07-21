@@ -41,9 +41,8 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V20.4 HOT-PATH OPTIMIZED: PRODUCTION QUANTITATIVE NODE
-    Neural Perceptron removed. Restored stable 40/40/20 statistical logit.
-    Dead CPU weight purged.
+    🔬 V20.5 PRODUCTION CORE: EMPIRICAL UPGRADE
+    HJB pseudo-math replaced with strict Basis Point spread filters.
     """
     def __init__(self, memory_depth=500):
         self.prev_bid = 0.0
@@ -68,8 +67,6 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         
         self.alpha = 0.05
-        self.gamma = 0.1  
-        self.kappa = 1.5  
 
     def update_orderbook_pressure(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
         delta_W = 0.0
@@ -151,16 +148,20 @@ class ContinuousMicrostructureEngine:
             "entropy": self.shannon_entropy, "regime": regime
         }
 
-    def solve_hjb_advantage(self, current_price: float, action: str, spread_pct: float) -> float:
-        total_intensity = abs(self.hawkes_ewma) + 1e-9
-        imbalance = self.hawkes_ewma / total_intensity
+    def spread_adjusted_edge(self, current_price: float, action: str, spread_pct: float, expected_move_pct: float) -> float:
+        """
+        🚀 V20.5 FIX: Dimensionally accurate basis-point edge filter.
+        Replaces HJB pseudo-math. Directly calculates if the statistical edge exceeds the spread footprint.
+        """
+        # Base expected edge in percentage terms
+        base_edge_pct = expected_move_pct * abs(self.hawkes_z * 0.10) 
         
-        dollar_variance = self.inst_variance * (current_price ** 2)
-        reservation_price = current_price + (imbalance * dollar_variance * self.gamma)
-        optimal_barrier = (self.gamma * dollar_variance) + (2 / self.kappa) * math.log(1 + self.kappa / self.gamma)
+        # Calculate net edge by penalizing for market spread
+        net_edge_pct = base_edge_pct - spread_pct
         
-        if action == "BUY": return (reservation_price - current_price) / current_price - (spread_pct * optimal_barrier)
-        else: return (current_price - reservation_price) / current_price - (spread_pct * optimal_barrier)
+        # Convert to basis points for evaluation and logging
+        net_edge_bps = net_edge_pct * 10000.0
+        return net_edge_bps
 
 
 class DistributedQuantEngine:
@@ -195,29 +196,25 @@ class DistributedQuantEngine:
         self.screener_metrics: Dict[str, Dict[str, float]] = {}
         self.orderbook_snapshots: Dict[str, dict] = {}
         self.ram_dna_cache: Dict[str, dict] = {}
-        self.debate_matrix = AdversarialDebateMatrix() 
         
         self.macro_regimes: Dict[str, str] = {}
         self.volatility_baseline: Dict[str, float] = {}
         
-        # 🚀 V20.4 FIX: Real atomic per-symbol locks (prevents async race conditions)
         self.symbol_locks: Dict[str, asyncio.Lock] = {}
-        self.active_positions_lock = set()  # Retained for legacy set compatibility
+        self.active_positions_lock = set()  
+        
+        # 🚀 V20.5 FIX: Track active daemon tasks so sweeper doesn't race them
+        self.daemon_tasks: Dict[str, asyncio.Task] = {}
         
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
         self._log_throttle_cache: Dict[str, float] = {}
         
         self.tick_sizes: Dict[str, float] = {}
-        self.global_macro_news_cache: str = "No significant macro shifts detected."
-        self.last_news_fetch: float = 0.0
         self.global_state_cache = {"last_updated": 0.0}
         
         self._initialize_symbol_structures(self.asset_basket)
 
-        nv_keys = [os.getenv("NVIDIA_API_KEY_1"), os.getenv("NVIDIA_API_KEY_2")]
-        self.ai_router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=os.getenv("DEEPSEEK_API_KEY"))
-        self.macro_data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY"))
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         
         self.executor = BybitUnifiedExecutor(
@@ -314,7 +311,6 @@ class DistributedQuantEngine:
                 
                 atr = entry_price * 0.015 
                 
-                # Lock symbol atomically
                 sym_lock = self._get_symbol_lock(symbol)
                 if not sym_lock.locked():
                     await sym_lock.acquire()
@@ -322,10 +318,12 @@ class DistributedQuantEngine:
                 
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 8}
                 
-                self.track_task(self._position_lifecycle_daemon(
+                daemon_task = self.track_task(self._position_lifecycle_daemon(
                     symbol, f"RECOVERY-{str(uuid.uuid4())[:8]}", direction, entry_price, atr, 
                     risk_matrix, 8, "RANGING"
                 ))
+                self.daemon_tasks[symbol] = daemon_task
+                
         except Exception as e:
             logger.error(f"Sync exchange state failed: {e}", exc_info=True)
 
@@ -334,6 +332,11 @@ class DistributedQuantEngine:
             await asyncio.sleep(300) 
             try:
                 for symbol in list(self.symbol_locks.keys()):
+                    # 🚀 V20.5 FIX: Sweeper Guard. Only sweep if the daemon is truly dead.
+                    active_daemon = self.daemon_tasks.get(symbol)
+                    if active_daemon and not active_daemon.done():
+                        continue 
+
                     sym_lock = self.symbol_locks[symbol]
                     if sym_lock.locked():
                         if not hasattr(self.risk_vault, 'active_positions') or symbol not in self.risk_vault.active_positions:
@@ -344,26 +347,6 @@ class DistributedQuantEngine:
                                     self._release_symbol_lock(symbol)
             except Exception as e:
                 logger.error(f"Stale lock cleanup error: {e}", exc_info=True)
-
-    async def _update_global_news_cache(self):
-        if time.time() - self.last_news_fetch > 300: 
-            try:
-                context = await asyncio.wait_for(self.macro_data_feed.fetch_market_snapshot("BTCUSDT", self.timeframe), timeout=8.0)
-                if context and "news_context" in context: self.global_macro_news_cache = context["news_context"]
-                self.last_news_fetch = time.time()
-            except Exception as e:
-                logger.error(f"News fetch skipped: {e}")
-
-    async def run_macro_commander(self):
-        logger.info("🧠 MACRO COMMANDER ONLINE. Systemic LLM oversight enabled.")
-        while True:
-            await asyncio.sleep(900) 
-            await self._update_global_news_cache()
-            try:
-                verdict = await self.debate_matrix.execute_debate_cycle("BTCUSDT", {"vpin_z_score": 0.0, "current_price": 0.0}, {}, self.global_macro_news_cache)
-                self.macro_regimes["BTCUSDT"] = verdict.get("action", "HOLD")
-            except Exception as e:
-                logger.error(f"Macro Commander cycle failed: {e}", exc_info=True)
 
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE: Actively pre-fetching database edge logic.")
@@ -514,7 +497,6 @@ class DistributedQuantEngine:
                         self.track_task(_shadow_commit())
                     return 
                 
-                # 🚀 V20.4 FIX: Fast-path non-blocking check using true asyncio.Lock
                 sym_lock = self._get_symbol_lock(symbol)
                 if sym_lock.locked(): return
                 
@@ -525,30 +507,28 @@ class DistributedQuantEngine:
                     prob_success = min(0.99, prob_success + 0.05)
                     self._throttled_log("INFO", f"🕵️ LOW ENTROPY // {symbol} Stealth footprint detected. Prob: {prob_success:.2%}", category=f"entropy_{symbol}", throttle_seconds=60)
                 
-                hjb_advantage = stat_engine.solve_hjb_advantage(price, action, spread_cost)
-                if hjb_advantage <= 0.0: return 
-                
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 
                 sl_dist_pct = max((atr * 1.5) / price, 0.01)
                 tp_dist_pct = sl_dist_pct * 2.0
                 
-                ev = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost
+                ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct)
                 
-                if ev < 0.0001: return 
+                # 🚀 V20.5 FIX: True Spread-Adjusted Edge Filter (replaces HJB heuristic)
+                net_edge_bps = stat_engine.spread_adjusted_edge(price, action, spread_cost, ev_pct)
+                if net_edge_bps <= 0.0: return 
                 
                 logger.critical(
                     f"🔬 INSTITUTIONAL TRIGGER // {symbol} [{regime}] "
-                    f"| {action} | Baye-Prob: {prob_success:.2%} | EV: {ev:.4f} | HJB Adv: {hjb_advantage * 10000:.2f} bps"
+                    f"| {action} | Baye-Prob: {prob_success:.2%} | EV: {ev_pct:.4f} | Net Edge: {net_edge_bps:.2f} bps"
                 )
                 
                 self.last_eval_time[symbol] = now
                 
-                # 🚀 V20.4 FIX: Atomically acquire per-symbol lock before execution hand-off
                 await sym_lock.acquire()
                 self.active_positions_lock.add(symbol)
-                self.track_task(self.execute_statistical_signal(symbol, action, price, prob_success, regime, hjb_advantage, atr))
+                self.track_task(self.execute_statistical_signal(symbol, action, price, prob_success, regime, net_edge_bps, atr))
                 
         except Exception as e:
             self.tick_error_counts[symbol] = [t for t in self.tick_error_counts.get(symbol, []) if now - t < 60]
@@ -558,7 +538,7 @@ class DistributedQuantEngine:
                 logger.error(f"🛑 CIRCUIT BREAKER TRIGGERED for {symbol} due to 5+ execution errors. Paused for 5 minutes.")
             logger.error(f"Handle incoming trade exception for {symbol}: {e}", exc_info=True)
 
-    async def execute_statistical_signal(self, symbol: str, action: str, price: float, confidence: float, regime: str, hjb_adv: float, atr: float):
+    async def execute_statistical_signal(self, symbol: str, action: str, price: float, confidence: float, regime: str, edge_bps: float, atr: float):
         try:
             dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
             
@@ -570,7 +550,7 @@ class DistributedQuantEngine:
                 dna_stats=dna_stats, 
                 atr=atr,
                 regime=regime,
-                hjb_adv=hjb_adv
+                edge_bps=edge_bps
             )
             if not success:
                 self._release_symbol_lock(symbol)
@@ -692,7 +672,6 @@ class DistributedQuantEngine:
 
                 if "wallet_baseline" not in self.global_state_cache: self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
                 
-                # 🚀 V20.4 FIX: Midnight UTC balance baseline reset (prevents baseline drift)
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
                 current_day = now_utc.strftime("%Y-%m-%d")
                 if self.global_state_cache.get("current_day") != current_day:
@@ -736,12 +715,12 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦Kc 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.4: HARDENED CORE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.5: PRODUCTION CORE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
-                    f"• Concurrency Engine: <code>Atomic asyncio.Lock per Symbol</code>\n"
-                    f"• Circuit Breaker: <code>Strict Midnight UTC Baseline (10% Max Loss)</code>\n"
-                    f"• Monitoring Lock: <code>Infinite Liveness Polling</code>\n\n"
+                    f"• Execution Guard: <code>Strict Midnight UTC Baseline (10% Max Loss)</code>\n"
+                    f"• Monitoring Lock: <code>Infinite Sweeper-Guarded Liveness</code>\n"
+                    f"• Exchange Comms:  <code>Outage Circuit-Breakers Active</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
                     f"• Total Liquidity: <code>{cv:.4f} USDT</code>\n"
                     f"• Session Return:  <code>{actual:+.4f} USDT</code>\n"
@@ -752,7 +731,7 @@ class DistributedQuantEngine:
                 )
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
-    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, hjb_adv: float) -> bool:
+    async def run_signal_lifecycle(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float) -> bool:
         try:
             signal_id = str(uuid.uuid4())
             is_armed = dna_stats.get("is_armed", False)
@@ -770,7 +749,6 @@ class DistributedQuantEngine:
                 logger.error(f"Failed to fetch balance for execution sizing: {e}", exc_info=True)
                 return False
                 
-            # 🚀 V20.4 FIX: Daily Loss Limit (10% Hard Cap off unmutated Start of Day Balance)
             start_bal = self.global_state_cache.get("start_of_day_balance", balance)
             if start_bal > 0 and balance < (start_bal * 0.90):
                 logger.critical(f"🛑 DAILY LOSS LIMIT TRIGGERED. Balance ({balance:.2f}) dropped below 90% of start-of-day ({start_bal:.2f}). Trading halted.")
@@ -788,7 +766,7 @@ class DistributedQuantEngine:
             base_kelly = confidence - ((1.0 - confidence) / max(0.1, reward_risk))
             account_scaling = 0.75 if balance < 100.0 else 1.0
             
-            hjb_boost = 1.0 + min(1.0, hjb_adv * 10)
+            hjb_boost = 1.0 + min(1.0, (edge_bps / 10000.0) * 10)
             quarter_kelly = max(0.005, min(0.025, base_kelly * 0.25 * account_scaling * hjb_boost * correlation_penalty))
 
             if quarter_kelly <= 0.0 or not is_armed:
@@ -845,7 +823,6 @@ class DistributedQuantEngine:
             if not execution_success:
                 return False 
                 
-            # 🚀 V20.4 FIX: Timeout-guarded async DB logging
             if not self.test_mode:
                 async def _live_db_commit():
                     try:
@@ -860,7 +837,9 @@ class DistributedQuantEngine:
             self.risk_vault.update_position_ledger(symbol, notional)
             
             self.track_task(self._safe_telegram_dispatch(f"🧬 *HFT EXECUTION FIRE*\n• Node: {symbol} | {direction}\n• Signal Probability: {confidence:.2%}\n• Leverage Applied: {target_leverage}x\n• Notional Value: ${notional:.2f} USDT", is_html=False, message_type="SUCCESS"))
-            self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": notional, "size": position_size}, target_leverage, regime))
+            
+            daemon_task = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": notional, "size": position_size}, target_leverage, regime))
+            self.daemon_tasks[symbol] = daemon_task
             
             return True
 
@@ -879,7 +858,6 @@ class DistributedQuantEngine:
             return
 
         try:
-            start_time = time.time()
             order_filled = False
             actual_entry = current_price
             
@@ -955,7 +933,8 @@ class DistributedQuantEngine:
             except Exception as e: 
                 logger.error(f"Failed to arm trailing stop: {e}", exc_info=True)
 
-            # 🚀 V20.4 FIX: Infinite daemon liveness loop (runs until exchange position strictly = 0)
+            # 🚀 V20.5 FIX: Daemon Outage Circuit Breaker
+            consecutive_errors = 0
             while True: 
                 await asyncio.sleep(10)
                 try:
@@ -963,8 +942,12 @@ class DistributedQuantEngine:
                         pos_res = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
                     pos_list = pos_res.get("result", {}).get("list", [])
                     position_gone = (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0
+                    consecutive_errors = 0  # Reset on success
                 except Exception as pos_gone_err:
-                    logger.error(f"Position polling error: {pos_gone_err}", exc_info=True)
+                    consecutive_errors += 1
+                    logger.error(f"Position polling error ({consecutive_errors}/10): {pos_gone_err}")
+                    if consecutive_errors >= 10:
+                        raise RuntimeError("10 consecutive API failures during daemon polling. Exchange likely offline.")
                     position_gone = False
 
                 try:
@@ -985,10 +968,10 @@ class DistributedQuantEngine:
                         self.risk_vault.update_position_ledger(symbol, 0.0)
                         break
                 except Exception as e:
-                    logger.error(f"Settlement check error: {e}", exc_info=True)
+                    logger.debug(f"Settlement check error: {e}")
 
                 if position_gone:
-                    logger.warning(f"🧾 RECONCILIATION // {symbol} closed outside the poll window. Pulling final PnL snapshot.")
+                    logger.warning(f"🧾 RECONCILIATION // {symbol} closed. Pulling final PnL snapshot.")
                     try: 
                         async with self.api_semaphore:
                             pnl_res = await asyncio.to_thread(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=5)
@@ -1024,7 +1007,8 @@ class DistributedQuantEngine:
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
-        for symbol in list(self.symbol_locks.keys()):
+        # 🚀 V20.5 FIX: Iterate safely over only the locked active symbols
+        for symbol in list(self.active_positions_lock):
             try:
                 async with self.api_semaphore:
                     await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
@@ -1052,7 +1036,6 @@ class DistributedQuantEngine:
         try: await self.synchronize_exchange_state()
         except Exception as e: logger.error(f"Boot sequence sync error: {e}", exc_info=True)
         
-        # 🚀 V20.4 FIX: Lock start-of-day balance baseline immediately on boot
         try:
             async with self.api_semaphore:
                 boot_bal = await self.executor.get_wallet_balance_usdt()
@@ -1078,7 +1061,8 @@ class DistributedQuantEngine:
         
         try:
             await asyncio.gather(
-                self.run_macro_commander(),
+                # 🚀 V20.5 FIX: LLM Matrix disabled. Saves $ API costs since it wasn't on hot path.
+                # self.run_macro_commander(),
                 self.run_dna_prewarmer(), 
                 self.stream_manager_loop(),
                 self.run_system_heartbeat(),
