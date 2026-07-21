@@ -39,10 +39,9 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V25.1 FINAL APEX: GARCH-ANCHORED
-    - Dual-Horizon OFI (Fast vs Slow Delta) with true mathematical scaling.
+    🔬 V25.3 FINAL APEX
+    - GARCH-Anchored Hawkes
     - L2 Ridge Penalty on SGD updates.
-    - Split Hawkes (Fast Mean / Slow Variance) to prevent Z-score inflation during volatility shocks.
     """
     def __init__(self, memory_depth=500):
         self.prev_bid = 0.0
@@ -130,8 +129,6 @@ class ContinuousMicrostructureEngine:
         for t_time, t_vol in self.trade_timestamps:
             hawkes_pressure += t_vol * math.exp(-self.hawkes_decay * (current_time - t_time))
             
-        # 🚀 V25.1: GARCH-like Split Hawkes 
-        # Fast alpha catches sweeping momentum, slow alpha grounds the variance to prevent false inflation
         self.hawkes_ewma = (1 - self.alpha_fast) * self.hawkes_ewma + self.alpha_fast * hawkes_pressure
         self.hawkes_ewmvar = (1 - self.alpha_slow) * self.hawkes_ewmvar + self.alpha_slow * (hawkes_pressure - self.hawkes_ewma)**2
         self.hawkes_z = (hawkes_pressure - self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9)
@@ -176,10 +173,9 @@ class ContinuousMicrostructureEngine:
 
         ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
         
-        # 🚀 V25.1: Scaled OFI Delta Divisor
         features = np.array([
             self.ofi_fast_z / 3.0,       
-            ofi_delta_z / 6.0,           # Allows matrix to absorb massive flash-crash deltas without artificial clipping
+            ofi_delta_z / 6.0,           
             self.hawkes_z / 3.0,         
             self.micro_price_skew / 10.0,
             btc_lead_ofi_z / 3.0         
@@ -227,9 +223,11 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
+        # 🚀 V25.3 FIX: Universal API Isolation (Locks + Thread Pool)
         self.api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="API_Isolator")
-        self.db_wal_queue = asyncio.Queue(maxsize=10000)
+        self.api_isolation_lock = asyncio.Lock()  
         
+        self.db_wal_queue = asyncio.Queue(maxsize=10000)
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(10)
         
@@ -275,9 +273,13 @@ class DistributedQuantEngine:
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
 
     async def isolated_api_call(self, func, *args, **kwargs):
-        """Safely executes synchronous API calls in the isolated ThreadPool"""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.api_thread_pool, lambda: func(*args, **kwargs))
+        """🚀 V25.3 FIX: Safely executes API calls, handling both async wrappers and sync functions."""
+        async with self.api_isolation_lock:
+            if asyncio.iscoroutinefunction(func):
+                return await func(*args, **kwargs)
+            else:
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(self.api_thread_pool, lambda: func(*args, **kwargs))
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self.symbol_locks:
@@ -783,7 +785,7 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V25.1: FINAL APEX)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V25.3: CRASH FIX)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
                     f"• Signal Engine:   <code>Multi-Horizon Dual-OFI + GARCH Smoothing</code>\n"
