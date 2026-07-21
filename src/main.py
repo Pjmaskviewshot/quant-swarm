@@ -7,6 +7,7 @@ import logging
 import uuid
 import datetime
 import numpy as np
+import concurrent.futures
 from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any
@@ -21,14 +22,11 @@ from portfolio.risk_manager import InstitutionalRiskVault
 from execution.sor import SmartOrderRouter
 
 # External Connectors
-from services.ai_router import ResilientAIRouter
-from services.adversarial_ai import AdversarialDebateMatrix
-from services.data_feed import AsynchronousDataFeed
 from ingestion.multi_feed import HighVelocityMultiFeed
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
 
-# Clean up HTTP logs to prevent terminal spam
+# Clean up HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logging.basicConfig(
@@ -41,17 +39,26 @@ logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
 
 class ContinuousMicrostructureEngine:
     """
-    🔬 V20.5 PRODUCTION CORE: EMPIRICAL UPGRADE
-    HJB pseudo-math replaced with strict Basis Point spread filters.
+    🔬 V25.1 FINAL APEX: GARCH-ANCHORED
+    - Dual-Horizon OFI (Fast vs Slow Delta) with true mathematical scaling.
+    - L2 Ridge Penalty on SGD updates.
+    - Split Hawkes (Fast Mean / Slow Variance) to prevent Z-score inflation during volatility shocks.
     """
     def __init__(self, memory_depth=500):
         self.prev_bid = 0.0
         self.prev_bid_size = 0.0
         self.prev_ask = 0.0
         self.prev_ask_size = 0.0
-        self.ofi_ewma = 0.0
-        self.ofi_ewmvar = 1.0
-        self.ofi_z = 0.0
+        
+        self.ofi_fast_ewma = 0.0
+        self.ofi_fast_ewmvar = 1.0
+        self.ofi_fast_z = 0.0
+        
+        self.ofi_slow_ewma = 0.0
+        self.ofi_slow_ewmvar = 1.0
+        self.ofi_slow_z = 0.0
+        
+        self.micro_price_skew = 0.0
         
         self.trade_timestamps = deque()
         self.hawkes_decay = 2.0  
@@ -66,11 +73,20 @@ class ContinuousMicrostructureEngine:
         self.hurst = 0.5
         self.shannon_entropy = 1.0
         
-        self.alpha = 0.05
+        self.alpha_fast = 0.15
+        self.alpha_slow = 0.02
+        
+        self.weights = np.array([0.20, 0.20, 0.20, 0.20, 0.20]) 
+        self.learning_rate = 0.001
+        self.l2_lambda = 0.0005  
+        self.prediction_buffer = deque(maxlen=1000)
+        self.sgd_updates = 0  
+        
+        self.validation_buffer = deque(maxlen=100)
+        self.rolling_mse = 0.0
 
     def update_orderbook_pressure(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
         delta_W = 0.0
-        
         if best_bid > self.prev_bid: delta_W += bid_vol
         elif best_bid == self.prev_bid: delta_W += (bid_vol - self.prev_bid_size)
         else: delta_W -= self.prev_bid_size
@@ -82,9 +98,18 @@ class ContinuousMicrostructureEngine:
         self.prev_bid, self.prev_bid_size = best_bid, bid_vol
         self.prev_ask, self.prev_ask_size = best_ask, ask_vol
         
-        self.ofi_ewma = (1 - self.alpha) * self.ofi_ewma + self.alpha * delta_W
-        self.ofi_ewmvar = (1 - self.alpha) * self.ofi_ewmvar + self.alpha * (delta_W - self.ofi_ewma)**2
-        self.ofi_z = (delta_W - self.ofi_ewma) / (math.sqrt(self.ofi_ewmvar) + 1e-9)
+        self.ofi_fast_ewma = (1 - self.alpha_fast) * self.ofi_fast_ewma + self.alpha_fast * delta_W
+        self.ofi_fast_ewmvar = (1 - self.alpha_fast) * self.ofi_fast_ewmvar + self.alpha_fast * (delta_W - self.ofi_fast_ewma)**2
+        self.ofi_fast_z = (delta_W - self.ofi_fast_ewma) / (math.sqrt(self.ofi_fast_ewmvar) + 1e-9)
+        
+        self.ofi_slow_ewma = (1 - self.alpha_slow) * self.ofi_slow_ewma + self.alpha_slow * delta_W
+        self.ofi_slow_ewmvar = (1 - self.alpha_slow) * self.ofi_slow_ewmvar + self.alpha_slow * (delta_W - self.ofi_slow_ewma)**2
+        self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
+        
+        current_mid = (best_bid + best_ask) / 2.0
+        micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
+        if current_mid > 0:
+            self.micro_price_skew = ((micro_price - current_mid) / current_mid) * 10000.0 
 
     def update_trades(self, price: float, volume: float, is_buy: bool, current_time: float):
         self.prices.append(price)
@@ -105,11 +130,37 @@ class ContinuousMicrostructureEngine:
         for t_time, t_vol in self.trade_timestamps:
             hawkes_pressure += t_vol * math.exp(-self.hawkes_decay * (current_time - t_time))
             
-        self.hawkes_ewma = (1 - self.alpha) * self.hawkes_ewma + self.alpha * hawkes_pressure
-        self.hawkes_ewmvar = (1 - self.alpha) * self.hawkes_ewmvar + self.alpha * (hawkes_pressure - self.hawkes_ewma)**2
+        # 🚀 V25.1: GARCH-like Split Hawkes 
+        # Fast alpha catches sweeping momentum, slow alpha grounds the variance to prevent false inflation
+        self.hawkes_ewma = (1 - self.alpha_fast) * self.hawkes_ewma + self.alpha_fast * hawkes_pressure
+        self.hawkes_ewmvar = (1 - self.alpha_slow) * self.hawkes_ewmvar + self.alpha_slow * (hawkes_pressure - self.hawkes_ewma)**2
         self.hawkes_z = (hawkes_pressure - self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9)
 
-    def extract_statistical_state(self, vpin_z: float) -> dict:
+        if len(self.prediction_buffer) > 0:
+            while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 15.0:
+                old_time, old_price, features_array, old_pred_prob = self.prediction_buffer.popleft()
+                
+                if price != old_price and old_price > 0:
+                    actual_return = math.log(price / old_price)
+                    scaled_return = max(-0.5, min(0.5, actual_return * 100.0))
+                    error = scaled_return - (old_pred_prob - 0.5)
+                    
+                    self.validation_buffer.append(error ** 2)
+                    if len(self.validation_buffer) == 100:
+                        self.rolling_mse = np.mean(self.validation_buffer)
+                        if self.rolling_mse > 0.40:
+                            logger.warning("📉 SGD MODEL DIVERGENCE DETECTED. Resetting to default burn-in weights.")
+                            self.weights = np.array([0.3, 0.2, 0.2, 0.1, 0.2])
+                            self.sgd_updates = 0
+                            self.validation_buffer.clear()
+                            continue
+
+                    self.weights = (1.0 - self.learning_rate * self.l2_lambda) * self.weights + (self.learning_rate * error * features_array)
+                    weight_norm = np.linalg.norm(self.weights) + 1e-9
+                    self.weights = self.weights / weight_norm
+                    self.sgd_updates += 1
+
+    def extract_statistical_state(self, vpin_z: float, btc_lead_ofi_z: float = 0.0) -> dict:
         if len(self.log_returns) > 30:
             rets = np.array(self.log_returns)
             var_1 = np.var(rets)
@@ -122,26 +173,36 @@ class ContinuousMicrostructureEngine:
                         h_est = 0.5 + 0.5 * math.log(vr + 1e-9) / math.log(k)
                         hurst_estimates.append(max(0.1, min(0.9, h_est)))
                 self.hurst = np.mean(hurst_estimates) if hurst_estimates else 0.5
-                
-                hist, _ = np.histogram(rets, bins=10, density=False)
-                total_obs = np.sum(hist)
-                if total_obs > 0:
-                    p = hist / total_obs
-                    p = p[p > 0]
-                    self.shannon_entropy = -np.sum(p * np.log2(p))
 
-        trend_weight = max(0.0, min(1.0, (self.hurst - 0.45) / 0.10))
-        fade_weight = 1.0 - trend_weight
-        regime = "TRENDING" if trend_weight > 0.5 else "RANGING"
+        ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
         
-        logit = (self.ofi_z * 0.4) + (self.hawkes_z * 0.4) + (vpin_z * 0.2)
+        # 🚀 V25.1: Scaled OFI Delta Divisor
+        features = np.array([
+            self.ofi_fast_z / 3.0,       
+            ofi_delta_z / 6.0,           # Allows matrix to absorb massive flash-crash deltas without artificial clipping
+            self.hawkes_z / 3.0,         
+            self.micro_price_skew / 10.0,
+            btc_lead_ofi_z / 3.0         
+        ])
+        features = np.clip(features, -1.0, 1.0)
+        
+        if self.sgd_updates < 1000:
+            active_weights = np.array([0.3, 0.2, 0.2, 0.1, 0.2]) 
+        else:
+            active_weights = self.weights
+
+        logit = np.dot(active_weights, features)
         logit = max(-10.0, min(10.0, logit))
         
-        p_trend_up = 1.0 / (1.0 + math.exp(-logit))
-        p_fade_up = 1.0 - p_trend_up
-        
-        p_up = (p_trend_up * trend_weight) + (p_fade_up * fade_weight)
+        base_p_up = 1.0 / (1.0 + math.exp(-logit))
+        p_up = 0.5 + 0.65 * (base_p_up - 0.5) 
         p_down = 1.0 - p_up
+        
+        if self.prices:
+            self.prediction_buffer.append((time.time(), self.prices[-1], features, p_up))
+            
+        trend_weight = max(0.0, min(1.0, (self.hurst - 0.45) / 0.10))
+        regime = "TRENDING" if trend_weight > 0.5 else "RANGING"
         
         return {
             "p_up": p_up, "p_down": p_down, 
@@ -149,19 +210,9 @@ class ContinuousMicrostructureEngine:
         }
 
     def spread_adjusted_edge(self, current_price: float, action: str, spread_pct: float, expected_move_pct: float) -> float:
-        """
-        🚀 V20.5 FIX: Dimensionally accurate basis-point edge filter.
-        Replaces HJB pseudo-math. Directly calculates if the statistical edge exceeds the spread footprint.
-        """
-        # Base expected edge in percentage terms
         base_edge_pct = expected_move_pct * abs(self.hawkes_z * 0.10) 
-        
-        # Calculate net edge by penalizing for market spread
         net_edge_pct = base_edge_pct - spread_pct
-        
-        # Convert to basis points for evaluation and logging
-        net_edge_bps = net_edge_pct * 10000.0
-        return net_edge_bps
+        return net_edge_pct * 10000.0
 
 
 class DistributedQuantEngine:
@@ -176,7 +227,9 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
-        self.api_semaphore = asyncio.Semaphore(15)
+        self.api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="API_Isolator")
+        self.db_wal_queue = asyncio.Queue(maxsize=10000)
+        
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(10)
         
@@ -197,18 +250,15 @@ class DistributedQuantEngine:
         self.orderbook_snapshots: Dict[str, dict] = {}
         self.ram_dna_cache: Dict[str, dict] = {}
         
-        self.macro_regimes: Dict[str, str] = {}
         self.volatility_baseline: Dict[str, float] = {}
-        
         self.symbol_locks: Dict[str, asyncio.Lock] = {}
         self.active_positions_lock = set()  
-        
-        # 🚀 V20.5 FIX: Track active daemon tasks so sweeper doesn't race them
         self.daemon_tasks: Dict[str, asyncio.Task] = {}
-        
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
         self._log_throttle_cache: Dict[str, float] = {}
+        
+        self.global_btc_ofi_z = 0.0
         
         self.tick_sizes: Dict[str, float] = {}
         self.global_state_cache = {"last_updated": 0.0}
@@ -223,6 +273,11 @@ class DistributedQuantEngine:
             testnet=os.getenv("BYBIT_TESTNET", "false").lower() == "true"
         )
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+
+    async def isolated_api_call(self, func, *args, **kwargs):
+        """Safely executes synchronous API calls in the isolated ThreadPool"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.api_thread_pool, lambda: func(*args, **kwargs))
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self.symbol_locks:
@@ -284,18 +339,16 @@ class DistributedQuantEngine:
 
     async def _fetch_exchange_tick_sizes(self):
         try:
-            async with self.api_semaphore:
-                info = await asyncio.to_thread(self.executor.client.get_instruments_info, category="linear")
-                for item in info.get("result", {}).get("list", []):
-                    self.tick_sizes[item.get("symbol")] = float(item.get("priceFilter", {}).get("tickSize", "0.0001"))
+            info = await self.isolated_api_call(self.executor.client.get_instruments_info, category="linear")
+            for item in info.get("result", {}).get("list", []):
+                self.tick_sizes[item.get("symbol")] = float(item.get("priceFilter", {}).get("tickSize", "0.0001"))
         except Exception as e:
             logger.error(f"Failed to fetch tick sizes: {e}", exc_info=True)
 
     async def synchronize_exchange_state(self):
         try:
             logger.info("📡 SYNCING EXCHANGE STATE: Scanning for orphaned live positions...")
-            async with self.api_semaphore:
-                pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+            pos_response = await self.isolated_api_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
             active_orphans = [p for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
             
             if not active_orphans: return
@@ -332,7 +385,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(300) 
             try:
                 for symbol in list(self.symbol_locks.keys()):
-                    # 🚀 V20.5 FIX: Sweeper Guard. Only sweep if the daemon is truly dead.
                     active_daemon = self.daemon_tasks.get(symbol)
                     if active_daemon and not active_daemon.done():
                         continue 
@@ -340,13 +392,35 @@ class DistributedQuantEngine:
                     sym_lock = self.symbol_locks[symbol]
                     if sym_lock.locked():
                         if not hasattr(self.risk_vault, 'active_positions') or symbol not in self.risk_vault.active_positions:
-                            async with self.api_semaphore:
-                                pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                            pos_response = await self.isolated_api_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                             if pos_response.get("retCode") == 0:
                                 if not any(float(p.get("size", 0.0)) > 0 for p in pos_response.get("result", {}).get("list", [])):
                                     self._release_symbol_lock(symbol)
             except Exception as e:
                 logger.error(f"Stale lock cleanup error: {e}", exc_info=True)
+
+    async def run_db_wal_worker(self):
+        logger.info("🖲️ WAL ENGINE ONLINE: Durable asynchronous execution logging activated.")
+        while True:
+            payload = await self.db_wal_queue.get()
+            action_type = payload.get("type")
+            args = payload.get("args", [])
+            
+            try:
+                async with self.db_semaphore:
+                    if action_type == "prediction":
+                        await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
+                    elif action_type == "settlement":
+                        await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
+                self.db_wal_queue.task_done()
+            except Exception as e:
+                logger.warning(f"WAL Commit Delayed (Supabase offline/timeout). Re-queuing payload for retry...")
+                await asyncio.sleep(5.0)
+                try:
+                    self.db_wal_queue.put_nowait(payload)
+                    self.db_wal_queue.task_done()
+                except asyncio.QueueFull:
+                    logger.error("WAL Queue is full. Discarding oldest payload to protect RAM.")
 
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE: Actively pre-fetching database edge logic.")
@@ -377,7 +451,6 @@ class DistributedQuantEngine:
                 
                 for sym, result in zip(symbols, results):
                     if isinstance(result, Exception):
-                        logger.error(f"DNA Cache fallback for {sym}: {result}")
                         self.ram_dna_cache[sym] = self.ram_dna_cache.get(sym, {"is_armed": True, "win_rate": 0.50})
                     else:
                         self.ram_dna_cache[sym] = result
@@ -421,7 +494,10 @@ class DistributedQuantEngine:
                 self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": bid_size, "best_ask": best_ask, "ask_size": ask_size}
                 
                 stat_engine = self.stat_engines.get(symbol)
-                if stat_engine: stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
+                if stat_engine: 
+                    stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
+                    if symbol == "BTCUSDT":
+                        self.global_btc_ofi_z = stat_engine.ofi_fast_z
                 
             except Exception as e:
                 logger.error(f"Orderbook tick processing error for {symbol}: {e}", exc_info=True)
@@ -460,8 +536,8 @@ class DistributedQuantEngine:
             if valid_manifests:
                 vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
             elif clock.vpin_history:
-                hist = np.array(list(clock.vpin_history)[-50:])
-                if len(hist) >= 20 and np.std(hist) > 0:
+                hist = np.array(list(clock.vpin_history)[-200:])
+                if len(hist) >= 50 and np.std(hist) > 0:
                     vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / np.std(hist))
                 else:
                     vpin_z = 0.0
@@ -476,9 +552,11 @@ class DistributedQuantEngine:
             spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / price if price > 0 else 0.001
             
             async with self.eval_semaphore:
-                state = stat_engine.extract_statistical_state(vpin_z)
+                btc_context = 0.0 if symbol == "BTCUSDT" else self.global_btc_ofi_z
+                state = stat_engine.extract_statistical_state(vpin_z, btc_lead_ofi_z=btc_context)
+                
                 p_up, p_down = state["p_up"], state["p_down"]
-                entropy, regime = state["entropy"], state["regime"]
+                regime = state["regime"]
                 
                 action = "BUY" if p_up > p_down else "SELL"
                 prob_success = max(p_up, p_down)
@@ -486,15 +564,12 @@ class DistributedQuantEngine:
                 is_shadow_asset = symbol in self.shadow_basket
                 if is_shadow_asset:
                     if prob_success > 0.65: 
-                        async def _shadow_commit():
-                            try:
-                                async with self.db_semaphore:
-                                    await asyncio.wait_for(
-                                        asyncio.to_thread(self.memory.commit_prediction, str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime}, True),
-                                        timeout=10.0
-                                    )
-                            except Exception as e: logger.debug(f"Shadow commit error: {e}")
-                        self.track_task(_shadow_commit())
+                        try:
+                            self.db_wal_queue.put_nowait({
+                                "type": "prediction", 
+                                "args": [str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime}, True]
+                            })
+                        except asyncio.QueueFull: pass
                     return 
                 
                 sym_lock = self._get_symbol_lock(symbol)
@@ -502,10 +577,6 @@ class DistributedQuantEngine:
                 
                 min_threshold = max(0.55, self.ram_dna_cache.get(symbol, {}).get("win_rate", 0.60))
                 if prob_success < min_threshold: return 
-                
-                if entropy < 0.4:
-                    prob_success = min(0.99, prob_success + 0.05)
-                    self._throttled_log("INFO", f"🕵️ LOW ENTROPY // {symbol} Stealth footprint detected. Prob: {prob_success:.2%}", category=f"entropy_{symbol}", throttle_seconds=60)
                 
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
@@ -515,7 +586,6 @@ class DistributedQuantEngine:
                 
                 ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct)
                 
-                # 🚀 V20.5 FIX: True Spread-Adjusted Edge Filter (replaces HJB heuristic)
                 net_edge_bps = stat_engine.spread_adjusted_edge(price, action, spread_cost, ev_pct)
                 if net_edge_bps <= 0.0: return 
                 
@@ -581,8 +651,7 @@ class DistributedQuantEngine:
             
             try:
                 await self._fetch_exchange_tick_sizes()
-                async with self.api_semaphore:
-                    full_market = await self.executor.get_top_volatile_assets(100, 10_000_000)
+                full_market = await self.isolated_api_call(self.executor.get_top_volatile_assets, 100, 10_000_000)
                 if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
             except Exception as e:
                 logger.error(f"Failed to fetch market data via REST: {e}")
@@ -664,8 +733,7 @@ class DistributedQuantEngine:
             if loop_counter % 5 == 0:
                 self.global_state_cache["last_updated"] = time.time()
                 try:
-                    async with self.api_semaphore:
-                        current_vault_balance = await self.executor.get_wallet_balance_usdt()
+                    current_vault_balance = await self.isolated_api_call(self.executor.get_wallet_balance_usdt)
                 except Exception as e:
                     logger.error(f"Failed to fetch balance during heartbeat: {e}", exc_info=True)
                     continue
@@ -715,12 +783,12 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V20.5: PRODUCTION CORE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V25.1: FINAL APEX)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
-                    f"• Execution Guard: <code>Strict Midnight UTC Baseline (10% Max Loss)</code>\n"
-                    f"• Monitoring Lock: <code>Infinite Sweeper-Guarded Liveness</code>\n"
-                    f"• Exchange Comms:  <code>Outage Circuit-Breakers Active</code>\n\n"
+                    f"• Signal Engine:   <code>Multi-Horizon Dual-OFI + GARCH Smoothing</code>\n"
+                    f"• Market Lead:     <code>BTC Cross-Sectional Flow Matrix</code>\n"
+                    f"• Risk Engine:     <code>Calibrated Kelly Risk Clamps</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔𝗟 𝗩𝗔𝗨𝗟𝗧 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>\n"
                     f"• Total Liquidity: <code>{cv:.4f} USDT</code>\n"
                     f"• Session Return:  <code>{actual:+.4f} USDT</code>\n"
@@ -743,8 +811,7 @@ class DistributedQuantEngine:
             target_tp_price = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
 
             try:
-                async with self.api_semaphore:
-                    balance = await self.executor.get_wallet_balance_usdt()
+                balance = await self.isolated_api_call(self.executor.get_wallet_balance_usdt)
             except Exception as e:
                 logger.error(f"Failed to fetch balance for execution sizing: {e}", exc_info=True)
                 return False
@@ -763,22 +830,19 @@ class DistributedQuantEngine:
                             correlation_penalty = max(0.25, 1.0 - (active_correlated * 0.25))
             
             reward_risk = tp_distance / sl_distance
-            base_kelly = confidence - ((1.0 - confidence) / max(0.1, reward_risk))
+            empirical_edge = max(0.01, confidence - 0.50)
+            base_kelly = empirical_edge / max(0.1, reward_risk)
             account_scaling = 0.75 if balance < 100.0 else 1.0
             
-            hjb_boost = 1.0 + min(1.0, (edge_bps / 10000.0) * 10)
-            quarter_kelly = max(0.005, min(0.025, base_kelly * 0.25 * account_scaling * hjb_boost * correlation_penalty))
+            quarter_kelly = max(0.005, min(0.025, base_kelly * 0.25 * account_scaling * correlation_penalty))
 
             if quarter_kelly <= 0.0 or not is_armed:
-                async def _shadow_commit():
-                    try:
-                        async with self.db_semaphore:
-                            await asyncio.wait_for(
-                                asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, True),
-                                timeout=10.0
-                            )
-                    except Exception as e: logger.debug(f"Shadow commit failed: {e}")
-                self.track_task(_shadow_commit())
+                try:
+                    self.db_wal_queue.put_nowait({
+                        "type": "prediction", 
+                        "args": [signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, True]
+                    })
+                except asyncio.QueueFull: pass
                 return False
 
             if balance < 1.0:
@@ -800,9 +864,8 @@ class DistributedQuantEngine:
                 execution_success = True
             else:
                 try:
-                    async with self.api_semaphore:
-                        await self.executor.adjust_leverage(symbol, target_leverage)
-                        await asyncio.sleep(0.2) 
+                    await self.isolated_api_call(self.executor.adjust_leverage, symbol, target_leverage)
+                    await asyncio.sleep(0.2) 
                 except Exception as e:
                     if "110043" in str(e):
                         pass
@@ -824,15 +887,12 @@ class DistributedQuantEngine:
                 return False 
                 
             if not self.test_mode:
-                async def _live_db_commit():
-                    try:
-                        async with self.db_semaphore:
-                            await asyncio.wait_for(
-                                asyncio.to_thread(self.memory.commit_prediction, signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False),
-                                timeout=10.0
-                            )
-                    except Exception as e: logger.error(f"Failed to async commit live signal to DB: {e}")
-                self.track_task(_live_db_commit())
+                try:
+                    self.db_wal_queue.put_nowait({
+                        "type": "prediction", 
+                        "args": [signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False]
+                    })
+                except asyncio.QueueFull: pass
                 
             self.risk_vault.update_position_ledger(symbol, notional)
             
@@ -864,8 +924,7 @@ class DistributedQuantEngine:
             for _ in range(5):  
                 await asyncio.sleep(3)
                 try:
-                    async with self.api_semaphore:
-                        pos_response = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_response = await self.isolated_api_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     positions = pos_response.get("result", {}).get("list", [])
                     if positions and float(positions[0].get("size", 0.0)) > 0:
                         order_filled = True
@@ -878,8 +937,7 @@ class DistributedQuantEngine:
             if not order_filled:
                 logger.critical(f"🔓 PORTFOLIO UNLOCKED // SOR failed to fill {symbol} within 15s. Canceling.")
                 try: 
-                    async with self.api_semaphore:
-                        await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
+                    await self.isolated_api_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
                 except Exception: pass
                 
                 self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
@@ -902,9 +960,8 @@ class DistributedQuantEngine:
             stops_verified = False
             for attempt in range(3):
                 try:
-                    async with self.api_semaphore:
-                        await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=realigned_sl_str)
-                        pos_res = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    await self.isolated_api_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=realigned_sl_str)
+                    pos_res = await self.isolated_api_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     
                     pos_verify = pos_res.get("result", {}).get("list", [{}])[0]
                     if float(pos_verify.get("stopLoss", 0.0)) > 0 and float(pos_verify.get("takeProfit", 0.0)) > 0:
@@ -917,8 +974,7 @@ class DistributedQuantEngine:
             if not stops_verified:
                 logger.error(f"🚨 CRITICAL: Failed to verify SL/TP for {symbol} after 3 attempts. FLATTENING POSITION.")
                 flatten_side = "Sell" if direction == "BUY" else "Buy"
-                async with self.api_semaphore:
-                    await asyncio.to_thread(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC", reduceOnly=True)
+                await self.isolated_api_call(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC", reduceOnly=True)
                 self._release_symbol_lock(symbol)
                 return
 
@@ -927,22 +983,19 @@ class DistributedQuantEngine:
             trailing_distance_str = align_price(atr * 1.5)
 
             try:
-                async with self.api_semaphore:
-                    await asyncio.to_thread(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=realigned_sl_str, trailingStop=trailing_distance_str, activePrice=activation_price)
+                await self.isolated_api_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=realigned_sl_str, trailingStop=trailing_distance_str, activePrice=activation_price)
                 logger.info(f"🛡️ NATIVE TRAIL ARMED // {symbol} Trailing Stop handed to exchange (Act: {activation_price}, Dist: {trailing_distance_str})")
             except Exception as e: 
                 logger.error(f"Failed to arm trailing stop: {e}", exc_info=True)
 
-            # 🚀 V20.5 FIX: Daemon Outage Circuit Breaker
             consecutive_errors = 0
             while True: 
-                await asyncio.sleep(10)
+                await asyncio.sleep(20)
                 try:
-                    async with self.api_semaphore:
-                        pos_res = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_res = await self.isolated_api_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     pos_list = pos_res.get("result", {}).get("list", [])
                     position_gone = (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0
-                    consecutive_errors = 0  # Reset on success
+                    consecutive_errors = 0  
                 except Exception as pos_gone_err:
                     consecutive_errors += 1
                     logger.error(f"Position polling error ({consecutive_errors}/10): {pos_gone_err}")
@@ -951,20 +1004,16 @@ class DistributedQuantEngine:
                     position_gone = False
 
                 try:
-                    async with self.api_semaphore:
-                        settlement = await self.executor.check_recent_settlement(symbol, 300) 
+                    settlement = await self.isolated_api_call(self.executor.check_recent_settlement, symbol, 300) 
                     if settlement.get("closed"):
                         net_pnl = float(settlement.get('pnl', 0.0))
                         self.track_task(self._safe_telegram_dispatch(f"🔔 <b>EXCHANGE EXECUTION TERMINATION</b>\n━━━━━━━━━━━━━━━━━━━━━━\n📈 <b>Asset Node:</b> <code>{symbol}</code>\n📊 <b>Outcome:</b> {'🟢 PROFIT' if net_pnl > 0 else '🔴 LOSS'}\n💰 <b>Net Return:</b> <code>{net_pnl:.4f} USDT</code>\n━━━━━━━━━━━━━━━━━━━━━━", is_html=True))
-                        async def _settlement_db_commit():
-                            try:
-                                async with self.db_semaphore:
-                                    await asyncio.wait_for(
-                                        asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details),
-                                        timeout=10.0
-                                    )
-                            except Exception as db_err: logger.error(f"Settlement log error: {db_err}")
-                        self.track_task(_settlement_db_commit())
+                        try:
+                            self.db_wal_queue.put_nowait({
+                                "type": "settlement", 
+                                "args": [signal_id, net_pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details]
+                            })
+                        except asyncio.QueueFull: pass
                         self.risk_vault.update_position_ledger(symbol, 0.0)
                         break
                 except Exception as e:
@@ -973,20 +1022,16 @@ class DistributedQuantEngine:
                 if position_gone:
                     logger.warning(f"🧾 RECONCILIATION // {symbol} closed. Pulling final PnL snapshot.")
                     try: 
-                        async with self.api_semaphore:
-                            pnl_res = await asyncio.to_thread(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=5)
+                        pnl_res = await self.isolated_api_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=5)
                         net_pnl = float(pnl_res.get("result", {}).get("list", [])[0].get("closedPnl", 0.0))
                     except Exception: net_pnl = 0.0
                     
-                    async def _reconciled_db_commit():
-                        try: 
-                            async with self.db_semaphore:
-                                await asyncio.wait_for(
-                                    asyncio.to_thread(self.memory.log_live_execution_result, signal_id, net_pnl, 0.0, "RECONCILED", exec_details),
-                                    timeout=10.0
-                                )
-                        except Exception: pass
-                    self.track_task(_reconciled_db_commit())
+                    try:
+                        self.db_wal_queue.put_nowait({
+                            "type": "settlement", 
+                            "args": [signal_id, net_pnl, 0.0, "RECONCILED", exec_details]
+                        })
+                    except asyncio.QueueFull: pass
                     
                     self.risk_vault.update_position_ledger(symbol, 0.0)
                     break
@@ -996,8 +1041,7 @@ class DistributedQuantEngine:
             logger.critical(f"🚑 EMERGENCY INTERVENTION // Attempting to flatten {symbol} position to protect capital.")
             try:
                 flatten_side = "Sell" if direction == "BUY" else "Buy"
-                async with self.api_semaphore:
-                    await asyncio.to_thread(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC", reduceOnly=True)
+                await self.isolated_api_call(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=str(risk_matrix["size"]), timeInForce="IOC", reduceOnly=True)
                 logger.critical(f"✅ EMERGENCY FLATTEN SUCCESSFUL for {symbol}.")
             except Exception as flatten_e: logger.error(f"❌ EMERGENCY FLATTEN FAILED for {symbol}: {flatten_e}", exc_info=True)
                 
@@ -1007,12 +1051,10 @@ class DistributedQuantEngine:
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
-        # 🚀 V20.5 FIX: Iterate safely over only the locked active symbols
         for symbol in list(self.active_positions_lock):
             try:
-                async with self.api_semaphore:
-                    await asyncio.to_thread(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
-                    pos_res = await asyncio.to_thread(self.executor.client.get_positions, category="linear", symbol=symbol)
+                await self.isolated_api_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
+                pos_res = await self.isolated_api_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     
                 pos_list = pos_res.get("result", {}).get("list", [])
                 if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
@@ -1020,8 +1062,7 @@ class DistributedQuantEngine:
                     side = pos_list[0].get("side")
                     flatten_side = "Sell" if side == "Buy" else "Buy"
                     
-                    async with self.api_semaphore:
-                        await asyncio.to_thread(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=qty_str, timeInForce="IOC", reduceOnly=True)
+                    await self.isolated_api_call(self.executor.client.place_order, category="linear", symbol=symbol, side=flatten_side, orderType="Market", qty=qty_str, timeInForce="IOC", reduceOnly=True)
                     logger.critical(f"✅ EMERGENCY FLATTEN EXECUTED for {symbol}")
             except Exception as e:
                 logger.error(f"Shutdown flatten failed for {symbol}: {e}", exc_info=True)
@@ -1037,19 +1078,17 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"Boot sequence sync error: {e}", exc_info=True)
         
         try:
-            async with self.api_semaphore:
-                boot_bal = await self.executor.get_wallet_balance_usdt()
-                self.global_state_cache["start_of_day_balance"] = boot_bal
-                self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
-                self.global_state_cache["last_updated"] = time.time()
-                self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-                logger.info(f"💵 INITIAL VAULT BASELINE LOCKED: {boot_bal:.4f} USDT")
+            boot_bal = await self.isolated_api_call(self.executor.get_wallet_balance_usdt)
+            self.global_state_cache["start_of_day_balance"] = boot_bal
+            self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
+            self.global_state_cache["last_updated"] = time.time()
+            self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            logger.info(f"💵 INITIAL VAULT BASELINE LOCKED: {boot_bal:.4f} USDT")
         except Exception as boot_bal_err:
             logger.error(f"Boot balance initialization failed: {boot_bal_err}")
         
         try: 
-            async with self.api_semaphore:
-                full_market = await self.executor.get_top_volatile_assets(100, 10_000_000)
+            full_market = await self.isolated_api_call(self.executor.get_top_volatile_assets, 100, 10_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
         except Exception: 
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
@@ -1061,8 +1100,7 @@ class DistributedQuantEngine:
         
         try:
             await asyncio.gather(
-                # 🚀 V20.5 FIX: LLM Matrix disabled. Saves $ API costs since it wasn't on hot path.
-                # self.run_macro_commander(),
+                self.run_db_wal_worker(),
                 self.run_dna_prewarmer(), 
                 self.stream_manager_loop(),
                 self.run_system_heartbeat(),
