@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import time
+import concurrent.futures
+import functools
 from typing import Dict, Any, List
 from pybit.unified_trading import HTTP
 
@@ -15,7 +17,7 @@ class TokenBucketRateLimiter:
     def __init__(self, capacity: int = 10, fill_rate: float = 5.0):
         self.capacity = float(capacity)
         self.tokens = float(capacity)
-        self.fill_rate = fill_rate  # Tokens regenerated per second
+        self.fill_rate = float(fill_rate)  # Tokens regenerated per second
         self.last_fill_time = time.time()
         self.lock = asyncio.Lock()
 
@@ -37,8 +39,9 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
-        # Store key for error-scrubbing purposes (P2-5 Fix)
+        # Store keys for error-scrubbing purposes
         self.api_key = api_key
+        self.api_secret = api_secret
         
         # Instantiate the official V5 client
         self.client = HTTP(
@@ -49,18 +52,27 @@ class BybitUnifiedExecutor:
         
         # 🛡️ UPGRADE: Initialize the global API rate limiter (10 burst, 5 per sec sustained)
         self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
+        
+        # 🚀 V25.4/25.5 FIX: Internal Single-Thread Isolator
+        # Mathematically guarantees pybit's underlying requests.Session is never hit by concurrent threads
+        self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="BybitIsolator")
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
-        🛡️ UNIFIED API GATEWAY (P1-7 & P2-5 Fix)
+        🛡️ UNIFIED API GATEWAY
         All exchange interactions pass through here to ensure rate-limiting, 
-        automatic retries on system load errors, and credential scrubbing.
+        automatic retries on system load errors, thread isolation, and credential scrubbing.
         """
         await self.rate_limiter.acquire()
+        loop = asyncio.get_running_loop()
+        
+        # 🚀 V25.5 FIX: Use functools.partial for thread-safe kwarg dispatch
+        bound_func = functools.partial(func, *args, **kwargs)
         
         for attempt in range(3):
             try:
-                response = await asyncio.to_thread(func, *args, **kwargs)
+                # Execute the synchronous pybit function entirely inside the isolated thread pool
+                response = await loop.run_in_executor(self._api_thread_pool, bound_func)
                 
                 # Check for Bybit-specific system load codes natively
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
@@ -72,21 +84,26 @@ class BybitUnifiedExecutor:
                 return response
                 
             except Exception as e:
-                # 🛑 P2-5 FIX: SECRETS HYGIENE
-                # Scrub API key from any network errors before they hit standard output
+                # 🛑 SECRETS HYGIENE
+                # Scrub API key and Secret from any network errors before they hit standard output
                 error_str = str(e)
                 if self.api_key and self.api_key in error_str:
                     error_str = error_str.replace(self.api_key, "********")
+                if self.api_secret and self.api_secret in error_str:
+                    error_str = error_str.replace(self.api_secret, "********")
                     
                 if attempt == 2:
                     logger.error(f"❌ Bybit API call failed after 3 attempts: {error_str}")
                     raise Exception(error_str)
                 await asyncio.sleep(1.0)
 
+    async def safe_call(self, func, *args, **kwargs) -> Any:
+        """🚀 Public async wrapper allowing external files to safely dispatch raw client calls"""
+        return await self._safe_api_call(func, *args, **kwargs)
+
     async def get_wallet_balance_usdt(self) -> float:
         """Fetches available margin balance from the Unified Trading Account."""
         try:
-            # Shift synchronous network call to our safe thread pool wrapper
             response = await self._safe_api_call(
                 self.client.get_wallet_balance,
                 accountType="UNIFIED",
@@ -129,7 +146,7 @@ class BybitUnifiedExecutor:
             # ErrCode 110013: Requested leverage exceeds Bybit's hard risk limit for this specific altcoin
             if "110013" in error_msg:
                 try:
-                    # 🛑 CRITICAL FIX: Deterministic API Query instead of fragile Regex parsing
+                    # Deterministic API Query
                     info = await self._safe_api_call(
                         self.client.get_instruments_info,
                         category="linear",
@@ -164,7 +181,6 @@ class BybitUnifiedExecutor:
         Acts as the engine's autonomous global satellite radar.
         """
         try:
-            # 1. Fetch 24-hour statistics for all tickers on the exchange safely
             response = await self._safe_api_call(
                 self.client.get_tickers,
                 category="linear"
@@ -176,11 +192,11 @@ class BybitUnifiedExecutor:
             for t in tickers:
                 symbol = t.get("symbol", "")
                 
-                # 2. Safety Filter: Only track perpetual USDT instruments
+                # Safety Filter: Only track perpetual USDT instruments
                 if not symbol.endswith("USDT"):
                     continue
                     
-                # 3. Liquidity Guard: Filter out low-volume, high-risk assets
+                # Liquidity Guard: Filter out low-volume, high-risk assets
                 turnover = float(t.get("turnover24h", 0))
                 if turnover < min_turnover:
                     continue
@@ -192,7 +208,7 @@ class BybitUnifiedExecutor:
                 if last == 0 or low == 0:
                     continue
                     
-                # 4. Volatility Scaling Engine
+                # Volatility Scaling Engine
                 volatility = (high - low) / last
                 
                 valid_assets.append({
@@ -201,7 +217,7 @@ class BybitUnifiedExecutor:
                     "turnover": turnover
                 })
                 
-            # 5. Mathematical Matrix Sorting (Highest alpha velocity at top)
+            # Mathematical Matrix Sorting (Highest alpha velocity at top)
             valid_assets.sort(key=lambda x: x["volatility"], reverse=True)
             
             # Slice and isolate the target list
@@ -217,7 +233,6 @@ class BybitUnifiedExecutor:
         side = "Buy" if direction == "BUY" else "Sell"
         
         try:
-            # 🛑 P2-8 FIX: Removed redundant/misleading timeInForce="IOC" on pure Market orders.
             order_payload = await self._safe_api_call(
                 self.client.place_order,
                 category="linear",
@@ -241,7 +256,6 @@ class BybitUnifiedExecutor:
 
     async def dispatch_limit_order(self, symbol: str, direction: str, qty: float, price: float, tp: float, sl: float) -> str:
         """
-        🚀 PHASE 1 UPGRADE (INTEGRATION): 
         Signs and executes passive Post-Only Limit Orders for Mean Reversion regimes to capture the spread.
         """
         side = "Buy" if direction == "BUY" else "Sell"
