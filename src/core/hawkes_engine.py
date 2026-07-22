@@ -42,6 +42,7 @@ class BivariateHawkesEngine:
         """
         Calculates the Coefficient of Variation (CV) of the trade stream.
         Dynamically adjusts the matrix to account for shifting market regimes.
+        Ensures mathematical stationarity via spectral radius clamping.
         """
         if len(self.dt_buffer) < self.calibration_window: 
             return
@@ -74,7 +75,19 @@ class BivariateHawkesEngine:
         noise_factor = 1.0 - implied_rho
         self.mu = self.base_mu * (noise_factor / 0.5)
         
-        logger.info(f"⚙️ HAWKES MLE CALIBRATED | CV: {cv:.2f} | Implied Excitation (ρ): {implied_rho:.2f} | Sensitivity Matrix Scaled: {scale_factor:.2f}x")
+        # 3. STATIONARITY CLAMP (Spectral Radius < 1.0)
+        # The branching matrix M_ij = alpha_ij / beta_ij determines process stability
+        branching_matrix = self.alpha / self.beta
+        spectral_radius = np.max(np.abs(np.linalg.eigvals(branching_matrix)))
+        
+        if spectral_radius >= 0.95:
+            # Rescale alpha to force the spectral radius down to a safe 0.90 limit
+            # This prevents the stochastic process from predicting infinite trade intensities
+            stationarity_correction = 0.90 / spectral_radius
+            self.alpha *= stationarity_correction
+            logger.warning(f"⚠️ HAWKES STATIONARITY CLAMP | Spectral Radius reached {spectral_radius:.3f}. Alpha matrix rescaled by {stationarity_correction:.2f}x to prevent explosive intensity.")
+
+        logger.info(f"⚙️ HAWKES MLE CALIBRATED | CV: {cv:.2f} | Implied Excitation (ρ): {implied_rho:.2f} | Sens: {scale_factor:.2f}x | Spectral Radius: {min(spectral_radius, 0.90):.3f}")
 
     def apply_tick(self, timestamp: float, is_buy: bool, trade_volume: float) -> tuple[float, float]:
         """

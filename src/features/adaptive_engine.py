@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import heapq
 import logging
 from collections import deque
 from typing import Dict, Any, Tuple, List
@@ -8,17 +9,21 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V20.2 APEX ENGINE: HIGH-SPEED MICROSTRUCTURE CACHE
-    Redundant OBI/MAD math completely purged. 
-    Features institutional-grade O(1) top-of-book caching for the Smart Order Router.
+    🔬 V27.0 SIGNAL APEX: HIGH-SPEED MICROSTRUCTURE CACHE
+    Upgraded to reconstruct and cache the Deep Book (Top 10 Levels) for MLOFI.
+    Features O(N log K) Heap Extraction and Epsilon Zero-Division Guards 
+    to guarantee mathematical stability during liquidity vacuums.
     """
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
         # Local Orderbook Reconstruction Cache
         self.local_bids: Dict[float, float] = {}
         self.local_asks: Dict[float, float] = {}
 
-        # 🚀 O(1) SNAPSHOT OPTIMIZATION CACHE
+        # 🚀 O(1) SNAPSHOT OPTIMIZATION CACHE (String format for API/SOR compatibility)
         self._cached_snapshot: Dict[str, List[List[str]]] = {"bids": [], "asks": []}
+        
+        # 🚀 V27.0 EXPORT CACHE: Pre-cast floats for Zero-Latency MLOFI Math
+        self._cached_floats: Dict[str, List[List[float]]] = {"bids": [], "asks": []}
 
         # Rolling memory for Aggressive Trade Flow Imbalance (Tape Reader Pipeline)
         self.tfi_history = deque(maxlen=memory_window_short)
@@ -30,17 +35,23 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
     def _prune_book(self):
-        """Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels."""
+        """
+        Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels.
+        ⚡ V26/V27 UPGRADE: Replaced O(N log N) sorting with O(N log K) Heap Queues.
+        """
         if len(self.local_bids) > 1000:
-            sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
-            self.local_bids = dict(sorted_bids[:500])
+            top_bids = heapq.nlargest(500, self.local_bids.items(), key=lambda x: x[0])
+            self.local_bids = dict(top_bids)
             
         if len(self.local_asks) > 1000:
-            sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
-            self.local_asks = dict(sorted_asks[:500])
+            top_asks = heapq.nsmallest(500, self.local_asks.items(), key=lambda x: x[0])
+            self.local_asks = dict(top_asks)
 
     def detect_market_regime(self) -> str:
-        """Kaufman's Efficiency Ratio (ER) Market Regime Classifier."""
+        """
+        Kaufman's Efficiency Ratio (ER) Market Regime Classifier.
+        ⚡ V26 UPGRADE: Mathematical Epsilon Guards against Zero-Division.
+        """
         if len(self.timeframes["5"]) >= 45:
             candles = list(self.timeframes["5"])
         elif len(self.timeframes["1"]) >= 20:
@@ -54,11 +65,15 @@ class AdaptiveFeatureEngine:
 
         directional_change = abs(closes[-1] - closes[0])
         absolute_changes = np.sum(np.abs(np.diff(closes)))
-        efficiency_ratio = directional_change / absolute_changes if absolute_changes > 0 else 0.0
+        
+        # Epsilon guard added
+        efficiency_ratio = directional_change / (absolute_changes + 1e-9)
 
         sma = np.mean(closes)
         std_dev = np.std(closes)
-        bb_width = (4 * std_dev) / sma if sma > 0 else 0.0
+        
+        # Epsilon guard added
+        bb_width = (4 * std_dev) / (sma + 1e-9)
 
         if efficiency_ratio < 0.35 or bb_width < 0.004:
             return "RANGING"
@@ -82,8 +97,8 @@ class AdaptiveFeatureEngine:
             elif side == "Sell":
                 sell_vol += qty
 
-        # Calculate Trade Flow Imbalance (-1.0 to 1.0)
-        tfi = (buy_vol - sell_vol) / (buy_vol + sell_vol) if (buy_vol + sell_vol) > 0 else 0.0
+        # Calculate Trade Flow Imbalance (-1.0 to 1.0) guarded by epsilon
+        tfi = (buy_vol - sell_vol) / ((buy_vol + sell_vol) + 1e-9)
         self.tfi_history.append(tfi)
 
     def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]], is_snapshot: bool = False) -> None:
@@ -115,22 +130,29 @@ class AdaptiveFeatureEngine:
 
             self._prune_book()
 
-            # 🚀 SORT ONCE ON HOT PATH AND CACHE IMMEDIATELY
-            sorted_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)
-            sorted_asks = sorted(self.local_asks.items(), key=lambda x: x[0])
+            # 🚀 V27.0 UPGRADE: Extract TOP 10 Levels for Deep-Book MLOFI calculations
+            if self.local_bids and self.local_asks:
+                best_bids = heapq.nlargest(10, self.local_bids.items(), key=lambda x: x[0])
+                best_asks = heapq.nsmallest(10, self.local_asks.items(), key=lambda x: x[0])
 
-            if sorted_bids and sorted_asks:
-                best_bid = sorted_bids[0][0]
-                best_ask = sorted_asks[0][0]
-                
-                if best_bid < best_ask:
-                    self._latest_mid = (best_bid + best_ask) / 2.0
-                
-                # Update high-speed execution cache array
-                self._cached_snapshot = {
-                    "bids": [[str(p), str(s)] for p, s in sorted_bids[:5]],
-                    "asks": [[str(p), str(s)] for p, s in sorted_asks[:5]]
-                }
+                if best_bids and best_asks:
+                    best_bid_price = best_bids[0][0]
+                    best_ask_price = best_asks[0][0]
+                    
+                    if best_bid_price < best_ask_price:
+                        self._latest_mid = (best_bid_price + best_ask_price) / 2.0
+                    
+                    # Update high-speed execution cache array instantly
+                    self._cached_snapshot = {
+                        "bids": [[str(p), str(s)] for p, s in best_bids],
+                        "asks": [[str(p), str(s)] for p, s in best_asks]
+                    }
+                    
+                    # ⚡ Pre-cast floats for zero-latency MLOFI array math
+                    self._cached_floats = {
+                        "bids": [[float(p), float(s)] for p, s in best_bids],
+                        "asks": [[float(p), float(s)] for p, s in best_asks]
+                    }
 
         except Exception as e:
             logger.error(f"Microstructure local cache reconstruction failure: {e}")
@@ -151,7 +173,8 @@ class AdaptiveFeatureEngine:
             
             current_close = candles[-1]["close"]
             historical_close = candles[0]["close"]
-            momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / historical_close
+            # ⚡ V26 UPGRADE: Epsilon guard
+            momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / max(historical_close, 1e-9)
             
         return momentum_matrix
 
@@ -163,12 +186,20 @@ class AdaptiveFeatureEngine:
         return getattr(self, '_latest_mid', 0.0)
 
     def get_latest_tfi(self) -> float:
-        """🚀 V20.2 CHANNELS: Exposes Tape Reader pipeline to the central orchestrator path."""
+        """Exposes Tape Reader pipeline to the central orchestrator path."""
         return self.tfi_history[-1] if self.tfi_history else 0.0
 
     def get_orderbook_snapshot(self) -> Dict[str, List[List[str]]]:
-        """🚀 ULTRA-LOW LATENCY FIX: Instantaneous O(1) layout return for the SOR engine."""
+        """Instantaneous O(1) layout return for the SOR engine (String Format)."""
         return self._cached_snapshot
+        
+    def get_deep_book_floats(self) -> Tuple[List[List[float]], List[List[float]]]:
+        """
+        🚀 V27.0 MLOFI EXPORT
+        Returns the reconstructed L2 deep book as raw floats, bypassing string-parsing 
+        overhead for the Microstructure Edge Gate.
+        """
+        return self._cached_floats["bids"], self._cached_floats["asks"]
 
     def get_computed_atr(self, period: int = 14) -> float:
         """Wilder's Smoothed True Range calculation for volatility-adjusted stop realignments."""
@@ -199,19 +230,20 @@ class AdaptiveFeatureEngine:
 
     def get_book_depth_metrics(self) -> Dict[str, float]:
         """Helper diagnostics for shallow liquidity scanning."""
-        snapshot = self._cached_snapshot
+        snapshot = self._cached_floats
         if not snapshot["bids"] or not snapshot["asks"]:
             return {}
             
-        bid_depth = sum(float(level[1]) for level in snapshot["bids"])
-        ask_depth = sum(float(level[1]) for level in snapshot["asks"])
+        # 🚀 V27.0 UPGRADE: Depth metrics now cover the Top 10 levels for better resistance modeling
+        bid_depth = sum(level[1] for level in snapshot["bids"])
+        ask_depth = sum(level[1] for level in snapshot["asks"])
         total_depth = bid_depth + ask_depth
         
         return {
-            "bid_depth_5": float(bid_depth),
-            "ask_depth_5": float(ask_depth),
-            "total_depth_5": float(total_depth),
-            "depth_imbalance": float((bid_depth - ask_depth) / (total_depth + 1e-6)),
+            "bid_depth_10": float(bid_depth),
+            "ask_depth_10": float(ask_depth),
+            "total_depth_10": float(total_depth),
+            "depth_imbalance": float((bid_depth - ask_depth) / (total_depth + 1e-9)),
             "top_bid": float(snapshot["bids"][0][0]),
             "top_ask": float(snapshot["asks"][0][0])
         }

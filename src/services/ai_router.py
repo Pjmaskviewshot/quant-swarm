@@ -10,12 +10,18 @@ from openai import AsyncOpenAI
 logger = logging.getLogger("QUANT_CORE.AI_ROUTER")
 
 class ResilientAIRouter:
+    """
+    🚀 V26.0 APEX: UNIVERSAL RESILIENT AI ROUTER
+    Engineered for the background asynchronous macro-loop.
+    Features DeepSeek/NVIDIA/Groq cascade matrix, LRU Round-Robin routing, 
+    dynamic penalty boxes, and strict memory/socket leak prevention.
+    """
     def __init__(self, nv_keys: List[str], deepseek_key: str):
         self.providers = []
         self.current_provider = "INITIALIZING" 
         
         # 🛡️ HARDENED NETWORK CONFIGURATION 
-        # 🚀 UPGRADED to 90.0s so the connection doesn't drop while DeepSeek is thinking
+        # Upgraded to 90.0s to accommodate DeepSeek Chain-of-Thought reasoning
         self.custom_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=10.0),
             http2=False,  
@@ -44,7 +50,7 @@ class ResilientAIRouter:
                 "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
             })
 
-        # 2. NVIDIA NIM: 🚀 APEX UPGRADE -> DeepSeek V4 Flash with Reasoning Engine
+        # 2. NVIDIA NIM: DeepSeek V4 Flash with Reasoning Engine
         for i, key in enumerate(nv_keys):
             if key:
                 self.providers.append({
@@ -53,7 +59,7 @@ class ResilientAIRouter:
                     "model": "deepseek-ai/deepseek-v4-flash",
                     "cooldown_until": 0.0,
                     "last_used": 0.0,
-                    "json_mode": False, # DeepSeek reasoning works best when extracting JSON from markdown fences
+                    "json_mode": False, # DeepSeek reasoning works best extracting JSON from markdown
                     "params": {
                         "temperature": 1.0, 
                         "top_p": 0.95, 
@@ -67,7 +73,7 @@ class ResilientAIRouter:
             self.providers.append({
                 "name": "DEEPSEEK_V4_FLASH",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                "model": "deepseek-v4-flash", 
+                "model": "deepseek-reasoner", # V26 Note: Reasoner handles complex JSON generation best natively
                 "cooldown_until": 0.0,
                 "last_used": 0.0,
                 "json_mode": False,
@@ -83,18 +89,29 @@ class ResilientAIRouter:
         else:
             logger.info(f"✅ Universal Cascade Matrix initialized with {len(self.providers)} failover nodes.")
 
+    async def close(self):
+        """
+        🚀 V26 UPGRADE: Resource Cleanup
+        Prevents AsyncIO unclosed socket memory leaks during system reboots.
+        """
+        if self.custom_http_client:
+            await self.custom_http_client.aclose()
+            logger.info("🔌 AI Router HTTP Client sockets gracefully closed.")
+
     def _sanitize_error(self, error_str: str) -> str:
+        """Shields API keys from bleeding into standard output/logging."""
         return re.sub(r'(gsk_[a-zA-Z0-9]{20,}|sk-[a-zA-Z0-9]{20,}|nvapi-[a-zA-Z0-9-_]{20,})', '[REDACTED_API_KEY]', error_str)
 
     def _get_next_healthy_provider(self):
         """
         🚀 APEX UPGRADE: Least-Recently-Used (LRU) Round-Robin Routing.
-        Prevents Node Starvation. 
+        Prevents Node Starvation by cycling through healthy nodes evenly.
         """
         current_time = time.time()
         healthy_providers = [p for p in self.providers if current_time >= p["cooldown_until"]]
         
         if healthy_providers:
+            # Sort by last_used to cycle them fairly
             healthy_providers.sort(key=lambda x: x.get("last_used", 0.0))
             selected = healthy_providers[0]
             selected["last_used"] = current_time
@@ -103,15 +120,23 @@ class ResilientAIRouter:
         return None
 
     def _clean_json_output(self, raw_text: str) -> str:
+        """
+        🚀 V26 UPGRADE: DeepSeek Chain-of-Thought Stripper
+        Removes <think> blocks that leak into standard output and extracts JSON safely.
+        """
+        # 1. Strip raw <think>...</think> blocks if the API leaks them
+        raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+        
+        # 2. Extract from markdown fences
         if "```json" in raw_text:
             return raw_text.split("```json")[1].split("```")[0].strip()
         elif "```" in raw_text:
             return raw_text.split("```")[1].split("```")[0].strip()
+            
         return raw_text.strip()
 
-    # 🚀 APEX UPGRADE: Increased default execution timeout from 15.0 to 60.0 seconds
     async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 60.0) -> str:
-        # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks
+        # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks quickly
         MAX_ATTEMPTS = 4 
         
         for attempt in range(MAX_ATTEMPTS):
@@ -133,7 +158,7 @@ class ResilientAIRouter:
                     "max_tokens": provider.get("params", {}).get("max_tokens", 2048),
                 }
                 
-                # 🚀 APEX UPGRADE: Inject NVIDIA Extra Body params for DeepSeek Reasoning
+                # Inject NVIDIA Extra Body params for DeepSeek Reasoning
                 if "extra_body" in provider.get("params", {}):
                     kwargs["extra_body"] = provider["params"]["extra_body"]
                 
@@ -147,13 +172,16 @@ class ResilientAIRouter:
                 
                 msg_obj = response.choices[0].message
                 
-                # 🚀 APEX UPGRADE: Capture DeepSeek's internal reasoning chain (CoT)
+                # Capture DeepSeek's internal reasoning chain (CoT)
                 reasoning = getattr(msg_obj, "reasoning", None) or getattr(msg_obj, "reasoning_content", None)
                 if reasoning:
                     logger.info(f"🧠 {provider['name']} Deep-Thought Logic Completed successfully.")
-                    logger.debug(f"Reasoning Trace: {reasoning[:150]}...")
+                    logger.debug(f"Reasoning Trace: {str(reasoning)[:150]}...")
                 
                 raw_content = msg_obj.content
+                
+                if not raw_content:
+                    raise ValueError("Received empty content block from LLM.")
                 
                 if require_json and not provider.get("json_mode", False):
                     return self._clean_json_output(raw_content)

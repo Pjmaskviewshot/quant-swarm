@@ -1,6 +1,6 @@
 import os
 import logging
-from flask import Flask
+from flask import Flask, jsonify
 from threading import Thread
 
 # Suppress standard Flask startup logs to keep the terminal clean for quantitative outputs
@@ -11,7 +11,21 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🟢 Quant Swarm Engine is Online and Hunting!"
+    """Default landing page for external pings."""
+    return "🟢 PJMASK EMPIRE | V26.0 APEX Quant Swarm is Online and Hunting!"
+
+@app.route('/health')
+def health_check():
+    """
+    🚀 V26 UPGRADE: Dedicated JSON Health Endpoint
+    Allows external uptime monitors (e.g., UptimeRobot, Render Health Checks) 
+    to programmatically verify the engine's heartbeat.
+    """
+    return jsonify({
+        "status": "online",
+        "version": "V26.0 APEX",
+        "engine": "Distributed Quant Swarm"
+    }), 200
 
 def run():
     # Render assigns a dynamic port. Fallback to 8080 locally.
@@ -20,7 +34,11 @@ def run():
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    """Spins up a background thread to keep the Render server awake."""
-    # 🛑 P2-4 FIX: daemon=True prevents the Flask server from blocking container shutdowns
-    t = Thread(target=run, daemon=True)
+    """
+    🚀 V26 UPGRADE: Daemonic Background Thread
+    Spins up a background thread to keep the server awake.
+    daemon=True ensures this web server does not block graceful system shutdowns 
+    during emergency flatten sequences.
+    """
+    t = Thread(target=run, name="ApexHealthServer", daemon=True)
     t.start()

@@ -1,10 +1,17 @@
 import time
-import math
 import numpy as np
 from collections import deque
 from typing import Dict, Any, List
+import logging
+
+logger = logging.getLogger("QUANT_CORE.VPIN")
 
 class VolumeSynchronizedClock:
+    """
+    🚀 V26.0 APEX: O(1) VOLUME SYNCHRONIZED CLOCK
+    Upgraded with mathematical Running Sums to eliminate O(N) array traversals 
+    during bucket closures, reducing execution latency to absolute minimums.
+    """
     def __init__(self, bucket_volume: float = 1_000_000.0, window_size: int = 50):
         self.bucket_volume = bucket_volume
         self.window_size = window_size
@@ -26,6 +33,11 @@ class VolumeSynchronizedClock:
         self.directional_imbalances = deque(maxlen=window_size)
         # Stores VPIN history for anomaly detection (Z-score)
         self.vpin_history = deque(maxlen=window_size * 2)
+
+        # ⚡ V26 UPGRADE: O(1) Running Sum Cache
+        # Replaces expensive sum() operations on the hot path
+        self._running_abs_imbalance = 0.0
+        self._running_dir_imbalance = 0.0
 
     def process_tick(self, price: float, volume: float, is_buyer_maker: bool) -> List[Dict[str, Any]]:
         """
@@ -76,8 +88,16 @@ class VolumeSynchronizedClock:
         abs_imbalance = abs(buy_v - sell_v)
         signed_imbalance = buy_v - sell_v
         
+        # ⚡ V26 UPGRADE: Maintain O(1) running sums before mutating deques
+        if len(self.bucket_imbalances) == self.window_size:
+            self._running_abs_imbalance -= self.bucket_imbalances[0]
+            self._running_dir_imbalance -= self.directional_imbalances[0]
+
         self.bucket_imbalances.append(abs_imbalance)
         self.directional_imbalances.append(signed_imbalance)
+        
+        self._running_abs_imbalance += abs_imbalance
+        self._running_dir_imbalance += signed_imbalance
         
         # 3. Calculate Institutional Footprint (Avg trade size per bucket)
         avg_trade_size = self.bucket_volume / max(1, self.current_bucket_ticks)
@@ -93,24 +113,25 @@ class VolumeSynchronizedClock:
         if len(self.bucket_imbalances) < self.window_size:
             return {"valid": False}
 
-        # 6. Calculate Toxicity (VPIN)
-        total_imbalance = sum(self.bucket_imbalances)
-        vpin_score = total_imbalance / (self.window_size * self.bucket_volume)
+        # ⚡ V26 UPGRADE: O(1) Toxicity (VPIN) and Directional Bias Calculation
+        # Added 1e-9 epsilon guard to definitively prevent ZeroDivision
+        divisor = (self.window_size * self.bucket_volume) + 1e-9
+        
+        vpin_score = self._running_abs_imbalance / divisor
         self.vpin_history.append(vpin_score)
 
-        # 7. Calculate Directional Bias (-1.0 to 1.0)
-        total_directional = sum(self.directional_imbalances)
-        directional_bias = total_directional / (self.window_size * self.bucket_volume)
+        directional_bias = self._running_dir_imbalance / divisor
 
-        # 8. Calculate Anomaly Z-Score
+        # 6. Calculate Anomaly Z-Score
         vpin_z_score = 0.0
         if len(self.vpin_history) >= 20:
             hist_array = np.array(self.vpin_history)
             mean = np.mean(hist_array)
-            std = np.std(hist_array) + 1e-6
+            # Standard Deviation bounded safely
+            std = np.std(hist_array) + 1e-9
             vpin_z_score = (vpin_score - mean) / std
 
-        # 🚀 9. THE ABSORPTION DETECTOR
+        # 🚀 7. THE ABSORPTION DETECTOR
         # If massive directional volume pushes into the market, but price moves the OPPOSITE way,
         # it proves an institutional limit wall is absorbing the retail flow.
         is_absorption_anomaly = False

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import asyncio
@@ -9,9 +10,14 @@ from services.ai_router import ResilientAIRouter
 logger = logging.getLogger("QUANT_CORE.ADVERSARIAL_AI")
 
 class AdversarialDebateMatrix:
+    """
+    🚀 V26.0 APEX: OFF-PATH ADVERSARIAL AI DEBATE MATRIX
+    Upgraded with Input Prompt Sanitization (Anti-Prompt Injection),
+    Strict JSON Schema Validation (Fixes Bug #7), and Bounds-Clamped 
+    Confidence Normalization for asynchronous macro regime caching.
+    """
     def __init__(self, router_override: ResilientAIRouter = None):
-        # 🚀 APEX UPGRADE: Universal Router Integration
-        # Bypasses hardcoded Groq limits to utilize the full NVIDIA/DeepSeek cascade matrix.
+        # Universal Router Integration across NVIDIA / DeepSeek cascade matrix
         if router_override:
             self.router = router_override
         else:
@@ -19,7 +25,65 @@ class AdversarialDebateMatrix:
             deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
             self.router = ResilientAIRouter(nv_keys=nv_keys, deepseek_key=deepseek_key)
             
-        self.debate_history = [] # Temporal Memory Loopback
+        self.debate_history = []  # Temporal Memory Loopback
+
+    def _sanitize_input(self, text: str) -> str:
+        """
+        🛡️ ANTI-PROMPT INJECTION SANITIZER
+        Strips control characters, system prompt overrides, and markdown injection syntax 
+        from external macro contexts (e.g., news feeds, RSS, social context).
+        """
+        if not text:
+            return ""
+        # Remove common prompt injection markers and system overrides
+        sanitized = re.sub(r'(?i)(ignore previous instructions|system prompt|you are now|override)', '[REDACTED]', str(text))
+        # Remove non-printable control characters
+        sanitized = "".join(ch for ch in sanitized if ch.isprintable())
+        return sanitized[:1500]  # Limit length to prevent context flooding
+
+    def _validate_and_normalize_verdict(self, raw_payload: str) -> Dict[str, Any]:
+        """
+        🛡️ STRICT JSON SCHEMA VALIDATOR (Fixes Bug #7)
+        Validates structure, enforces Enum types, and clamps confidence parameters.
+        """
+        try:
+            data = json.loads(raw_payload)
+            if not isinstance(data, dict):
+                raise ValueError("Parsed JSON is not a dictionary.")
+
+            # 1. Validate & Normalize Action Enum
+            raw_action = str(data.get("action", "HOLD")).upper().strip()
+            valid_actions = {"BUY", "SELL", "HOLD"}
+            action = raw_action if raw_action in valid_actions else "HOLD"
+
+            # 2. Validate & Clamp Confidence
+            raw_conf = data.get("confidence", 0.50)
+            try:
+                conf = float(raw_conf)
+            except (ValueError, TypeError):
+                conf = 0.50
+            # Strictly bound between 0.0 and 1.0
+            confidence = max(0.0, min(1.0, conf))
+
+            # 3. Sanitize Reasoning String
+            reasoning = str(data.get("reasoning", "No reasoning provided.")).strip()
+            reasoning = self._sanitize_input(reasoning)[:250]
+
+            return {
+                "action": action,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "schema_valid": True
+            }
+
+        except Exception as e:
+            logger.error(f"❌ SCHEMA VALIDATION FAULT: {e} | Raw string: {raw_payload}")
+            return {
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reasoning": f"SCHEMA_VALIDATION_FAILURE: {str(e)}",
+                "schema_valid": False
+            }
 
     def _calibrate_confidence(self, vpin_data: dict, judge_confidence: float, dna_stats: dict) -> float:
         """
@@ -43,12 +107,11 @@ class AdversarialDebateMatrix:
         if abs(vpin_z) >= 3.0 and dna_win_rate >= 0.60:
             calibrated = min(1.0, calibrated * 1.25)
 
-        return round(calibrated, 4)
+        return round(max(0.0, min(1.0, calibrated)), 4)
 
     async def _query_agent(self, role_prompt: str, data_context: str, timeout: float = 12.0, require_json: bool = False) -> str:
         """
         Routes the LLM prompt through the Universal Resilient Router.
-        Automatically handles failovers, rate-limits, and hardware JSON enforcement.
         """
         messages = [
             {"role": "system", "content": role_prompt},
@@ -56,7 +119,6 @@ class AdversarialDebateMatrix:
         ]
         
         try:
-            # Push payload through the failover cascade
             response_text = await self.router.execute_inference(
                 messages=messages, 
                 require_json=require_json, 
@@ -79,7 +141,7 @@ class AdversarialDebateMatrix:
     async def execute_debate_cycle(self, symbol: str, vpin_data: dict, dna_stats: dict, macro_context: str) -> Dict[str, Any]:
         """
         Runs full multi-agent debate layered with KNN neighborhood data, Systemic Context, 
-        and the VPIN Whale Absorption Metrics.
+        and the VPIN Whale Absorption Metrics. Operates safely off-path in background loops.
         """
         vpin_score = vpin_data.get('vpin_score', 0)
         vpin_z = vpin_data.get('vpin_z_score', 0)
@@ -91,10 +153,13 @@ class AdversarialDebateMatrix:
         avg_trade_size = vpin_data.get('avg_trade_size', 0)
         absorption_str = "CRITICAL ALERT: Hidden Whale Limit Wall absorbing all volume." if is_absorption else "Normal Flow"
 
+        # 🛡️ Anti-Prompt Injection Filter on Macro Context
+        safe_macro_context = self._sanitize_input(macro_context)
+
         # Compile consolidated data context sheet
         context = (
             f"--- MICROSTRUCTURE DATA ---\n"
-            f"Asset Node: {symbol} | Price: {price}\n"
+            f"Asset Node: {self._sanitize_input(symbol)} | Price: {price}\n"
             f"VPIN Score: {vpin_score} | Anomaly Z-Score: {vpin_z} SD\n"
             f"Directional Imbalance: {directional_bias} ({suggested_dir} Pressure)\n"
             f"Absorption State: {absorption_str}\n"
@@ -103,7 +168,7 @@ class AdversarialDebateMatrix:
             f"Database Matched Profiles: {dna_stats.get('matched_samples', 0)}\n"
             f"Historical Match Win-Rate: {dna_stats.get('cluster_win_rate', 0.50):.2%}\n"
             f"--- SYSTEMIC CONTEXT ---\n"
-            f"{macro_context}\n"
+            f"{safe_macro_context}\n"
             f"--- TEMPORAL MEMORY (Past Rulings) ---\n"
             f"{self._get_temporal_memory(symbol)}"
         )
@@ -121,7 +186,7 @@ class AdversarialDebateMatrix:
 
         # Phase 2: Skeptic
         skeptic_prompt = (
-            f"You are the Skeptic. The Predator just claimed: '{predator_thesis}'. "
+            f"You are the Skeptic. The Predator just claimed: '{self._sanitize_input(predator_thesis)}'. "
             "Your objective is to destroy this argument. Focus heavily on the 'Absorption State' and KNN win rates. "
             "If an Absorption Anomaly is active, argue that the Predator is walking into a whale's iceberg trap. Be brutal. 3 sentences max."
         )
@@ -141,27 +206,21 @@ class AdversarialDebateMatrix:
         
         raw_verdict = await self._query_agent(judge_prompt, debate_log, require_json=True)
 
-        try:
-            verdict_json = json.loads(raw_verdict)
-            
-            raw_conf = float(verdict_json.get("confidence", 0.50))
-            calibrated_conf = self._calibrate_confidence(vpin_data, raw_conf, dna_stats)
-            verdict_json["confidence"] = calibrated_conf
-            
-            self.debate_history.append({
-                "timestamp": time.time(), "symbol": symbol, "action": verdict_json.get("action"), "vpin": vpin_score
-            })
-            if len(self.debate_history) > 100:
-                self.debate_history.pop(0)
-            
-            return verdict_json
-            
-        except json.JSONDecodeError as json_err:
-            logger.error(f"❌ JSON Matrix Fault: {json_err} | Raw payload: {raw_verdict}")
-            return self._execute_deterministic_fallback("Parsing Failure", vpin_data)
-        except Exception as e:
-            logger.error(f"❌ Judge Evaluation Fault: {e}")
-            return self._execute_deterministic_fallback("Judge Exception", vpin_data)
+        # 🛡️ Strict Schema Parsing & Normalization
+        verdict = self._validate_and_normalize_verdict(raw_verdict)
+        if not verdict["schema_valid"]:
+            return self._execute_deterministic_fallback("Parsing/Schema Failure", vpin_data)
+
+        calibrated_conf = self._calibrate_confidence(vpin_data, verdict["confidence"], dna_stats)
+        verdict["confidence"] = calibrated_conf
+
+        self.debate_history.append({
+            "timestamp": time.time(), "symbol": symbol, "action": verdict["action"], "vpin": vpin_score
+        })
+        if len(self.debate_history) > 100:
+            self.debate_history.pop(0)
+
+        return verdict
 
     def _execute_deterministic_fallback(self, fail_reason: str, vpin_data: dict) -> Dict[str, Any]:
         """Processes clear non-LLM decision matrix fallback rules."""

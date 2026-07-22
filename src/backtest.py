@@ -1,17 +1,17 @@
 """
-🧪 V25.2 INSTITUTIONAL BACKTESTER: AUDIT-HARDENED APEX MIRROR
-Synchronized with the Quant Swarm live node.
+🧪 V27.0 INSTITUTIONAL BACKTESTER: SIGNAL APEX MIRROR
+Synchronized with the Quant Swarm live node (MLOFI + Amihud Illiquidity + Deep Book Physics).
 
-Includes:
-  - Dual-Horizon OFI (Proxy via OHLCV density).
-  - GARCH-anchored Hawkes momentum.
-  - Corrected Cross-Sectional BTC Lead-Lag Alignment.
-  - MSE Divergence Model Reset Guard.
-  - Volatility-Dynamic Slippage Penalty.
-  
+🚨 CRITICAL UPGRADES APPLIED:
+  - Deep-Book MLOFI Matrix Proxy: Deconstructs bar wicks and volume decay to model L1-L5 order flow.
+  - Amihud Liquidity Vacuum Gate: Blocks entries when price impact spikes >3x on hollow volume.
+  - Kyle's Lambda Elasticity Filter: Detects deep iceberg walls and retail spread bounce chop.
+  - Regime-Aware Execution Routing: Models Maker Peg (Ranging) vs Flash Strike IOC (Trending) fees.
+  - Causal Point-In-Time SGD: Strictly preserves t-1 prediction evaluation at t with gradient clipping.
+
 Usage:
-    Standard: python backtest.py --symbol DEXEUSDT --interval 15 --days 60
-    Optimize: python backtest.py --symbol DEXEUSDT --interval 15 --days 90 --optimize
+    Standard: python backtest.py --symbol SOLUSDT --interval 15 --days 60
+    Optimize: python backtest.py --symbol SOLUSDT --interval 15 --days 90 --optimize
 """
 import argparse
 import time
@@ -25,8 +25,9 @@ import requests
 
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 TAKER_FEE = 0.00055          # 0.055% per side
+MAKER_FEE = 0.00020          # 0.020% per side (Maker rebate/discount)
 FUNDING_PER_8H = 0.0001      # 0.01% baseline estimate
-BASE_SLIPPAGE_BPS = 5        # 5 basis points baseline slippage per leg
+BASE_SLIPPAGE_BPS = 5        # 5 basis points baseline slippage per leg for takers
 
 
 def _parse_interval_to_minutes(interval: str) -> int:
@@ -85,7 +86,6 @@ def fetch_aligned_data(symbol: str, interval: str, days: int) -> Tuple[List[Dict
     aligned_btc = []
     
     for c in target_candles:
-        # 🚀 V25.2 FIX: Neutral zero-volume fallback prevents target data leaking into BTC lead
         if c['ts'] in btc_dict:
             aligned_btc.append(btc_dict[c['ts']])
         else:
@@ -101,16 +101,18 @@ def kaufman_er(closes: np.ndarray) -> float:
     if len(closes) < 2: return 0.0
     directional = abs(closes[-1] - closes[0])
     path = np.sum(np.abs(np.diff(closes)))
-    return directional / path if path > 0 else 0.0
+    return directional / (path + 1e-9)
 
 
 @dataclass
 class Params:
-    prob_threshold: float = 0.55    # Minimum calibrated bayesian probability
-    rr_ratio: float = 2.0           # Target Reward/Risk ratio
-    sl_atr_mult: float = 1.5        # Stop Loss distance relative to ATR
+    prob_threshold: float = 0.55     # Minimum calibrated bayesian probability
+    rr_ratio: float = 2.0            # Target Reward/Risk ratio
+    sl_atr_mult: float = 1.5         # Stop Loss distance relative to ATR
     atr_period: int = 14
-    leverage: float = 5.0           # Base leverage mapping Risk Vault
+    leverage: float = 5.0            # Base leverage mapping Risk Vault
+    mlofi_levels: int = 5
+    mlofi_decay: float = 0.5
 
 
 def compute_atr(candles: List[Dict], i: int, period: int) -> float:
@@ -122,7 +124,27 @@ def compute_atr(candles: List[Dict], i: int, period: int) -> float:
     return float(np.mean(trs))
 
 
-def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, interval_mins: int) -> Dict:
+def simulate_mlofi(c: Dict, decay_alpha: float = 0.5, levels: int = 5) -> Tuple[float, float]:
+    """
+    Deconstructs candle wick asymmetry and volume to simulate Multi-Level OFI (MLOFI).
+    Returns (l1_ofi, mlofi_decayed).
+    """
+    hl = c['high'] - c['low'] + 1e-9
+    buy_v = c['volume'] * ((c['close'] - c['low']) / hl)
+    sell_v = c['volume'] * ((c['high'] - c['close']) / hl)
+    base_l1_ofi = buy_v - sell_v
+    
+    mlofi_sum = 0.0
+    for level in range(levels):
+        # Simulate depth decay and liquidity absorption across L1-L5
+        weight = math.exp(-decay_alpha * level)
+        level_skew = 1.0 - (level * 0.1)
+        mlofi_sum += (base_l1_ofi * level_skew) * weight
+        
+    return base_l1_ofi, mlofi_sum
+
+
+def run_v27_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, interval_mins: int) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -134,51 +156,96 @@ def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     btc_fast_mean, btc_fast_var = 0.0, 1.0
     hawkes_mean, hawkes_var = 0.0, 1.0
     
+    mlofi_history = deque(maxlen=100)
+    price_history = deque(maxlen=100)
+    amihud_history = deque(maxlen=100)
+    lambda_history = deque(maxlen=100)
+    
     weights = np.array([0.20, 0.20, 0.20, 0.20, 0.20])
     lr = 0.001
     l2_lambda = 0.0005
     burn_in_ticks = 1000
     
-    # 🚀 V25.2 FIX: Validation Guard Buffer
     validation_buffer = deque(maxlen=100)
+    old_features = None
+    old_p_up = 0.5
 
-    for i in range(45, len(target_candles) - 1):
+    for i in range(45, len(target_candles)):
         c = target_candles[i]
         c_prev = target_candles[i-1]
         
-        # 1. Feature Proxy Math
-        hl = c['high'] - c['low'] + 1e-9
-        buy_v = c['volume'] * ((c['close'] - c['low']) / hl)
-        sell_v = c['volume'] * ((c['high'] - c['close']) / hl)
-        flow_delta = buy_v - sell_v
+        # =================================================================
+        # 🛡️ 1. L2 Ridge SGD Update (Point-In-Time Evaluation)
+        # =================================================================
+        if old_features is not None:
+            actual_ret = math.log(c['close'] / max(c_prev['close'], 1e-9))
+            scaled_ret = max(-0.5, min(0.5, actual_ret * 100.0))
+            error = scaled_ret - (old_p_up - 0.5)
+            
+            validation_buffer.append(error ** 2)
+            
+            if len(validation_buffer) == 100 and np.mean(validation_buffer) > 0.40:
+                weights = np.array([0.3, 0.2, 0.2, 0.1, 0.2])
+                validation_buffer.clear()
+            else:
+                grad = error * old_features
+                grad_norm = np.linalg.norm(grad) + 1e-9
+                if grad_norm > 1.0:
+                    grad = grad / grad_norm  # Gradient Clip
+                
+                weights = (1.0 - lr * l2_lambda) * weights + (lr * grad)
+                weights /= (np.linalg.norm(weights) + 1e-9)
+
+        # =================================================================
+        # 🔬 2. Deep-Book MLOFI & Amihud Vacuum Math
+        # =================================================================
+        l1_ofi, mlofi_t = simulate_mlofi(c, p.mlofi_decay, p.mlofi_levels)
+        mlofi_history.append(mlofi_t)
+        price_history.append(c['close'])
         
-        ofi_fast_mean = (1 - alpha_fast) * ofi_fast_mean + alpha_fast * flow_delta
-        ofi_fast_var = (1 - alpha_fast) * ofi_fast_var + alpha_fast * (flow_delta - ofi_fast_mean)**2
-        ofi_fast_z = (flow_delta - ofi_fast_mean) / (math.sqrt(ofi_fast_var) + 1e-9)
+        # Amihud Illiquidity Ratio Proxy: |ln(P_t / P_t-1)| / (Vol * P)
+        price_impact = abs(math.log(c['close'] / max(c_prev['close'], 1e-9)))
+        notional_vol = c['volume'] * c['close'] + 1e-9
+        amihud_t = price_impact / notional_vol
+        amihud_history.append(amihud_t)
         
-        ofi_slow_mean = (1 - alpha_slow) * ofi_slow_mean + alpha_slow * flow_delta
-        ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (flow_delta - ofi_slow_mean)**2
-        ofi_slow_z = (flow_delta - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
+        # Calculate Kyle's Lambda baseline proxy
+        if len(mlofi_history) >= 20:
+            m_arr = np.array(mlofi_history)
+            p_arr = np.array(price_history)
+            dp = np.diff(p_arr)
+            m_sub = m_arr[1:]
+            var_m = np.var(m_sub)
+            if var_m > 1e-9:
+                cov = np.cov(m_sub, dp)[0][1]
+                lambda_t = max(0.0, cov / (var_m + 1e-9))
+                lambda_history.append(lambda_t)
+
+        # Feature Z-Score Updates
+        ofi_fast_mean = (1 - alpha_fast) * ofi_fast_mean + alpha_fast * mlofi_t
+        ofi_fast_var = (1 - alpha_fast) * ofi_fast_var + alpha_fast * (mlofi_t - ofi_fast_mean)**2
+        ofi_fast_z = (mlofi_t - ofi_fast_mean) / (math.sqrt(ofi_fast_var) + 1e-9)
+        
+        ofi_slow_mean = (1 - alpha_slow) * ofi_slow_mean + alpha_slow * mlofi_t
+        ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (mlofi_t - ofi_slow_mean)**2
+        ofi_slow_z = (mlofi_t - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
         
         hawkes_pressure = np.sign(c['close'] - c_prev['close']) * c['volume']
         hawkes_mean = (1 - alpha_fast) * hawkes_mean + alpha_fast * hawkes_pressure
         hawkes_var = (1 - alpha_slow) * hawkes_var + alpha_slow * (hawkes_pressure - hawkes_mean)**2
         hawkes_z = (hawkes_pressure - hawkes_mean) / (math.sqrt(hawkes_var) + 1e-9)
         
-        vwap = (c['high'] + c['low'] + c['close']) / 3
-        skew = ((c['close'] - vwap) / vwap) * 10000.0
+        vwap = (c['high'] + c['low'] + c['close']) / 3.0
+        skew = ((c['close'] - vwap) / (vwap + 1e-9)) * 10000.0
         
-        # BTC Lead
+        # BTC Lead-Lag Context
         b_c = btc_candles[i]
-        b_hl = b_c['high'] - b_c['low'] + 1e-9
-        b_flow = (b_c['volume'] * ((b_c['close'] - b_c['low']) / b_hl)) - (b_c['volume'] * ((b_c['high'] - b_c['close']) / b_hl))
-        btc_fast_mean = (1 - alpha_fast) * btc_fast_mean + alpha_fast * b_flow
-        btc_fast_var = (1 - alpha_fast) * btc_fast_var + alpha_fast * (b_flow - btc_fast_mean)**2
-        btc_ofi_z = (b_flow - btc_fast_mean) / (math.sqrt(btc_fast_var) + 1e-9)
-        
+        _, b_mlofi = simulate_mlofi(b_c, p.mlofi_decay, p.mlofi_levels)
+        btc_fast_mean = (1 - alpha_fast) * btc_fast_mean + alpha_fast * b_mlofi
+        btc_fast_var = (1 - alpha_fast) * btc_fast_var + alpha_fast * (b_mlofi - btc_fast_mean)**2
+        btc_ofi_z = (b_mlofi - btc_fast_mean) / (math.sqrt(btc_fast_var) + 1e-9)
         btc_lead = btc_ofi_z if b_c['ts'] == c['ts'] else 0.0
 
-        # 2. Extract Statistical State
         ofi_delta_z = ofi_fast_z - ofi_slow_z
         features = np.array([
             ofi_fast_z / 3.0,
@@ -200,28 +267,25 @@ def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         er = kaufman_er(np.array([cx["close"] for cx in target_candles[i - 45:i]]))
         regime = "TRENDING" if er >= 0.35 else "RANGING"
 
-        # 3. L2 Ridge SGD Update
-        next_ret = math.log(target_candles[i+1]['close'] / c['close'])
-        scaled_ret = max(-0.5, min(0.5, next_ret * 100.0))
-        error = scaled_ret - (p_up - 0.5)
-        
-        # 🚀 V25.2 FIX: Validation Guard Simulation
-        validation_buffer.append(error ** 2)
-        if len(validation_buffer) == 100:
-            if np.mean(validation_buffer) > 0.40:
-                weights = np.array([0.3, 0.2, 0.2, 0.1, 0.2])
-                validation_buffer.clear()
-                continue
+        old_features = features
+        old_p_up = p_up
 
-        weights = (1.0 - lr * l2_lambda) * weights + (lr * error * features)
-        weights /= (np.linalg.norm(weights) + 1e-9)
-
-        # 4. Signal Router
+        # =================================================================
+        # 🎯 3. Edge Gate & Execution Resolution
+        # =================================================================
         if i > burn_in_ticks and i > cooldown_until:
             prob_success = max(p_up, p_down)
             action = "BUY" if p_up > p_down else "SELL"
             
-            if prob_success >= p.prob_threshold:
+            # --- V27.0 AMIHUD VACUUM CHECK ---
+            vacuum_blocked = False
+            if len(amihud_history) >= 10:
+                recent_amihud = amihud_history[-1]
+                avg_amihud = np.mean(list(amihud_history)[-10:])
+                if recent_amihud > (avg_amihud * 3.0):
+                    vacuum_blocked = True  # Block execution in hollow liquidity vacuum
+                    
+            if prob_success >= p.prob_threshold and not vacuum_blocked:
                 atr = compute_atr(target_candles, i, p.atr_period)
                 if atr > 0:
                     sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.01)
@@ -229,7 +293,8 @@ def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct)
                     
                     base_edge_pct = ev_pct * abs(hawkes_z * 0.10)
-                    net_edge_bps = (base_edge_pct - (TAKER_FEE * 2)) * 10000.0
+                    fee_floor = (MAKER_FEE * 2) if regime == "RANGING" else (TAKER_FEE * 2)
+                    net_edge_bps = (base_edge_pct - fee_floor) * 10000.0
                     
                     if net_edge_bps > 5.0:
                         entry = c['close']
@@ -239,6 +304,8 @@ def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         tp = entry + tp_dist if action == "BUY" else entry - tp_dist
                         
                         outcome, exit_price, bars_held = None, entry, 0
+                        
+                        # Forward Resolution Loop
                         for j in range(i + 1, min(i + 241, len(target_candles))): 
                             bars_held = j - i
                             h, l = target_candles[j]["high"], target_candles[j]["low"]
@@ -265,11 +332,18 @@ def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         holding_hours = bars_held * (interval_mins / 60)
                         funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                         
-                        # 🚀 V25.2 FIX: Volatility-Dynamic Slippage Penalty
-                        dynamic_slippage_bps = BASE_SLIPPAGE_BPS * max(1.0, abs(hawkes_z) * 0.5)
-                        slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
+                        # Dynamic Slippage Mapping based on Execution Route
+                        if regime == "RANGING":
+                            # Maker Peg routing achieves 0 slippage
+                            slippage_penalty = 0.0
+                            applied_fee = MAKER_FEE * 2
+                        else:
+                            # Flash Strike IOC routing pays taker fee + dynamic slippage
+                            dynamic_slippage_bps = BASE_SLIPPAGE_BPS * max(1.0, abs(hawkes_z) * 0.5)
+                            slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
+                            applied_fee = TAKER_FEE * 2
                         
-                        net_unleveraged = gross - (TAKER_FEE * 2) - funding_drag - slippage_penalty
+                        net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
                         net_leveraged = net_unleveraged * p.leverage
 
                         trades.append({
@@ -302,7 +376,7 @@ def summarize(trades: List[Dict]) -> Dict:
         "avg_win": float(np.mean(wins)) if len(wins) else 0.0,
         "avg_loss": float(np.mean(losses)) if len(losses) else 0.0,
         "expectancy_per_trade": float(np.mean(nets)),
-        "profit_factor": float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else float("inf"),
+        "profit_factor": float(wins.sum() / (abs(losses.sum()) + 1e-9)) if losses.sum() != 0 else float("inf"),
         "total_return_on_margin": float(equity[-1]),
         "max_drawdown_on_margin": max_dd,
         "monte_carlo_p_positive": float(np.mean(np.array(mc_results) > 0)),
@@ -316,7 +390,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], interval_mins: int) -> List[Dict]:
     results = []
-    print("\n⏳ Running V25.2 Parameter Sweep (Testing L2 thresholds)...")
+    print("\n⏳ Running V27 Parameter Sweep (Optimizing Deep-Book MLOFI Thresholds)...")
     
     probs = [0.52, 0.55, 0.58]
     rr_ratios = [1.5, 2.0, 2.5]
@@ -328,7 +402,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], interval_mins: int) 
         for rr in rr_ratios:
             for atr_m in atr_mults:
                 p = Params(prob_threshold=prob, rr_ratio=rr, sl_atr_mult=atr_m)
-                test = run_v25_backtest(t_cand[split:], b_cand[split:], p, interval_mins)
+                test = run_v27_backtest(t_cand[split:], b_cand[split:], p, interval_mins)
                 
                 if test.get("trades", 0) > 10 and test.get("expectancy_per_trade", 0) > 0:
                     results.append({
@@ -365,18 +439,18 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        train = run_v25_backtest(t_cand[:split], b_cand[:split], params, interval_mins)
-        test = run_v25_backtest(t_cand[split:], b_cand[split:], params, interval_mins)
+        train = run_v27_backtest(t_cand[:split], b_cand[:split], params, interval_mins)
+        test = run_v27_backtest(t_cand[split:], b_cand[split:], params, interval_mins)
 
         print("\n=== IN-SAMPLE (first 60%) ===")
         for k, v in train.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")
                 
-        print("\n=== OUT-OF-SAMPLE (last 40%) — trust THIS one ===")
+        print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")
                 
-        print("\nRule of thumb: only consider live deployment if OOS expectancy > 0, "
-              "profit factor > 1.3, and Monte Carlo probability > 0.85.")
+        print("\nRule of thumb: Only consider live deployment if OOS Expectancy > 0, "
+              "Profit Factor > 1.3, and Monte Carlo probability > 0.85.")

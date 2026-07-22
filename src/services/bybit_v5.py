@@ -38,10 +38,17 @@ class TokenBucketRateLimiter:
 
 
 class BybitUnifiedExecutor:
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+    """
+    🚀 V26.1 APEX: PARALLELIZED UNIFIED API EXECUTOR
+    Upgraded with an expanded 8-worker thread pool to eliminate thread-serialization 
+    bottlenecks across multi-asset swarm deployments, paired with strict token-bucket rate limiting.
+    Includes strict Fail-Fast logic for malformed 10002 responses to prevent 
+    Token-Bucket limits from being burned on guaranteed-fail requests.
+    """
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 8):
         # Store keys for error-scrubbing purposes
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = api_key or ""
+        self.api_secret = api_secret or ""
         
         # Instantiate the official V5 client
         self.client = HTTP(
@@ -50,34 +57,41 @@ class BybitUnifiedExecutor:
             api_secret=api_secret
         )
         
-        # 🛡️ UPGRADE: Initialize the global API rate limiter (10 burst, 5 per sec sustained)
+        # 🛡️ Initialize the global API rate limiter (10 burst, 5 per sec sustained)
         self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
         
-        # 🚀 V25.4/25.5 FIX: Internal Single-Thread Isolator
-        # Mathematically guarantees pybit's underlying requests.Session is never hit by concurrent threads
-        self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="BybitIsolator")
+        # 🚀 V26 UPGRADE: Expanded Multi-Thread Pool (Fixes Thread Serialization Bottleneck)
+        # Prevents concurrent requests across different asset nodes from blocking each other in single-file queues
+        self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="BybitIsolator")
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
         🛡️ UNIFIED API GATEWAY
         All exchange interactions pass through here to ensure rate-limiting, 
-        automatic retries on system load errors, thread isolation, and credential scrubbing.
+        automatic retries on system load errors, thread isolation, fail-fast on parameter errors, and credential scrubbing.
         """
         await self.rate_limiter.acquire()
         loop = asyncio.get_running_loop()
         
-        # 🚀 V25.5 FIX: Use functools.partial for thread-safe kwarg dispatch
+        # Thread-safe kwarg dispatch
         bound_func = functools.partial(func, *args, **kwargs)
         
         for attempt in range(3):
             try:
-                # Execute the synchronous pybit function entirely inside the isolated thread pool
+                # Execute the synchronous pybit function inside the parallelized thread pool
                 response = await loop.run_in_executor(self._api_thread_pool, bound_func)
                 
-                # Check for Bybit-specific system load codes natively
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
-                if ret_code in [10006, 10002, 10016]: 
-                    logger.warning(f"⚠️ Bybit System Load (Code: {ret_code}). Backoff...")
+                
+                # 🚀 V26.1 FIX: Fail Fast on Parameter Error (10002). Never retry malformed requests.
+                if ret_code == 10002:
+                    error_msg = f"❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+
+                # Check for Bybit-specific system load/rate limit codes natively
+                if ret_code in [10006, 10016]: 
+                    logger.warning(f"⚠️ Bybit System Load/Rate Limit (Code: {ret_code}). Backoff...")
                     await asyncio.sleep(2.0)
                     continue
                 
@@ -85,12 +99,16 @@ class BybitUnifiedExecutor:
                 
             except Exception as e:
                 # 🛑 SECRETS HYGIENE
-                # Scrub API key and Secret from any network errors before they hit standard output
+                # Scrub API key and Secret from any network errors before standard output
                 error_str = str(e)
                 if self.api_key and self.api_key in error_str:
                     error_str = error_str.replace(self.api_key, "********")
                 if self.api_secret and self.api_secret in error_str:
                     error_str = error_str.replace(self.api_secret, "********")
+                
+                # Immediately raise if it was a forced fail-fast on 10002
+                if "10002 Parameter Fault" in error_str:
+                    raise ValueError(error_str)
                     
                 if attempt == 2:
                     logger.error(f"❌ Bybit API call failed after 3 attempts: {error_str}")
@@ -98,7 +116,7 @@ class BybitUnifiedExecutor:
                 await asyncio.sleep(1.0)
 
     async def safe_call(self, func, *args, **kwargs) -> Any:
-        """🚀 Public async wrapper allowing external files to safely dispatch raw client calls"""
+        """🚀 Public async wrapper allowing external modules to safely dispatch raw client calls"""
         return await self._safe_api_call(func, *args, **kwargs)
 
     async def get_wallet_balance_usdt(self) -> float:
@@ -115,7 +133,7 @@ class BybitUnifiedExecutor:
                 if coin_info.get("coin") == "USDT":
                     return float(coin_info.get("walletBalance", 0.0))
             return 0.0
-        except Exception as e:
+        except Exception:
             logger.error(f"Failed to fetch Bybit wallet balance metrics.")
             return 0.0
 
@@ -168,7 +186,7 @@ class BybitUnifiedExecutor:
                         sellLeverage=str(max_allowed)
                     )
                     return True
-                except Exception as fallback_err:
+                except Exception:
                     logger.error(f"Leverage auto-clamping failed for {symbol}.")
                     return False
                     
@@ -208,8 +226,8 @@ class BybitUnifiedExecutor:
                 if last == 0 or low == 0:
                     continue
                     
-                # Volatility Scaling Engine
-                volatility = (high - low) / last
+                # ⚡ V26 UPGRADE: Volatility Scaling Engine with Epsilon Guard
+                volatility = (high - low) / (last + 1e-9)
                 
                 valid_assets.append({
                     "symbol": symbol,
@@ -224,7 +242,7 @@ class BybitUnifiedExecutor:
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             return top_symbols
             
-        except Exception as e:
+        except Exception:
             logger.error(f"❌ Failed to fetch global market tickers.")
             return []
 
@@ -243,14 +261,14 @@ class BybitUnifiedExecutor:
                 takeProfit=str(tp),
                 stopLoss=str(sl),
                 tpslMode="Full",
-                positionIdx=0  # Fixed: Resolves exchange rejection error 10001
+                positionIdx=0  # Resolves exchange rejection error 10001
             )
             
             order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
             logger.critical(f"🚀 ORDER DISPATCHED SUCCESSFUL // ID: {order_id} | Side: {side} | Qty: {qty}")
             return order_id
             
-        except Exception as e:
+        except Exception:
             logger.error(f"Order routing execution failed at exchange interface level.")
             return ""
 
@@ -280,7 +298,7 @@ class BybitUnifiedExecutor:
             logger.critical(f"🕸️ PASSIVE LIMIT NET DEPLOYED // ID: {order_id} | Side: {side} | Qty: {qty} @ {price}")
             return order_id
             
-        except Exception as e:
+        except Exception:
             logger.error(f"Limit order routing execution failed at exchange interface level.")
             return ""
 
@@ -330,6 +348,6 @@ class BybitUnifiedExecutor:
                 
             return {"closed": False}
             
-        except Exception as e:
+        except Exception:
             logger.error(f"Failed to pull closed PnL metrics for {symbol}.")
             return {"closed": False}

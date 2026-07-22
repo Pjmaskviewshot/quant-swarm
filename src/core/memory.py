@@ -11,9 +11,10 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V19.3 GENESIS: ATOMIC MEMORY LEDGER
-    Hyper-optimized Supabase connector. Single-trip atomic updates.
-    Standardized KNN Feature Matrix.
+    🌌 V27.0 SIGNAL APEX: VECTORIZED MEMORY LEDGER
+    Hyper-optimized Supabase connector. 
+    Features pure NumPy vectorization for shadow OHLC forensics and 
+    Dynamic Rolling Variance for the Bayesian DNA Matrix.
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -133,6 +134,11 @@ class MemoryBank:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
+        """
+        🚀 V27.0 APEX: OHLC Vectorized Resolution Engine.
+        Uses pure NumPy array math to accurately simulate intra-candle TP/SL hunting
+        without using slow Python loops. Completely eradicates shadow execution latency.
+        """
         resolved_count = 0
 
         try:
@@ -192,45 +198,46 @@ class MemoryBank:
                 candles_to_check = max(1, int(elapsed_minutes) + 2) 
                 start_index = max(0, len(closes) - candles_to_check)
 
-                for idx, i in enumerate(range(start_index, len(closes))):
-                    high = highs[i]
-                    low = lows[i]
-                    bars_held = idx
+                # ⚡ VECTORIZED INTRA-BAR HIT DETECTION
+                highs_arr = np.array(highs[start_index:])
+                lows_arr = np.array(lows[start_index:])
 
-                    if prediction == "BUY":
-                        hit_tp = high >= tp_price
-                        hit_sl = low <= sl_price
-                        if hit_tp and hit_sl:
-                            is_terminated, exit_price = True, sl_price
-                            break
-                        elif hit_tp:
-                            is_terminated, exit_price = True, tp_price
-                            break
-                        elif hit_sl:
-                            is_terminated, exit_price = True, sl_price
-                            break
-                    elif prediction == "SELL":
-                        hit_tp = low <= tp_price
-                        hit_sl = high >= sl_price
-                        if hit_tp and hit_sl:
-                            is_terminated, exit_price = True, sl_price
-                            break
-                        elif hit_tp:
-                            is_terminated, exit_price = True, tp_price
-                            break
-                        elif hit_sl:
-                            is_terminated, exit_price = True, sl_price
-                            break
+                if prediction == "BUY":
+                    tp_hits = np.where(highs_arr >= tp_price)[0]
+                    sl_hits = np.where(lows_arr <= sl_price)[0]
+                elif prediction == "SELL":
+                    tp_hits = np.where(lows_arr <= tp_price)[0]
+                    sl_hits = np.where(highs_arr >= sl_price)[0]
+                else:
+                    tp_hits = []
+                    sl_hits = []
+
+                # Find the earliest occurrence of TP or SL
+                first_tp_idx = tp_hits[0] if len(tp_hits) > 0 else float('inf')
+                first_sl_idx = sl_hits[0] if len(sl_hits) > 0 else float('inf')
+
+                if first_tp_idx != float('inf') or first_sl_idx != float('inf'):
+                    is_terminated = True
+                    # Pessimistic fill assumption: If both hit in the same candle, assume SL hit first.
+                    if first_sl_idx <= first_tp_idx:
+                        exit_price = sl_price
+                        bars_held = int(first_sl_idx)
+                    else:
+                        exit_price = tp_price
+                        bars_held = int(first_tp_idx)
 
                 if not is_terminated and elapsed_minutes >= 60.0:
                     is_terminated = True
                     exit_price = current_price
+                    bars_held = len(highs_arr)
 
                 if is_terminated:
                     simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
                     TAKER_ROUND_TRIP = 0.0011
                     
-                    gross_return = abs(exit_price - entry_price) / entry_price
+                    # Prevent division by zero mathematically
+                    entry_price_safe = entry_price if entry_price > 0 else 1e-9
+                    gross_return = abs(exit_price - entry_price_safe) / entry_price_safe
                     
                     is_win = False
                     if prediction == "BUY" and exit_price > entry_price:
@@ -254,7 +261,7 @@ class MemoryBank:
                 
             if update_batch:
                 self._safe_execute(self.supabase.table("quantitative_ledger").upsert(update_batch))
-                logger.info(f"📊 GHOST FORENSICS: Traversed and settled {len(update_batch)} predictive ledger paths.")
+                logger.info(f"📊 GHOST FORENSICS: Vectorized traversal settled {len(update_batch)} predictive ledger paths.")
                 
             return resolved_count
 
@@ -263,6 +270,11 @@ class MemoryBank:
             return 0
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
+        """
+        🚀 V27.0 APEX: Dynamic Rolling Variance Normalization
+        Hardcoded scalar limits have been removed. The Euclidean distance matrix 
+        is now dynamically standardizing features relative to actual market volatility.
+        """
         c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
         c_obi = current_dna.get("z_obi", 0.0)
         c_spread = current_dna.get("spread_pct", 0.001) * 1000 
@@ -292,19 +304,33 @@ class MemoryBank:
             if len(historical_data) < k_neighbors:
                 return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": len(historical_data), "cluster_win_rate": 0.50}
 
-            distances = []
+            # ⚡ DYNAMIC FEATURE STANDARDIZATION
+            # Extract historical features into arrays for variance calculation
+            h_vols = [min(float(row.get("vol_mult", 1.0)), 10.0) for row in historical_data]
+            h_obis = [float(row.get("z_obi", 0.0)) for row in historical_data]
+            
+            h_spreads = []
             for row in historical_data:
-                h_vol = min(float(row.get("vol_mult", 1.0)), 10.0)
-                h_obi = float(row.get("z_obi", 0.0))
                 h_price = float(row.get("price_at_prediction", 1.0))
                 h_spread_raw = float(row.get("spread", 0.0))
                 h_spread_pct = (h_spread_raw / h_price) * 1000 if h_price > 0 else 0.001
+                h_spreads.append(h_spread_pct)
                 
-                # 🚀 V19.3 FIX: STANDARDIZED EUCLIDEAN METRIC (Issue #14)
-                # Prevents massive spread spikes from overpowering the OBI vector
-                norm_vol = (c_vol - h_vol) / 2.0
-                norm_obi = (c_obi - h_obi) / 1.5
-                norm_spread = (c_spread - h_spread_pct) / 5.0
+            # Calculate rolling standard deviations with epsilon guards to prevent Division-by-Zero
+            std_vol = np.std(h_vols) + 1e-9
+            std_obi = np.std(h_obis) + 1e-9
+            std_spread = np.std(h_spreads) + 1e-9
+
+            distances = []
+            for i, row in enumerate(historical_data):
+                h_vol = h_vols[i]
+                h_obi = h_obis[i]
+                h_spread_pct = h_spreads[i]
+                
+                # Normalize distances relative to the market's current structural variance
+                norm_vol = (c_vol - h_vol) / std_vol
+                norm_obi = (c_obi - h_obi) / std_obi
+                norm_spread = (c_spread - h_spread_pct) / std_spread
                 
                 dist = math.sqrt(
                     (1.5 * norm_vol)**2 + 
@@ -323,6 +349,7 @@ class MemoryBank:
             wins = sum(n["is_correct"] for n in nearest_neighbors)
             total = len(nearest_neighbors)
             
+            # Additive Smoothing (Laplace)
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
             is_armed = bayesian_edge >= 0.55
