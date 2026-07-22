@@ -2,6 +2,7 @@ import numpy as np
 from collections import deque
 import math
 import logging
+import time
 from typing import List
 
 logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
@@ -13,6 +14,7 @@ class MicrostructureEdgeGate:
         Upgraded with Multi-Level OFI (MLOFI) and Amihud Liquidity Vacuum Detection.
         Replaces latency-heavy AI heuristics and shallow L1 noise with deterministic, 
         deep-book market physics.
+        Includes high-frequency log throttling to prevent terminal spam.
         """
         self.window_size = window_size
         self.mlofi_levels = mlofi_levels
@@ -30,6 +32,16 @@ class MicrostructureEdgeGate:
         
         # Trade volume tracking for Amihud ratio
         self.rolling_volume = 0.0
+
+        # Throttle cache for high-frequency warnings
+        self._last_log_time = {}
+
+    def _throttled_warn(self, category: str, message: str, throttle_sec: float = 10.0):
+        now = time.time()
+        last = self._last_log_time.get(category, 0.0)
+        if now - last > throttle_sec:
+            self._last_log_time[category] = now
+            logger.warning(message)
 
     def update_trade_volume(self, volume: float):
         """Accumulates trade volume between orderbook snapshots for the Amihud ratio."""
@@ -154,19 +166,19 @@ class MicrostructureEdgeGate:
         baseline_lambda = np.mean(self.lambda_history)
         roll_spread = self.compute_roll_spread()
         
-        # 0. 🕳️ AMIHUD LIQUIDITY VACUUM CHECK (NEW)
+        # 0. 🕳️ AMIHUD LIQUIDITY VACUUM CHECK
         if len(self.amihud_history) > 10:
             current_amihud = self.amihud_history[-1]
             amihud_mean = np.mean(list(self.amihud_history)[-10:])
             # If illiquidity spikes >3x the recent norm, the book is hollow. Do not execute.
             if current_amihud > (amihud_mean * 3.0):
-                logger.warning(f"🕳️ LIQUIDITY VACUUM // {symbol} | Amihud spike detected. Avoiding slippage trap.")
+                self._throttled_warn(f"vacuum_{symbol}", f"🕳️ LIQUIDITY VACUUM // {symbol} | Amihud spike detected. Avoiding slippage trap.")
                 return {"action": "HOLD", "confidence": 0.0, "reasoning": f"AMIHUD_LIQUIDITY_VACUUM | Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x"}
 
         # 1. 🧊 HIDDEN WHALE ABSORPTION (DEEP BOOK TRAP)
         # Using MLOFI prevents the bot from being fooled by L1 spoofing.
         if abs(current_mlofi) > (mlofi_std * 1.5) and current_lambda < (baseline_lambda * 0.5):
-            logger.warning(f"🧊 DEEP ICEBERG WALL DETECTED // {symbol} | MLOFI Surge absorbed by deep limit liquidity.")
+            self._throttled_warn(f"iceberg_{symbol}", f"🧊 DEEP ICEBERG WALL DETECTED // {symbol} | MLOFI Surge absorbed by deep limit liquidity.")
             return {
                 "action": "HOLD", 
                 "confidence": 0.0, 
