@@ -3,17 +3,17 @@ from collections import deque
 import math
 import logging
 import time
-from typing import List
+from typing import List, Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
+    """
+    🚀 V28.0 QUANTUM APEX: CALIBRATED EDGE GATE
+    Filters out market noise, deep iceberg absorption walls, retail chop, 
+    and Amihud liquidity vacuums using Level-2 MLOFI and Kyle's Lambda.
+    """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
-        """
-        🚀 V27.2 SIGNAL APEX: CALIBRATED EDGE GATE
-        Fixed Amihud calculation to use Notional Volume buckets ($2000+) to prevent 
-        micro-tick noise from locking the execution engine.
-        """
         self.window_size = window_size
         self.mlofi_levels = mlofi_levels
         self.decay_alpha = decay_alpha  
@@ -94,7 +94,7 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # 🚀 V27.2 FIX: Stable Notional Volume Buckets for Amihud Ratio
+        # Stable Notional Volume Buckets for Amihud Ratio
         notional_vol = self.rolling_volume * mid_price
         if notional_vol >= 2000.0:
             if self.amihud_anchor_price > 0:
@@ -102,7 +102,6 @@ class MicrostructureEdgeGate:
                 illiquidity = price_change / notional_vol
                 self.amihud_history.append(illiquidity)
             
-            # Reset bucket
             self.rolling_volume = 0.0
             self.amihud_anchor_price = mid_price
 
@@ -112,14 +111,17 @@ class MicrostructureEdgeGate:
                 self.lambda_history.append(lmbda)
 
     def _calculate_instantaneous_lambda(self) -> float:
+        if len(self.prices) < 2 or len(self.mlofis) < 2:
+            return 0.0
         p_array = np.array(self.prices)
         dp = np.diff(p_array)
         ofi_array = np.array(self.mlofis)[1:] 
         
-        if np.std(ofi_array) == 0: return 0.0
-            
+        if len(dp) == 0 or len(ofi_array) == 0 or len(dp) != len(ofi_array):
+            return 0.0
+        
         variance = np.var(ofi_array)
-        if variance == 0: return 0.0
+        if variance < 1e-12: return 0.0
             
         covariance = np.cov(ofi_array, dp)[0][1]
         return max(0.0, covariance / (variance + 1e-9))
@@ -147,7 +149,7 @@ class MicrostructureEdgeGate:
         direction = "BUY" if current_mlofi > 0 else "SELL"
         
         current_lambda = self._calculate_instantaneous_lambda()
-        baseline_lambda = np.mean(self.lambda_history)
+        baseline_lambda = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         roll_spread = self.compute_roll_spread()
         
         # 0. 🕳️ AMIHUD LIQUIDITY VACUUM CHECK

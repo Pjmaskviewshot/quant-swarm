@@ -11,9 +11,9 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V27.5 APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🚀 V28.0 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Slippage Clamps, and Phantom-Trade Prevention.
-    Patched Maker-Peg race conditions and asymmetric chase bounds.
+    Upgraded with Robust Cancel-Retry Loops to eliminate Zombie/Orphan orders.
     """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0050):
         self.executor = executor
@@ -89,6 +89,7 @@ class SmartOrderRouter:
             final_price = self._format_dynamic_price(target_price, symbol)
 
             try:
+                # TimeInForce="IOC" ensures unfilled portions are auto-cancelled. No zombies possible here.
                 response = await self.executor.safe_call(
                     self.executor.client.place_order,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
@@ -137,7 +138,6 @@ class SmartOrderRouter:
         final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
 
         anchor_price = None
-        # 🚀 V27.5 AUDIT FIX: Widened chase deviation to 1.5% to accommodate volatile altcoins
         max_chase_deviation = 0.015 
         rejection_count = 0  
 
@@ -194,7 +194,6 @@ class SmartOrderRouter:
                     order_list = status_response.get("result", {}).get("list", [])
                     
                     if not order_list:
-                        # 🚀 V27.5 AUDIT FIX: Wait 500ms for exchange replication to prevent phantom misses
                         await asyncio.sleep(0.5) 
                         hist_response = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                         hist_list = hist_response.get("result", {}).get("list", [])
@@ -236,10 +235,24 @@ class SmartOrderRouter:
                 
             await asyncio.sleep(loop_delay) 
 
+        # 🚀 V28.0 FIX: Robust Cancellation Loop prevents Order Leakage/Zombies
         if current_order_id:
             logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
-            try: 
-                await self.executor.safe_call(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
+            cancel_success = False
+            
+            for c_attempt in range(3):
+                try: 
+                    await self.executor.safe_call(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
+                    cancel_success = True
+                    break
+                except Exception as e:
+                    logger.error(f"⚠️ Cancel attempt {c_attempt+1} failed for {symbol}: {e}")
+                    await asyncio.sleep(1.0)
+                    
+            if not cancel_success:
+                logger.critical(f"🛑 ORPHAN ORDER ALERT // Failed to cancel peg order {current_order_id} for {symbol}. Manual intervention may be needed.")
+                
+            try:
                 hist_res = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                 hist_list = hist_res.get("result", {}).get("list", [])
                 if hist_list and float(hist_list[0].get("cumExecQty", 0.0)) > 0:
@@ -252,7 +265,6 @@ class SmartOrderRouter:
         await self._fetch_exchange_limits(symbol)
         logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
         
-        # 🚀 V27.5 AUDIT FIX: Now dynamically reads true Hawkes/VPIN intensity to authorize Flash Strikes
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:

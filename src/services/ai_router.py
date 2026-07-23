@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import asyncio
 import logging
@@ -11,7 +12,7 @@ logger = logging.getLogger("QUANT_CORE.AI_ROUTER")
 
 class ResilientAIRouter:
     """
-    🚀 V26.0 APEX: UNIVERSAL RESILIENT AI ROUTER
+    🚀 V28.0 QUANTUM APEX: UNIVERSAL RESILIENT AI ROUTER
     Engineered for the background asynchronous macro-loop.
     Features DeepSeek/NVIDIA/Groq cascade matrix, LRU Round-Robin routing, 
     dynamic penalty boxes, and strict memory/socket leak prevention.
@@ -50,16 +51,17 @@ class ResilientAIRouter:
                 "params": {"temperature": 0.1, "top_p": 0.95, "max_tokens": 2048}
             })
 
-        # 2. NVIDIA NIM: DeepSeek V4 Flash with Reasoning Engine
+        # 2. NVIDIA NIM: DeepSeek V3 Flash
         for i, key in enumerate(nv_keys):
             if key:
                 self.providers.append({
                     "name": f"NVIDIA_NIM_DEEPSEEK_FLASH_{i+1}",
                     "client": AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key, http_client=self.custom_http_client, max_retries=0),
-                    "model": "deepseek-ai/deepseek-v4-flash",
+                    # 🚀 V28.0 FIX: Correct NVIDIA NIM deepseek model identifier
+                    "model": "deepseek-ai/deepseek-v3",
                     "cooldown_until": 0.0,
                     "last_used": 0.0,
-                    "json_mode": False, # DeepSeek reasoning works best extracting JSON from markdown
+                    "json_mode": False, 
                     "params": {
                         "temperature": 1.0, 
                         "top_p": 0.95, 
@@ -71,9 +73,10 @@ class ResilientAIRouter:
         # 3. DEEPSEEK NATIVE: The Paid Last Resort
         if deepseek_key:
             self.providers.append({
-                "name": "DEEPSEEK_V4_FLASH",
+                "name": "DEEPSEEK_REASONER",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                "model": "deepseek-reasoner", # V26 Note: Reasoner handles complex JSON generation best natively
+                # 🚀 V28.0 FIX: Deepseek-reasoner correctly specified
+                "model": "deepseek-reasoner", 
                 "cooldown_until": 0.0,
                 "last_used": 0.0,
                 "json_mode": False,
@@ -121,19 +124,16 @@ class ResilientAIRouter:
 
     def _clean_json_output(self, raw_text: str) -> str:
         """
-        🚀 V26 UPGRADE: DeepSeek Chain-of-Thought Stripper
+        🚀 V28.0 UPGRADE: DeepSeek Chain-of-Thought Stripper
         Removes <think> blocks that leak into standard output and extracts JSON safely.
         """
-        # 1. Strip raw <think>...</think> blocks if the API leaks them
-        raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+        # 1. Remove the entire <think> block (Fixes the regex literal spaces bug)
+        cleaned_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL)
         
-        # 2. Extract from markdown fences
-        if "```json" in raw_text:
-            return raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            return raw_text.split("```")[1].split("```")[0].strip()
-            
-        return raw_text.strip()
+        # 2. Remove markdown code fences
+        cleaned_text = re.sub(r'```(?:json)?', '', cleaned_text).strip()
+        
+        return cleaned_text
 
     async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 60.0) -> str:
         # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks quickly

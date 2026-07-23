@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 import logging
+import string
 from typing import Dict, Any
 from services.ai_router import ResilientAIRouter
 
@@ -11,10 +12,10 @@ logger = logging.getLogger("QUANT_CORE.ADVERSARIAL_AI")
 
 class AdversarialDebateMatrix:
     """
-    🚀 V26.0 APEX: OFF-PATH ADVERSARIAL AI DEBATE MATRIX
-    Upgraded with Input Prompt Sanitization (Anti-Prompt Injection),
-    Strict JSON Schema Validation (Fixes Bug #7), and Bounds-Clamped 
-    Confidence Normalization for asynchronous macro regime caching.
+    🚀 V28.0 QUANTUM APEX: OFF-PATH ADVERSARIAL AI DEBATE MATRIX
+    Upgraded with Hardened Prompt Sanitization (Anti-Homoglyph/Injection),
+    Strict JSON Schema Validation, and Bounds-Clamped Confidence Normalization 
+    for asynchronous macro regime caching.
     """
     def __init__(self, router_override: ResilientAIRouter = None):
         # Universal Router Integration across NVIDIA / DeepSeek cascade matrix
@@ -35,15 +36,19 @@ class AdversarialDebateMatrix:
         """
         if not text:
             return ""
-        # Remove common prompt injection markers and system overrides
-        sanitized = re.sub(r'(?i)(ignore previous instructions|system prompt|you are now|override)', '[REDACTED]', str(text))
-        # Remove non-printable control characters
-        sanitized = "".join(ch for ch in sanitized if ch.isprintable())
-        return sanitized[:1500]  # Limit length to prevent context flooding
+            
+        # 1. Strip all non-printable characters (blocks unicode homoglyphs/ZWS)
+        clean_text = "".join(filter(lambda x: x in string.printable, str(text)))
+        
+        # 2. Aggressively strip system instruction injection patterns
+        clean_text = re.sub(r'(?i)(ignore(d)?\s+previous|system(.)?prompt|you\s+are\s+(now|a)|override|bypass)', '[REDACTED]', clean_text)
+        
+        # 3. Truncate to maximum acceptable context size to prevent overflow attacks
+        return clean_text[:2000]
 
     def _validate_and_normalize_verdict(self, raw_payload: str) -> Dict[str, Any]:
         """
-        🛡️ STRICT JSON SCHEMA VALIDATOR (Fixes Bug #7)
+        🛡️ STRICT JSON SCHEMA VALIDATOR
         Validates structure, enforces Enum types, and clamps confidence parameters.
         """
         try:
