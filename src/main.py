@@ -702,7 +702,8 @@ class DistributedQuantEngine:
                 sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
                 rr_ratio = self.live_params.get("rr_ratio", 2.0)
                 
-                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.01)
+                # 🚀 V28.4 FIX: Lowered ATR floor from 1.0% to 0.2% so dynamic parameters can breathe
+                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.002)
                 tp_dist_pct = sl_dist_pct * rr_ratio
                 ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct)
                 
@@ -749,6 +750,12 @@ class DistributedQuantEngine:
     async def execute_statistical_signal(self, symbol: str, action: str, price: float, confidence: float, regime: str, edge_bps: float, atr: float, vol_z: float, vol_mult: float):
         try:
             dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+            
+            # 🛡️ V28.4 SAFETY: Force paper-trading during the 16-minute math warm-up
+            stat_engine = self.stat_engines.get(symbol)
+            if stat_engine and stat_engine.sgd_updates < 1000:
+                dna_stats = dna_stats.copy()
+                dna_stats["is_armed"] = False
             
             success = await self.run_signal_lifecycle(
                 symbol=symbol, 
@@ -931,7 +938,6 @@ class DistributedQuantEngine:
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
-                # 🚀 FIX: Graceful 15-second WAL Queue Drain before shutdown
                 if drawdown_pct >= 0.25:
                     logger.critical(f"🚨 FATAL: PORTFOLIO DRAWDOWN EXCEEDED 25% ({drawdown_pct:.2%}). INITIATING EMERGENCY SHUTDOWN.")
                     await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
@@ -964,7 +970,7 @@ class DistributedQuantEngine:
                 except Exception: regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V28.2 PRODUCTION APEX)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V28.4 PRODUCTION APEX)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗣𝗿𝗼𝗱𝘂𝗰𝘁𝗶𝗼𝗻 𝗚𝗿𝗮𝗱𝗲 𝗜𝗻𝗳𝗿𝗮𝘀𝘁𝗿𝘂𝗰𝘁𝘂𝗿𝗲</b>\n"
                     f"• Signal Engine:   <code>O(1) SGD Edge + MLOFI Vacuum</code>\n"
