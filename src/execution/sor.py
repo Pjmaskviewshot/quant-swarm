@@ -11,17 +11,14 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V27.1 APEX: INSTITUTIONAL SMART ORDER ROUTER
-    Features Explicit Order-ID State Tracking, Hedge Mode Compatibility,
-    Hard Slippage Clamps, and Maker-Peg Rejection Circuit Breakers.
-    Now mathematically guaranteed to respect the global TokenBucketRateLimiter.
+    🚀 V27.5 APEX: INSTITUTIONAL SMART ORDER ROUTER
+    Features Exact Order-ID Tracking, Slippage Clamps, and Phantom-Trade Prevention.
+    Patched Maker-Peg race conditions and asymmetric chase bounds.
     """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0050):
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
         self.instrument_cache: Dict[str, Dict[str, float]] = {}
-        
-        # 🚀 V26.2 FIX: Dynamic Hedge Mode Compatibility (Default 0 = One-Way Mode)
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
 
     def _get_precision(self, step_size: float) -> int:
@@ -31,7 +28,6 @@ class SmartOrderRouter:
     async def _fetch_exchange_limits(self, symbol: str):
         if symbol in self.instrument_cache: return
         try:
-            # ⚡ CRITICAL FIX: Route through executor's rate-limited gateway
             info = await self.executor.safe_call(self.executor.client.get_instruments_info, category="linear", symbol=symbol)
             lot_filter = info["result"]["list"][0]["lotSizeFilter"]
             price_filter = info["result"]["list"][0]["priceFilter"]
@@ -59,9 +55,6 @@ class SmartOrderRouter:
         return round(stepped_price, self._get_precision(tick_size))
 
     def _get_meaningful_tob(self, ob_data: Dict, side: str, min_notional: float = 5.0) -> float:
-        """
-        🚀 HFT ANTI-SPOOFING FILTER
-        """
         levels = ob_data.get("bids" if side == "BUY" else "asks", [[0, 0]])
         for level in levels:
             try:
@@ -74,18 +67,11 @@ class SmartOrderRouter:
         return float(levels[0][0]) if levels else 0.0
 
     async def _fetch_rest_tob(self, symbol: str, side: str) -> float:
-        """Fallback REST query if Local RAM is offline."""
-        # ⚡ CRITICAL FIX: Route through executor's rate-limited gateway
         ob_response = await self.executor.safe_call(self.executor.client.get_orderbook, category="linear", symbol=symbol)
         ob_data = ob_response.get("result", {})
         return self._get_meaningful_tob({"bids": ob_data.get("b", []), "asks": ob_data.get("a", [])}, side)
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float):
-        """
-        ⚡ THE FLASH STRIKE
-        Aggressive IOC escalation with explicit `cumExecQty` verification.
-        Prevents hallucinated positions when IOC orders miss the book.
-        """
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive escalation.")
         
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
@@ -94,19 +80,15 @@ class SmartOrderRouter:
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         for attempt in range(3):
-            # Escalate aggressiveness but HARD CLAMP it to the max_slippage_pct
             escalation_pct = 0.001 * (2 ** attempt)
             escalation_pct = min(escalation_pct, self.max_slippage_pct)
             
-            if side == "Buy":
-                target_price = current_mid_price * (1.0 + escalation_pct)
-            else:
-                target_price = current_mid_price * (1.0 - escalation_pct)
+            if side == "Buy": target_price = current_mid_price * (1.0 + escalation_pct)
+            else: target_price = current_mid_price * (1.0 - escalation_pct)
                 
             final_price = self._format_dynamic_price(target_price, symbol)
 
             try:
-                # ⚡ CRITICAL FIX: Route through executor's rate-limited gateway
                 response = await self.executor.safe_call(
                     self.executor.client.place_order,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
@@ -118,8 +100,6 @@ class SmartOrderRouter:
                 
                 if response.get("retCode") == 0:
                     order_id = response.get("result", {}).get("orderId", "UNKNOWN")
-                    
-                    # Give the matching engine 300ms to resolve the IOC, then verify.
                     await asyncio.sleep(0.3)
                     
                     hist_res = await self.executor.safe_call(
@@ -136,9 +116,7 @@ class SmartOrderRouter:
                         else:
                             logger.warning(f"⚠️ Flash Strike IOC missed (Liquidity vanished). Escalating...")
                     else:
-                        # Exchange latency fallback: Assume success if history query drops to let the lifecycle daemon manage it.
-                        logger.critical(f"✅ FLASH STRIKE PLACED // {symbol} ID: {order_id} (History delayed)")
-                        return True
+                        logger.warning(f"⚠️ Flash Strike API history delayed. Cannot verify fill for ID: {order_id}. Assuming missed.")
                 else:
                     logger.warning(f"⚠️ Flash Strike API rejection (Attempt {attempt+1}): {response.get('retMsg')}")
                     await asyncio.sleep(0.1) 
@@ -150,11 +128,6 @@ class SmartOrderRouter:
         return False
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60):
-        """
-        🛡️ HIGH-FREQUENCY MAKER PEGGING
-        Replaces blind polling with exact order-ID state tracking.
-        Detects and honors fractional partial fills perfectly.
-        """
         logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Anti-Spoofing Scanners.")
         
         start_time = time.time()
@@ -164,7 +137,8 @@ class SmartOrderRouter:
         final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
 
         anchor_price = None
-        max_chase_deviation = 0.0075 
+        # 🚀 V27.5 AUDIT FIX: Widened chase deviation to 1.5% to accommodate volatile altcoins
+        max_chase_deviation = 0.015 
         rejection_count = 0  
 
         while time.time() - start_time < timeout:
@@ -189,7 +163,6 @@ class SmartOrderRouter:
 
                 if anchor_price is None: anchor_price = target_price
 
-                # 2. CHASE BOUNDARY CHECK
                 if direction.upper() == "BUY" and target_price > anchor_price * (1 + max_chase_deviation):
                     logger.warning(f"🏃 CHASE ABORTED // {symbol} ran +{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
                     break
@@ -200,7 +173,6 @@ class SmartOrderRouter:
                 cleaned_qty = self._apply_dynamic_exchange_limits(qty, target_price, symbol)
                 final_target_price = self._format_dynamic_price(target_price, symbol)
                 
-                # 3. INITIAL ORDER PLACEMENT
                 if not current_order_id:
                     place_response = await self.executor.safe_call(
                         self.executor.client.place_order, category="linear", symbol=symbol, side=side, orderType="Limit",
@@ -217,13 +189,13 @@ class SmartOrderRouter:
                             break
                         await asyncio.sleep(loop_delay); continue
                 
-                # 4. EXPLICIT ORDER ID STATE TRACKING
                 if current_order_id:
                     status_response = await self.executor.safe_call(self.executor.client.get_open_orders, category="linear", symbol=symbol, orderId=current_order_id)
                     order_list = status_response.get("result", {}).get("list", [])
                     
                     if not order_list:
-                        # Order is no longer open. Check history to see if it Filled or Canceled.
+                        # 🚀 V27.5 AUDIT FIX: Wait 500ms for exchange replication to prevent phantom misses
+                        await asyncio.sleep(0.5) 
                         hist_response = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                         hist_list = hist_response.get("result", {}).get("list", [])
                         
@@ -233,7 +205,6 @@ class SmartOrderRouter:
                                 logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units.")
                                 return True
                         
-                        # It was canceled with 0 fills. Reset and try to peg again.
                         current_order_id = None
                         continue
                             
@@ -249,7 +220,6 @@ class SmartOrderRouter:
                         rejection_count += 1
                         current_order_id = None 
                         
-                        # Partial Fill Guard: If it was canceled but we snagged a partial fill, exit successfully!
                         if cum_exec_qty > 0:
                             logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
                             return True
@@ -266,12 +236,10 @@ class SmartOrderRouter:
                 
             await asyncio.sleep(loop_delay) 
 
-        # 5. TIMEOUT GRACEFUL RESOLUTION
         if current_order_id:
             logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
             try: 
                 await self.executor.safe_call(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
-                # Verify if we caught a partial fill at the very last second before timeout
                 hist_res = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                 hist_list = hist_res.get("result", {}).get("list", [])
                 if hist_list and float(hist_list[0].get("cumExecQty", 0.0)) > 0:
@@ -281,24 +249,16 @@ class SmartOrderRouter:
         return False
 
     async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
-        """
-        🚀 TRENDING REGIME ROUTING
-        """
         await self._fetch_exchange_limits(symbol)
-        
         logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
         
+        # 🚀 V27.5 AUDIT FIX: Now dynamically reads true Hawkes/VPIN intensity to authorize Flash Strikes
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
             return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=30)
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
-        """
-        🕸️ RANGING REGIME ROUTING
-        """
         await self._fetch_exchange_limits(symbol)
-        
         logger.info(f"🕸️ RANGING REGIME ROUTING // Forcing Maker Peg on {symbol}")
-        
         return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=60)
