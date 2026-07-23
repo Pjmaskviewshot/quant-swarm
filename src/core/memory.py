@@ -11,7 +11,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V27.6 SIGNAL APEX: VECTORIZED MEMORY LEDGER
+    🌌 V27.7 SIGNAL APEX: VECTORIZED MEMORY LEDGER
     Hyper-optimized Supabase connector. 
     Features pure NumPy vectorization for shadow OHLC forensics, 
     Dynamic Rolling Variance for the Bayesian DNA Matrix, and chunked upserts.
@@ -133,9 +133,10 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
-    def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float) -> int:
+    # 🚀 V27.7 FIX: Added interval_mins to dynamically calculate actual holding time
+    def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float, interval_mins: float = 15.0) -> int:
         """
-        🚀 V27.6 APEX: OHLC Vectorized Resolution Engine.
+        🚀 V27.7 APEX: OHLC Vectorized Resolution Engine.
         Uses pure NumPy array math to accurately simulate intra-candle TP/SL hunting
         without using slow Python loops. Completely eradicates shadow execution latency.
         """
@@ -255,14 +256,14 @@ class MemoryBank:
                     row["is_correct"] = is_win
                     row["net_pnl"] = float(net_pnl)
                     
-                    # 🚀 V27.6 FIX: Correct duration multiplier (assuming 15m default timeframe)
-                    row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held * 15.0)), 2)
+                    # 🚀 V27.7 FIX: Dynamic duration multiplier derived from actual timeframe
+                    row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held * interval_mins)), 2)
                     
                     update_batch.append(row)
                     resolved_count += 1
                 
             if update_batch:
-                # 🚀 V27.6 FIX: Chunked Upserts to prevent Supabase N+1 payload rejection
+                # Chunked Upserts to prevent Supabase N+1 payload rejection
                 chunk_size = 100
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
