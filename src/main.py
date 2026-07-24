@@ -1016,7 +1016,8 @@ class DistributedQuantEngine:
                     logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price:.4f} (Slip: {slippage_bps:.1f} bps)")
             else:
                 try:
-                    await self.executor.safe_call(self.executor.adjust_leverage, symbol, target_leverage)
+                    # 🚀 FIX: Await adjust_leverage directly, do not wrap in safe_call
+                    await self.executor.adjust_leverage(symbol, target_leverage)
                     await asyncio.sleep(0.2) 
                 except Exception as e: 
                     logger.error(f"Leverage adjustment failed for {symbol}: {e}", exc_info=True)
