@@ -9,9 +9,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V31.3 APEX: DECOUPLED INGESTION LAYER
-    Features de-rated packet sequence verification using `prevSeq` continuity matching
-    with minor gap tolerance (<=3) to prevent reconnect blindness during volatility spikes.
+    🚀 V33.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    Features absolute sequence gap intolerance for L2 validity
+    and dynamic O(1) WebSocket hot-swapping.
     """
     def __init__(
         self, 
@@ -36,6 +36,8 @@ class HighVelocityMultiFeed:
         self.is_running = False
         self.last_msg_timestamp = time.time()
         self.orderbook_sequences: Dict[str, int] = {}
+        
+        self.active_ws = None  # Reference to the active WebSocket for hot-swapping
         
         self._active_tasks = set()
         
@@ -76,6 +78,39 @@ class HighVelocityMultiFeed:
             except Exception as e:
                 logger.error(f"❌ Consumer worker failed to process payload: {e}", exc_info=True)
 
+    async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
+        """
+        🚀 V33.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        Pushes subscribe/unsubscribe JSON commands over the active WebSocket
+        without dropping the connection to the other 24 assets.
+        """
+        if not self.active_ws or self.active_ws.closed:
+            return
+
+        unsub_args = [
+            f"tickers.{drop_symbol}", 
+            f"orderbook.50.{drop_symbol}", 
+            f"publicTrade.{drop_symbol}"
+        ] + [f"kline.{i}.{drop_symbol}" for i in self.intervals]
+
+        sub_args = [
+            f"tickers.{add_symbol}", 
+            f"orderbook.50.{add_symbol}", 
+            f"publicTrade.{add_symbol}"
+        ] + [f"kline.{i}.{add_symbol}" for i in self.intervals]
+
+        try:
+            await self.active_ws.send_json({"op": "unsubscribe", "args": unsub_args})
+            await self.active_ws.send_json({"op": "subscribe", "args": sub_args})
+            
+            # Clean up local sequence memory for dropped coin
+            self.orderbook_sequences.pop(drop_symbol, None)
+            
+            logger.info(f"🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
+        except Exception as e:
+            logger.error(f"Hot-swap socket injection failed: {e}")
+            # If the socket is dead, the main loop will catch it and reconnect everything anyway.
+
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
         self.is_running = True
@@ -101,8 +136,6 @@ class HighVelocityMultiFeed:
 
         while self.is_running:
             watchdog_task = None
-            
-            # Purge old sequence states upon reconnect to prevent false anomaly loops
             self.orderbook_sequences.clear()
             
             try:
@@ -110,6 +143,7 @@ class HighVelocityMultiFeed:
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(self.ws_url, heartbeat=20.0) as ws:
                         
+                        self.active_ws = ws
                         reconnect_delay = 1.0
                         
                         async def connection_watchdog():
@@ -166,19 +200,17 @@ class HighVelocityMultiFeed:
                                             last_seq = self.orderbook_sequences.get(symbol)
                                             prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
                                             
-                                            # 🚀 V31.3 FIX: De-rated Sequence Gap Sensitivity Protocol
+                                            # 🚀 V33.0 FIX: ZERO SEQUENCE GAP TOLERANCE
+                                            # If the delta doesn't perfectly lock onto the last sequence, drop the book.
                                             if last_seq is not None and prev_seq is not None:
-                                                gap = prev_seq - last_seq
-                                                if gap != 0:
-                                                    if 0 < gap <= 3:
-                                                        # Minor gap during volatility burst: tolerate & update sequence pointer
-                                                        logger.warning(f"⚠️ MINOR SEQUENCE GAP // {symbol} (Skipped {gap} deltas: PrevSeq:{prev_seq} vs Stored:{last_seq}). Tolerating to maintain stream.")
-                                                    else:
-                                                        # Severe sequence drop or out-of-order sequence: force clean disconnect to resync snapshot
-                                                        logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap:{gap} | PrevSeq:{prev_seq} != Stored:{last_seq}). Forcing resync.")
-                                                        await ws.close()
-                                                        break
-                                                
+                                                if prev_seq != last_seq:
+                                                    logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Forcing resync.")
+                                                    
+                                                    # Close the entire socket. The outer loop will instantly 
+                                                    # reconnect and fetch clean snapshots for everything.
+                                                    await ws.close()
+                                                    break
+                                                    
                                             self.orderbook_sequences[symbol] = u_sequence
 
                                         self.ingestion_queue.put_nowait(("orderbook", {
@@ -217,6 +249,7 @@ class HighVelocityMultiFeed:
             if not self.is_running:
                 break
                 
+            self.active_ws = None
             logger.warning(f"⚠️ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)

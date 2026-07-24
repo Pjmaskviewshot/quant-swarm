@@ -9,11 +9,12 @@ import json
 import tempfile
 import datetime
 import random
+import heapq
 import numpy as np
 import aiosqlite  
 from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 
 # Core & Feature Modules
@@ -22,6 +23,7 @@ from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock
+from features.omni_scanner import GlobalOmniScanner  # 🚀 V33.0 IMPORT
 from portfolio.risk_manager import InstitutionalRiskVault
 from execution.sor import SmartOrderRouter
 
@@ -40,16 +42,36 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.DISTRIBUTED_MAIN")
+logger = logging.getLogger("QUANT_CORE.V33_OMNI_SWARM")
+
+
+class ClusterWarmStartRLS:
+    """
+    🌌 V32.0 CLUSTER-WARM-STARTED RLS ENGINE
+    Eliminates cold-start divergence and zero-knowledge learning delays by 
+    assigning calibrated covariance priors based on asset volatility profiles.
+    """
+    @staticmethod
+    def get_cluster_priors(symbol: str):
+        if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
+            w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05, 0.05, 0.05])
+            w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12, 0.08, 0.07])
+            p_scale = 1.0
+        elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
+            w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08, 0.06, 0.06])
+            w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11, 0.09, 0.09])
+            p_scale = 2.0
+        else:
+            w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10, 0.10, 0.10])
+            w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12, 0.10, 0.10])
+            p_scale = 0.5 
+
+        return w_trend, w_range, np.eye(9) * p_scale
+
 
 class ContinuousMicrostructureEngine:
-    """
-    🌌 V31.4 QUANTUM SUPREMACY: KALMAN-OPTIMIZED RLS ENSEMBLE
-    Zero static parameters. Weights updated via Recursive Least Squares (RLS).
-    Decays and thresholds are dynamically modulated by real-time volatility.
-    *V31.4 Hardened: Tikhonov Regularization prevents Covariance Matrix singularity.*
-    """
-    def __init__(self, memory_depth=500):
+    def __init__(self, symbol: str = "GENERIC", memory_depth=500):
+        self.symbol = symbol
         self.prev_bid = 0.0
         self.prev_bid_size = 0.0
         self.prev_ask = 0.0
@@ -87,16 +109,16 @@ class ContinuousMicrostructureEngine:
         self.last_price_time = 0.0  
         self.shannon_entropy = 1.0
         
-        self.weights_trending = np.array([0.18, 0.15, 0.15, 0.05, 0.10, 0.12, 0.05, 0.08, 0.12]) 
-        self.weights_ranging  = np.array([0.10, 0.20, 0.05, 0.20, 0.15, 0.05, 0.15, 0.05, 0.05])
-        
-        self.P_trending = np.eye(9) * 10.0 
-        self.P_ranging = np.eye(9) * 10.0  
-        self.forgetting_factor = 0.999     
+        w_t, w_r, P_init = ClusterWarmStartRLS.get_cluster_priors(symbol)
+        self.weights_trending = w_t
+        self.weights_ranging  = w_r
+        self.P_trending = P_init.copy()
+        self.P_ranging = P_init.copy()
+        self.forgetting_factor = 0.998
         
         self.prediction_buffer = deque(maxlen=50000)
         self.historical_probs = deque(maxlen=2000) 
-        self.rls_updates = 0  
+        self.rls_updates = 100 
         
         self.validation_buffer = deque(maxlen=100)
         self.rolling_mse = 0.0
@@ -190,11 +212,15 @@ class ContinuousMicrostructureEngine:
                     self.validation_buffer.append(error ** 2)
                     if len(self.validation_buffer) == 100:
                         self.rolling_mse = np.mean(self.validation_buffer)
-                        if self.rolling_mse > 0.30 or np.trace(self.P_trending) > 10000.0:
-                            logger.warning("📉 RLS DIVERGENCE: Resetting Inverse Covariance Matrices.")
-                            self.P_trending = np.eye(9) * 10.0
-                            self.P_ranging = np.eye(9) * 10.0
-                            self.rls_updates = 0
+                        if self.rolling_mse > 0.35 or np.trace(self.P_trending) > 5000.0:
+                            # 🚀 V33.1 FIX: Soft Damping instead of hard trace reset
+                            logger.warning(f"📉 Applying Levenberg-Marquardt Trace Damping for {self.symbol}.")
+                            trace_t = np.trace(self.P_trending)
+                            trace_r = np.trace(self.P_ranging)
+                            if trace_t > 5000:
+                                self.P_trending = self.P_trending / (trace_t / 1000.0) + np.eye(9) * 0.1
+                            if trace_r > 5000:
+                                self.P_ranging = self.P_ranging / (trace_r / 1000.0) + np.eye(9) * 0.1
                             self.validation_buffer.clear()
                             continue
 
@@ -275,12 +301,8 @@ class ContinuousMicrostructureEngine:
 
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (self.kaufman_er - 0.35)))
 
-        if self.rls_updates < 1000:
-            active_w_trend = np.array([0.18, 0.15, 0.15, 0.05, 0.10, 0.12, 0.05, 0.08, 0.12])
-            active_w_range = np.array([0.10, 0.20, 0.05, 0.20, 0.15, 0.05, 0.15, 0.05, 0.05])
-        else:
-            active_w_trend = self.weights_trending
-            active_w_range = self.weights_ranging
+        active_w_trend = self.weights_trending
+        active_w_range = self.weights_ranging
 
         logit_trend = np.dot(active_w_trend, attended_features)
         logit_range = np.dot(active_w_range, attended_features)
@@ -363,7 +385,9 @@ class DistributedQuantEngine:
         self.daemon_tasks: Dict[str, asyncio.Task] = {}
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
-        self._log_throttle_cache: Dict[str, float] = {}
+        
+        self.auction_queue: List[tuple] = []  
+        self.auction_lock = asyncio.Lock()
         
         self.global_btc_ofi_z = 0.0
         self.tick_sizes: Dict[str, float] = {}
@@ -383,6 +407,10 @@ class DistributedQuantEngine:
             max_workers=8
         )
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+        
+        # 🚀 V33.0 OMNI-SWARM SCANNER
+        self.omni_scanner = GlobalOmniScanner(self.executor)
+        self.stream_feed_instance = None  # Reference held for hot-swapping
 
     def _get_vpin_bucket_size(self, symbol: str) -> float:
         if "BTC" in symbol: return 1_000_000.0
@@ -447,13 +475,12 @@ class DistributedQuantEngine:
                         self.stat_engines[sym].P_ranging = np.array(data["P_ranging"])
                     
                     if "rls_updates" in data: self.stat_engines[sym].rls_updates = data["rls_updates"]
-                    elif "sgd_updates" in data: self.stat_engines[sym].rls_updates = data["sgd_updates"]
-            logger.info("🧠 KALMAN RLS MEMORY LOADED: Successfully recovered Covariance Tensors from disk.")
+            logger.info("🧠 KALMAN RLS MEMORY LOADED: Recovered Covariance Tensors from disk.")
         except Exception: pass
 
     def _initialize_symbol_structures(self, symbols: List[str]):
         for s in symbols:
-            if s not in self.stat_engines: self.stat_engines[s] = ContinuousMicrostructureEngine()
+            if s not in self.stat_engines: self.stat_engines[s] = ContinuousMicrostructureEngine(symbol=s)
             if s not in self.vpin_clocks: self.vpin_clocks[s] = VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s))
             if s not in self.feature_engines: self.feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
             if s not in self.edge_gates: self.edge_gates[s] = MicrostructureEdgeGate(window_size=100)
@@ -587,7 +614,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(2.0)
 
     async def run_dna_prewarmer(self):
-        logger.info("🔥 RAM PRE-WARMER ONLINE: Actively pre-fetching database edge logic.")
+        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
         while True:
             try:
                 await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
@@ -639,7 +666,7 @@ class DistributedQuantEngine:
                 logger.error(f"Shadow resolution daemon error: {e}", exc_info=True)
 
     async def run_ai_macro_evaluator(self):
-        logger.info("🧠 AI MACRO LOOP ONLINE: Background narrative evaluation demoted to 1-Hour schedule.")
+        logger.info("🧠 AI MACRO LOOP ONLINE: Background narrative evaluation on 1-Hour schedule.")
         while True:
             await asyncio.sleep(3600) 
             try:
@@ -777,7 +804,6 @@ class DistributedQuantEngine:
                 # Phase 3: Minimal Scope Atomic Guard
                 async with self.symbol_locks[symbol]:
                     if symbol in self.active_positions_lock: return
-                    if len(self.active_positions_lock) >= 5: return
 
                     sgd_state = stat_engine.extract_statistical_state(price, vpin_z, tensor_alpha, virtual_sl, virtual_tp)
                     
@@ -794,29 +820,38 @@ class DistributedQuantEngine:
                     is_shadow_asset = symbol in self.shadow_basket
                     dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
                     
-                    if stat_engine.rls_updates < 1000:
-                        dna_stats["is_armed"] = False
-                    
                     if is_shadow_asset or not dna_stats.get("is_armed", False):
                         if prob_success > 0.65: 
                             self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime, "virtual_sl": virtual_sl, "virtual_tp": virtual_tp}, True])
                         return 
                     
+                    # 🚀 V32.0 FRICTION-ADJUSTED EXPECTED VALUE (EV) CALCULATION
+                    taker_fee_pct = 0.0011  # Bybit 0.055% taker fee round-trip
+                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - taker_fee_pct
+                    
+                    # Compute Risk-Adjusted Sharpe Proxy for Auction Ranking
+                    net_sharpe = net_ev_pct / (sl_dist_pct + 1e-9)
+                    
+                    # Require positive Net EV after fees and spread
+                    if net_ev_pct <= 0.0005:  # Must yield at least 5 bps net edge
+                        return
+                        
                     dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
                     min_threshold = max(dynamic_gate, dna_stats.get("win_rate", 0.50))
+                    if prob_success < min_threshold: return
                     
-                    if prob_success < min_threshold: return 
+                    # 🚀 V32.0 GLOBAL AUCTION PUSH
+                    payload = {
+                        "symbol": symbol, "action": action, "price": price, 
+                        "prob_success": prob_success, "dna_stats": dna_stats, 
+                        "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
+                        "vol_z": stat_engine.hawkes_z, "vol_mult": 1.0, "timestamp": now
+                    }
                     
-                    ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct)
-                    net_edge_bps = stat_engine.spread_adjusted_edge(price, action, spread_cost, ev_pct)
-                    if net_edge_bps <= 0.0: return 
-                    
+                    async with self.auction_lock:
+                        heapq.heappush(self.auction_queue, (-net_sharpe, symbol, payload))
+                        
                     self.last_eval_time[symbol] = now
-                    self.active_positions_lock[symbol] = action
-                
-                # Phase 4: Lock-Free Execution Dispatch
-                logger.critical(f"🔬 QUANTUM SUPREMACY TRIGGER // {symbol} [{regime}] | {action} | RLS-Prob: {prob_success:.2%} | Dynamic Gate: {dynamic_gate:.2%} | Edge: {net_edge_bps:.2f} bps")
-                self.track_task(self.execute_statistical_signal(symbol, action, price, prob_success, dna_stats, atr, regime, net_edge_bps, stat_engine.hawkes_z, 1.0))
                 
         except Exception as e:
             logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -824,7 +859,90 @@ class DistributedQuantEngine:
             self.tick_error_counts[symbol].append(now)
             if len(self.tick_error_counts[symbol]) > 5:
                 self.circuit_breakers[symbol] = now + 300 
-                logger.error(f"🛑 CIRCUIT BREAKER TRIGGERED for {symbol} due to 5+ execution errors. Paused for 5 minutes.")
+                logger.error(f"🛑 CIRCUIT BREAKER TRIGGERED for {symbol}. Paused for 5 minutes.")
+
+    async def run_global_capital_auction_worker(self):
+        """
+        🚀 V32.0 GLOBAL CAPITAL AUCTION WORKER (PATCHED)
+        Runs continuously in the background. Batches candidate trade signals every 500ms,
+        ranks them by Friction-Adjusted Sharpe Ratio, and deploys available capital slots 
+        only to the single highest-conviction asset in the universe. Re-queues valid runners-up.
+        """
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
+        while True:
+            await asyncio.sleep(0.5)  # 500ms auction window
+            
+            async with self.auction_lock:
+                if not self.auction_queue:
+                    continue
+                
+                candidates = []
+                while self.auction_queue:
+                    candidates.append(heapq.heappop(self.auction_queue))
+            
+            if not candidates: continue
+            
+            top_neg_sharpe, top_symbol, top_payload = candidates[0]
+            top_sharpe = -top_neg_sharpe
+            
+            # 🚀 V33.1 FIX: Put viable runners-up back in the queue
+            async with self.auction_lock:
+                for i in range(1, len(candidates)):
+                    # Only re-queue if it's less than 5 seconds old
+                    if time.time() - candidates[i][2]["timestamp"] < 5.0:
+                        heapq.heappush(self.auction_queue, candidates[i])
+
+            if len(self.active_positions_lock) >= 5:
+                continue
+                
+            async with self.symbol_locks[top_symbol]:
+                if top_symbol in self.active_positions_lock:
+                    continue
+                    
+                self.active_positions_lock[top_symbol] = top_payload["action"]
+                
+                logger.critical(
+                    f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                    f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                    f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+                )
+                
+                self.track_task(self.execute_statistical_signal(
+                    top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                    top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                    top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"]
+                ))
+
+    async def run_omni_swarm_director(self):
+        """
+        🚀 V33.0 OMNI-SWARM DIRECTOR
+        Monitors 250+ Bybit Perpetuals for Idiosyncratic Alpha.
+        Hot-swaps stagnant assets for explosive assets in real-time.
+        """
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
+        while True:
+            await asyncio.sleep(15)  # Scan entire market every 15 seconds
+            
+            try:
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket)
+                
+                if dead_sym and hot_sym:
+                    # 1. Update Asset Array Safely
+                    if dead_sym in self.asset_basket:
+                        self.asset_basket.remove(dead_sym)
+                    if hot_sym not in self.asset_basket:
+                        self.asset_basket.append(hot_sym)
+                    
+                    # 2. Initialize Internal Memory Structures for the new coin instantly
+                    self._initialize_symbol_structures([hot_sym])
+                    
+                    # 3. Fire WebSocket command to the ingestion stream dynamically 
+                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                        
+                    logger.critical(f"🚀 {hot_sym} FULLY ARMED AND INJECTED INTO QUANT MATRIX.")
+            except Exception as e:
+                logger.error(f"Omni-Swarm Director iteration failed: {e}")
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float):
         try:
@@ -850,7 +968,7 @@ class DistributedQuantEngine:
             start_bal = self.global_state_cache.get("start_of_day_balance", balance)
             
             if start_bal > 0 and balance < (start_bal * 0.95):
-                logger.critical(f"🛑 DAILY LOSS LIMIT TRIGGERED. Balance ({balance:.2f}) dropped below 95% of start-of-day ({start_bal:.2f}). Trading halted until UTC Midnight.")
+                logger.critical(f"🛑 DAILY LOSS LIMIT TRIGGERED. Balance ({balance:.2f}) dropped below 95% of start ({start_bal:.2f}).")
                 self.global_emergency_lock = True
                 self.active_positions_lock.pop(symbol, None)
                 return
@@ -895,7 +1013,7 @@ class DistributedQuantEngine:
                     
                     penalty_factor = (1 + slippage_bps / 10000) if direction == "BUY" else (1 - slippage_bps / 10000)
                     current_price *= penalty_factor
-                    logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price:.4f} (Simulated Slip: {slippage_bps:.1f} bps)")
+                    logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price:.4f} (Slip: {slippage_bps:.1f} bps)")
             else:
                 try:
                     await self.executor.safe_call(self.executor.adjust_leverage, symbol, target_leverage)
@@ -917,6 +1035,16 @@ class DistributedQuantEngine:
                 
             if not self.test_mode:
                 self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False])
+                
+                # 🚀 REAL-TIME TELEGRAM ENTRY ALERT
+                entry_msg = (
+                    f"⚡ <b>ENTRY ALERT // {symbol}</b>\n"
+                    f"• Action: <b>{direction}</b>\n"
+                    f"• Price: <code>{current_price:.5f}</code>\n"
+                    f"• Size: <code>{position_size:.2f}</code>\n"
+                    f"• Edge: <code>{edge_bps:.1f} bps</code>"
+                )
+                self.track_task(self._safe_telegram_dispatch(entry_msg, is_html=True))
                 
             self.risk_vault.update_position_ledger(symbol, notional)
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": notional, "size": position_size}, target_leverage, regime))
@@ -969,7 +1097,7 @@ class DistributedQuantEngine:
         
         for s in self.asset_basket + self.shadow_basket:
             new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
-            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine())
+            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
             new_dna_cache[s] = self.ram_dna_cache.get(s, {})
             new_last_eval[s] = self.last_eval_time.get(s, 0.0)
             new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
@@ -997,6 +1125,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(basket=self.asset_basket + self.shadow_basket[:10], intervals=["1", "5", "15"], orderbook_callback=self.handle_incoming_orderbook_tick, screener_callback=self.handle_incoming_basket_screener_update, kline_callback=self.handle_incoming_kline_update, trade_callback=self.handle_incoming_trade, engine_reference=self)
+            self.stream_feed_instance = stream_feed  # 🚀 Expose to Omni-Swarm for Hot-Swapping
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
             def _on_stream_done(t):
                 if not t.cancelled() and not self.stream_restart_event.is_set(): self.stream_restart_event.set()
@@ -1058,7 +1187,6 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.error(f"Drawdown WAL check failed: {e}")
                     
-                    # 🚀 V31.4 FIX: Graceful shutdown now guarantees flat positions
                     await self.graceful_shutdown()
                     sys.exit(0)
                 
@@ -1081,11 +1209,11 @@ class DistributedQuantEngine:
                     regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V31.4 QUANTUM SUPREMACY)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V33.0 OMNI-SWARM)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
-                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝗞𝗮𝗹𝗺𝗮𝗻-𝗢𝗽𝘁𝗶𝗺𝗶𝘇𝗲𝗱 𝗥𝗟𝗦 𝗘𝗻𝘀𝗲𝗺𝗯𝗹𝗲</b>\n"
-                    f"• Signal Engine:   <code>RLS Dynamic Covariance + Floating Thresholds</code>\n"
-                    f"• State Variables: <code>Zero-Static (Volatility-Scaled Tensors)</code>\n"
+                    f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝖦𝗅𝗈𝖻𝖺𝗅 𝖧𝗈𝗍-𝖲𝗐𝖺𝗉 𝖠𝗋𝖼𝗁𝗂𝗍𝖾𝖼𝗍𝗎𝗋𝖾</b>\n"
+                    f"• Signal Engine:   <code>Cluster Warm-Started RLS + Friction Penalty</code>\n"
+                    f"• Omni Scanner:    <code>Beta-Stripped Alpha Identification (250+ Assets)</code>\n"
                     f"• Execution Guard: <code>Infinite Loop Drawdown Breaker Verification</code>\n"
                     f"• Risk Engine:     <code>5% Daily Limit | Strict Max 5x Leverage</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔🇱 𝗩𝗔𝗨🇱𝗧 𝗣𝗥𝗢𝗙𝗜🇱𝗘</b>\n"
@@ -1193,8 +1321,17 @@ class DistributedQuantEngine:
                 try:
                     settlement = await self.executor.check_recent_settlement(symbol, 300) 
                     if settlement.get("closed"):
-                        self.log_to_wal_sync("settlement", [signal_id, float(settlement.get('pnl', 0.0)), actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details])
+                        pnl = float(settlement.get('pnl', 0.0))
+                        self.log_to_wal_sync("settlement", [signal_id, pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details])
                         self.risk_vault.update_position_ledger(symbol, 0.0)
+                        
+                        # 🚀 REAL-TIME TELEGRAM EXIT ALERT
+                        exit_msg = (
+                            f"🏁 <b>TRADE CLOSED // {symbol}</b>\n"
+                            f"• Outcome: <b>{settlement['outcome']}</b>\n"
+                            f"• Net PnL: <code>{pnl:+.4f} USDT</code>"
+                        )
+                        self.track_task(self._safe_telegram_dispatch(exit_msg, is_html=True))
                         break
                 except Exception as e:
                     logger.debug(f"Settlement check failed for {symbol}: {e}")
@@ -1207,6 +1344,13 @@ class DistributedQuantEngine:
                     
                     self.log_to_wal_sync("settlement", [signal_id, net_pnl, 0.0, "RECONCILED", exec_details])
                     self.risk_vault.update_position_ledger(symbol, 0.0)
+                    
+                    # 🚀 REAL-TIME TELEGRAM RECONCILIATION ALERT
+                    exit_msg = (
+                        f"🏁 <b>TRADE RECONCILED // {symbol}</b>\n"
+                        f"• Net PnL: <code>{net_pnl:+.4f} USDT</code>"
+                    )
+                    self.track_task(self._safe_telegram_dispatch(exit_msg, is_html=True))
                     break
 
         except Exception as e:
@@ -1330,7 +1474,9 @@ class DistributedQuantEngine:
         daemons = [
             self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, self.cleanup_stale_locks, 
-            self.run_shadow_resolution_daemon, self.run_ai_macro_evaluator, self._universe_refresher_loop
+            self.run_shadow_resolution_daemon, self.run_ai_macro_evaluator, self._universe_refresher_loop,
+            self.run_global_capital_auction_worker,  # 🚀 V32.0 AUCTION DAEMON
+            self.run_omni_swarm_director             # 🚀 V33.0 OMNI-SWARM DAEMON
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
 
