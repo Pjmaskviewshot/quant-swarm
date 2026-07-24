@@ -9,9 +9,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V26.2 APEX: DECOUPLED INGESTION LAYER
-    Features absolute packet verification using exact `prevSeq` continuity matching
-    to guarantee zero structural loss across the orderbook matrix.
+    🚀 V31.3 APEX: DECOUPLED INGESTION LAYER
+    Features de-rated packet sequence verification using `prevSeq` continuity matching
+    with minor gap tolerance (<=3) to prevent reconnect blindness during volatility spikes.
     """
     def __init__(
         self, 
@@ -39,7 +39,7 @@ class HighVelocityMultiFeed:
         
         self._active_tasks = set()
         
-        # ⚡ V26.1 UPGRADE: High-Capacity Decoupling Queue (Prevents network backpressure)
+        # High-Capacity Decoupling Queue (Prevents network backpressure)
         self.ingestion_queue = asyncio.Queue(maxsize=50000)
 
     def track_task(self, coro: Coroutine):
@@ -51,7 +51,7 @@ class HighVelocityMultiFeed:
 
     async def _data_consumer_worker(self):
         """
-        🚀 V26.1 UPGRADE: DEDICATED CONSUMER
+        🚀 DEDICATED CONSUMER
         Pulls from the high-speed FIFO queue and executes callbacks sequentially.
         Maintains strict chronological L2/L3 ordering without blocking network socket reading.
         """
@@ -102,7 +102,7 @@ class HighVelocityMultiFeed:
         while self.is_running:
             watchdog_task = None
             
-            # 🚀 V26.2 FIX: Purge old sequence states upon reconnect to prevent false anomaly loops
+            # Purge old sequence states upon reconnect to prevent false anomaly loops
             self.orderbook_sequences.clear()
             
             try:
@@ -164,16 +164,20 @@ class HighVelocityMultiFeed:
                                             self.orderbook_sequences[symbol] = u_sequence
                                         elif msg_type == "delta":
                                             last_seq = self.orderbook_sequences.get(symbol)
+                                            prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
                                             
-                                            # 🚀 V26.2 FIX: Exact Bybit V5 Specification prevSeq Validation
-                                            # A valid delta's `prevSeq` (data.u - 1 or explicit) MUST perfectly equal our stored `last_seq`
-                                            # We use `data.get("pu")` (prev_seq in Bybit V5 Linear docs)
-                                            prev_seq = data.get("pu")  
-                                            
-                                            if last_seq is not None and prev_seq is not None and prev_seq != last_seq:
-                                                logger.critical(f"⚠️ SEQUENCE GAP DETECTED // {symbol} (PrevSeq:{prev_seq} != Last:{last_seq}). Forcing clean disconnect to re-sync orderbook matrix.")
-                                                await ws.close()
-                                                break
+                                            # 🚀 V31.3 FIX: De-rated Sequence Gap Sensitivity Protocol
+                                            if last_seq is not None and prev_seq is not None:
+                                                gap = prev_seq - last_seq
+                                                if gap != 0:
+                                                    if 0 < gap <= 3:
+                                                        # Minor gap during volatility burst: tolerate & update sequence pointer
+                                                        logger.warning(f"⚠️ MINOR SEQUENCE GAP // {symbol} (Skipped {gap} deltas: PrevSeq:{prev_seq} vs Stored:{last_seq}). Tolerating to maintain stream.")
+                                                    else:
+                                                        # Severe sequence drop or out-of-order sequence: force clean disconnect to resync snapshot
+                                                        logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap:{gap} | PrevSeq:{prev_seq} != Stored:{last_seq}). Forcing resync.")
+                                                        await ws.close()
+                                                        break
                                                 
                                             self.orderbook_sequences[symbol] = u_sequence
 

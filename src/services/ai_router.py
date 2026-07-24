@@ -12,7 +12,7 @@ logger = logging.getLogger("QUANT_CORE.AI_ROUTER")
 
 class ResilientAIRouter:
     """
-    🚀 V28.0 QUANTUM APEX: UNIVERSAL RESILIENT AI ROUTER
+    🌌 V31.1 QUANTUM APEX: UNIVERSAL RESILIENT AI ROUTER
     Engineered for the background asynchronous macro-loop.
     Features DeepSeek/NVIDIA/Groq cascade matrix, LRU Round-Robin routing, 
     dynamic penalty boxes, and strict memory/socket leak prevention.
@@ -22,7 +22,7 @@ class ResilientAIRouter:
         self.current_provider = "INITIALIZING" 
         
         # 🛡️ HARDENED NETWORK CONFIGURATION 
-        # Upgraded to 90.0s to accommodate DeepSeek Chain-of-Thought reasoning
+        # Timeout set to 90.0s to accommodate DeepSeek Chain-of-Thought reasoning
         self.custom_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(90.0, connect=10.0),
             http2=False,  
@@ -57,7 +57,6 @@ class ResilientAIRouter:
                 self.providers.append({
                     "name": f"NVIDIA_NIM_DEEPSEEK_FLASH_{i+1}",
                     "client": AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key, http_client=self.custom_http_client, max_retries=0),
-                    # 🚀 V28.0 FIX: Correct NVIDIA NIM deepseek model identifier
                     "model": "deepseek-ai/deepseek-v3",
                     "cooldown_until": 0.0,
                     "last_used": 0.0,
@@ -75,7 +74,6 @@ class ResilientAIRouter:
             self.providers.append({
                 "name": "DEEPSEEK_REASONER",
                 "client": AsyncOpenAI(base_url="https://api.deepseek.com/v1", api_key=deepseek_key, http_client=self.custom_http_client, max_retries=0),
-                # 🚀 V28.0 FIX: Deepseek-reasoner correctly specified
                 "model": "deepseek-reasoner", 
                 "cooldown_until": 0.0,
                 "last_used": 0.0,
@@ -114,7 +112,6 @@ class ResilientAIRouter:
         healthy_providers = [p for p in self.providers if current_time >= p["cooldown_until"]]
         
         if healthy_providers:
-            # Sort by last_used to cycle them fairly
             healthy_providers.sort(key=lambda x: x.get("last_used", 0.0))
             selected = healthy_providers[0]
             selected["last_used"] = current_time
@@ -124,19 +121,22 @@ class ResilientAIRouter:
 
     def _clean_json_output(self, raw_text: str) -> str:
         """
-        🚀 V28.0 UPGRADE: DeepSeek Chain-of-Thought Stripper
-        Removes <think> blocks that leak into standard output and extracts JSON safely.
+        🚀 V31.1 UPGRADE: DeepSeek Chain-of-Thought & Markdown Stripper
+        Robustly removes closed and unclosed <think> or <thinking> blocks, 
+        plus markdown code blocks to yield clean JSON strings.
         """
-        # 1. Remove the entire <think> block (Fixes the regex literal spaces bug)
-        cleaned_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL)
+        # 1. Remove closed thinking tags (<think>...</think> or <thinking>...</thinking>)
+        cleaned_text = re.sub(r'<(think|thinking)>.*?</\1>', '', raw_text, flags=re.DOTALL | re.IGNORECASE)
         
-        # 2. Remove markdown code fences
-        cleaned_text = re.sub(r'```(?:json)?', '', cleaned_text).strip()
+        # 2. Fallback: Remove unclosed thinking tags if token generation was truncated mid-thought
+        cleaned_text = re.sub(r'<(think|thinking)>.*', '', cleaned_text, flags=re.DOTALL | re.IGNORECASE)
+
+        # 3. Strip Markdown code blocks (e.g. ```json ... ```)
+        cleaned_text = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', cleaned_text, flags=re.DOTALL | re.IGNORECASE).strip()
         
         return cleaned_text
 
     async def execute_inference(self, messages: List[Dict[str, str]], require_json: bool = False, timeout: float = 60.0) -> str:
-        # Reduced max attempts to 4 to fail fast and trigger mathematical fallbacks quickly
         MAX_ATTEMPTS = 4 
         
         for attempt in range(MAX_ATTEMPTS):
@@ -189,7 +189,6 @@ class ResilientAIRouter:
                 return raw_content
                 
             except asyncio.TimeoutError:
-                # Harsh 60-second penalty for Timeouts to prevent Death Loops
                 logger.warning(f"⚠️ {provider['name']} Timed Out after {timeout}s. Penalizing node for 60s.")
                 provider["cooldown_until"] = time.time() + 60.0
                 

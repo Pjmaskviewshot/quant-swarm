@@ -9,9 +9,10 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V28.0 QUANTUM APEX: CALIBRATED EDGE GATE
+    🚀 V31.1 QUANTUM APEX: CALIBRATED EDGE GATE
     Filters out market noise, deep iceberg absorption walls, retail chop, 
     and Amihud liquidity vacuums using Level-2 MLOFI and Kyle's Lambda.
+    *V31.1 Upgrade: Dynamic Asset-Scaled Amihud Buckets.*
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -41,7 +42,8 @@ class MicrostructureEdgeGate:
     def update_trade_volume(self, volume: float):
         self.rolling_volume += volume
 
-    def update_orderbook_state(self, bids: List[List[float]], asks: List[List[float]], mid_price: float):
+    # 🚀 V31.1 FIX: Added `symbol` parameter to dynamically scale the Amihud bucket
+    def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         if not self.prev_bids or not self.prev_asks:
             self.prev_bids = bids[:self.mlofi_levels]
             self.prev_asks = asks[:self.mlofi_levels]
@@ -94,9 +96,17 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # Stable Notional Volume Buckets for Amihud Ratio
+        # 🚀 V31.1 FIX: Dynamic Tiered Amihud Buckets
+        if "BTC" in symbol:
+            amihud_threshold = 200000.0  # $200k for BTC
+        elif "ETH" in symbol or "SOL" in symbol:
+            amihud_threshold = 50000.0   # $50k for ETH/SOL
+        else:
+            amihud_threshold = 10000.0   # $10k for Alts
+
         notional_vol = self.rolling_volume * mid_price
-        if notional_vol >= 2000.0:
+        
+        if notional_vol >= amihud_threshold:
             if self.amihud_anchor_price > 0:
                 price_change = abs(math.log(mid_price / (self.amihud_anchor_price + 1e-9)))
                 illiquidity = price_change / notional_vol

@@ -11,10 +11,11 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V27.7 SIGNAL APEX: VECTORIZED MEMORY LEDGER
+    🌌 V31.3 SIGNAL APEX: VECTORIZED MEMORY LEDGER
     Hyper-optimized Supabase connector. 
     Features pure NumPy vectorization for shadow OHLC forensics, 
     Dynamic Rolling Variance for the Bayesian DNA Matrix, and chunked upserts.
+    *V31.3 Upgrade: Strict Parity with Live Risk Vault Leverage Math.*
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -133,10 +134,9 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
-    # 🚀 V27.7 FIX: Added interval_mins to dynamically calculate actual holding time
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float, interval_mins: float = 15.0) -> int:
         """
-        🚀 V27.7 APEX: OHLC Vectorized Resolution Engine.
+        🚀 V31.3 APEX: OHLC Vectorized Resolution Engine.
         Uses pure NumPy array math to accurately simulate intra-candle TP/SL hunting
         without using slow Python loops. Completely eradicates shadow execution latency.
         """
@@ -233,19 +233,39 @@ class MemoryBank:
                     bars_held = len(highs_arr)
 
                 if is_terminated:
-                    simulated_leverage = max(5.0, min(15.0, 5.0 + (abs(row.get("z_obi", 0.0)) * 2.0)))
-                    TAKER_ROUND_TRIP = 0.0011
-                    
-                    # Prevent division by zero mathematically
-                    entry_price_safe = entry_price if entry_price > 0 else 1e-9
-                    gross_return = abs(exit_price - entry_price_safe) / entry_price_safe
-                    
                     is_win = False
                     if prediction == "BUY" and exit_price > entry_price:
                         is_win = True
                     elif prediction == "SELL" and exit_price < entry_price:
                         is_win = True
+
+                    # 🚀 V31.3 FIX: Exact Parity with Live Risk Vault Leverage Math
+                    shadow_balance = 100.0
+                    fractional_risk = 0.015 # Assume standard 1.5% risk for shadow modeling
+                    shadow_notional = shadow_balance * fractional_risk
+                    
+                    # Prevent division by zero mathematically
+                    entry_price_safe = entry_price if entry_price > 0 else 1e-9
+                    sl_distance_pct = abs(exit_price - entry_price_safe) / entry_price_safe if not is_win else abs(sl_price - entry_price_safe) / entry_price_safe
+                    sl_distance_pct = max(0.005, sl_distance_pct) # Floor to match live
+                    
+                    base_leverage = 3.0
+                    hard_cap = 5.0
+                    
+                    # Exact Live Formula: max_safe = 1.0 / (sl_pct * 1.5)
+                    max_safe_leverage = 1.0 / (sl_distance_pct * 1.5)
+                    
+                    if shadow_notional > (shadow_balance * 3.0):
+                        target_leverage = max(base_leverage, min(hard_cap, shadow_notional / shadow_balance))
+                    else:
+                        target_leverage = base_leverage
                         
+                    simulated_leverage = min(target_leverage, max_safe_leverage)
+                    simulated_leverage = max(1.0, min(hard_cap, simulated_leverage))
+                    
+                    TAKER_ROUND_TRIP = 0.0011
+                    
+                    gross_return = abs(exit_price - entry_price_safe) / entry_price_safe
                     if not is_win:
                         gross_return = -gross_return
                         
@@ -256,7 +276,6 @@ class MemoryBank:
                     row["is_correct"] = is_win
                     row["net_pnl"] = float(net_pnl)
                     
-                    # 🚀 V27.7 FIX: Dynamic duration multiplier derived from actual timeframe
                     row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held * interval_mins)), 2)
                     
                     update_batch.append(row)

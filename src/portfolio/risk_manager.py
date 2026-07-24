@@ -1,7 +1,7 @@
 import logging
 import math
 import numpy as np
-from typing import Dict, Any, List
+from typing import Dict, List
 
 logger = logging.getLogger("QUANT_CORE.RISK_MANAGER")
 
@@ -10,33 +10,26 @@ class InstitutionalRiskVault:
         self, 
         max_drawdown_pct: float = 0.25, 
         max_single_position_risk_pct: float = 0.15, 
-        exchange_min_notional: float = 5.0, 
-        max_single_asset_leverage_limit: float = 10.0
+        exchange_min_notional: float = 5.0
     ):
         """
-        🚀 V26.1 APEX: INSTITUTIONAL RISK VAULT
-        Upgraded with mathematical Epsilon Guards and strictly decoupled Notional/Margin
-        caps to prevent circular concentration risks.
-        
-        Parameters:
-            max_drawdown_pct (float): Maximum trailing drawdown limit before circuit breaking.
-            max_single_position_risk_pct (float): Baseline risk fraction per position.
-            exchange_min_notional (float): Minimum order cost required by the exchange interface.
-            max_single_asset_leverage_limit (float): Maximum total leverage exposure allowed for a single asset node.
+        🛡️ V31.4 APEX: INSTITUTIONAL RISK VAULT
+        Hardened with Single Source of Truth leverage caps and dynamic correlation margin guards.
         """
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
         self.exchange_min_notional = exchange_min_notional
-        self.max_single_asset_leverage_limit = max_single_asset_leverage_limit
+        
+        # 🚀 V31.4 FIX: Single Source of Truth Leverage Caps
+        self.absolute_max_leverage: float = 5.0
+        self.base_leverage: float = 3.0
+        
         self.peak_balance = 0.0
         self.emergency_circuit_breaker = False
         
         # --- GLOBAL PORTFOLIO LEDGER ---
         self.active_positions: Dict[str, float] = {}
 
-        # ====================================================================
-        # 🚀 PHASE 2 UPGRADES: DYNAMIC CAPITAL HARDENING LAYERS
-        # ====================================================================
         # Cross-asset correlation groups to prevent structural systemic risk
         self.correlation_groups = {
             "DYNAMIC_BTC_COVARIANCE": ["BTCUSDT"] # Updated dynamically by the math engine
@@ -53,8 +46,6 @@ class InstitutionalRiskVault:
             
         # Use recent history (last 150 periods) to gauge current market stress
         base_prices = np.array(price_histories[base_asset][-150:]) 
-        
-        # ⚡ V26 UPGRADE: Epsilon Guards on Base Returns
         base_returns = np.diff(base_prices) / (base_prices[:-1] + 1e-9)
         
         restricted_group = [base_asset]
@@ -65,8 +56,6 @@ class InstitutionalRiskVault:
                 
             # Align sequence lengths for mathematical parity
             sym_prices = np.array(prices[-len(base_prices):])
-            
-            # ⚡ V26 UPGRADE: Epsilon Guards on Sym Returns
             sym_returns = np.diff(sym_prices) / (sym_prices[:-1] + 1e-9)
             
             # Prevent division by zero anomalies in flat/illiquid micro-caps
@@ -98,7 +87,6 @@ class InstitutionalRiskVault:
             
         # 3. Check Absolute Drawdown Breach
         if self.peak_balance > 0:
-            # ⚡ V26 UPGRADE: Epsilon Guard on Drawdown math
             current_drawdown = (self.peak_balance - current_balance) / (self.peak_balance + 1e-9)
             if current_drawdown >= self.max_drawdown_pct:
                 if not self.emergency_circuit_breaker:
@@ -107,11 +95,13 @@ class InstitutionalRiskVault:
                 return False
         
         # 4. Cross-Asset Correlation Guard
+        active_correlated_count = 0
         if symbol and new_position_notional > 0:
             for group_name, asset_list in self.correlation_groups.items():
                 if symbol in asset_list:
                     active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
-                    if active_correlated_nodes:
+                    active_correlated_count = len(active_correlated_nodes)
+                    if active_correlated_count > 0:
                         logger.warning(
                             f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected. "
                             f"High-covariance trade already open in group [{group_name}]: {active_correlated_nodes}. Over-exposure aborted."
@@ -122,9 +112,8 @@ class InstitutionalRiskVault:
         if symbol:
             current_node_exposure = self.active_positions.get(symbol, 0.0)
             
-            # ⚡ V26 UPGRADE FIX: Replaced circular leverage logic with strict Notional Cap
             # An asset can never exceed a notional size equivalent to the account balance * max leverage limit.
-            absolute_max_notional_per_asset = current_balance * self.max_single_asset_leverage_limit
+            absolute_max_notional_per_asset = current_balance * self.absolute_max_leverage
             
             if (current_node_exposure + new_position_notional) > absolute_max_notional_per_asset:
                 logger.warning(f"⚠️ Single asset concentration risk limit reached for {symbol}. Cap: {absolute_max_notional_per_asset:.2f} USDT.")
@@ -133,8 +122,12 @@ class InstitutionalRiskVault:
         # 6. Check Global Exposure (The Swarm Central Banker)
         total_exposure = sum(self.active_positions.values()) + new_position_notional
         
-        # Global limit: Swarm cannot exceed 5.0x the aggregate account balance in notional exposure
-        global_max_notional = current_balance * 5.0
+        # 🚀 V31.4 FIX: Dynamically shrink the global exposure limit based on active correlated risk
+        # If we have 2 uncorrelated assets open, we allow normal margin usage. 
+        # But if the entire market is correlated, we forcibly shrink the ceiling.
+        correlation_penalty = 1.0 - (min(active_correlated_count, 3) * 0.15)
+        
+        global_max_notional = current_balance * self.absolute_max_leverage * correlation_penalty
         
         if total_exposure > global_max_notional:
             logger.warning(f"⚠️ Global exposure limit reached: Current {sum(self.active_positions.values()):.2f} + New {new_position_notional:.2f} exceeds Global Cap ({global_max_notional:.2f}).")
@@ -159,8 +152,8 @@ class InstitutionalRiskVault:
         self, 
         notional_position_usdt: float, 
         account_balance: float, 
-        base_leverage: int = 5, 
-        hard_cap: int = 15, 
+        base_leverage: int = 3, 
+        hard_cap: int = 5, 
         sl_distance_pct: float = None
     ) -> int:
         """
@@ -168,6 +161,10 @@ class InstitutionalRiskVault:
         Dynamically scales leverage required to execute the ideal Kelly fraction while strictly adhering to safety bounds.
         Contains un-bypassable micro-account scaling rules and a Liquidation Reality Check.
         """
+        # Override any passed-in caps with the Absolute Master limits
+        safe_base = min(base_leverage, self.base_leverage)
+        safe_cap = min(hard_cap, self.absolute_max_leverage)
+        
         if account_balance <= 0 or notional_position_usdt <= 0:
             return 1
             
@@ -176,20 +173,14 @@ class InstitutionalRiskVault:
         if sl_distance_pct and sl_distance_pct > 0:
             # Force the liquidation price to be at least 1.5x further away than the Stop Loss
             max_safe_leverage = int(1.0 / (sl_distance_pct * 1.5))
-            hard_cap = min(hard_cap, max_safe_leverage)
+            safe_cap = min(safe_cap, max_safe_leverage)
 
-        # 🛑 MICRO-ACCOUNT SURVIVAL CLAMP
-        # A tiny account cannot handle 15x leverage without imminent liquidation risk from standard volatility.
-        if account_balance < 10.0:
-            hard_cap = min(hard_cap, 2)  # Ultra-safe mode for sub-$10 accounts
-        elif account_balance < 50.0:
-            hard_cap = min(hard_cap, 3)  # Safe mode for sub-$50 accounts
-            
-        # Target consuming a maximum of 12% of the free balance as margin per trade
-        margin_required = account_balance * 0.12
+        # Target consuming a maximum of 20% of the free balance as margin per trade (5x leverage equivalent)
+        margin_required = account_balance * 0.20
         
-        # ⚡ V26 UPGRADE: Epsilon Guard on Margin Math
         calculated_leverage = math.ceil(notional_position_usdt / (margin_required + 1e-9))
         
         # Apply institutional safety bounds to prevent liquidation cascades
-        return int(min(max(1, calculated_leverage), hard_cap))
+        final_leverage = int(min(max(safe_base, calculated_leverage), safe_cap))
+        
+        return max(1, final_leverage)
