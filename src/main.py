@@ -835,12 +835,13 @@ class DistributedQuantEngine:
                 elif ai_action != "HOLD":
                     prob_success = prob_success / confidence_multiplier
                 
+                # 🚀 V34.3 FIX: Corrected variable reference from 'vol_z' to 'stat_engine.ofi_fast_z'
                 payload_features = {
                     "symbol": symbol,
                     "market_regime": regime,
                     "virtual_sl": virtual_sl,
                     "virtual_tp": virtual_tp,
-                    "adaptive_obi_z": vol_z, 
+                    "adaptive_obi_z": stat_engine.ofi_fast_z, 
                     "liquidity_density_ratio": vol_mult,
                     "bid_ask_spread": spread_cost
                 }
@@ -1359,7 +1360,6 @@ class DistributedQuantEngine:
                     self.active_positions_lock.pop(symbol, None)
                 return
 
-            # 🚀 V34.3 FIX: Remove activePrice to avoid ErrCode 10001 during fast market slippage
             try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=realigned_sl_str, trailingStop=align_price(atr * 1.5))
             except Exception as e:
                 logger.debug(f"Trailing stop set failed for {symbol}: {e}")
