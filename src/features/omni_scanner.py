@@ -9,7 +9,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 class GlobalOmniScanner:
     """
-    🌌 V34.2 OMNI-SWARM CROSS-SECTIONAL SCANNER (PROTECTED ACTIVE POSITIONS)
+    🌌 V34.3 OMNI-SWARM CROSS-SECTIONAL SCANNER (15M SWEET SPOT)
     Scans Bybit 250+ perpetual universe every 10 seconds.
     Isolates Idiosyncratic Alpha (true price returns) while strictly 
     banning illiquid micro-caps and protecting open positions from hot-swaps.
@@ -67,9 +67,10 @@ class GlobalOmniScanner:
                 current_price = float(data.get('lastPrice', 0))
                 turnover24h = float(data.get('turnover24h', 0))
                 
-                # 🚀 V33.1 FIX: LIQUIDITY GATE (Ban Micro-Caps)
-                # Ban assets priced under $0.50 OR with less than $50M 24h turnover
-                if current_price < 0.50 or turnover24h < 50_000_000.0:
+                # 🚀 V34.3 FIX: OPTIMIZED LIQUIDITY GATE
+                # Lowered to $15M turnover and $0.10 price.
+                # Opens up 50-80 mid-caps. The SOR 12-bps cap will handle spread safety.
+                if current_price < 0.10 or turnover24h < 15_000_000.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -151,7 +152,7 @@ class GlobalOmniScanner:
                 if top_score > (deadest_score * 3.0):
                     logger.critical(
                         f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
-                        f"Injecting Tier-1 Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
+                        f"Injecting Fast-Moving Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
                     return deadest_sym, top_sym
 

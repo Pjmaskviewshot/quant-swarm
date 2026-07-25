@@ -691,7 +691,6 @@ class DistributedQuantEngine:
                     dir_hist = list(clock.directional_imbalances)
                     directional_bias = np.mean(dir_hist) / (clock.bucket_volume + 1e-9) if dir_hist else 0.0
                     
-                    # 🚀 FIX BUG #3: Pull true absorption state from the volume clock
                     is_absorption = getattr(clock, 'is_absorption_anomaly', False)
                     
                     vpin_data = {
@@ -816,16 +815,13 @@ class DistributedQuantEngine:
                 prob_success = max(p_up, p_down)
                 action = "BUY" if p_up > p_down else "SELL"
                 
-                # 🚀 FIX BUG #2: AI DIRECTIONAL ALIGNMENT CHECK
                 macro_state = self.fsm.get_ai_macro_state(symbol)
                 ai_action = macro_state.get("action", "HOLD")
                 confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
 
-                # Only boost confidence if the AI agrees with the model's action
                 if ai_action == action:
                     prob_success = min(0.99, prob_success * confidence_multiplier)
                 elif ai_action != "HOLD":
-                    # If the AI panel explicitly contradicts the model, penalize confidence
                     prob_success = prob_success / confidence_multiplier
                 
                 is_shadow_asset = symbol in self.shadow_basket
@@ -846,8 +842,6 @@ class DistributedQuantEngine:
                     
                 dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
                 
-                # 🚀 FIX BUG #1: WIN RATE KEY MISMATCH
-                # Check 'cluster_win_rate' first, then 'win_rate', then fallback to 0.50
                 dna_win_rate = dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))
                 
                 min_threshold = max(dynamic_gate, dna_win_rate)
@@ -860,7 +854,6 @@ class DistributedQuantEngine:
                     "vol_z": stat_engine.hawkes_z, "vol_mult": 1.0, "timestamp": now
                 }
                 
-                # 🚀 FIX HEAP BUG: Insert monotonic timestamp as 2nd element so tuples never compare the dictionary payload
                 async with self.auction_lock:
                     heapq.heappush(self.auction_queue, (-net_sharpe, time.time(), symbol, payload))
                     
@@ -889,13 +882,11 @@ class DistributedQuantEngine:
             
             if not candidates: continue
             
-            # 🚀 FIX HEAP BUG: Unpack the 4-element tuple (neg_sharpe, timestamp, symbol, payload)
             top_neg_sharpe, _, top_symbol, top_payload = candidates[0]
             top_sharpe = -top_neg_sharpe
             
             async with self.auction_lock:
                 for i in range(1, len(candidates)):
-                    # Check timestamp from index 3 (the payload dictionary)
                     if time.time() - candidates[i][3]["timestamp"] < 5.0:
                         heapq.heappush(self.auction_queue, candidates[i])
 
@@ -926,7 +917,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(15) 
             
             try:
-                # 🚀 FIX BUG #5: Pass active positions as a protected set so open trades are never dropped
                 async with self.portfolio_state_lock:
                     protected_symbols = set(self.active_positions_lock.keys())
                     
@@ -1076,7 +1066,6 @@ class DistributedQuantEngine:
             if feature_engine:
                 feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
                 
-                # 🚀 FIX BUG #4: Only append to screener_memory if the interval matches primary trading timeframe
                 if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
                     self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
                     self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
@@ -1088,7 +1077,8 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=100_000_000)
+            # 🚀 V34.3 FIX: Expanded to $15M minimum turnover to massively increase trade opportunities
+            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
         except Exception as e:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
@@ -1242,7 +1232,7 @@ class DistributedQuantEngine:
                     regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V34.2 KELLY ENGINE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V34.3 KELLY ENGINE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝖦𝗅𝗈𝖻𝖺𝗅 𝖧𝗈𝗍-𝖲𝗐𝖺𝗉 𝖠𝗋𝖼𝗁𝗂𝗍𝖾𝖼𝗍𝗎𝗋𝖾</b>\n"
                     f"• Signal Engine:   <code>Cluster Warm-Started RLS + Friction Penalty</code>\n"
@@ -1492,7 +1482,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception as e: logger.warning(f"Engine boot balance fetch failed: {e}")
         
-        try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=100_000_000)
+        try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
         except Exception as e:
             logger.error(f"Engine boot full market fetch failed: {e}")
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
