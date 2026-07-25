@@ -1,14 +1,14 @@
 """
-🧪 V34.2 INSTITUTIONAL BACKTESTER: OMNI-SWARM PARITY
-Synchronized strictly with the Quant Swarm live node V34.2.
+🧪 V34.3 INSTITUTIONAL BACKTESTER: OMNI-SWARM PARITY
+Synchronized strictly with the Quant Swarm live node V34.3.
 
-🚨 PARITY FIXES (V34.2 ALIGNED):
-  - Levenberg-Marquardt Trace Damping (No more RLS hard resets)
-  - Cluster Warm-Start Priors (Calibrated altcoin beta clusters)
-  - Friction-Adjusted EV Gate (Evaluates Taker Fees + Spread drag)
-  - 1-Minute Granular Stepping (Eradicates Look-Ahead Bias)
-  - 🚀 NEW: 5-Minute Wilder-Smoothed ATR for exact Live Parity
-  - 🚀 NEW: Synthetic VPIN Volume-Clock generation
+🚨 PARITY FIXES (V34.3 ALIGNED):
+  - Levenberg-Marquardt Trace Damping
+  - Cluster Warm-Start Priors
+  - 1-Minute Granular Stepping
+  - 5-Minute Wilder-Smoothed ATR 
+  - Synthetic VPIN Volume-Clock 
+  - 🚀 NEW: Dynamic L2 Spread & OBI execution friction simulation
 """
 import argparse
 import time
@@ -323,7 +323,6 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
-        # 🚀 FIX HI-3: Insert dynamically calculated VPIN Z-score into feature vector
         base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
         cross_momentum = (ofi_fast_z / 3.0) * (hawkes_z / 3.0)
         cross_skew_abs = (skew / 10.0) * (ofi_delta_z / 6.0)
@@ -357,7 +356,6 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         else:
             dynamic_gate = 0.58
         
-        # 🚀 FIX HI-3: Use 5-minute Wilder smoothed ATR for Stop Loss calculation
         sim_atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
         sl_dist = max((sim_atr * p.sl_atr_mult) / sim_price, 0.005) * sim_price
         tp_dist = sl_dist * p.rr_ratio
@@ -381,15 +379,17 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
                     
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
-                # 🚀 Recompute ATR to ensure entry gate has exact parity
                 atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
                 if atr > 0:
                     sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.005)
                     tp_dist_pct = sl_dist_pct * p.rr_ratio
                     
+                    # 🚀 V34.3 FIX: Dynamic Spread & Slippage Simulation based on volatility
+                    # Instead of a hardcoded 0.0005, the spread expands and contracts logically.
+                    dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
                     taker_fee_pct = 0.0011
-                    approx_spread = 0.0005 
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - approx_spread - taker_fee_pct
+                    
+                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
                     
                     if net_ev_pct > 0.0005:  
                         
@@ -474,7 +474,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V34.2 OOS Sweep (Friction-Adjusted Expected Value)...")
+    print("\n⏳ Running V34.3 OOS Sweep (Friction-Adjusted Expected Value)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]

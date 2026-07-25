@@ -11,11 +11,11 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V34.2 SIGNAL APEX: VECTORIZED MEMORY LEDGER
+    🌌 V34.3 SIGNAL APEX: VECTORIZED MEMORY LEDGER
     Hyper-optimized Supabase connector. 
     Features pure NumPy vectorization for shadow OHLC forensics, 
     Dynamic Rolling Variance for the Bayesian DNA Matrix, and chunked upserts.
-    *V34.2 Upgrade: Full Dynamic Leverage Parity & Dual Win-Rate Key Aliasing.*
+    *V34.3 Upgrade: Strict Symbol Isolation for K-NN DNA Matrix Queries.*
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -281,21 +281,24 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}", exc_info=True)
             return 0
 
-    def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
+    def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V34.2 APEX: Dynamic Rolling Variance Normalization
+        🚀 V34.3 APEX: Dynamic Rolling Variance Normalization
         Hardcoded scalar limits removed. Standardizes features relative to market volatility.
         Includes dual win_rate/cluster_win_rate key aliasing for backwards compatibility.
+        *V34.3: Strict Symbol Isolation for Memory Queries*
         """
-        c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
-        c_obi = current_dna.get("z_obi", 0.0)
-        c_spread = current_dna.get("spread_pct", 0.001) * 1000 
+        c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
+        c_obi = float(current_dna.get("z_obi", 0.0))
+        c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
+        target_symbol = current_dna.get("symbol", "UNKNOWN")
         
         vol_bucket = round(c_vol * 2.0) / 2.0  
         obi_bucket = round(c_obi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
         
-        dna_hash = f"{vol_bucket}_{obi_bucket}_{spread_bucket}"
+        # Hash now includes symbol to prevent cross-asset cache contamination
+        dna_hash = f"{target_symbol}_{vol_bucket}_{obi_bucket}_{spread_bucket}"
         current_time = time.time()
         
         if dna_hash in self.dna_cache:
@@ -304,9 +307,11 @@ class MemoryBank:
                 return cached_result
 
         try:
+            # 🚀 V34.3 FIX: Isolate query by specific asset symbol
             query = self.supabase.table("quantitative_ledger")\
                 .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
                 .eq("resolved", True)\
+                .eq("symbol", target_symbol)\
                 .order("timestamp", desc=True)\
                 .limit(2000)
                 

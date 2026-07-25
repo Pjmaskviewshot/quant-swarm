@@ -627,7 +627,18 @@ class DistributedQuantEngine:
                 fetch_tasks = {}
                 for symbol in list(self.asset_basket):
                     metrics = self.screener_metrics.get(symbol, {})
-                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": 0.0, "spread_pct": 0.001}
+                    
+                    # 🚀 FIX: Pull real spread and OBI from the stat engines instead of hardcoding 0.0
+                    stat_engine = self.stat_engines.get(symbol)
+                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
+                    
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    spread_pct = 0.001
+                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
+                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
+
+                    # Pass the symbol string AND the dynamic data
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
                     fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
                 
                 if not fetch_tasks: continue
@@ -784,12 +795,15 @@ class DistributedQuantEngine:
                 vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9)) if len(hist) >= 50 and np.std(hist) > 0 else 0.0
             else: vpin_z = 0.0
         
+            # 🚀 FIX: Lock evaluation timestamp IMMEDIATELY to stop millisecond tick bursts causing duplicate signals
             throttle_time = 0.2 if abs(vpin_z) > 1.5 else 1.0
             if now - self.last_eval_time.get(symbol, 0.0) < throttle_time: return
+            self.last_eval_time[symbol] = now
             
             ob = self.orderbook_snapshots.get(symbol)
             if not ob or "bid_size" not in ob: return
             spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
+            vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
             
             async with self.eval_semaphores[symbol]:
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
@@ -824,12 +838,23 @@ class DistributedQuantEngine:
                 elif ai_action != "HOLD":
                     prob_success = prob_success / confidence_multiplier
                 
+                # 🚀 FIX: Store the true economics attribution so future DNA searches have real data
+                payload_features = {
+                    "symbol": symbol,
+                    "market_regime": regime,
+                    "virtual_sl": virtual_sl,
+                    "virtual_tp": virtual_tp,
+                    "adaptive_obi_z": vol_z, 
+                    "liquidity_density_ratio": vol_mult,
+                    "bid_ask_spread": spread_cost
+                }
+                
                 is_shadow_asset = symbol in self.shadow_basket
                 dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
                 
                 if is_shadow_asset or not dna_stats.get("is_armed", False):
                     if prob_success > 0.65: 
-                        self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime, "virtual_sl": virtual_sl, "virtual_tp": virtual_tp}, True])
+                        self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, payload_features, True])
                     return 
                 
                 taker_fee_pct = 0.0011 
@@ -841,9 +866,7 @@ class DistributedQuantEngine:
                     return
                     
                 dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
-                
                 dna_win_rate = dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))
-                
                 min_threshold = max(dynamic_gate, dna_win_rate)
                 if prob_success < min_threshold: return
                 
@@ -851,13 +874,12 @@ class DistributedQuantEngine:
                     "symbol": symbol, "action": action, "price": price, 
                     "prob_success": prob_success, "dna_stats": dna_stats, 
                     "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                    "vol_z": stat_engine.hawkes_z, "vol_mult": 1.0, "timestamp": now
+                    "vol_z": stat_engine.hawkes_z, "vol_mult": vol_mult, "timestamp": now,
+                    "payload_features": payload_features
                 }
                 
                 async with self.auction_lock:
                     heapq.heappush(self.auction_queue, (-net_sharpe, time.time(), symbol, payload))
-                    
-                self.last_eval_time[symbol] = now
                 
         except Exception as e:
             logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -908,7 +930,8 @@ class DistributedQuantEngine:
             self.track_task(self.execute_statistical_signal(
                 top_payload["symbol"], top_payload["action"], top_payload["price"], 
                 top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
-                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"]
+                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                top_payload.get("payload_features")
             ))
 
     async def run_omni_swarm_director(self):
@@ -937,8 +960,15 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"Omni-Swarm Director iteration failed: {e}")
 
-    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float):
+    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None):
         try:
+            # 🚀 FIX: Prevent redundant position daemon spawns
+            if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
+                logger.warning(f"⚠️ Lifecycle daemon already active for {symbol}. Aborting duplicate spawn.")
+                async with self.portfolio_state_lock:
+                    self.active_positions_lock.pop(symbol, None)
+                return
+
             signal_id = str(uuid.uuid4())
             sl_atr_mult, rr_ratio = self.live_params.get("sl_atr_mult", 1.5), self.live_params.get("rr_ratio", 2.0)
             
@@ -1032,7 +1062,9 @@ class DistributedQuantEngine:
                     actual_qty_filled = target_position_size
                     actual_filled_notional = target_notional
                     
-                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False])
+                # 🚀 FIX: Pass the payload_features to the ledger
+                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
                 
                 entry_msg = (
                     f"⚡ <b>ENTRY ALERT // {symbol}</b>\n"
@@ -1072,7 +1104,25 @@ class DistributedQuantEngine:
                     self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
                     self.screener_memory[symbol]["last_update_time"] = time.time()
 
-    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]): pass
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        
+        # 🚀 FIX: Actually store the live 24h volume turnover for the DNA matrix
+        try:
+            raw_data = data.get("raw_data", {})
+            if "turnover24h" in raw_data:
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                
+                # Create a normalized multiplier (e.g., 1.5x average volume)
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0:
+                    vol_mult = min(10.0, max(0.1, turnover / baseline))
+                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e:
+            logger.debug(f"Screener update parse failed for {symbol}: {e}")
 
     async def run_universe_refresher(self):
         try:
