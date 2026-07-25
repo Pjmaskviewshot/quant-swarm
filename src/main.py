@@ -524,7 +524,9 @@ class DistributedQuantEngine:
                     self.active_positions_lock[symbol] = direction
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 8}
                 
-                daemon_task = self.track_task(self._position_lifecycle_daemon(symbol, f"RECOVERY-{str(uuid.uuid4())[:8]}", direction, entry_price, atr, risk_matrix, 3, "RANGING"))
+                # 🚀 V34.3 FIX: Use a pure UUID to satisfy strict Postgres schemas
+                recovery_uuid = str(uuid.uuid4())
+                daemon_task = self.track_task(self._position_lifecycle_daemon(symbol, recovery_uuid, direction, entry_price, atr, risk_matrix, 3, "RANGING", is_recovery=True))
                 self.daemon_tasks[symbol] = daemon_task
         except Exception as e:
             logger.error(f"Failed synchronizing exchange state: {e}", exc_info=True)
@@ -826,9 +828,6 @@ class DistributedQuantEngine:
                 prob_success = max(p_up, p_down)
                 action = "BUY" if p_up > p_down else "SELL"
                 
-                # 🚀 V34.3 FIX: Explicitly define vol_z to prevent NameError
-                vol_z = stat_engine.hawkes_z
-                
                 macro_state = self.fsm.get_ai_macro_state(symbol)
                 ai_action = macro_state.get("action", "HOLD")
                 confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
@@ -873,7 +872,7 @@ class DistributedQuantEngine:
                     "symbol": symbol, "action": action, "price": price, 
                     "prob_success": prob_success, "dna_stats": dna_stats, 
                     "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                    "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": now,
+                    "vol_z": stat_engine.hawkes_z, "vol_mult": vol_mult, "timestamp": now,
                     "payload_features": payload_features
                 }
                 
@@ -1293,8 +1292,8 @@ class DistributedQuantEngine:
                 )
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING"):
-        exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if "RECOVERY" in signal_id else ("GHOST" if self.test_mode else "LIVE")}
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False):
+        exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
         max_lifetime_seconds = 14400 
 
