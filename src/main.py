@@ -826,6 +826,9 @@ class DistributedQuantEngine:
                 prob_success = max(p_up, p_down)
                 action = "BUY" if p_up > p_down else "SELL"
                 
+                # 🚀 V34.3 FIX: Explicitly define vol_z to prevent NameError
+                vol_z = stat_engine.hawkes_z
+                
                 macro_state = self.fsm.get_ai_macro_state(symbol)
                 ai_action = macro_state.get("action", "HOLD")
                 confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
@@ -835,7 +838,6 @@ class DistributedQuantEngine:
                 elif ai_action != "HOLD":
                     prob_success = prob_success / confidence_multiplier
                 
-                # 🚀 V34.3 FIX: Corrected variable reference from 'vol_z' to 'stat_engine.ofi_fast_z'
                 payload_features = {
                     "symbol": symbol,
                     "market_regime": regime,
@@ -871,7 +873,7 @@ class DistributedQuantEngine:
                     "symbol": symbol, "action": action, "price": price, 
                     "prob_success": prob_success, "dna_stats": dna_stats, 
                     "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                    "vol_z": stat_engine.hawkes_z, "vol_mult": vol_mult, "timestamp": now,
+                    "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": now,
                     "payload_features": payload_features
                 }
                 
