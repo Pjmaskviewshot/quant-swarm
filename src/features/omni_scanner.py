@@ -9,9 +9,10 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 class GlobalOmniScanner:
     """
-    🌌 V33.0 OMNI-SWARM CROSS-SECTIONAL SCANNER (MATH FIXED)
-    Scans the entire Bybit 250+ perpetual universe every 10 seconds.
-    Isolates Idiosyncratic Alpha (true price returns) and yields hot-swap commands.
+    🌌 V33.1 OMNI-SWARM CROSS-SECTIONAL SCANNER (TIER-1 ONLY)
+    Scans the Bybit 250+ perpetual universe every 10 seconds.
+    Isolates Idiosyncratic Alpha (true price returns) while strictly 
+    banning illiquid micro-caps to prevent spread-bleed on small accounts.
     """
     def __init__(self, executor):
         self.executor = executor
@@ -54,9 +55,12 @@ class GlobalOmniScanner:
         for sym, data in tickers.items():
             try:
                 current_price = float(data.get('lastPrice', 0))
+                turnover24h = float(data.get('turnover24h', 0))
                 
-                # Filter out assets under $1.00 to avoid micro-cap spread drag
-                if current_price < 1.0:
+                # 🚀 V33.1 FIX: LIQUIDITY GATE (Ban Micro-Caps)
+                # Ban assets priced under $0.50 OR with less than $50M 24h turnover
+                # This prevents the bot from trading garbage like ZAMAUSDT or HOMEUSDT
+                if current_price < 0.50 or turnover24h < 50_000_000.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -137,7 +141,7 @@ class GlobalOmniScanner:
                 
                 # Only swap if the Alpha differential is massive
                 if top_score > (deadest_score * 3.0):
-                    logger.critical(f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> Injecting {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})")
+                    logger.critical(f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> Injecting Tier-1 Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})")
                     return deadest_sym, top_sym
 
         return None, None

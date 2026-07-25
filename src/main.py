@@ -23,8 +23,8 @@ from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock
-from features.omni_scanner import GlobalOmniScanner  # 🚀 V33.0 IMPORT
-from portfolio.risk_manager import InstitutionalRiskVault
+from features.omni_scanner import GlobalOmniScanner  
+from portfolio.risk_manager import InstitutionalRiskVault  # 🚀 V34.0 IMPORT
 from execution.sor import SmartOrderRouter
 
 # External Connectors
@@ -42,15 +42,10 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V33_OMNI_SWARM")
+logger = logging.getLogger("QUANT_CORE.V34_KELLY_SWARM")
 
 
 class ClusterWarmStartRLS:
-    """
-    🌌 V32.0 CLUSTER-WARM-STARTED RLS ENGINE
-    Eliminates cold-start divergence and zero-knowledge learning delays by 
-    assigning calibrated covariance priors based on asset volatility profiles.
-    """
     @staticmethod
     def get_cluster_priors(symbol: str):
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
@@ -213,7 +208,6 @@ class ContinuousMicrostructureEngine:
                     if len(self.validation_buffer) == 100:
                         self.rolling_mse = np.mean(self.validation_buffer)
                         if self.rolling_mse > 0.35 or np.trace(self.P_trending) > 5000.0:
-                            # 🚀 V33.1 FIX: Soft Damping instead of hard trace reset
                             logger.warning(f"📉 Applying Levenberg-Marquardt Trace Damping for {self.symbol}.")
                             trace_t = np.trace(self.P_trending)
                             trace_r = np.trace(self.P_ranging)
@@ -362,6 +356,7 @@ class DistributedQuantEngine:
         
         self.fsm = SystemStateMachine()
         self.memory = MemoryBank()
+        # 🚀 V34.0: Injecting Kelly Engine into core
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.15)
         self.ai_matrix = AdversarialDebateMatrix()
         self.data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY", ""))
@@ -408,9 +403,8 @@ class DistributedQuantEngine:
         )
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
         
-        # 🚀 V33.0 OMNI-SWARM SCANNER
         self.omni_scanner = GlobalOmniScanner(self.executor)
-        self.stream_feed_instance = None  # Reference held for hot-swapping
+        self.stream_feed_instance = None  
 
     def _get_vpin_bucket_size(self, symbol: str) -> float:
         if "BTC" in symbol: return 1_000_000.0
@@ -752,7 +746,6 @@ class DistributedQuantEngine:
             is_buy = (str(trade_data.get("side", "")).upper() == "BUY")
             exchange_timestamp = float(trade_data.get("timestamp", now * 1000)) / 1000.0
             
-            # Phase 1: Lock-Free Mathematical State Updates
             self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
             
             edge_gate = self.edge_gates.get(symbol)
@@ -784,7 +777,6 @@ class DistributedQuantEngine:
             if not ob or "bid_size" not in ob: return
             spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
             
-            # Phase 2: Per-Symbol Semaphore Evaluation
             async with self.eval_semaphores[symbol]:
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
                 if structural_verdict["action"] == "HOLD": return
@@ -801,7 +793,6 @@ class DistributedQuantEngine:
                 virtual_tp = price + (tp_dist_pct * price) if structural_verdict["action"] == "BUY" else price - (tp_dist_pct * price)
                 tensor_alpha = self.tensor_oracle.compute_lead_lag_signal(symbol)
                 
-                # Phase 3: Minimal Scope Atomic Guard
                 async with self.symbol_locks[symbol]:
                     if symbol in self.active_positions_lock: return
 
@@ -825,22 +816,18 @@ class DistributedQuantEngine:
                             self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, {"symbol": symbol, "market_regime": regime, "virtual_sl": virtual_sl, "virtual_tp": virtual_tp}, True])
                         return 
                     
-                    # 🚀 V32.0 FRICTION-ADJUSTED EXPECTED VALUE (EV) CALCULATION
-                    taker_fee_pct = 0.0011  # Bybit 0.055% taker fee round-trip
+                    taker_fee_pct = 0.0011 
                     net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - taker_fee_pct
                     
-                    # Compute Risk-Adjusted Sharpe Proxy for Auction Ranking
                     net_sharpe = net_ev_pct / (sl_dist_pct + 1e-9)
                     
-                    # Require positive Net EV after fees and spread
-                    if net_ev_pct <= 0.0005:  # Must yield at least 5 bps net edge
+                    if net_ev_pct <= 0.0005: 
                         return
                         
                     dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
                     min_threshold = max(dynamic_gate, dna_stats.get("win_rate", 0.50))
                     if prob_success < min_threshold: return
                     
-                    # 🚀 V32.0 GLOBAL AUCTION PUSH
                     payload = {
                         "symbol": symbol, "action": action, "price": price, 
                         "prob_success": prob_success, "dna_stats": dna_stats, 
@@ -862,15 +849,9 @@ class DistributedQuantEngine:
                 logger.error(f"🛑 CIRCUIT BREAKER TRIGGERED for {symbol}. Paused for 5 minutes.")
 
     async def run_global_capital_auction_worker(self):
-        """
-        🚀 V32.0 GLOBAL CAPITAL AUCTION WORKER (PATCHED)
-        Runs continuously in the background. Batches candidate trade signals every 500ms,
-        ranks them by Friction-Adjusted Sharpe Ratio, and deploys available capital slots 
-        only to the single highest-conviction asset in the universe. Re-queues valid runners-up.
-        """
         logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
         while True:
-            await asyncio.sleep(0.5)  # 500ms auction window
+            await asyncio.sleep(0.5) 
             
             async with self.auction_lock:
                 if not self.auction_queue:
@@ -885,10 +866,8 @@ class DistributedQuantEngine:
             top_neg_sharpe, top_symbol, top_payload = candidates[0]
             top_sharpe = -top_neg_sharpe
             
-            # 🚀 V33.1 FIX: Put viable runners-up back in the queue
             async with self.auction_lock:
                 for i in range(1, len(candidates)):
-                    # Only re-queue if it's less than 5 seconds old
                     if time.time() - candidates[i][2]["timestamp"] < 5.0:
                         heapq.heappush(self.auction_queue, candidates[i])
 
@@ -914,29 +893,21 @@ class DistributedQuantEngine:
                 ))
 
     async def run_omni_swarm_director(self):
-        """
-        🚀 V33.0 OMNI-SWARM DIRECTOR
-        Monitors 250+ Bybit Perpetuals for Idiosyncratic Alpha.
-        Hot-swaps stagnant assets for explosive assets in real-time.
-        """
         logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
         while True:
-            await asyncio.sleep(15)  # Scan entire market every 15 seconds
+            await asyncio.sleep(15) 
             
             try:
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket)
                 
                 if dead_sym and hot_sym:
-                    # 1. Update Asset Array Safely
                     if dead_sym in self.asset_basket:
                         self.asset_basket.remove(dead_sym)
                     if hot_sym not in self.asset_basket:
                         self.asset_basket.append(hot_sym)
                     
-                    # 2. Initialize Internal Memory Structures for the new coin instantly
                     self._initialize_symbol_structures([hot_sym])
                     
-                    # 3. Fire WebSocket command to the ingestion stream dynamically 
                     if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
                         await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
                         
@@ -973,22 +944,9 @@ class DistributedQuantEngine:
                 self.active_positions_lock.pop(symbol, None)
                 return
             
-            correlation_penalty = 1.0
-            if hasattr(self.risk_vault, "correlation_groups"):
-                for group, assets in self.risk_vault.correlation_groups.items():
-                    if symbol in assets:
-                        active_correlated = sum(1 for a, a_dir in self.active_positions_lock.items() if a in assets and a != symbol and a_dir == direction)
-                        if active_correlated > 0: correlation_penalty = max(0.25, 1.0 - (active_correlated * 0.25))
-            
-            edge = confidence - 0.50
-            if edge <= 0.02: 
-                self.active_positions_lock.pop(symbol, None)
-                return
-                
-            base_risk = 0.01
-            risk_multiplier = edge / 0.10  
-            account_scaling = 0.75 if balance < 100.0 else 1.0
-            fractional_risk = max(0.005, min(0.025, base_risk * risk_multiplier * account_scaling * correlation_penalty))
+            # 🚀 V34.0 ASYMMETRIC KELLY ALLOCATION INJECTION
+            # Replaces the old static `base_risk` logic with the dynamic institutional fraction
+            fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence)
 
             if balance < 1.0: 
                 self.active_positions_lock.pop(symbol, None)
@@ -1016,7 +974,6 @@ class DistributedQuantEngine:
                     logger.critical(f"📜 PAPER TRADE EXECUTED: {symbol} {direction} {position_size} @ {current_price:.4f} (Slip: {slippage_bps:.1f} bps)")
             else:
                 try:
-                    # 🚀 FIX: Await adjust_leverage directly, do not wrap in safe_call
                     await self.executor.adjust_leverage(symbol, target_leverage)
                     await asyncio.sleep(0.2) 
                 except Exception as e: 
@@ -1037,13 +994,13 @@ class DistributedQuantEngine:
             if not self.test_mode:
                 self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}, False])
                 
-                # 🚀 REAL-TIME TELEGRAM ENTRY ALERT
                 entry_msg = (
                     f"⚡ <b>ENTRY ALERT // {symbol}</b>\n"
                     f"• Action: <b>{direction}</b>\n"
                     f"• Price: <code>{current_price:.5f}</code>\n"
                     f"• Size: <code>{position_size:.2f}</code>\n"
-                    f"• Edge: <code>{edge_bps:.1f} bps</code>"
+                    f"• Edge: <code>{edge_bps:.1f} bps</code>\n"
+                    f"• Kelly: <code>{fractional_risk:.2%} Risk</code>"
                 )
                 self.track_task(self._safe_telegram_dispatch(entry_msg, is_html=True))
                 
@@ -1078,11 +1035,12 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=10_000_000)
-            if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
+            # 🚀 V34.0: Banning illiquid assets by demanding $100M turnover
+            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=100_000_000)
+            if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
         except Exception as e:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
             
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
@@ -1126,7 +1084,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(basket=self.asset_basket + self.shadow_basket[:10], intervals=["1", "5", "15"], orderbook_callback=self.handle_incoming_orderbook_tick, screener_callback=self.handle_incoming_basket_screener_update, kline_callback=self.handle_incoming_kline_update, trade_callback=self.handle_incoming_trade, engine_reference=self)
-            self.stream_feed_instance = stream_feed  # 🚀 Expose to Omni-Swarm for Hot-Swapping
+            self.stream_feed_instance = stream_feed  
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
             def _on_stream_done(t):
                 if not t.cancelled() and not self.stream_restart_event.is_set(): self.stream_restart_event.set()
@@ -1204,17 +1162,17 @@ class DistributedQuantEngine:
                         regime_stats[regime]["count"] += 1
                         regime_stats[regime]["pnl"] += pnl
                     regime_text = "".join([f"• {'🕸️' if r == 'RANGING' else '🚀'} <b>{r}:</b> <code>{s['count']} trades</code> | <code>{s['pnl']:+.4f} (Live PnL)</code>\n" for r, s in regime_stats.items()]) or "• <i>No resolved live metrics recorded today yet.</i>\n"
-                    recent_trades = "".join([f"{'✅' if t.get('actual_outcome') == 'WIN' else '🔴'} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n" for t in sorted(data, key=lambda x: x.get('timestamp', ''))[-5:]]) or "• <i>Waiting for first live execution cycle...</i>\n"
+                    recent_trades = "".join([f"{'✅' if t.get('actual_outcome') in ['WIN', 'PROFIT'] else '🔴'} {t.get('symbol')} | {t.get('predicted_direction')} | PnL: {float(t.get('net_pnl', 0)):+.4f}\n" for t in sorted(data, key=lambda x: x.get('timestamp', ''))[-5:]]) or "• <i>Waiting for first live execution cycle...</i>\n"
                 except Exception as e:
                     logger.error(f"Heartbeat regime stat calculation failed: {e}")
                     regime_text, recent_trades = "• ⚠️ <i>Supabase ledger context error.</i>\n", "• <i>Unavailable</i>\n"
 
                 report = (
-                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V33.0 OMNI-SWARM)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💎 <b>𝗣██𝗔𝗦𝗞 𝗘𝗠𝗣𝗜𝗥𝗘 | 𝗤𝗨𝗔𝗡𝗧 𝗦𝗪𝗔𝗥𝗠 (V34.0 KELLY ENGINE)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏱️ <b>𝗨𝗽𝘁𝗶𝗺𝗲:</b> <code>{uptime_hours:.2f} Hours</code> | 🛰️ <b>𝗡𝗼𝗱𝗲𝘀:</b> <code>{len(self.asset_basket)} Live</code>\n\n"
                     f"⚙️ <b>𝗘𝗡𝗚𝗜𝗡𝗘 𝗦𝗧𝗔𝗧𝗨𝗦: 𝖦𝗅𝗈𝖻𝖺𝗅 𝖧𝗈𝗍-𝖲𝗐𝖺𝗉 𝖠𝗋𝖼𝗁𝗂𝗍𝖾𝖼𝗍𝗎𝗋𝖾</b>\n"
                     f"• Signal Engine:   <code>Cluster Warm-Started RLS + Friction Penalty</code>\n"
-                    f"• Omni Scanner:    <code>Beta-Stripped Alpha Identification (250+ Assets)</code>\n"
+                    f"• Position Sizing: <code>Asymmetric Half-Kelly Compounding</code>\n"
                     f"• Execution Guard: <code>Infinite Loop Drawdown Breaker Verification</code>\n"
                     f"• Risk Engine:     <code>5% Daily Limit | Strict Max 5x Leverage</code>\n\n"
                     f"💵 <b>𝗙𝗜𝗡𝗔𝗡𝗖𝗜𝗔🇱 𝗩𝗔𝗨🇱𝗧 𝗣𝗥𝗢𝗙𝗜🇱𝗘</b>\n"
@@ -1319,36 +1277,30 @@ class DistributedQuantEngine:
                     logger.debug(f"Position check failed for {symbol}: {e}")
                     position_gone = False
 
-                try:
-                    settlement = await self.executor.check_recent_settlement(symbol, 300) 
-                    if settlement.get("closed"):
-                        pnl = float(settlement.get('pnl', 0.0))
-                        self.log_to_wal_sync("settlement", [signal_id, pnl, actual_entry - current_price if direction == "BUY" else current_price - actual_entry, settlement['outcome'], exec_details])
-                        self.risk_vault.update_position_ledger(symbol, 0.0)
-                        
-                        # 🚀 REAL-TIME TELEGRAM EXIT ALERT
-                        exit_msg = (
-                            f"🏁 <b>TRADE CLOSED // {symbol}</b>\n"
-                            f"• Outcome: <b>{settlement['outcome']}</b>\n"
-                            f"• Net PnL: <code>{pnl:+.4f} USDT</code>"
-                        )
-                        self.track_task(self._safe_telegram_dispatch(exit_msg, is_html=True))
-                        break
-                except Exception as e:
-                    logger.debug(f"Settlement check failed for {symbol}: {e}")
-
                 if position_gone:
-                    try: net_pnl = float((await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=5)).get("result", {}).get("list", [])[0].get("closedPnl", 0.0))
+                    await asyncio.sleep(3.0) 
+                    try: 
+                        closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
+                        closed_list = closed_data.get("result", {}).get("list", [])
+                        if closed_list:
+                            net_pnl = float(closed_list[0].get("closedPnl", 0.0))
+                            real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
+                            # 🚀 V34.0: Feed PnL back into the Kelly Engine
+                            self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (actual_entry * float(closed_list[0].get("qty", 1))))
+                        else:
+                            net_pnl = 0.0
+                            real_outcome = "RECONCILED"
                     except Exception as e:
                         logger.debug(f"Closed PnL fetch failed for {symbol}: {e}")
                         net_pnl = 0.0
+                        real_outcome = "RECONCILED"
                     
-                    self.log_to_wal_sync("settlement", [signal_id, net_pnl, 0.0, "RECONCILED", exec_details])
+                    self.log_to_wal_sync("settlement", [signal_id, net_pnl, 0.0, real_outcome, exec_details])
                     self.risk_vault.update_position_ledger(symbol, 0.0)
                     
-                    # 🚀 REAL-TIME TELEGRAM RECONCILIATION ALERT
                     exit_msg = (
-                        f"🏁 <b>TRADE RECONCILED // {symbol}</b>\n"
+                        f"🏁 <b>TRADE CLOSED // {symbol}</b>\n"
+                        f"• Outcome: <b>{'🟢 WIN' if net_pnl > 0 else '🔴 LOSS'}</b>\n"
                         f"• Net PnL: <code>{net_pnl:+.4f} USDT</code>"
                     )
                     self.track_task(self._safe_telegram_dispatch(exit_msg, is_html=True))
