@@ -1,12 +1,14 @@
 """
-🧪 V33.1 INSTITUTIONAL BACKTESTER: OMNI-SWARM PARITY
-Synchronized strictly with the Quant Swarm live node V33.1.
+🧪 V34.2 INSTITUTIONAL BACKTESTER: OMNI-SWARM PARITY
+Synchronized strictly with the Quant Swarm live node V34.2.
 
-🚨 PARITY FIXES (V33.1 ALIGNED):
+🚨 PARITY FIXES (V34.2 ALIGNED):
   - Levenberg-Marquardt Trace Damping (No more RLS hard resets)
   - Cluster Warm-Start Priors (Calibrated altcoin beta clusters)
   - Friction-Adjusted EV Gate (Evaluates Taker Fees + Spread drag)
   - 1-Minute Granular Stepping (Eradicates Look-Ahead Bias)
+  - 🚀 NEW: 5-Minute Wilder-Smoothed ATR for exact Live Parity
+  - 🚀 NEW: Synthetic VPIN Volume-Clock generation
 """
 import argparse
 import time
@@ -78,7 +80,7 @@ class Params:
     mlofi_decay: float = 0.5
 
 def get_cluster_priors(symbol: str):
-    """V33.1 PARITY: Cluster Warm-Start Initialization"""
+    """V34.2 PARITY: Cluster Warm-Start Initialization"""
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
         w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05, 0.05, 0.05])
         w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12, 0.08, 0.07])
@@ -93,13 +95,45 @@ def get_cluster_priors(symbol: str):
         p_scale = 0.5 
     return w_trend, w_range, np.eye(9) * p_scale
 
-def compute_atr(candles: List[Dict], i: int, period: int) -> float:
-    if i < period + 1: return 0.0
+def compute_atr_5m_wilder(candles: List[Dict], i: int, period: int) -> float:
+    """
+    🚀 V34.2 FIX: Simulates exact Live Parity by downsampling 1m to 5m, 
+    then applying Wilder's Exponential Smoothing instead of raw SMA.
+    """
+    if i < (period * 5) + 1: 
+        return 0.0
+        
+    # Extract the last (period * 5 + 5) minutes to build ~15 5-minute bars
+    history_slice = candles[max(0, i - (period * 5 + 10)) : i]
+    if len(history_slice) < period * 5: return 0.0
+    
+    # Resample to 5m pseudo-bars
+    bars_5m = []
+    for k in range(0, len(history_slice), 5):
+        chunk = history_slice[k:k+5]
+        if not chunk: continue
+        bars_5m.append({
+            "high": max([c["high"] for c in chunk]),
+            "low": min([c["low"] for c in chunk]),
+            "close": chunk[-1]["close"]
+        })
+        
+    if len(bars_5m) < period + 1: return 0.0
+    
+    # Calculate True Range
     trs = []
-    for j in range(i - period, i):
-        h, l, pc = candles[j]["high"], candles[j]["low"], candles[j - 1]["close"]
+    for j in range(1, len(bars_5m)):
+        h, l, pc = bars_5m[j]["high"], bars_5m[j]["low"], bars_5m[j-1]["close"]
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return float(np.mean(trs))
+        
+    trs = trs[-period:]
+    
+    # Wilder's Smoothing (alpha = 1/period)
+    atr = trs[0]
+    for tr in trs[1:]:
+        atr = (atr * (period - 1) + tr) / period
+        
+    return float(atr)
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
@@ -120,7 +154,13 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
         return float(np.sign(btc_momentum) * min(1.0, abs(correlation)))
     return 0.0
 
-def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def get_vpin_bucket_size(symbol: str) -> float:
+    if "BTC" in symbol: return 1_000_000.0
+    if "ETH" in symbol: return 500_000.0
+    if "SOL" in symbol: return 250_000.0
+    return 100_000.0
+
+def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -139,7 +179,13 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     log_returns = deque(maxlen=500)
     inst_variance = 1e-6
     
-    # 🚀 V33.1 PARITY: Cluster Initialization
+    # 🚀 V34.2 PARITY: VPIN Volume Clock Tracker
+    vpin_bucket_size = get_vpin_bucket_size(symbol)
+    current_bucket_vol = 0.0
+    current_bucket_buy_vol = 0.0
+    vpin_history = deque(maxlen=200)
+    synthetic_vpin_z = 0.0
+    
     w_t, w_r, P_init = get_cluster_priors(symbol)
     weights_trending = w_t.copy()
     weights_ranging  = w_r.copy()
@@ -147,7 +193,7 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     P_ranging = P_init.copy()
     forgetting_factor = 0.998      
     
-    rls_updates = 100  # Armed instantly like live V33.1
+    rls_updates = 100  # Armed instantly like live
     
     validation_buffer = deque(maxlen=100)
     prediction_buffer = deque()
@@ -156,7 +202,7 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
 
-    for i in range(45, len(target_candles)):
+    for i in range(75, len(target_candles)):
         c = target_candles[i]
         c_prev = target_candles[i-1]
         now_ts = c['ts']
@@ -169,6 +215,23 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         log_returns.append(ret)
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
+
+        # --- 🚀 PROCESS VPIN VOLUME CLOCK ---
+        vol_notional = c['volume'] * sim_price
+        current_bucket_vol += vol_notional
+        if c['close'] >= c['open']: current_bucket_buy_vol += vol_notional
+            
+        if current_bucket_vol >= vpin_bucket_size:
+            sell_vol = current_bucket_vol - current_bucket_buy_vol
+            vpin_score = abs(current_bucket_buy_vol - sell_vol) / current_bucket_vol
+            vpin_history.append(vpin_score)
+            
+            if len(vpin_history) > 20:
+                hist_arr = np.array(vpin_history)
+                synthetic_vpin_z = float((vpin_score - np.mean(hist_arr)) / (np.std(hist_arr) + 1e-9))
+            
+            current_bucket_vol = 0.0
+            current_bucket_buy_vol = 0.0
 
         # --- 🧠 PROCESS RLS MATURITIES (Strict Bracket Target) ---
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 300000:  
@@ -191,7 +254,6 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 validation_buffer.append(error ** 2)
                 if len(validation_buffer) == 100:
                     rolling_mse = np.mean(validation_buffer)
-                    # 🚀 V33.1 PARITY: Levenberg-Marquardt Trace Damping
                     if rolling_mse > 0.35 or np.trace(P_trending) > 5000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
@@ -261,7 +323,8 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
-        base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, 0.0]) 
+        # 🚀 FIX HI-3: Insert dynamically calculated VPIN Z-score into feature vector
+        base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
         cross_momentum = (ofi_fast_z / 3.0) * (hawkes_z / 3.0)
         cross_skew_abs = (skew / 10.0) * (ofi_delta_z / 6.0)
         
@@ -294,7 +357,8 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         else:
             dynamic_gate = 0.58
         
-        sim_atr = compute_atr(target_candles, i, p.atr_period)
+        # 🚀 FIX HI-3: Use 5-minute Wilder smoothed ATR for Stop Loss calculation
+        sim_atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
         sl_dist = max((sim_atr * p.sl_atr_mult) / sim_price, 0.005) * sim_price
         tp_dist = sl_dist * p.rr_ratio
         virt_sl = sim_price - sl_dist if action_dir == "BUY" else sim_price + sl_dist
@@ -317,17 +381,17 @@ def run_v31_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
                     
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
-                atr = compute_atr(target_candles, i, p.atr_period)
+                # 🚀 Recompute ATR to ensure entry gate has exact parity
+                atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
                 if atr > 0:
                     sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.005)
                     tp_dist_pct = sl_dist_pct * p.rr_ratio
                     
-                    # 🚀 V33.1 PARITY: Friction-Adjusted Expected Value (EV) Limit
                     taker_fee_pct = 0.0011
-                    approx_spread = 0.0005 # Approximated slippage/spread floor
+                    approx_spread = 0.0005 
                     net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - approx_spread - taker_fee_pct
                     
-                    if net_ev_pct > 0.0005:  # Must yield at least 5 bps net edge
+                    if net_ev_pct > 0.0005:  
                         
                         entry = c['close']
                         sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
@@ -410,7 +474,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V33.1 OOS Sweep (Friction-Adjusted Expected Value)...")
+    print("\n⏳ Running V34.2 OOS Sweep (Friction-Adjusted Expected Value)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -420,7 +484,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
     for rr in rr_ratios:
         for atr_m in atr_mults:
             p = Params(rr_ratio=rr, sl_atr_mult=atr_m)
-            test = run_v31_backtest(t_cand[split:], b_cand[split:], p, symbol)
+            test = run_v34_backtest(t_cand[split:], b_cand[split:], p, symbol)
             
             if test.get("trades", 0) > 10 and test.get("expectancy_per_trade", 0) > 0:
                 results.append({
@@ -461,8 +525,8 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        train = run_v31_backtest(t_cand[:split], b_cand[:split], params, args.symbol)
-        test = run_v31_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        train = run_v34_backtest(t_cand[:split], b_cand[:split], params, args.symbol)
+        test = run_v34_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
 
         print("\n=== IN-SAMPLE (first 60%) ===")
         for k, v in train.items():

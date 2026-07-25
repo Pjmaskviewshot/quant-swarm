@@ -11,11 +11,11 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🌌 V31.3 SIGNAL APEX: VECTORIZED MEMORY LEDGER
+    🌌 V34.2 SIGNAL APEX: VECTORIZED MEMORY LEDGER
     Hyper-optimized Supabase connector. 
     Features pure NumPy vectorization for shadow OHLC forensics, 
     Dynamic Rolling Variance for the Bayesian DNA Matrix, and chunked upserts.
-    *V31.3 Upgrade: Strict Parity with Live Risk Vault Leverage Math.*
+    *V34.2 Upgrade: Full Dynamic Leverage Parity & Dual Win-Rate Key Aliasing.*
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -136,9 +136,9 @@ class MemoryBank:
 
     def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float, interval_mins: float = 15.0) -> int:
         """
-        🚀 V31.3 APEX: OHLC Vectorized Resolution Engine.
+        🚀 V34.2 APEX: OHLC Vectorized Resolution Engine.
         Uses pure NumPy array math to accurately simulate intra-candle TP/SL hunting
-        without using slow Python loops. Completely eradicates shadow execution latency.
+        without using slow Python loops. Fully aligned with live dynamic leverage scaling.
         """
         resolved_count = 0
 
@@ -239,29 +239,14 @@ class MemoryBank:
                     elif prediction == "SELL" and exit_price < entry_price:
                         is_win = True
 
-                    # 🚀 V31.3 FIX: Exact Parity with Live Risk Vault Leverage Math
-                    shadow_balance = 100.0
-                    fractional_risk = 0.015 # Assume standard 1.5% risk for shadow modeling
-                    shadow_notional = shadow_balance * fractional_risk
-                    
-                    # Prevent division by zero mathematically
+                    # 🚀 V34.2 HI-1 FIX: Dynamic Leverage Parity with Live Risk Vault
                     entry_price_safe = entry_price if entry_price > 0 else 1e-9
-                    sl_distance_pct = abs(exit_price - entry_price_safe) / entry_price_safe if not is_win else abs(sl_price - entry_price_safe) / entry_price_safe
-                    sl_distance_pct = max(0.005, sl_distance_pct) # Floor to match live
-                    
-                    base_leverage = 3.0
-                    hard_cap = 5.0
-                    
-                    # Exact Live Formula: max_safe = 1.0 / (sl_pct * 1.5)
+                    sl_distance_pct = abs(sl_price - entry_price_safe) / entry_price_safe
+                    sl_distance_pct = max(0.005, sl_distance_pct) # 0.5% floor to match live
+
+                    # Live Formula: max_safe_leverage = 1.0 / (sl_distance_pct * 1.5)
                     max_safe_leverage = 1.0 / (sl_distance_pct * 1.5)
-                    
-                    if shadow_notional > (shadow_balance * 3.0):
-                        target_leverage = max(base_leverage, min(hard_cap, shadow_notional / shadow_balance))
-                    else:
-                        target_leverage = base_leverage
-                        
-                    simulated_leverage = min(target_leverage, max_safe_leverage)
-                    simulated_leverage = max(1.0, min(hard_cap, simulated_leverage))
+                    simulated_leverage = max(1.0, min(5.0, float(math.floor(max_safe_leverage))))
                     
                     TAKER_ROUND_TRIP = 0.0011
                     
@@ -275,6 +260,7 @@ class MemoryBank:
                     row["actual_outcome"] = "WIN" if is_win else "LOSS"
                     row["is_correct"] = is_win
                     row["net_pnl"] = float(net_pnl)
+                    row["leverage"] = float(simulated_leverage)
                     
                     row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held * interval_mins)), 2)
                     
@@ -282,7 +268,7 @@ class MemoryBank:
                     resolved_count += 1
                 
             if update_batch:
-                # Chunked Upserts to prevent Supabase N+1 payload rejection
+                # Chunked Upserts to prevent Supabase payload rejection
                 chunk_size = 100
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
@@ -297,9 +283,9 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, float], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V27.0 APEX: Dynamic Rolling Variance Normalization
-        Hardcoded scalar limits have been removed. The Euclidean distance matrix 
-        is now dynamically standardizing features relative to actual market volatility.
+        🚀 V34.2 APEX: Dynamic Rolling Variance Normalization
+        Hardcoded scalar limits removed. Standardizes features relative to market volatility.
+        Includes dual win_rate/cluster_win_rate key aliasing for backwards compatibility.
         """
         c_vol = min(current_dna.get("vol_mult", 1.0), 10.0) 
         c_obi = current_dna.get("z_obi", 0.0)
@@ -328,10 +314,15 @@ class MemoryBank:
             historical_data = response.data if response else []
             
             if len(historical_data) < k_neighbors:
-                return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": len(historical_data), "cluster_win_rate": 0.50}
+                return {
+                    "bayesian_edge": 0.50, 
+                    "is_armed": False, 
+                    "matched_samples": len(historical_data), 
+                    "cluster_win_rate": 0.50,
+                    "win_rate": 0.50  # 🚀 Bug #1 Fix Alias
+                }
 
             # ⚡ DYNAMIC FEATURE STANDARDIZATION
-            # Extract historical features into arrays for variance calculation
             h_vols = [min(float(row.get("vol_mult", 1.0)), 10.0) for row in historical_data]
             h_obis = [float(row.get("z_obi", 0.0)) for row in historical_data]
             
@@ -342,7 +333,6 @@ class MemoryBank:
                 h_spread_pct = (h_spread_raw / h_price) * 1000 if h_price > 0 else 0.001
                 h_spreads.append(h_spread_pct)
                 
-            # Calculate rolling standard deviations with epsilon guards to prevent Division-by-Zero
             std_vol = np.std(h_vols) + 1e-9
             std_obi = np.std(h_obis) + 1e-9
             std_spread = np.std(h_spreads) + 1e-9
@@ -353,7 +343,6 @@ class MemoryBank:
                 h_obi = h_obis[i]
                 h_spread_pct = h_spreads[i]
                 
-                # Normalize distances relative to the market's current structural variance
                 norm_vol = (c_vol - h_vol) / std_vol
                 norm_obi = (c_obi - h_obi) / std_obi
                 norm_spread = (c_spread - h_spread_pct) / std_spread
@@ -379,12 +368,14 @@ class MemoryBank:
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
             is_armed = bayesian_edge >= 0.55
+            win_rate_calc = round(wins / total, 4) if total > 0 else 0.50
             
             result_payload = {
                 "bayesian_edge": round(bayesian_edge, 4),
                 "is_armed": is_armed,
                 "matched_samples": total,
-                "cluster_win_rate": round(wins / total, 4)
+                "cluster_win_rate": win_rate_calc,
+                "win_rate": win_rate_calc  # 🚀 Bug #1 Fix Alias
             }
             
             self.dna_cache[dna_hash] = (current_time, result_payload)
@@ -392,4 +383,10 @@ class MemoryBank:
 
         except Exception as e:
             logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}", exc_info=True)
-            return {"bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0, "cluster_win_rate": 0.50}
+            return {
+                "bayesian_edge": 0.50, 
+                "is_armed": False, 
+                "matched_samples": 0, 
+                "cluster_win_rate": 0.50,
+                "win_rate": 0.50  # 🚀 Bug #1 Fix Alias
+            }

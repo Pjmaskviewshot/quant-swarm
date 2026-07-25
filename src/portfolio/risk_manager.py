@@ -13,7 +13,7 @@ class InstitutionalRiskVault:
         exchange_min_notional: float = 5.0
     ):
         """
-        💎 V34.0 APEX: ASYMMETRIC KELLY ENGINE
+        💎 V34.1 APEX: ASYMMETRIC KELLY ENGINE (MACRO-SYNCED)
         Dynamically scales capital allocation based on live win rate, payoff ratios,
         and realized account equity. Limits drawdown using half-Kelly damping.
         """
@@ -33,7 +33,7 @@ class InstitutionalRiskVault:
             "DYNAMIC_BTC_COVARIANCE": ["BTCUSDT"] 
         }
 
-        # 🚀 V34.0 FIX: Kelly Calibration State
+        # Kelly Calibration State
         self.rolling_wins = 0
         self.rolling_losses = 0
         self.avg_win_pct = 0.02
@@ -43,7 +43,9 @@ class InstitutionalRiskVault:
         if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
             return
             
-        base_prices = np.array(price_histories[base_asset][-150:]) 
+        # 🚀 V34.1 FIX: Expanded correlation window to 1,440 minutes (24 hours)
+        # This captures true structural market beta, not just transient micro-noise.
+        base_prices = np.array(price_histories[base_asset][-1440:]) 
         base_returns = np.diff(base_prices) / (base_prices[:-1] + 1e-9)
         
         restricted_group = [base_asset]
@@ -67,7 +69,6 @@ class InstitutionalRiskVault:
         logger.debug(f"🕸️ COVARIANCE MATRIX UPDATED: {len(restricted_group)} assets locked in high-correlation with {base_asset}.")
 
     def update_kelly_metrics(self, is_win: bool, pnl_pct: float):
-        """🚀 V34.0 FIX: Updates the rolling parameters required for the Kelly formula."""
         if is_win:
             self.rolling_wins = min(100, self.rolling_wins + 1)
             self.avg_win_pct = (self.avg_win_pct * 0.9) + (abs(pnl_pct) * 0.1)
@@ -77,7 +78,7 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float) -> float:
         """
-        🚀 V34.0 FIX: Calculates the Asymmetric Half-Kelly fraction.
+        Calculates the Asymmetric Half-Kelly fraction.
         K = W - ((1 - W) / R)
         """
         total_trades = self.rolling_wins + self.rolling_losses

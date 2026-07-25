@@ -11,11 +11,12 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V29.2 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
-    Features Exact Order-ID Tracking, Slippage Clamps, and Phantom-Trade Prevention.
-    Upgraded with Robust Cancel-Retry Loops to eliminate Zombie/Orphan orders.
+    🚀 V34.1 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+    Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
+    Accelerated Maker-Peg execution, and Phantom-Trade Prevention.
     """
-    def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0050):
+    # 🚀 FIX: Hard cap global slippage defaults to 12 bps maximum (0.12%)
+    def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
         self.instrument_cache: Dict[str, Dict[str, float]] = {}
@@ -80,7 +81,9 @@ class SmartOrderRouter:
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         for attempt in range(3):
-            escalation_pct = 0.001 * (2 ** attempt)
+            # 🚀 FIX: More granular escalation: 2bps, 4bps, 8bps (Capped tightly at 12bps)
+            escalation_base = 0.0002
+            escalation_pct = escalation_base * (2 ** attempt)
             escalation_pct = min(escalation_pct, self.max_slippage_pct)
             
             if side == "Buy": target_price = current_mid_price * (1.0 + escalation_pct)
@@ -125,7 +128,7 @@ class SmartOrderRouter:
             except Exception as e:
                 logger.error(f"⚠️ Network Exception during Flash Strike for {symbol}: {e}")
                 
-        logger.error(f"❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or Slippage Cap hit.")
+        logger.error(f"❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or strict 12-bps Slippage Cap hit.")
         return False
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60):
@@ -142,18 +145,20 @@ class SmartOrderRouter:
         rejection_count = 0  
 
         while time.time() - start_time < timeout:
-            loop_delay = 1.5 
+            # 🚀 FIX: Accelerated limit loop (from 1.5s down to 0.5s)
+            loop_delay = 0.5 
 
             try:
                 target_price = 0.0
                 if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
                     target_price = self._get_meaningful_tob(depth_snapshot, side)
-                    if target_price > 0.0: loop_delay = 0.2
+                    # 🚀 FIX: Hyper-aggressive TOB match timing (0.1s)
+                    if target_price > 0.0: loop_delay = 0.1
                     
                 if target_price <= 0.0 and feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
                     ob_data = feature_engine.get_orderbook_snapshot()
                     target_price = self._get_meaningful_tob(ob_data, side)
-                    if target_price > 0.0: loop_delay = 0.2
+                    if target_price > 0.0: loop_delay = 0.1
                     
                 if target_price <= 0.0:
                     target_price = await self._fetch_rest_tob(symbol, side)
