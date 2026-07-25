@@ -39,11 +39,9 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V26.1 APEX: PARALLELIZED UNIFIED API EXECUTOR
-    Upgraded with an expanded 8-worker thread pool to eliminate thread-serialization 
-    bottlenecks across multi-asset swarm deployments, paired with strict token-bucket rate limiting.
-    Includes strict Fail-Fast logic for malformed 10002 responses to prevent 
-    Token-Bucket limits from being burned on guaranteed-fail requests.
+    🚀 V34.3 APEX: PARALLELIZED UNIFIED API EXECUTOR
+    Upgraded with strict Leverage Caching and a 95% Sizing Buffer to eliminate 
+    API rejections (110043 & 110007) and guarantee Maker-Peg order routing.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 8):
         # Store keys for error-scrubbing purposes
@@ -60,9 +58,11 @@ class BybitUnifiedExecutor:
         # 🛡️ Initialize the global API rate limiter (10 burst, 5 per sec sustained)
         self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
         
-        # 🚀 V26 UPGRADE: Expanded Multi-Thread Pool (Fixes Thread Serialization Bottleneck)
-        # Prevents concurrent requests across different asset nodes from blocking each other in single-file queues
+        # 🚀 V26 UPGRADE: Expanded Multi-Thread Pool
         self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="BybitIsolator")
+        
+        # 🚀 V34.3 UPGRADE: Local Leverage Cache prevents 110043 API Rejections
+        self._leverage_cache: Dict[str, int] = {}
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
@@ -83,7 +83,7 @@ class BybitUnifiedExecutor:
                 
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
                 
-                # 🚀 V26.1 FIX: Fail Fast on Parameter Error (10002). Never retry malformed requests.
+                # Fail Fast on Parameter Error (10002). Never retry malformed requests.
                 if ret_code == 10002:
                     error_msg = f"❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
                     logger.error(error_msg)
@@ -99,7 +99,6 @@ class BybitUnifiedExecutor:
                 
             except Exception as e:
                 # 🛑 SECRETS HYGIENE
-                # Scrub API key and Secret from any network errors before standard output
                 error_str = str(e)
                 if self.api_key and self.api_key in error_str:
                     error_str = error_str.replace(self.api_key, "********")
@@ -131,53 +130,73 @@ class BybitUnifiedExecutor:
             account_data = response["result"]["list"][0]
             for coin_info in account_data.get("coin", []):
                 if coin_info.get("coin") == "USDT":
-                    return float(coin_info.get("walletBalance", 0.0))
+                    # 🚀 V34.3 FIX: 95% Sizing Buffer
+                    # Leaves 5% free margin locally to absorb limit-order fee holds
+                    # and prevent 'ab not enough for new order' (110007) errors.
+                    raw_balance = float(coin_info.get("walletBalance", 0.0))
+                    return raw_balance * 0.95
             return 0.0
         except Exception:
             logger.error(f"Failed to fetch Bybit wallet balance metrics.")
             return 0.0
 
-    async def adjust_leverage(self, symbol: str, leverage: int) -> bool:
+    async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:
         """
-        Safely modifies isolated/cross leverage thresholds before order dispatch.
-        Attempts to set leverage, gracefully clamping to exchange maximums if rejected.
+        🚀 V34.3: Smart Leverage Caching
+        Only pushes an API update if the symbol's current leverage on Bybit 
+        is different from the target. Saves API calls & latency.
         """
         try:
+            # Check local cache first
+            if self._leverage_cache.get(symbol) == target_leverage:
+                return True
+                
+            # If not in cache, verify actual state on exchange to prevent 110043 error
+            pos_info = await self._safe_api_call(
+                self.client.get_positions,
+                category="linear",
+                symbol=symbol
+            )
+            
+            positions = pos_info.get("result", {}).get("list", [])
+            if positions:
+                current_leverage = int(float(positions[0].get("leverage", 1)))
+                self._leverage_cache[symbol] = current_leverage
+                
+                if current_leverage == target_leverage:
+                    logger.debug(f"Leverage for {symbol} is already perfectly set at {target_leverage}x.")
+                    return True
+
+            # State is out of sync. Push the update.
             await self._safe_api_call(
                 self.client.set_leverage,
                 category="linear",
                 symbol=symbol,
-                buyLeverage=str(leverage),
-                sellLeverage=str(leverage)
+                buyLeverage=str(target_leverage),
+                sellLeverage=str(target_leverage)
             )
-            logger.info(f"⚙️ AUTO-SCALED LEVERAGE: {symbol} is now set to {leverage}x")
+            
+            self._leverage_cache[symbol] = target_leverage
+            logger.info(f"⚙️ AUTO-SCALED LEVERAGE: {symbol} is now set to {target_leverage}x")
             return True
             
         except Exception as e:
             error_msg = str(e)
             
-            # Capture Bybit API error code 110043 ('Leverage not modified') 
-            if "110043" in error_msg or "not modified" in error_msg.lower():
-                logger.debug(f"Leverage for {symbol} is already safely configured at {leverage}x.")
-                return True
-                
             # ErrCode 110013: Requested leverage exceeds Bybit's hard risk limit for this specific altcoin
             if "110013" in error_msg:
                 try:
-                    # Deterministic API Query
                     info = await self._safe_api_call(
                         self.client.get_instruments_info,
                         category="linear",
                         symbol=symbol
                     )
                     
-                    # Safely extract exact maximum allowed leverage directly from the exchange specifications
                     max_allowed_str = info["result"]["list"][0]["leverageFilter"]["maxLeverage"]
                     max_allowed = int(float(max_allowed_str))
                     
-                    logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {leverage}x down to {max_allowed}x.")
+                    logger.warning(f"⚠️ Exchange Risk Cap hit for {symbol}. Auto-clamping leverage from {target_leverage}x down to {max_allowed}x.")
                     
-                    # Immediately retry the exchange request with the safely capped maximum
                     await self._safe_api_call(
                         self.client.set_leverage,
                         category="linear",
@@ -185,6 +204,7 @@ class BybitUnifiedExecutor:
                         buyLeverage=str(max_allowed),
                         sellLeverage=str(max_allowed)
                     )
+                    self._leverage_cache[symbol] = max_allowed
                     return True
                 except Exception:
                     logger.error(f"Leverage auto-clamping failed for {symbol}.")

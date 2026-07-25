@@ -1077,7 +1077,6 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            # 🚀 V34.3 FIX: Expanded to $15M minimum turnover to massively increase trade opportunities
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
         except Exception as e:
