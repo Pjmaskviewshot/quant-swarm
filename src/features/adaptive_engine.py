@@ -10,9 +10,10 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V35.0 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
+    🔬 V35.4 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
     Upgraded to track 5 distinct non-linear market states using Gaussian emission probabilities.
     Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
+    Matrix aligned with backtest for perfect predictive parity.
     """
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
         # Local Orderbook Reconstruction Cache
@@ -35,7 +36,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V35 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 V35.4 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -49,10 +50,10 @@ class AdaptiveFeatureEngine:
         self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
         
         # Transition Matrix P(State_t | State_{t-1})
-        # Defines the mathematical inertia of market regimes.
+        # 🚀 V35.4 FIX: Matrix strictly aligned to backtest! (0.75 self-persistence)
         self.transition_matrix = np.array([
-            [0.85, 0.02, 0.08, 0.04, 0.01], # From BULL
-            [0.02, 0.85, 0.08, 0.04, 0.01], # From BEAR
+            [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
+            [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
             [0.10, 0.10, 0.70, 0.05, 0.05], # From CHOP
             [0.05, 0.05, 0.05, 0.80, 0.05], # From MEAN_REVERTING
             [0.05, 0.05, 0.15, 0.05, 0.70]  # From VACUUM
@@ -79,9 +80,8 @@ class AdaptiveFeatureEngine:
 
     def detect_market_regime(self) -> str:
         """
-        🚀 V35 APEX: HMM Gaussian State Classifier.
-        Replaces the binary ER toggle. Calculates the emission probabilities of 
-        recent market velocity and variance, then updates the Markov belief state.
+        🚀 V35.4 APEX: HMM Gaussian State Classifier.
+        Matrix Parity aligned with Backtest (0.75 self-persistence).
         """
         if len(self.timeframes["5"]) >= 20:
             candles = list(self.timeframes["5"])[-20:]
@@ -105,7 +105,6 @@ class AdaptiveFeatureEngine:
         avg_vol = float(np.mean(volumes))
         
         # 2. Define Regime Expected Archetypes (Mean, StdDev) for Emission P(Obs | State)
-        # Features: (Expected Return, Expected Volatility, Expected ER)
         archetypes = {
             "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
             "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
@@ -132,7 +131,6 @@ class AdaptiveFeatureEngine:
         emission_probs += 1e-9
             
         # 4. HMM Forward Algorithm: Update Belief State
-        # P(State_t) = P(Obs | State_t) * Sum( P(State_t | State_t-1) * P(State_t-1) )
         prior = np.dot(self.transition_matrix.T, self.state_probs)
         unnormalized_posterior = emission_probs * prior
         self.state_probs = unnormalized_posterior / np.sum(unnormalized_posterior)
