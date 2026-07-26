@@ -17,11 +17,9 @@ class TradingState(Enum):
 
 class SystemStateMachine:
     """
-    🚀 V34.3 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
-    Formerly a deprecated shell, this module is now the O(1) in-memory cache 
-    for the Off-Path AI LLM Debate Matrix and Swarm-level Circuit Breakers.
-    
-    Legacy methods are strictly preserved to prevent ImportErrors from older modules.
+    🚀 V35 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
+    Serves as the O(1) in-memory cache for the Off-Path AI LLM Debate Matrix 
+    and the single-source-of-truth Swarm-level Circuit Breaker.
     """
     def __init__(self, accuracy_threshold: float = 0.60, warmup_epochs: int = 150):
         self.current_state = TradingState.BOOTSTRAPPING
@@ -29,7 +27,7 @@ class SystemStateMachine:
         # ⚡ O(1) Cache for off-path LLM predictions (Eliminates execution latency)
         self.ai_macro_cache: Dict[str, Dict[str, Any]] = {}
         
-        # 🛑 Swarm-level hardware locks
+        # 🛑 Single Source of Truth for Swarm-level hardware locks
         self.global_emergency_lock = False
         
         logger.info("⚡ FSM Shell Upgraded: Now serving as O(1) Macro Regime & Circuit Breaker Cache.")
@@ -44,7 +42,6 @@ class SystemStateMachine:
         Updates the asset's macro state without blocking the High-Frequency WebSocket feed.
         """
         self.ai_macro_cache[symbol] = {
-            # 🚀 V34.3 FIX: Key renamed to 'action' to properly map main.py's `.get('action', 'HOLD')` request.
             "action": action.upper(),
             # Clamp the multiplier to prevent hallucinated extreme leverage sizing
             "confidence_multiplier": max(0.5, min(2.0, confidence_multiplier)), 
@@ -61,7 +58,6 @@ class SystemStateMachine:
         
         # If no state exists or the LLM data is older than 15 minutes, revert to safe defaults
         if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
-            # 🚀 V34.3 FIX: Fallback must use 'action' key, defaulting to 'HOLD'
             return {"action": "HOLD", "confidence_multiplier": 1.0}
             
         return state
@@ -78,8 +74,15 @@ class SystemStateMachine:
         self.current_state = TradingState.ACTIVE_TRADING
         logger.warning("🔓 FSM GLOBAL EMERGENCY LOCK LIFTED. SWARM RE-ARMED.")
 
+    def is_emergency_locked(self) -> bool:
+        """
+        🚀 FIX P1: Explicit boolean check used by main.py to stop executions.
+        Unifies the global lock to this FSM singleton.
+        """
+        return self.global_emergency_lock
+
     # ====================================================================
-    # 🛡️ LEGACY METHODS (PRESERVED FOR MAIN.PY BACKWARD COMPATIBILITY)
+    # 🛡️ LEGACY METHODS (PRESERVED FOR BACKWARD COMPATIBILITY)
     # ====================================================================
 
     def process_state_transition(self, rolling_accuracy: float, total_resolved: int, market_regime: str = "TRENDING") -> TradingState:

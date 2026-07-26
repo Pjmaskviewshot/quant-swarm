@@ -1264,7 +1264,7 @@ class DistributedQuantEngine:
                 
         logger.critical("🔍 VERIFYING ZERO EXPOSURE...")
         max_verify_attempts = 10
-        verified_flat = False  # 🚀 FIX P0: Explicit flat tracking prevents false FATAL alerts
+        verified_flat = False  
         
         for attempt in range(max_verify_attempts):
             try:
@@ -1289,7 +1289,7 @@ class DistributedQuantEngine:
                 logger.error(f"Exposure verification API call failed: {e}")
                 await asyncio.sleep(5)
                 
-        if not verified_flat:  # 🚀 Uses the explicit flag instead of attempt index
+        if not verified_flat:  
             logger.critical("💀 FATAL: COULD NOT VERIFY ZERO EXPOSURE AFTER MAXIMUM RETRIES.")
             if hasattr(self, 'telegram'): 
                 await self.telegram.send_html_report("🚨 <b>FATAL SHUTDOWN ERROR</b>\nCould not flatten all positions.")
@@ -1304,7 +1304,6 @@ class DistributedQuantEngine:
             
         if hasattr(self, 'telegram'): await self.telegram.close()
         
-        # 🚀 FIX P0: Correct attribute reference stops Zombie Thread memory leaks
         if hasattr(self.executor, "_api_thread_pool"):
             logger.info("🧹 Sweeping Executor ThreadPool...")
             self.executor._api_thread_pool.shutdown(wait=False, cancel_futures=True)

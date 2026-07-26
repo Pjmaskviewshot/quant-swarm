@@ -45,3 +45,4 @@ CREATE INDEX IF NOT EXISTS idx_ledger_resolved ON quantitative_ledger(resolved);
 CREATE INDEX IF NOT EXISTS idx_ledger_regime ON quantitative_ledger(market_regime);
 CREATE INDEX IF NOT EXISTS idx_ledger_timestamp ON quantitative_ledger(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_is_shadow ON quantitative_ledger(is_shadow);
+CREATE INDEX IF NOT EXISTS idx_ledger_symbol ON quantitative_ledger(symbol); -- 🚀 FIX P3: Prevents query timeouts
