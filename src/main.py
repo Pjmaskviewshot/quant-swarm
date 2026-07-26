@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V35_APEX")
+logger = logging.getLogger("QUANT_CORE.V35.2_APEX")
 
 
 class ClusterWarmStartRLS:
@@ -135,14 +135,13 @@ class ContinuousMicrostructureEngine:
         self.weights_ranging  = w_r
         self.P_trending = P_init.copy()
         self.P_ranging = P_init.copy()
-        self.forgetting_factor = 0.998
         
         self.prediction_buffer = deque(maxlen=50000)
         self.historical_probs = deque(maxlen=2000) 
         self.rls_updates = 100 
         
-        self.validation_buffer = deque(maxlen=100)
-        self.rolling_mse = 0.0
+        # 🚀 V35.2 UPGRADE: Smooth EWMA tracking for errors, no hard resets
+        self.ewma_mse = 0.25 
 
     def get_dynamic_decays(self):
         vol_scalar = min(1.0, max(0.0, self.inst_variance * 5000.0))
@@ -230,44 +229,46 @@ class ContinuousMicrostructureEngine:
 
                     error = y_true - old_pred_prob 
                     
-                    self.validation_buffer.append(error ** 2)
-                    if len(self.validation_buffer) == 100:
-                        self.rolling_mse = np.mean(self.validation_buffer)
-                        if self.rolling_mse > 0.35 or np.trace(self.P_trending) > 5000.0:
-                            logger.warning(f"📉 Applying Levenberg-Marquardt Trace Damping for {self.symbol}.")
-                            trace_t = np.trace(self.P_trending)
-                            trace_r = np.trace(self.P_ranging)
-                            if trace_t > 5000:
-                                self.P_trending = self.P_trending / (trace_t / 1000.0) + np.eye(9) * 0.1
-                            if trace_r > 5000:
-                                self.P_ranging = self.P_ranging / (trace_r / 1000.0) + np.eye(9) * 0.1
-                            self.validation_buffer.clear()
-                            continue
+                    # 🚀 V35.2 UPGRADE: Smooth EWMA Error Tracking
+                    self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
 
                     x = features_array.reshape(-1, 1)
-                    pi = old_pred_prob
-                    var_pi = max(1e-4, pi * (1.0 - pi))  
+                    var_pi = max(1e-4, old_pred_prob * (1.0 - old_pred_prob))  
+                    
+                    # 🚀 V35.2 UPGRADE: Adaptive Forgetting Factor (AFF)
+                    # High Entropy = Forget Faster. Smooth Trend = Remember Longer.
+                    dynamic_lambda = max(0.990, min(0.9995, 1.0 - (self.shannon_entropy * 0.005)))
                     
                     if r_blend > 0.1:
-                        lam_t = self.forgetting_factor
                         P_x_t = self.P_trending @ x
-                        den_t = lam_t + var_pi * float((x.T @ P_x_t)[0][0])
+                        den_t = dynamic_lambda + var_pi * float((x.T @ P_x_t)[0][0])
                         K_t = P_x_t / den_t
                         update_t = (K_t.flatten() * error * r_blend)
                         self.weights_trending = self.weights_trending + update_t
-                        self.P_trending = (self.P_trending - var_pi * (K_t @ (x.T @ self.P_trending))) / lam_t
-                        self.P_trending += np.eye(9) * 1e-4
+                        self.P_trending = (self.P_trending - var_pi * (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
+                        
+                        # 🚀 V35.2 UPGRADE: Continuous Tikhonov Regularization (Leaky RLS)
+                        # Mathematically bounds the matrix trace at 1000 so it NEVER blows up.
+                        trace_t = np.trace(self.P_trending)
+                        if trace_t > 1000.0:
+                            self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(9) * 0.01)
+                        else:
+                            self.P_trending += np.eye(9) * 1e-5
 
                     r_range = 1.0 - r_blend
                     if r_range > 0.1:
-                        lam_r = self.forgetting_factor
                         P_x_r = self.P_ranging @ x
-                        den_r = lam_r + var_pi * float((x.T @ P_x_r)[0][0])
+                        den_r = dynamic_lambda + var_pi * float((x.T @ P_x_r)[0][0])
                         K_r = P_x_r / den_r
                         update_r = (K_r.flatten() * error * r_range)
                         self.weights_ranging = self.weights_ranging + update_r
-                        self.P_ranging = (self.P_ranging - var_pi * (K_r @ (x.T @ self.P_ranging))) / lam_r
-                        self.P_ranging += np.eye(9) * 1e-4
+                        self.P_ranging = (self.P_ranging - var_pi * (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
+                        
+                        trace_r = np.trace(self.P_ranging)
+                        if trace_r > 1000.0:
+                            self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(9) * 0.01)
+                        else:
+                            self.P_ranging += np.eye(9) * 1e-5
                     
                     self.P_trending = (self.P_trending + self.P_trending.T) / 2.0
                     self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0
@@ -346,7 +347,11 @@ class ContinuousMicrostructureEngine:
         if len(self.historical_probs) > 100:
             mean_prob = np.mean(self.historical_probs)
             std_prob = np.std(self.historical_probs) + 1e-9
-            dynamic_gate = mean_prob + (1.25 * std_prob)  
+            
+            # 🚀 V35.2 UPGRADE: Apply error penalty to the dynamic gate
+            # If EWMA error is high, the gate rises, demanding higher conviction to trade.
+            error_penalty = max(0.0, (self.ewma_mse - 0.25) * 2.0)
+            dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty
         else:
             dynamic_gate = 0.58
             
@@ -905,7 +910,6 @@ class DistributedQuantEngine:
                     await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
                     await db.commit()
                 async with aiosqlite.connect(self.wal_db_path) as db:
-                    # 🚀 V35.1 FIX: Increased limit from 5 to 100 rows per batch to prevent backlogs
                     async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
                         rows = await cursor.fetchall()
                 for row in rows:
