@@ -269,6 +269,9 @@ class ContinuousMicrostructureEngine:
                         self.P_ranging = (self.P_ranging - var_pi * (K_r @ (x.T @ self.P_ranging))) / lam_r
                         self.P_ranging += np.eye(9) * 1e-4
                     
+                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0
+                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0
+                    
                     self.rls_updates += 1
 
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float) -> dict:
@@ -539,7 +542,6 @@ class DistributedQuantEngine:
             logger.error(f"Failed fetching tick sizes: {e}", exc_info=True)
 
     async def synchronize_exchange_state(self):
-        """Restored: Recovers active open positions on boot."""
         try:
             pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
             active_orphans = [p for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
@@ -564,7 +566,6 @@ class DistributedQuantEngine:
             logger.error(f"Failed synchronizing exchange state: {e}", exc_info=True)
 
     async def cleanup_stale_locks(self):
-        """Restored: Cleans up orphaned portfolio locks."""
         while True:
             await asyncio.sleep(300) 
             try:
@@ -587,7 +588,9 @@ class DistributedQuantEngine:
         
         now = time.time()
         if self.circuit_breakers.get(symbol, 0.0) > now: return
-        if self.global_emergency_lock: return
+        
+        # 🚀 FIX P1: Route global emergency check through the unified FSM
+        if self.fsm.is_emergency_locked(): return
 
         try:
             price = float(trade_data.get("price", 0.0))
@@ -707,6 +710,155 @@ class DistributedQuantEngine:
                 
         except Exception as e:
             logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
+
+    async def run_global_capital_auction_worker(self):
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
+        while True:
+            await asyncio.sleep(0.5) 
+            
+            async with self.portfolio_state_lock:
+                if len(self.active_positions_lock) >= 5:
+                    continue
+                    
+                async with self.auction_lock:
+                    if not self.auction_queue:
+                        continue
+                        
+                    if len(self.auction_queue) > 1000:
+                        self.auction_queue = heapq.nsmallest(500, self.auction_queue) # nsmallest on negative Sharpe = highest Sharpe
+                        heapq.heapify(self.auction_queue)
+                        
+                    valid_candidates = []
+                    while self.auction_queue:
+                        item = heapq.heappop(self.auction_queue)
+                        _, _, sym, payload = item
+                        if time.time() - payload["timestamp"] < 5.0 and sym not in self.active_positions_lock:
+                            valid_candidates.append(item)
+                            
+                    if not valid_candidates: continue
+                        
+                    best_candidate = valid_candidates[0]
+                    top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+                    top_sharpe = -top_neg_sharpe
+                    
+                    for i in range(1, len(valid_candidates)):
+                        heapq.heappush(self.auction_queue, valid_candidates[i])
+
+                    self.active_positions_lock[top_symbol] = top_payload["action"]
+            
+            logger.critical(
+                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+            )
+            
+            self.track_task(self.execute_statistical_signal(
+                top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                top_payload.get("payload_features")
+            ))
+
+    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None):
+        try:
+            if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
+                logger.warning(f"⚠️ Lifecycle daemon active for {symbol}. Aborting duplicate.")
+                async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                return
+
+            signal_id = str(uuid.uuid4())
+            sl_atr_mult, rr_ratio = self.live_params.get("sl_atr_mult", 1.5), self.live_params.get("rr_ratio", 2.0)
+            
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
+            tp_distance = sl_distance * rr_ratio 
+            
+            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+            
+            raw_sl = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
+            raw_tp = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
+            initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
+
+            try: balance = await self.executor.get_wallet_balance_usdt()
+            except Exception as e: 
+                logger.error(f"Failed balance fetch for {symbol}: {e}")
+                async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                return
+                
+            fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence)
+
+            if balance < 1.0: 
+                async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                return
+
+            dollar_risk = balance * fractional_risk
+            target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+            target_notional = target_position_size * current_price
+
+            if not self.risk_vault.evaluate_portfolio_safety(balance, target_notional, symbol): 
+                async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                return
+
+            target_leverage = self.risk_vault.calculate_dynamic_leverage(target_notional, balance, sl_distance_pct=(sl_distance / current_price))
+            
+            if self.test_mode:
+                execution_success = random.random() < 0.85
+                actual_filled_notional = target_notional
+            else:
+                try:
+                    await self.executor.adjust_leverage(symbol, target_leverage)
+                    await asyncio.sleep(0.2) 
+                except Exception as e: 
+                    logger.error(f"Leverage adjust failed for {symbol}: {e}")
+                    async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                    return
+
+                feature_engine = self.feature_engines.get(symbol)
+                current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
+
+                if regime == "TRENDING":
+                    res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                else:
+                    res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                
+                execution_success = res[0] if isinstance(res, tuple) else bool(res)
+
+            if not execution_success: 
+                async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                return 
+                
+            if not self.test_mode:
+                try:
+                    pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_data = pos_response.get("result", {}).get("list", [])
+                    actual_qty_filled = float(pos_data[0].get("size", 0.0)) if pos_data else 0.0
+                    actual_filled_notional = actual_qty_filled * current_price
+                    if actual_filled_notional <= 0:
+                        async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
+                        return
+                except Exception:
+                    actual_qty_filled = target_position_size
+                    actual_filled_notional = target_notional
+                    
+                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+                
+                entry_msg = (
+                    f"⚡ <b>ENTRY ALERT // {symbol}</b>\n"
+                    f"• Action: <b>{direction}</b>\n"
+                    f"• Price: <code>{current_price:.5f}</code>\n"
+                    f"• Size: <code>{actual_qty_filled:.2f}</code>\n"
+                    f"• Edge: <code>{edge_bps:.1f} bps</code>\n"
+                    f"• Kelly: <code>{fractional_risk:.2%} Risk</code>"
+                )
+                self.track_task(self._safe_telegram_dispatch(entry_msg, is_html=True))
+                
+            self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
+            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime))
+            
+        except Exception as e:
+            logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
+            async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
 
     async def log_to_wal_async(self, action_type: str, args: list):
         async with self.wal_lock:
