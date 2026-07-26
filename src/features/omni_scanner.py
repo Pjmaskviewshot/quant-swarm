@@ -7,11 +7,41 @@ import asyncio
 
 logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
+def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
+    """
+    🚀 V34.3 UPGRADE: PCA Eigenvector Beta-Stripping
+    Computes the top Principal Component (PC1) representing the global market beta,
+    and returns pure idiosyncratic alpha residuals for each asset.
+    """
+    if price_matrix.shape[0] < 2 or price_matrix.shape[1] < 10:
+        return np.zeros(price_matrix.shape[0])
+        
+    # Standardize returns
+    stds = np.std(price_matrix, axis=1, keepdims=True) + 1e-9
+    norm_matrix = (price_matrix - np.mean(price_matrix, axis=1, keepdims=True)) / stds
+    
+    try:
+        # Compute SVD to get top Eigenvector (PC1 - Market Beta)
+        U, S, Vt = np.linalg.svd(norm_matrix, full_matrices=False)
+        market_factor = Vt[0, :] 
+        
+        residuals = []
+        for i in range(norm_matrix.shape[0]):
+            beta = np.dot(norm_matrix[i, :], market_factor) / (np.dot(market_factor, market_factor) + 1e-9)
+            residual = norm_matrix[i, -1] - (beta * market_factor[-1])
+            residuals.append(residual)
+            
+        return np.array(residuals) * 10000.0  # Scale to bps
+    except Exception as e:
+        logger.debug(f"PCA SVD Computation failed: {e}")
+        return np.zeros(price_matrix.shape[0])
+
+
 class GlobalOmniScanner:
     """
-    🌌 V34.3 OMNI-SWARM CROSS-SECTIONAL SCANNER (15M SWEET SPOT)
+    🌌 V34.3 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit 250+ perpetual universe every 10 seconds.
-    Isolates Idiosyncratic Alpha (true price returns) while strictly 
+    Isolates Pure Idiosyncratic Alpha via PCA Beta-Stripping while strictly 
     banning illiquid micro-caps and protecting open positions from hot-swaps.
     """
     def __init__(self, executor):
@@ -35,7 +65,7 @@ class GlobalOmniScanner:
         protected_symbols: Optional[Set[str]] = None
     ) -> Tuple[Optional[str], Optional[str]]:
         """
-        Calculates RVOL and Beta-Stripped Alpha using true log-returns. 
+        Calculates RVOL and PCA Beta-Stripped Alpha using true log-returns. 
         Returns (Symbol_To_Drop, Symbol_To_Add) if a severe anomaly is detected.
         Protects active positions in `protected_symbols` from being dropped.
         """
@@ -48,8 +78,10 @@ class GlobalOmniScanner:
 
         current_time = time.time()
         scoring_matrix = []
+        valid_symbols = []
+        return_matrix_rows = []
 
-        # 1. Update Memory & Extract TRUE BTC Log Returns
+        # 1. Update Memory & Extract True Log Returns
         btc_data = tickers.get("BTCUSDT")
         if btc_data:
             current_btc_price = float(btc_data.get('lastPrice', 0))
@@ -68,9 +100,8 @@ class GlobalOmniScanner:
                 turnover24h = float(data.get('turnover24h', 0))
                 
                 # 🚀 V34.3 FIX: OPTIMIZED LIQUIDITY GATE
-                # Lowered to $15M turnover and $0.10 price.
-                # Opens up 50-80 mid-caps. The SOR 12-bps cap will handle spread safety.
-                if current_price < 0.10 or turnover24h < 15_000_000.0:
+                # Lowered to $15M turnover and $0.05 price.
+                if current_price < 0.05 or turnover24h < 15_000_000.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -95,36 +126,34 @@ class GlobalOmniScanner:
                     self.market_memory[sym]["vol"].pop(0)
                     self.market_memory[sym]["returns"].pop(0)
 
-                # Need at least 10 samples to calculate standard deviation
-                if len(self.market_memory[sym]["vol"]) < 10:
-                    continue
+                # Need at least 10 samples to calculate valid metrics
+                if len(self.market_memory[sym]["vol"]) >= 10:
+                    valid_symbols.append(sym)
+                    # Use last 10 returns for PCA matrix to ensure dimension alignment
+                    return_matrix_rows.append(self.market_memory[sym]["returns"][-10:])
 
-                # 2. Calculate Cross-Sectional RVOL Z-Score
+            except Exception:
+                continue
+
+        if not valid_symbols:
+            return None, None
+
+        # 2. Extract Pure Idiosyncratic Alpha via PCA SVD
+        price_matrix = np.array(return_matrix_rows)
+        pca_alphas = compute_pca_residual_alpha(price_matrix)
+
+        # 3. Calculate Cross-Sectional RVOL Z-Score & Final Swarm Score
+        for idx, sym in enumerate(valid_symbols):
+            try:
                 vol_array = np.array(self.market_memory[sym]["vol"])
                 mu_v = np.mean(vol_array)
                 sig_v = np.std(vol_array) + 1e-9
-                rvol_z = (vol - mu_v) / sig_v
-
-                # 3. True Idiosyncratic Alpha Approximation (Beta-Stripped Price Returns)
-                if len(self.btc_returns) > 10 and len(self.market_memory[sym]["returns"]) > 10:
-                    min_len = min(len(self.btc_returns), len(self.market_memory[sym]["returns"]))
-                    btc_arr = np.array(self.btc_returns[-min_len:])
-                    sym_arr = np.array(self.market_memory[sym]["returns"][-min_len:])
-                    
-                    covariance = np.cov(btc_arr, sym_arr)[0][1]
-                    btc_variance = np.var(btc_arr) + 1e-9
-                    beta = covariance / btc_variance
-                    
-                    expected_return = beta * btc_ret
-                    idiosyncratic_alpha = sym_ret - expected_return
-                    
-                    scaled_alpha = idiosyncratic_alpha * 10000.0 
-                else:
-                    scaled_alpha = 0.0
-
-                swarm_score = (rvol_z * 0.6) + (abs(scaled_alpha) * 0.4)
+                rvol_z = (vol_array[-1] - mu_v) / sig_v
+                
+                idiosyncratic_alpha = pca_alphas[idx]
+                
+                swarm_score = (rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)
                 scoring_matrix.append((swarm_score, sym, rvol_z))
-
             except Exception:
                 continue
 
@@ -152,7 +181,7 @@ class GlobalOmniScanner:
                 if top_score > (deadest_score * 3.0):
                     logger.critical(
                         f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
-                        f"Injecting Fast-Moving Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
+                        f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
                     return deadest_sym, top_sym
 

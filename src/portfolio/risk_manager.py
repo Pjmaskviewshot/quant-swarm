@@ -126,7 +126,7 @@ class InstitutionalRiskVault:
                 if symbol in asset_list:
                     active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
                     active_correlated_count = len(active_correlated_nodes)
-                    if active_correlated_count > 0:
+                    if active_correlated_count > 1:
                         logger.warning(
                             f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected. "
                             f"High-covariance trade already open in group [{group_name}]: {active_correlated_nodes}. Over-exposure aborted."

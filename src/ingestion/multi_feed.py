@@ -9,9 +9,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V33.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    🚀 V34.3 OMNI-SWARM: DECOUPLED INGESTION LAYER
     Features absolute sequence gap intolerance for L2 validity
-    and dynamic O(1) WebSocket hot-swapping.
+    with per-symbol isolated resyncing and dynamic O(1) hot-swapping.
     """
     def __init__(
         self, 
@@ -111,6 +111,25 @@ class HighVelocityMultiFeed:
             logger.error(f"Hot-swap socket injection failed: {e}")
             # If the socket is dead, the main loop will catch it and reconnect everything anyway.
 
+    async def _resync_isolated_symbol(self, symbol: str):
+        """
+        🚀 V34.3 FIX: ISOLATED SNAPSHOT RESYNC
+        Forces Bybit to send a fresh orderbook snapshot for ONE symbol 
+        without dropping the entire multiplexed websocket connection.
+        """
+        if not self.active_ws or self.active_ws.closed:
+            return
+            
+        logger.warning(f"🔄 Requesting isolated snapshot resync for {symbol}...")
+        self.orderbook_sequences.pop(symbol, None)
+        
+        try:
+            await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
+            await asyncio.sleep(0.1) # Brief pause to clear exchange-side buffers
+            await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
+        except Exception as e:
+            logger.error(f"Isolated resync request failed for {symbol}: {e}")
+
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
         self.is_running = True
@@ -200,16 +219,16 @@ class HighVelocityMultiFeed:
                                             last_seq = self.orderbook_sequences.get(symbol)
                                             prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
                                             
-                                            # 🚀 V33.0 FIX: ZERO SEQUENCE GAP TOLERANCE
-                                            # If the delta doesn't perfectly lock onto the last sequence, drop the book.
+                                            # 🚀 V34.3 FIX: ZERO SEQUENCE GAP TOLERANCE
+                                            # If the delta doesn't perfectly lock onto the last sequence, isolate and resync.
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
-                                                    logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Forcing resync.")
+                                                    logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
                                                     
-                                                    # Close the entire socket. The outer loop will instantly 
-                                                    # reconnect and fetch clean snapshots for everything.
-                                                    await ws.close()
-                                                    break
+                                                    # 🚀 FIX: Instead of killing the entire socket with `await ws.close()`,
+                                                    # we spin off a background task to quickly unsubscribe/subscribe to JUST this symbol
+                                                    self.track_task(self._resync_isolated_symbol(symbol))
+                                                    continue # Skip processing this broken delta
                                                     
                                             self.orderbook_sequences[symbol] = u_sequence
 

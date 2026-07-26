@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 import time
@@ -42,6 +43,7 @@ class BybitUnifiedExecutor:
     🚀 V34.3 APEX: PARALLELIZED UNIFIED API EXECUTOR
     Upgraded with strict Leverage Caching and a 95% Sizing Buffer to eliminate 
     API rejections (110043 & 110007) and guarantee Maker-Peg order routing.
+    Legacy dead code removed to prevent position index conflicts with SOR.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 8):
         # Store keys for error-scrubbing purposes
@@ -265,109 +267,3 @@ class BybitUnifiedExecutor:
         except Exception:
             logger.error(f"❌ Failed to fetch global market tickers.")
             return []
-
-    async def dispatch_market_order(self, symbol: str, direction: str, qty: float, tp: float, sl: float) -> str:
-        """Signs and executes automated market orders with bracketed protection constraints."""
-        side = "Buy" if direction == "BUY" else "Sell"
-        
-        try:
-            order_payload = await self._safe_api_call(
-                self.client.place_order,
-                category="linear",
-                symbol=symbol,
-                side=side,
-                orderType="Market",
-                qty=str(qty),
-                takeProfit=str(tp),
-                stopLoss=str(sl),
-                tpslMode="Full",
-                positionIdx=0  # Resolves exchange rejection error 10001
-            )
-            
-            order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
-            logger.critical(f"🚀 ORDER DISPATCHED SUCCESSFUL // ID: {order_id} | Side: {side} | Qty: {qty}")
-            return order_id
-            
-        except Exception:
-            logger.error(f"Order routing execution failed at exchange interface level.")
-            return ""
-
-    async def dispatch_limit_order(self, symbol: str, direction: str, qty: float, price: float, tp: float, sl: float) -> str:
-        """
-        Signs and executes passive Post-Only Limit Orders for Mean Reversion regimes to capture the spread.
-        """
-        side = "Buy" if direction == "BUY" else "Sell"
-        
-        try:
-            order_payload = await self._safe_api_call(
-                self.client.place_order,
-                category="linear",
-                symbol=symbol,
-                side=side,
-                orderType="Limit",
-                qty=str(qty),
-                price=str(price),
-                takeProfit=str(tp),
-                stopLoss=str(sl),
-                tpslMode="Full",
-                timeInForce="PostOnly", # Forces the order to be a maker, avoiding taker fees
-                positionIdx=0
-            )
-            
-            order_id = order_payload["result"].get("orderId", "UNKNOWN_ID")
-            logger.critical(f"🕸️ PASSIVE LIMIT NET DEPLOYED // ID: {order_id} | Side: {side} | Qty: {qty} @ {price}")
-            return order_id
-            
-        except Exception:
-            logger.error(f"Limit order routing execution failed at exchange interface level.")
-            return ""
-
-    async def check_recent_settlement(self, symbol: str, lookback_seconds: int = 60) -> Dict[str, Any]:
-        """
-        Queries the exchange's closed PnL ledger to see if a bracket order executed.
-        Returns formatted trade metrics if a trade closed within the lookback window.
-        """
-        try:
-            response = await self._safe_api_call(
-                self.client.get_closed_pnl,
-                category="linear",
-                symbol=symbol,
-                limit=1
-            )
-            
-            pnl_list = response.get("result", {}).get("list", [])
-            if not pnl_list:
-                return {"closed": False}
-                
-            latest_trade = pnl_list[0]
-            
-            # Convert exchange millisecond timestamp to seconds
-            updated_time = int(latest_trade.get("updatedTime", 0)) / 1000
-            current_time = time.time()
-            
-            # Verify if this trade closure happened recently
-            if (current_time - updated_time) <= lookback_seconds:
-                pnl = float(latest_trade.get("closedPnl", 0.0))
-                side = latest_trade.get("side", "UNKNOWN")
-                qty = float(latest_trade.get("qty", 0.0))
-                entry_price = float(latest_trade.get("avgEntryPrice", 0.0))
-                exit_price = float(latest_trade.get("avgExitPrice", 0.0))
-                
-                outcome = "🟢 PROFIT" if pnl > 0 else "🔴 LOSS"
-                
-                return {
-                    "closed": True,
-                    "symbol": symbol,
-                    "outcome": outcome,
-                    "pnl": round(pnl, 4),
-                    "side": side,
-                    "qty": qty,
-                    "entry": entry_price,
-                    "exit": exit_price
-                }
-                
-            return {"closed": False}
-            
-        except Exception:
-            logger.error(f"Failed to pull closed PnL metrics for {symbol}.")
-            return {"closed": False}

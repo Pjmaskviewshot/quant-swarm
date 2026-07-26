@@ -1,7 +1,8 @@
-import numpy as np
+import math
 import time
-import heapq
+import numpy as np
 import logging
+import heapq
 from collections import deque
 from typing import Dict, Any, Tuple, List
 
@@ -9,7 +10,7 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V27.0 SIGNAL APEX: HIGH-SPEED MICROSTRUCTURE CACHE
+    🔬 V34.3 SIGNAL APEX: HIGH-SPEED MICROSTRUCTURE CACHE
     Upgraded to reconstruct and cache the Deep Book (Top 10 Levels) for MLOFI.
     Features O(N log K) Heap Extraction and Epsilon Zero-Division Guards 
     to guarantee mathematical stability during liquidity vacuums.
@@ -222,8 +223,11 @@ class AdaptiveFeatureEngine:
         if not tr_values:
             return 0.0
             
-        atr = tr_values[0]
-        for i in range(1, min(period, len(tr_values))):
+        # 🚀 V34.3 FIX: Correctly initialize Wilder's ATR with the SMA of the first N True Ranges
+        init_period = min(period, len(tr_values))
+        atr = float(np.mean(tr_values[:init_period]))
+        
+        for i in range(init_period, len(tr_values)):
             atr = (atr * (period - 1) + tr_values[i]) / period
             
         return float(atr)

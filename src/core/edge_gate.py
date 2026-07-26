@@ -9,10 +9,10 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V31.1 QUANTUM APEX: CALIBRATED EDGE GATE
+    🚀 V34.3 QUANTUM APEX: CALIBRATED CONFLUENCE GATE
     Filters out market noise, deep iceberg absorption walls, retail chop, 
     and Amihud liquidity vacuums using Level-2 MLOFI and Kyle's Lambda.
-    *V31.1 Upgrade: Dynamic Asset-Scaled Amihud Buckets.*
+    Upgraded to enforce strict directional confluence with the RLS model.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -42,7 +42,6 @@ class MicrostructureEdgeGate:
     def update_trade_volume(self, volume: float):
         self.rolling_volume += volume
 
-    # 🚀 V31.1 FIX: Added `symbol` parameter to dynamically scale the Amihud bucket
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         if not self.prev_bids or not self.prev_asks:
             self.prev_bids = bids[:self.mlofi_levels]
@@ -146,7 +145,12 @@ class MicrostructureEdgeGate:
         if cov >= 0: return 0.0 
         return 2.0 * math.sqrt(-cov)
 
-    def evaluate_structural_edge(self, symbol: str, vpin_z: float) -> dict:
+    def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
+        """
+        Evaluates the local order book microstructure.
+        🚀 V34.3 FIX: Enforces strict directional confluence. If the MLOFI direction
+        contradicts the RLS model's intended direction, the gate vetoes the trade.
+        """
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK"}
 
@@ -157,6 +161,14 @@ class MicrostructureEdgeGate:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "MLOFI_FLAT"}
 
         direction = "BUY" if current_mlofi > 0 else "SELL"
+        
+        # 🚀 V34.3 UPGRADE: Confluence Veto
+        if intended_direction and direction != intended_direction:
+            return {
+                "action": "HOLD", 
+                "confidence": 0.0, 
+                "reasoning": f"CONFLUENCE_FAILURE | RLS wants {intended_direction}, MLOFI wants {direction}"
+            }
         
         current_lambda = self._calculate_instantaneous_lambda()
         baseline_lambda = np.mean(self.lambda_history) if self.lambda_history else current_lambda

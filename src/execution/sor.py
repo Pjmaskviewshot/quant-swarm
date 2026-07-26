@@ -3,7 +3,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from decimal import Decimal, ROUND_HALF_UP
 from services.bybit_v5 import BybitUnifiedExecutor
 
@@ -11,7 +11,7 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V34.1 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🚀 V34.3 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
     Accelerated Maker-Peg execution, and Phantom-Trade Prevention.
     """
@@ -72,7 +72,8 @@ class SmartOrderRouter:
         ob_data = ob_response.get("result", {})
         return self._get_meaningful_tob({"bids": ob_data.get("b", []), "asks": ob_data.get("a", [])}, side)
 
-    async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float):
+    # 🚀 FIX: Return Tuple[bool, float, float] -> (Success, Average Fill Price, Total Quantity Filled)
+    async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float) -> Tuple[bool, float, float]:
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive escalation.")
         
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
@@ -114,9 +115,10 @@ class SmartOrderRouter:
                     
                     if orders:
                         cum_exec = float(orders[0].get("cumExecQty", 0.0))
+                        avg_price = float(orders[0].get("avgPrice", current_mid_price))
                         if cum_exec > 0:
-                            logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units on attempt {attempt+1}. ID: {order_id}")
-                            return True
+                            logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}. ID: {order_id}")
+                            return True, avg_price, cum_exec
                         else:
                             logger.warning(f"⚠️ Flash Strike IOC missed (Liquidity vanished). Escalating...")
                     else:
@@ -129,9 +131,10 @@ class SmartOrderRouter:
                 logger.error(f"⚠️ Network Exception during Flash Strike for {symbol}: {e}")
                 
         logger.error(f"❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or strict 12-bps Slippage Cap hit.")
-        return False
+        return False, 0.0, 0.0
 
-    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60):
+    # 🚀 FIX: Return Tuple[bool, float, float]
+    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60) -> Tuple[bool, float, float]:
         logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Anti-Spoofing Scanners.")
         
         start_time = time.time()
@@ -205,9 +208,10 @@ class SmartOrderRouter:
                         
                         if hist_list:
                             cum_exec = float(hist_list[0].get("cumExecQty", 0.0))
+                            avg_price = float(hist_list[0].get("avgPrice", final_target_price))
                             if cum_exec > 0:
-                                logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units.")
-                                return True
+                                logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units at {avg_price}.")
+                                return True, avg_price, cum_exec
                         
                         current_order_id = None
                         continue
@@ -216,17 +220,18 @@ class SmartOrderRouter:
                     order_status = order_info.get("orderStatus")
                     current_peg_price = float(order_info.get("price"))
                     cum_exec_qty = float(order_info.get("cumExecQty", 0.0))
+                    avg_price = float(order_info.get("avgPrice", current_peg_price))
                     
                     if order_status in ["Filled"]:
                         logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely at optimal Maker fees.")
-                        return True
+                        return True, avg_price, cum_exec_qty
                     elif order_status in ["Cancelled", "Rejected"]: 
                         rejection_count += 1
                         current_order_id = None 
                         
                         if cum_exec_qty > 0:
                             logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
-                            return True
+                            return True, avg_price, cum_exec_qty
                             
                         if rejection_count >= 5:
                             logger.error(f"🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 5 times. Aborting.")
@@ -260,13 +265,16 @@ class SmartOrderRouter:
             try:
                 hist_res = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                 hist_list = hist_res.get("result", {}).get("list", [])
-                if hist_list and float(hist_list[0].get("cumExecQty", 0.0)) > 0:
-                    return True
+                if hist_list:
+                    cum_exec = float(hist_list[0].get("cumExecQty", 0.0))
+                    avg_price = float(hist_list[0].get("avgPrice", anchor_price))
+                    if cum_exec > 0:
+                        return True, avg_price, cum_exec
             except Exception: pass
             
-        return False
+        return False, 0.0, 0.0
 
-    async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
+    async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
         
@@ -275,7 +283,7 @@ class SmartOrderRouter:
         else:
             return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=30)
 
-    async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> bool:
+    async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         logger.info(f"🕸️ RANGING REGIME ROUTING // Forcing Maker Peg on {symbol}")
         return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=60)

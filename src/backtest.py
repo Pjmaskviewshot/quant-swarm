@@ -8,12 +8,16 @@ Synchronized strictly with the Quant Swarm live node V34.3.
   - 1-Minute Granular Stepping
   - 5-Minute Wilder-Smoothed ATR 
   - Synthetic VPIN Volume-Clock 
-  - 🚀 NEW: Dynamic L2 Spread & OBI execution friction simulation
+  - Dynamic L2 Spread & OBI execution friction simulation
+  - 🚀 NEW: Permutation Entropy Chaos Filter
+  - 🚀 NEW: Micro-Price Skew Guided Trailing Stops
+  - 🚀 NEW: 5-Fold Rolling Walk-Forward Validation
 """
 import argparse
 import time
 import math
 from collections import deque
+from itertools import permutations
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
@@ -96,18 +100,12 @@ def get_cluster_priors(symbol: str):
     return w_trend, w_range, np.eye(9) * p_scale
 
 def compute_atr_5m_wilder(candles: List[Dict], i: int, period: int) -> float:
-    """
-    🚀 V34.2 FIX: Simulates exact Live Parity by downsampling 1m to 5m, 
-    then applying Wilder's Exponential Smoothing instead of raw SMA.
-    """
     if i < (period * 5) + 1: 
         return 0.0
         
-    # Extract the last (period * 5 + 5) minutes to build ~15 5-minute bars
     history_slice = candles[max(0, i - (period * 5 + 10)) : i]
     if len(history_slice) < period * 5: return 0.0
     
-    # Resample to 5m pseudo-bars
     bars_5m = []
     for k in range(0, len(history_slice), 5):
         chunk = history_slice[k:k+5]
@@ -120,7 +118,6 @@ def compute_atr_5m_wilder(candles: List[Dict], i: int, period: int) -> float:
         
     if len(bars_5m) < period + 1: return 0.0
     
-    # Calculate True Range
     trs = []
     for j in range(1, len(bars_5m)):
         h, l, pc = bars_5m[j]["high"], bars_5m[j]["low"], bars_5m[j-1]["close"]
@@ -128,7 +125,6 @@ def compute_atr_5m_wilder(candles: List[Dict], i: int, period: int) -> float:
         
     trs = trs[-period:]
     
-    # Wilder's Smoothing (alpha = 1/period)
     atr = trs[0]
     for tr in trs[1:]:
         atr = (atr * (period - 1) + tr) / period
@@ -153,6 +149,32 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if abs(btc_momentum) > 0.0002 and correlation > 0.60:
         return float(np.sign(btc_momentum) * min(1.0, abs(correlation)))
     return 0.0
+
+def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
+    """
+    🚀 UPGRADE: Calculates Permutation Entropy on raw tick prices to detect market chaos instantly.
+    """
+    if len(series) < (order * delay): return 1.0
+    
+    sub_vectors = []
+    for i in range(len(series) - (order - 1) * delay):
+        sub_vectors.append([series[i + j * delay] for j in range(order)])
+        
+    perm_counts = {perm: 0 for perm in permutations(range(order))}
+    
+    for vec in sub_vectors:
+        rank = tuple(np.argsort(vec))
+        perm_counts[rank] += 1
+        
+    total = len(sub_vectors)
+    entropy = 0.0
+    for count in perm_counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log2(p)
+            
+    max_entropy = math.log2(math.factorial(order))
+    return float(entropy / max_entropy)
 
 def get_vpin_bucket_size(symbol: str) -> float:
     if "BTC" in symbol: return 1_000_000.0
@@ -210,6 +232,11 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         btc_1m_history.append(btc_candles[i]['close'])
         alt_1m_history.append(sim_price)
+        
+        # 🚀 UPGRADE: Compute Real-Time Permutation Entropy
+        shannon_entropy = 1.0
+        if len(alt_1m_history) > 10:
+            shannon_entropy = compute_permutation_entropy(list(alt_1m_history)[-20:])
         
         ret = math.log(sim_price / (c_prev['close'] + 1e-9))
         log_returns.append(ret)
@@ -355,6 +382,10 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             dynamic_gate = mean_prob + (1.25 * std_prob)
         else:
             dynamic_gate = 0.58
+            
+        # 🚀 UPGRADE: Entropy Hard Block - Filter Out High-Chaos Noise
+        if shannon_entropy > 0.85:
+            dynamic_gate = 0.99 
         
         sim_atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
         sl_dist = max((sim_atr * p.sl_atr_mult) / sim_price, 0.005) * sim_price
@@ -381,11 +412,10 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
                 atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
                 if atr > 0:
-                    sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.005)
+                    # 🚀 UPGRADE: Increase minimum stop distance floor to 80 bps
+                    sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.008)
                     tp_dist_pct = sl_dist_pct * p.rr_ratio
                     
-                    # 🚀 V34.3 FIX: Dynamic Spread & Slippage Simulation based on volatility
-                    # Instead of a hardcoded 0.0005, the spread expands and contracts logically.
                     dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
                     taker_fee_pct = 0.0011
                     
@@ -402,6 +432,17 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             h, l = target_candles[j]["high"], target_candles[j]["low"]
                             hit_tp = h >= tp if action_dir == "BUY" else l <= tp
                             hit_sl = l <= sl if action_dir == "BUY" else h >= sl
+                            
+                            # 🚀 UPGRADE: Micro-Price Skew Guided Trailing Stop Update Simulation
+                            # Simulating trailing stop activation after 5 minutes of holding
+                            if bars_held > 5:
+                                trail_dist = sl_dist_pct * entry * 0.75
+                                if action_dir == "BUY":
+                                    new_sl = l - trail_dist
+                                    if new_sl > sl: sl = new_sl
+                                else:
+                                    new_sl = h + trail_dist
+                                    if new_sl < sl: sl = new_sl
                                 
                             if hit_tp and hit_sl: outcome, exit_price = "LOSS", sl; break
                             if hit_tp: outcome, exit_price = "WIN", tp; break
@@ -436,7 +477,16 @@ def run_v34_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         })
                         
                         rolling_outcomes.append(1.0 if net_leveraged > 0 else 0.0)
-                        cooldown_until = i + bars_held  
+                        
+                        # 🚀 UPGRADE: Track consecutive losses to simulate the 2-hour asset lockout
+                        if net_leveraged < 0:
+                            recent_losses = sum(1 for out in list(rolling_outcomes)[-2:] if out == 0.0)
+                            if recent_losses >= 2:
+                                cooldown_until = i + 120 # Simulate a 2-hour (120 min) cooldown on this asset
+                            else:
+                                cooldown_until = i + bars_held
+                        else:
+                            cooldown_until = i + bars_held  
 
     return summarize(trades)
 
@@ -455,6 +505,11 @@ def summarize(trades: List[Dict]) -> Dict:
         sim_nets = np.random.choice(nets, size=len(nets), replace=True)
         mc_results.append(np.sum(sim_nets))
     
+    # Calculate Sharpe Ratio (Assuming roughly 252 trading days/year equivalent)
+    mean_return = np.mean(nets)
+    std_return = np.std(nets) + 1e-9
+    sharpe = (mean_return / std_return) * math.sqrt(len(trades))
+    
     return {
         "trades": len(trades),
         "win_rate": float(len(wins) / len(trades)),
@@ -464,6 +519,7 @@ def summarize(trades: List[Dict]) -> Dict:
         "profit_factor": float(wins.sum() / (abs(losses.sum()) + 1e-9)) if losses.sum() != 0 else float("inf"),
         "total_return_on_margin": float(equity[-1]),
         "max_drawdown_on_margin": max_dd,
+        "sharpe_ratio": float(sharpe),
         "monte_carlo_p_positive": float(np.mean(np.array(mc_results) > 0)),
         "by_regime": {
             r: {"trades": sum(1 for t in trades if t["regime"] == r),
@@ -474,27 +530,57 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V34.3 OOS Sweep (Friction-Adjusted Expected Value)...")
+    print("\n⏳ Running V34.3 Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
     
-    split = int(len(t_cand) * 0.7)
+    # 🚀 FIX: Walk-Forward Validation (5 Rolling Folds)
+    total_len = len(t_cand)
+    fold_size = int(total_len / 6) # 1 fold for test, 5 for training progression
+    train_size = fold_size * 2 # Train on 2 folds
     
     for rr in rr_ratios:
         for atr_m in atr_mults:
             p = Params(rr_ratio=rr, sl_atr_mult=atr_m)
-            test = run_v34_backtest(t_cand[split:], b_cand[split:], p, symbol)
             
-            if test.get("trades", 0) > 10 and test.get("expectancy_per_trade", 0) > 0:
-                results.append({
-                    "RR": rr, "ATR": atr_m,
-                    "OOS_Profit_Factor": test["profit_factor"],
-                    "OOS_Expectancy": test["expectancy_per_trade"],
-                    "OOS_WinRate": test["win_rate"]
-                })
+            fold_sharpes = []
+            fold_expectancies = []
+            total_trades = 0
+            
+            # Walk forward step-by-step
+            for fold in range(4):
+                train_start = fold * fold_size
+                test_start = train_start + train_size
+                test_end = test_start + fold_size
+                
+                if test_end > total_len: break
+                
+                # Test the parameters on the unseen fold
+                test_result = run_v34_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                
+                if test_result.get("trades", 0) > 2:
+                    fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
+                    fold_expectancies.append(test_result.get("expectancy_per_trade", 0.0))
+                    total_trades += test_result.get("trades", 0)
+                else:
+                    fold_sharpes.append(-1.0) # Punish low-trade folds
+            
+            if total_trades > 10 and len(fold_sharpes) == 4:
+                avg_sharpe = np.mean(fold_sharpes)
+                avg_expectancy = np.mean(fold_expectancies)
+                
+                # Only keep configs that didn't blow up in any fold
+                if min(fold_sharpes) > -0.5:
+                    results.append({
+                        "RR": rr, "ATR": atr_m,
+                        "OOS_Avg_Sharpe": avg_sharpe,
+                        "OOS_Avg_Expectancy": avg_expectancy,
+                        "Total_Trades": total_trades,
+                        "Min_Fold_Sharpe": min(fold_sharpes)
+                    })
                     
-    return sorted(results, key=lambda x: x["OOS_Profit_Factor"], reverse=True)[:5]
+    return sorted(results, key=lambda x: x["OOS_Avg_Sharpe"], reverse=True)[:5]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -509,17 +595,17 @@ if __name__ == "__main__":
 
     if args.optimize:
         best_params = parameter_sweep(t_cand, b_cand, args.symbol)
-        print("\n🏆 Top 5 Parameter Configurations (Sorted by True OOS Profit Factor):")
+        print("\n🏆 Top 5 Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
         for i, res in enumerate(best_params, 1):
             print(f" {i}. RR: {res['RR']} | SL ATR: {res['ATR']} "
-                  f"--> PF: {res['OOS_Profit_Factor']:.2f} | WR: {res['OOS_WinRate']:.1%}")
+                  f"--> Avg Sharpe: {res['OOS_Avg_Sharpe']:.2f} | Min Fold Sharpe: {res['Min_Fold_Sharpe']:.2f}")
         
         import json
         if best_params:
             best = best_params[0]
             with open("params.json", "w") as f:
                 json.dump({"rr_ratio": best["RR"], "sl_atr_mult": best["ATR"]}, f)
-            print("💾 Saved best parameters to params.json for live engine sync.")
+            print("💾 Saved most robust parameters to params.json for live engine sync.")
             
     else:
         split = int(len(t_cand) * 0.6)

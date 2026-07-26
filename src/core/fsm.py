@@ -17,7 +17,7 @@ class TradingState(Enum):
 
 class SystemStateMachine:
     """
-    🚀 V26.0 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
+    🚀 V34.3 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
     Formerly a deprecated shell, this module is now the O(1) in-memory cache 
     for the Off-Path AI LLM Debate Matrix and Swarm-level Circuit Breakers.
     
@@ -38,18 +38,19 @@ class SystemStateMachine:
     # 🚀 V26 APEX METHODS: OFF-PATH INTELLIGENCE & SAFETY
     # ====================================================================
     
-    def update_ai_macro_state(self, symbol: str, regime: str, confidence_multiplier: float):
+    def update_ai_macro_state(self, symbol: str, action: str, confidence_multiplier: float):
         """
         Called exclusively by the background LLM worker loop.
         Updates the asset's macro state without blocking the High-Frequency WebSocket feed.
         """
         self.ai_macro_cache[symbol] = {
-            "regime": regime.upper(),
+            # 🚀 V34.3 FIX: Key renamed to 'action' to properly map main.py's `.get('action', 'HOLD')` request.
+            "action": action.upper(),
             # Clamp the multiplier to prevent hallucinated extreme leverage sizing
             "confidence_multiplier": max(0.5, min(2.0, confidence_multiplier)), 
             "last_updated": time.time()
         }
-        logger.info(f"🧠 AI MACRO STATE CACHED // {symbol}: {regime.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
+        logger.info(f"🧠 AI MACRO STATE CACHED // {symbol}: {action.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
 
     def get_ai_macro_state(self, symbol: str, staleness_limit_seconds: float = 900.0) -> Dict[str, Any]:
         """
@@ -60,7 +61,8 @@ class SystemStateMachine:
         
         # If no state exists or the LLM data is older than 15 minutes, revert to safe defaults
         if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
-            return {"regime": "RANGING", "confidence_multiplier": 1.0}
+            # 🚀 V34.3 FIX: Fallback must use 'action' key, defaulting to 'HOLD'
+            return {"action": "HOLD", "confidence_multiplier": 1.0}
             
         return state
         

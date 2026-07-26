@@ -13,6 +13,7 @@ import heapq
 import numpy as np
 import aiosqlite  
 from collections import deque
+from itertools import permutations
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
@@ -64,6 +65,33 @@ class ClusterWarmStartRLS:
         return w_trend, w_range, np.eye(9) * p_scale
 
 
+def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
+    """
+    🚀 UPGRADE: Calculates Permutation Entropy on raw tick prices to detect market chaos instantly.
+    """
+    if len(series) < (order * delay): return 1.0
+    
+    sub_vectors = []
+    for i in range(len(series) - (order - 1) * delay):
+        sub_vectors.append([series[i + j * delay] for j in range(order)])
+        
+    perm_counts = {perm: 0 for perm in permutations(range(order))}
+    
+    for vec in sub_vectors:
+        rank = tuple(np.argsort(vec))
+        perm_counts[rank] += 1
+        
+    total = len(sub_vectors)
+    entropy = 0.0
+    for count in perm_counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log2(p)
+            
+    max_entropy = math.log2(math.factorial(order))
+    return float(entropy / max_entropy)
+
+
 class ContinuousMicrostructureEngine:
     def __init__(self, symbol: str = "GENERIC", memory_depth=500):
         self.symbol = symbol
@@ -81,6 +109,7 @@ class ContinuousMicrostructureEngine:
         self.ofi_slow_z = 0.0
         
         self.micro_price_skew = 0.0
+        self.true_micro_price = 0.0
         
         self.last_trade_time = 0.0
         self.hawkes_pressure_state = 0.0
@@ -149,9 +178,9 @@ class ContinuousMicrostructureEngine:
         self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
         
         current_mid = (best_bid + best_ask) / 2.0
-        micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
+        self.true_micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
         if current_mid > 0:
-            self.micro_price_skew = ((micro_price - current_mid) / (current_mid + 1e-9)) * 10000.0 
+            self.micro_price_skew = ((self.true_micro_price - current_mid) / (current_mid + 1e-9)) * 10000.0 
 
     def update_trades(self, price: float, volume: float, is_buy: bool, current_time: float):
         if current_time - self.last_price_time >= 60.0:
@@ -248,6 +277,10 @@ class ContinuousMicrostructureEngine:
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, virtual_sl: float, virtual_tp: float) -> dict:
         current_time = time.time()
         
+        # 🚀 UPGRADE: Compute Real-Time Permutation Entropy
+        if len(self.prices) > 10:
+            self.shannon_entropy = compute_permutation_entropy(list(self.prices)[-20:])
+        
         if len(self.prices) >= 20:
             prices_arr = np.array(list(self.prices)[-20:])
             directional_change = abs(prices_arr[-1] - prices_arr[0])
@@ -317,10 +350,14 @@ class ContinuousMicrostructureEngine:
             dynamic_gate = mean_prob + (1.25 * std_prob)  
         else:
             dynamic_gate = 0.58
+            
+        # 🚀 UPGRADE: Entropy Hard Block - Filter Out High-Chaos Noise
+        if self.shannon_entropy > 0.85:
+            dynamic_gate = 0.99 
         
         self.prediction_buffer.append((time.time(), current_price, attended_features, prob_success, virtual_sl, virtual_tp, action_dir, r_blend))
         
-        return {"p_up": p_up, "p_down": p_down, "entropy": self.shannon_entropy, "r_blend": r_blend, "dynamic_gate": dynamic_gate}
+        return {"p_up": p_up, "p_down": p_down, "action_dir": action_dir, "entropy": self.shannon_entropy, "r_blend": r_blend, "dynamic_gate": dynamic_gate}
 
     def spread_adjusted_edge(self, current_price: float, action: str, spread_pct: float, expected_move_pct: float) -> float:
         base_edge_pct = expected_move_pct * abs(self.hawkes_velocity * 0.10) 
@@ -524,7 +561,6 @@ class DistributedQuantEngine:
                     self.active_positions_lock[symbol] = direction
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 8}
                 
-                # 🚀 V34.3 FIX: Use a pure UUID to satisfy strict Postgres schemas
                 recovery_uuid = str(uuid.uuid4())
                 daemon_task = self.track_task(self._position_lifecycle_daemon(symbol, recovery_uuid, direction, entry_price, atr, risk_matrix, 3, "RANGING", is_recovery=True))
                 self.daemon_tasks[symbol] = daemon_task
@@ -762,11 +798,17 @@ class DistributedQuantEngine:
         if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
         
         now = time.time()
+        
+        # 🚀 UPGRADE: Check for asset-specific consecutive loss circuit breaker
         if self.circuit_breakers.get(symbol, 0.0) > now: return
         if self.global_emergency_lock: return
 
         try:
             price = float(trade_data.get("price", 0.0))
+            
+            # 🚀 UPGRADE: Enforce minimum price floor ($0.05) to eliminate sub-penny tick noise
+            if price < 0.05: return
+            
             volume = float(trade_data.get("size", 0.0))
             is_buy = (str(trade_data.get("side", "")).upper() == "BUY")
             exchange_timestamp = float(trade_data.get("timestamp", now * 1000)) / 1000.0
@@ -805,31 +847,47 @@ class DistributedQuantEngine:
             vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
             
             async with self.eval_semaphores[symbol]:
-                structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z)
-                if structural_verdict["action"] == "HOLD": return
                 
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
                 rr_ratio = self.live_params.get("rr_ratio", 2.0)
                 
-                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.005)
+                # 🚀 UPGRADE: Increase minimum stop distance floor to 80 bps
+                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.008)
                 tp_dist_pct = sl_dist_pct * rr_ratio
                 
-                virtual_sl = price - (sl_dist_pct * price) if structural_verdict["action"] == "BUY" else price + (sl_dist_pct * price)
-                virtual_tp = price + (tp_dist_pct * price) if structural_verdict["action"] == "BUY" else price - (tp_dist_pct * price)
+                # We need to know intended direction before calculating SL/TP for state extraction
+                # So we calculate the RLS state first without virt_sl/tp (or pass neutral), then map it.
+                # However, your stat engine needs virt_sl/tp for validation labeling.
+                # So we will extract statistical state assuming BUY, then recalculate if it leans SELL.
+                
                 tensor_alpha = self.tensor_oracle.compute_lead_lag_signal(symbol)
                 
-                sgd_state = stat_engine.extract_statistical_state(price, vpin_z, tensor_alpha, virtual_sl, virtual_tp)
+                sgd_state = stat_engine.extract_statistical_state(
+                    price, vpin_z, tensor_alpha, 
+                    price - (sl_dist_pct * price), 
+                    price + (tp_dist_pct * price)
+                )
                 
                 p_up, p_down = sgd_state["p_up"], sgd_state["p_down"]
+                action = "BUY" if p_up > p_down else "SELL"
+                
+                # Now that we have intended action, generate final SL/TP
+                virtual_sl = price - (sl_dist_pct * price) if action == "BUY" else price + (sl_dist_pct * price)
+                virtual_tp = price + (tp_dist_pct * price) if action == "BUY" else price - (tp_dist_pct * price)
+                
+                # 🚀 V34.3 FIX: Enforce Edge Gate Directional Confluence
+                structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
+                if structural_verdict["action"] == "HOLD": return
+                
                 regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
                 
                 prob_success = max(p_up, p_down)
-                action = "BUY" if p_up > p_down else "SELL"
+                vol_z = stat_engine.hawkes_z
                 
                 macro_state = self.fsm.get_ai_macro_state(symbol)
-                ai_action = macro_state.get("action", "HOLD")
+                ai_action = macro_state.get("regime", "HOLD") # 🚀 V34.3 FIX: Fetch correct key from FSM
                 confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
 
                 if ai_action == action:
@@ -872,7 +930,7 @@ class DistributedQuantEngine:
                     "symbol": symbol, "action": action, "price": price, 
                     "prob_success": prob_success, "dna_stats": dna_stats, 
                     "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                    "vol_z": stat_engine.hawkes_z, "vol_mult": vol_mult, "timestamp": now,
+                    "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": now,
                     "payload_features": payload_features
                 }
                 
@@ -1134,8 +1192,8 @@ class DistributedQuantEngine:
             if sym not in new_core_basket and len(new_core_basket) < 25: new_core_basket.append(sym)
                 
         self.asset_basket = new_core_basket
-        self.shadow_basket = [s for s in full_market if s not in self.asset_basket]
-        if len(self.shadow_basket) < 10: self.shadow_basket.extend([s for s in ["XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "MATICUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT"] if s not in self.shadow_basket])
+        # 🚀 V34.3 FIX: Populate the shadow basket with remaining top assets to feed the DNA memory engine
+        self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:15]
         
         new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores = {}, {}, {}, {}, {}, {}, {}, {}, {}
         
@@ -1162,17 +1220,30 @@ class DistributedQuantEngine:
         self.force_dna_refresh.set() 
 
     async def _universe_refresher_loop(self):
+        """Re-scans the Bybit top 100 universe every 4 hours."""
         while True:
             await asyncio.sleep(14400)
             await self.run_universe_refresher()
 
     async def stream_manager_loop(self):
+        """Maintains the HighVelocity WebSocket Feed."""
         while True:
-            stream_feed = HighVelocityMultiFeed(basket=self.asset_basket + self.shadow_basket[:10], intervals=["1", "5", "15"], orderbook_callback=self.handle_incoming_orderbook_tick, screener_callback=self.handle_incoming_basket_screener_update, kline_callback=self.handle_incoming_kline_update, trade_callback=self.handle_incoming_trade, engine_reference=self)
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:10], 
+                intervals=[self.timeframe], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
             self.stream_feed_instance = stream_feed  
             stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
             def _on_stream_done(t):
-                if not t.cancelled() and not self.stream_restart_event.is_set(): self.stream_restart_event.set()
+                if not t.cancelled() and not self.stream_restart_event.is_set(): 
+                    self.stream_restart_event.set()
+                    
             stream_task.add_done_callback(_on_stream_done)
             await self.stream_restart_event.wait()
             stream_task.cancel()
@@ -1181,6 +1252,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(2)
 
     async def run_exchange_state_reconciliation_daemon(self):
+        """Polls Bybit every 15s to ensure local portfolio locks match remote reality."""
         logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
         while True:
             await asyncio.sleep(15)
@@ -1329,7 +1401,7 @@ class DistributedQuantEngine:
                 return
 
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
-            actual_sl_distance = max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.005)
+            actual_sl_distance = max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.008)
             actual_tp_distance = actual_sl_distance * self.live_params.get("rr_ratio", 2.0)
             
             realigned_sl = actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance
@@ -1365,9 +1437,13 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.debug(f"Trailing stop set failed for {symbol}: {e}")
 
+            stat_engine = self.stat_engines.get(symbol)
+
             while True: 
                 await asyncio.sleep(20)
-                if time.time() - daemon_start_time > max_lifetime_seconds:
+                now = time.time()
+                
+                if now - daemon_start_time > max_lifetime_seconds:
                     try:
                         pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                         if float(pos_res.get("result", {}).get("list", [{}])[0].get("size", 0.0)) > 0:
@@ -1397,6 +1473,17 @@ class DistributedQuantEngine:
                             real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
                             capital_risked = (actual_entry * float(closed_list[0].get("qty", 1))) / target_leverage
                             self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (capital_risked + 1e-9))
+                            
+                            # 🚀 UPGRADE: Track consecutive losses per asset to trigger timeouts
+                            if net_pnl < 0:
+                                prev_loss = self.tick_error_counts.get(symbol, [])
+                                prev_loss = [t for t in prev_loss if now - t < 3600]
+                                prev_loss.append(now)
+                                self.tick_error_counts[symbol] = prev_loss
+                                
+                                if len(prev_loss) >= 2:
+                                    self.circuit_breakers[symbol] = now + 7200
+                                    logger.warning(f"⏸️ ASSET LOCKOUT: {symbol} paused for 2 hours after 2 consecutive losses.")
                         else:
                             net_pnl = 0.0
                             real_outcome = "RECONCILED"
@@ -1415,6 +1502,31 @@ class DistributedQuantEngine:
                     )
                     self.track_task(self._safe_telegram_dispatch(exit_msg, is_html=True))
                     break
+
+                # 🚀 UPGRADE: Micro-Price Skew Guided Trailing Stop Update
+                if stat_engine and stat_engine.true_micro_price > 0:
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
+                    c_price = float(ob.get("best_bid", current_price)) if direction == "BUY" else float(ob.get("best_ask", current_price))
+                    
+                    if b_vol > 0 and a_vol > 0:
+                        trail_dist = actual_sl_distance * 0.75 
+                        if direction == "BUY":
+                            pressure = b_vol / a_vol
+                            eff_dist = trail_dist / min(2.0, max(0.5, pressure))
+                            new_sl = max(stat_engine.true_micro_price - eff_dist, c_price - trail_dist)
+                            if new_sl > realigned_sl:
+                                realigned_sl = new_sl
+                                try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=align_price(realigned_sl))
+                                except Exception: pass
+                        else:
+                            pressure = a_vol / b_vol
+                            eff_dist = trail_dist / min(2.0, max(0.5, pressure))
+                            new_sl = min(stat_engine.true_micro_price + eff_dist, c_price + trail_dist)
+                            if new_sl < realigned_sl:
+                                realigned_sl = new_sl
+                                try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=align_price(realigned_sl))
+                                except Exception: pass
 
         except Exception as e:
             logger.error(f"Position daemon critical fault for {symbol}: {e}", exc_info=True)
