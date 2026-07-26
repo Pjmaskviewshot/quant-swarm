@@ -10,23 +10,22 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V34.3 SIGNAL APEX: HIGH-SPEED MICROSTRUCTURE CACHE
-    Upgraded to reconstruct and cache the Deep Book (Top 10 Levels) for MLOFI.
-    Features O(N log K) Heap Extraction and Epsilon Zero-Division Guards 
-    to guarantee mathematical stability during liquidity vacuums.
+    🔬 V35.0 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
+    Upgraded to track 5 distinct non-linear market states using Gaussian emission probabilities.
+    Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
     """
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
         # Local Orderbook Reconstruction Cache
         self.local_bids: Dict[float, float] = {}
         self.local_asks: Dict[float, float] = {}
 
-        # 🚀 O(1) SNAPSHOT OPTIMIZATION CACHE (String format for API/SOR compatibility)
+        # 🚀 O(1) SNAPSHOT OPTIMIZATION CACHE
         self._cached_snapshot: Dict[str, List[List[str]]] = {"bids": [], "asks": []}
         
-        # 🚀 V27.0 EXPORT CACHE: Pre-cast floats for Zero-Latency MLOFI Math
+        # 🚀 O(1) MLOFI FLOAT EXPORT CACHE
         self._cached_floats: Dict[str, List[List[float]]] = {"bids": [], "asks": []}
 
-        # Rolling memory for Aggressive Trade Flow Imbalance (Tape Reader Pipeline)
+        # Aggressive Trade Flow Imbalance
         self.tfi_history = deque(maxlen=memory_window_short)
         
         # Multi-Timeframe micro-aggregates
@@ -35,10 +34,33 @@ class AdaptiveFeatureEngine:
         
         self._latest_mid = 0.0
 
+        # ====================================================================
+        # 🚀 V35 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # ====================================================================
+        self.regimes = [
+            "TRENDING_BULL", 
+            "TRENDING_BEAR", 
+            "HIGH_VOL_CHOP", 
+            "MEAN_REVERTING", 
+            "LIQUIDITY_VACUUM"
+        ]
+        
+        # Current belief state probabilities (Uniform initial prior)
+        self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+        
+        # Transition Matrix P(State_t | State_{t-1})
+        # Defines the mathematical inertia of market regimes.
+        self.transition_matrix = np.array([
+            [0.85, 0.02, 0.08, 0.04, 0.01], # From BULL
+            [0.02, 0.85, 0.08, 0.04, 0.01], # From BEAR
+            [0.10, 0.10, 0.70, 0.05, 0.05], # From CHOP
+            [0.05, 0.05, 0.05, 0.80, 0.05], # From MEAN_REVERTING
+            [0.05, 0.05, 0.15, 0.05, 0.70]  # From VACUUM
+        ])
+
     def _prune_book(self):
         """
         Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels.
-        ⚡ V26/V27 UPGRADE: Replaced O(N log N) sorting with O(N log K) Heap Queues.
         """
         if len(self.local_bids) > 1000:
             top_bids = heapq.nlargest(500, self.local_bids.items(), key=lambda x: x[0])
@@ -48,38 +70,84 @@ class AdaptiveFeatureEngine:
             top_asks = heapq.nsmallest(500, self.local_asks.items(), key=lambda x: x[0])
             self.local_asks = dict(top_asks)
 
+    def _gaussian_pdf(self, x: float, mean: float, std: float) -> float:
+        """Helper for HMM Emission Probabilities."""
+        variance = float(std)**2 + 1e-9
+        denom = math.sqrt(2 * math.pi * variance)
+        num = math.exp(-(float(x) - float(mean))**2 / (2 * variance))
+        return num / denom
+
     def detect_market_regime(self) -> str:
         """
-        Kaufman's Efficiency Ratio (ER) Market Regime Classifier.
-        ⚡ V26 UPGRADE: Mathematical Epsilon Guards against Zero-Division.
+        🚀 V35 APEX: HMM Gaussian State Classifier.
+        Replaces the binary ER toggle. Calculates the emission probabilities of 
+        recent market velocity and variance, then updates the Markov belief state.
         """
-        if len(self.timeframes["5"]) >= 45:
-            candles = list(self.timeframes["5"])
+        if len(self.timeframes["5"]) >= 20:
+            candles = list(self.timeframes["5"])[-20:]
         elif len(self.timeframes["1"]) >= 20:
-            candles = list(self.timeframes["1"])
+            candles = list(self.timeframes["1"])[-20:]
         else:
-            return "RANGING"
+            return "MEAN_REVERTING" # Safe fallback
 
-        lookback = min(len(candles), 45)
-        recent_candles = candles[-lookback:]
-        closes = np.array([float(c["close"]) for c in recent_candles])
-
+        closes = np.array([float(c["close"]) for c in candles])
+        volumes = np.array([float(c["volume"]) for c in candles])
+        
+        # 1. Calculate Emission Features
+        log_returns = np.diff(np.log(closes + 1e-9))
+        mu_ret = float(np.mean(log_returns))
+        volatility = float(np.std(log_returns)) + 1e-9
+        
         directional_change = abs(closes[-1] - closes[0])
         absolute_changes = np.sum(np.abs(np.diff(closes)))
+        er = float(directional_change / (absolute_changes + 1e-9))
         
-        # Epsilon guard added
-        efficiency_ratio = directional_change / (absolute_changes + 1e-9)
-
-        sma = np.mean(closes)
-        std_dev = np.std(closes)
+        avg_vol = float(np.mean(volumes))
         
-        # Epsilon guard added
-        bb_width = (4 * std_dev) / (sma + 1e-9)
-
-        if efficiency_ratio < 0.35 or bb_width < 0.004:
-            return "RANGING"
-        else:
+        # 2. Define Regime Expected Archetypes (Mean, StdDev) for Emission P(Obs | State)
+        # Features: (Expected Return, Expected Volatility, Expected ER)
+        archetypes = {
+            "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
+            "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
+            "HIGH_VOL_CHOP":    {"ret": (0.0, 0.002), "vol": (0.008, 0.002), "er": (0.3, 0.15)},
+            "MEAN_REVERTING":   {"ret": (0.0, 0.0005), "vol": (0.0015, 0.0005), "er": (0.2, 0.1)},
+            "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
+        }
+        
+        # 3. Calculate Emission Probabilities
+        emission_probs = np.zeros(5)
+        for i, regime in enumerate(self.regimes):
+            arch = archetypes[regime]
+            p_ret = self._gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
+            p_vol = self._gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
+            p_er  = self._gaussian_pdf(er, arch["er"][0], arch["er"][1])
+            
+            # Liquidity Vacuum uniquely keys off volume drops
+            if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes, 25):
+                p_er *= 2.0 
+                
+            emission_probs[i] = p_ret * p_vol * p_er
+            
+        # Add epsilon to prevent absolute zero
+        emission_probs += 1e-9
+            
+        # 4. HMM Forward Algorithm: Update Belief State
+        # P(State_t) = P(Obs | State_t) * Sum( P(State_t | State_t-1) * P(State_t-1) )
+        prior = np.dot(self.transition_matrix.T, self.state_probs)
+        unnormalized_posterior = emission_probs * prior
+        self.state_probs = unnormalized_posterior / np.sum(unnormalized_posterior)
+        
+        # 5. Extract Maximum Likelihood Regime
+        best_state_idx = int(np.argmax(self.state_probs))
+        detected_regime = self.regimes[best_state_idx]
+        
+        # Map back to legacy binary tags for main.py execution pipeline backward compatibility
+        if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"]:
             return "TRENDING"
+        elif detected_regime in ["HIGH_VOL_CHOP", "MEAN_REVERTING", "LIQUIDITY_VACUUM"]:
+            return "RANGING"
+            
+        return "RANGING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
         """Ingests real-time market execution prints to calculate actual trade aggression."""
@@ -98,7 +166,6 @@ class AdaptiveFeatureEngine:
             elif side == "Sell":
                 sell_vol += qty
 
-        # Calculate Trade Flow Imbalance (-1.0 to 1.0) guarded by epsilon
         tfi = (buy_vol - sell_vol) / ((buy_vol + sell_vol) + 1e-9)
         self.tfi_history.append(tfi)
 
@@ -131,7 +198,6 @@ class AdaptiveFeatureEngine:
 
             self._prune_book()
 
-            # 🚀 V27.0 UPGRADE: Extract TOP 10 Levels for Deep-Book MLOFI calculations
             if self.local_bids and self.local_asks:
                 best_bids = heapq.nlargest(10, self.local_bids.items(), key=lambda x: x[0])
                 best_asks = heapq.nsmallest(10, self.local_asks.items(), key=lambda x: x[0])
@@ -143,13 +209,11 @@ class AdaptiveFeatureEngine:
                     if best_bid_price < best_ask_price:
                         self._latest_mid = (best_bid_price + best_ask_price) / 2.0
                     
-                    # Update high-speed execution cache array instantly
                     self._cached_snapshot = {
                         "bids": [[str(p), str(s)] for p, s in best_bids],
                         "asks": [[str(p), str(s)] for p, s in best_asks]
                     }
                     
-                    # ⚡ Pre-cast floats for zero-latency MLOFI array math
                     self._cached_floats = {
                         "bids": [[float(p), float(s)] for p, s in best_bids],
                         "asks": [[float(p), float(s)] for p, s in best_asks]
@@ -174,36 +238,23 @@ class AdaptiveFeatureEngine:
             
             current_close = candles[-1]["close"]
             historical_close = candles[0]["close"]
-            # ⚡ V26 UPGRADE: Epsilon guard
             momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / max(historical_close, 1e-9)
             
         return momentum_matrix
-
-    # =================================================================
-    # 🛡️ INTERFACE CHANNELS FOR EXPOSED ENGINE CALLS
-    # =================================================================
 
     def get_latest_mid(self) -> float:
         return getattr(self, '_latest_mid', 0.0)
 
     def get_latest_tfi(self) -> float:
-        """Exposes Tape Reader pipeline to the central orchestrator path."""
         return self.tfi_history[-1] if self.tfi_history else 0.0
 
     def get_orderbook_snapshot(self) -> Dict[str, List[List[str]]]:
-        """Instantaneous O(1) layout return for the SOR engine (String Format)."""
         return self._cached_snapshot
         
     def get_deep_book_floats(self) -> Tuple[List[List[float]], List[List[float]]]:
-        """
-        🚀 V27.0 MLOFI EXPORT
-        Returns the reconstructed L2 deep book as raw floats, bypassing string-parsing 
-        overhead for the Microstructure Edge Gate.
-        """
         return self._cached_floats["bids"], self._cached_floats["asks"]
 
     def get_computed_atr(self, period: int = 14) -> float:
-        """Wilder's Smoothed True Range calculation for volatility-adjusted stop realignments."""
         if len(self.timeframes["5"]) >= period + 1:
             candles = list(self.timeframes["5"])
         elif len(self.timeframes["1"]) >= period + 1:
@@ -223,7 +274,6 @@ class AdaptiveFeatureEngine:
         if not tr_values:
             return 0.0
             
-        # 🚀 V34.3 FIX: Correctly initialize Wilder's ATR with the SMA of the first N True Ranges
         init_period = min(period, len(tr_values))
         atr = float(np.mean(tr_values[:init_period]))
         
@@ -233,12 +283,10 @@ class AdaptiveFeatureEngine:
         return float(atr)
 
     def get_book_depth_metrics(self) -> Dict[str, float]:
-        """Helper diagnostics for shallow liquidity scanning."""
         snapshot = self._cached_floats
         if not snapshot["bids"] or not snapshot["asks"]:
             return {}
             
-        # 🚀 V27.0 UPGRADE: Depth metrics now cover the Top 10 levels for better resistance modeling
         bid_depth = sum(level[1] for level in snapshot["bids"])
         ask_depth = sum(level[1] for level in snapshot["asks"])
         total_depth = bid_depth + ask_depth

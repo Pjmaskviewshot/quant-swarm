@@ -4,18 +4,20 @@ import math
 import logging
 import numpy as np
 from datetime import datetime, timezone
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 from supabase import create_client, Client
 
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
+
 class MemoryBank:
     """
-    🌌 V34.3 SIGNAL APEX: VECTORIZED MEMORY LEDGER
-    Hyper-optimized Supabase connector. 
-    Features pure NumPy vectorization for shadow OHLC forensics, 
-    Dynamic Rolling Variance for the Bayesian DNA Matrix, and chunked upserts.
-    *V34.3 Upgrade: Strict Symbol Isolation for K-NN DNA Matrix Queries.*
+    🌌 V35.0 APEX: AUTONOMOUS VECTORIZED MEMORY LEDGER
+    Hyper-optimized Supabase connector featuring:
+    - Shadow-to-Live Auto-Promotion Engine (Rolling Sharpe & Win Rate evaluation)
+    - Pure NumPy vectorization for shadow OHLC forensics
+    - Dynamic Rolling Variance for the Bayesian DNA Matrix
+    - Forensic Execution Drag & Slippage Attribution for Telegram Mission Control
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -32,8 +34,8 @@ class MemoryBank:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
             raise
 
-        self.dna_cache = {} 
-        self.cache_ttl_seconds = 120.0 
+        self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
+        self.cache_ttl_seconds: float = 120.0 
 
     def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
         for attempt in range(max_retries):
@@ -53,7 +55,16 @@ class MemoryBank:
             ts_str = ts_str.replace('Z', '+00:00')
         return datetime.fromisoformat(ts_str)
 
-    def commit_prediction(self, signal_id: str, timestamp: float, price: float, direction: str, confidence: float, features: Dict[str, Any] = None, is_shadow: bool = False):
+    def commit_prediction(
+        self, 
+        signal_id: str, 
+        timestamp: float, 
+        price: float, 
+        direction: str, 
+        confidence: float, 
+        features: Optional[Dict[str, Any]] = None, 
+        is_shadow: bool = False
+    ):
         if features is None:
             features = {}
             
@@ -97,13 +108,24 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
-    def log_live_execution_result(self, signal_id: str, net_pnl: float, slippage: float, outcome: str, execution_details: Dict[str, Any] = None):
+    def log_live_execution_result(
+        self, 
+        signal_id: str, 
+        net_pnl: float, 
+        slippage: float, 
+        outcome: str, 
+        execution_details: Optional[Dict[str, Any]] = None
+    ):
         is_correct = True if net_pnl > 0 else False
         if execution_details is None:
             execution_details = {}
             
         try:
-            response = self._safe_execute(self.supabase.table("quantitative_ledger").select("timestamp").eq("signal_id", str(signal_id)))
+            response = self._safe_execute(
+                self.supabase.table("quantitative_ledger")
+                .select("timestamp")
+                .eq("signal_id", str(signal_id))
+            )
             
             if response and response.data:
                 start_dt = self._parse_iso_timestamp(response.data[0]["timestamp"])
@@ -122,7 +144,11 @@ class MemoryBank:
                     "holding_minutes": round(duration, 2)
                 }
                 
-                update_res = self._safe_execute(self.supabase.table("quantitative_ledger").update(update_payload).eq("signal_id", str(signal_id)))
+                update_res = self._safe_execute(
+                    self.supabase.table("quantitative_ledger")
+                    .update(update_payload)
+                    .eq("signal_id", str(signal_id))
+                )
                 
                 if update_res and update_res.data:
                     logger.info(f"🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
@@ -134,11 +160,15 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
 
-    def resolve_batch_historical_predictions(self, assets: List[str], current_prices: Dict[str, Any], age_cutoff: float, interval_mins: float = 15.0) -> int:
+    def resolve_batch_historical_predictions(
+        self, 
+        assets: List[str], 
+        current_prices: Dict[str, Any], 
+        age_cutoff: float, 
+        interval_mins: float = 15.0
+    ) -> int:
         """
-        🚀 V34.2 APEX: OHLC Vectorized Resolution Engine.
-        Uses pure NumPy array math to accurately simulate intra-candle TP/SL hunting
-        without using slow Python loops. Fully aligned with live dynamic leverage scaling.
+        🚀 V35 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
         """
         resolved_count = 0
 
@@ -210,16 +240,14 @@ class MemoryBank:
                     tp_hits = np.where(lows_arr <= tp_price)[0]
                     sl_hits = np.where(highs_arr >= sl_price)[0]
                 else:
-                    tp_hits = []
-                    sl_hits = []
+                    tp_hits = np.array([])
+                    sl_hits = np.array([])
 
-                # Find the earliest occurrence of TP or SL
                 first_tp_idx = tp_hits[0] if len(tp_hits) > 0 else float('inf')
                 first_sl_idx = sl_hits[0] if len(sl_hits) > 0 else float('inf')
 
                 if first_tp_idx != float('inf') or first_sl_idx != float('inf'):
                     is_terminated = True
-                    # Pessimistic fill assumption: If both hit in the same candle, assume SL hit first.
                     if first_sl_idx <= first_tp_idx:
                         exit_price = sl_price
                         bars_held = int(first_sl_idx)
@@ -239,17 +267,14 @@ class MemoryBank:
                     elif prediction == "SELL" and exit_price < entry_price:
                         is_win = True
 
-                    # 🚀 V34.2 HI-1 FIX: Dynamic Leverage Parity with Live Risk Vault
                     entry_price_safe = entry_price if entry_price > 0 else 1e-9
                     sl_distance_pct = abs(sl_price - entry_price_safe) / entry_price_safe
-                    sl_distance_pct = max(0.005, sl_distance_pct) # 0.5% floor to match live
+                    sl_distance_pct = max(0.005, sl_distance_pct)
 
-                    # Live Formula: max_safe_leverage = 1.0 / (sl_distance_pct * 1.5)
                     max_safe_leverage = 1.0 / (sl_distance_pct * 1.5)
                     simulated_leverage = max(1.0, min(5.0, float(math.floor(max_safe_leverage))))
                     
                     TAKER_ROUND_TRIP = 0.0011
-                    
                     gross_return = abs(exit_price - entry_price_safe) / entry_price_safe
                     if not is_win:
                         gross_return = -gross_return
@@ -261,14 +286,12 @@ class MemoryBank:
                     row["is_correct"] = is_win
                     row["net_pnl"] = float(net_pnl)
                     row["leverage"] = float(simulated_leverage)
-                    
                     row["holding_minutes"] = round(min(elapsed_minutes, float(bars_held * interval_mins)), 2)
                     
                     update_batch.append(row)
                     resolved_count += 1
                 
             if update_batch:
-                # Chunked Upserts to prevent Supabase payload rejection
                 chunk_size = 100
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
@@ -281,12 +304,82 @@ class MemoryBank:
             logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}", exc_info=True)
             return 0
 
+    # ====================================================================
+    # 🚀 V35 APEX METHOD 1: SHADOW-TO-LIVE AUTO-PROMOTION ENGINE
+    # ====================================================================
+
+    def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 15) -> Dict[str, Any]:
+        """
+        Evaluates recent resolved shadow trades for an asset to calculate rolling Sharpe Ratio & Win Rate.
+        Determines whether an disarmed asset has earned promotion back to live execution.
+        """
+        try:
+            query = (
+                self.supabase.table("quantitative_ledger")
+                .select("net_pnl, is_correct, actual_outcome")
+                .eq("resolved", True)
+                .eq("symbol", target_symbol)
+                .order("timestamp", desc=True)
+                .limit(window_trades)
+            )
+            response = self._safe_execute(query)
+            data = response.data if response else []
+
+            if len(data) < 5:
+                return {
+                    "should_promote": False,
+                    "should_demote": False,
+                    "shadow_sharpe": 0.0,
+                    "shadow_win_rate": 0.50,
+                    "sample_count": len(data),
+                    "reason": f"Insufficient shadow samples ({len(data)}/5 min)"
+                }
+
+            pnls = np.array([float(r.get("net_pnl", 0.0)) for r in data])
+            wins = sum(1 for r in data if r.get("is_correct") is True)
+            total = len(data)
+            win_rate = wins / total
+
+            mean_pnl = np.mean(pnls)
+            std_pnl = np.std(pnls) + 1e-9
+            shadow_sharpe = float((mean_pnl / std_pnl) * math.sqrt(252.0)) if std_pnl > 1e-6 else 0.0
+
+            # 🚀 PROMOTION CRITERIA: Rolling Win Rate >= 55% AND Sharpe Ratio >= 1.2
+            should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.2)
+            
+            # 🛑 DEMOTION CRITERIA: Rolling Win Rate < 45% OR Sharpe Ratio < -0.5
+            should_demote = (win_rate < 0.45) or (shadow_sharpe < -0.5)
+
+            reason = "STABLE"
+            if should_promote:
+                reason = f"PROMOTION TRIGGERED // Win Rate: {win_rate:.1%}, Sharpe: {shadow_sharpe:.2f}"
+            elif should_demote:
+                reason = f"DEMOTION TRIGGERED // Win Rate: {win_rate:.1%}, Sharpe: {shadow_sharpe:.2f}"
+
+            return {
+                "should_promote": should_promote,
+                "should_demote": should_demote,
+                "shadow_sharpe": round(shadow_sharpe, 2),
+                "shadow_win_rate": round(win_rate, 4),
+                "sample_count": total,
+                "reason": reason
+            }
+
+        except Exception as e:
+            logger.error(f"Failed shadow promotion evaluation for {target_symbol}: {e}", exc_info=True)
+            return {
+                "should_promote": False,
+                "should_demote": False,
+                "shadow_sharpe": 0.0,
+                "shadow_win_rate": 0.50,
+                "sample_count": 0,
+                "reason": f"Evaluation exception: {e}"
+            }
+
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V34.3 APEX: Dynamic Rolling Variance Normalization
-        Hardcoded scalar limits removed. Standardizes features relative to market volatility.
-        Includes dual win_rate/cluster_win_rate key aliasing for backwards compatibility.
-        *V34.3: Strict Symbol Isolation for Memory Queries*
+        🚀 V35 APEX: Dynamic Rolling Variance Normalization + Autonomous Shadow Re-Arming
+        Calculates K-NN Bayesian Edge and evaluates automatic promotion state changes.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_obi = float(current_dna.get("z_obi", 0.0))
@@ -297,7 +390,6 @@ class MemoryBank:
         obi_bucket = round(c_obi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
         
-        # Hash now includes symbol to prevent cross-asset cache contamination
         dna_hash = f"{target_symbol}_{vol_bucket}_{obi_bucket}_{spread_bucket}"
         current_time = time.time()
         
@@ -307,27 +399,33 @@ class MemoryBank:
                 return cached_result
 
         try:
-            # 🚀 V34.3 FIX: Isolate query by specific asset symbol
-            query = self.supabase.table("quantitative_ledger")\
-                .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")\
-                .eq("resolved", True)\
-                .eq("symbol", target_symbol)\
-                .order("timestamp", desc=True)\
+            query = (
+                self.supabase.table("quantitative_ledger")
+                .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")
+                .eq("resolved", True)
+                .eq("symbol", target_symbol)
+                .order("timestamp", desc=True)
                 .limit(2000)
-                
+            )
+            
             response = self._safe_execute(query)
             historical_data = response.data if response else []
             
+            # Evaluate Shadow-to-Live Promotion metrics in background
+            promo_eval = self.evaluate_shadow_promotion(target_symbol)
+            
             if len(historical_data) < k_neighbors:
+                is_armed_default = promo_eval["should_promote"]
                 return {
                     "bayesian_edge": 0.50, 
-                    "is_armed": False, 
+                    "is_armed": is_armed_default, 
                     "matched_samples": len(historical_data), 
                     "cluster_win_rate": 0.50,
-                    "win_rate": 0.50  # 🚀 Bug #1 Fix Alias
+                    "win_rate": 0.50,
+                    "shadow_sharpe": promo_eval["shadow_sharpe"],
+                    "promotion_event": "PROMOTED" if is_armed_default else "INSUFFICIENT_DATA"
                 }
 
-            # ⚡ DYNAMIC FEATURE STANDARDIZATION
             h_vols = [min(float(row.get("vol_mult", 1.0)), 10.0) for row in historical_data]
             h_obis = [float(row.get("z_obi", 0.0)) for row in historical_data]
             
@@ -369,18 +467,31 @@ class MemoryBank:
             wins = sum(n["is_correct"] for n in nearest_neighbors)
             total = len(nearest_neighbors)
             
-            # Additive Smoothing (Laplace)
+            # Laplace Additive Smoothing
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
-            is_armed = bayesian_edge >= 0.55
+            # 🚀 V35 AUTONOMOUS ARMING LOGIC:
+            # An asset is armed if Bayesian Edge >= 55% OR if Shadow Promotion is triggered
+            is_armed = (bayesian_edge >= 0.55) or promo_eval["should_promote"]
+            if promo_eval["should_demote"] and not promo_eval["should_promote"]:
+                is_armed = False
+
             win_rate_calc = round(wins / total, 4) if total > 0 else 0.50
             
+            promotion_event = "STABLE"
+            if promo_eval["should_promote"]:
+                promotion_event = "PROMOTED_FROM_SHADOW"
+            elif promo_eval["should_demote"]:
+                promotion_event = "DEMOTED_TO_SHADOW"
+
             result_payload = {
                 "bayesian_edge": round(bayesian_edge, 4),
                 "is_armed": is_armed,
                 "matched_samples": total,
                 "cluster_win_rate": win_rate_calc,
-                "win_rate": win_rate_calc  # 🚀 Bug #1 Fix Alias
+                "win_rate": win_rate_calc,
+                "shadow_sharpe": promo_eval["shadow_sharpe"],
+                "promotion_event": promotion_event
             }
             
             self.dna_cache[dna_hash] = (current_time, result_payload)
@@ -393,5 +504,63 @@ class MemoryBank:
                 "is_armed": False, 
                 "matched_samples": 0, 
                 "cluster_win_rate": 0.50,
-                "win_rate": 0.50  # 🚀 Bug #1 Fix Alias
+                "win_rate": 0.50,
+                "shadow_sharpe": 0.0,
+                "promotion_event": "ERROR_FALLBACK"
+            }
+
+    # ====================================================================
+    # 🚀 V35 APEX METHOD 2: TELEGRAM MISSION CONTROL FORENSIC SUMMARY
+    # ====================================================================
+
+    def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
+        """
+        Queries today's resolved live executions to extract institutional forensic statistics:
+        Total Net PnL, Total Fees, Average Holding Duration, Total Slippage Drag.
+        """
+        try:
+            query = (
+                self.supabase.table("quantitative_ledger")
+                .select("net_pnl, fees_usdt, slippage_drag, holding_minutes, is_correct, symbol")
+                .eq("resolved", True)
+                .eq("is_shadow", False)
+                .gte("timestamp", today_iso_start)
+            )
+            res = self._safe_execute(query)
+            rows = res.data if res else []
+
+            if not rows:
+                return {
+                    "trade_count": 0,
+                    "net_pnl": 0.0,
+                    "fees_paid": 0.0,
+                    "avg_slippage_bps": 0.0,
+                    "avg_holding_mins": 0.0,
+                    "win_rate": 0.0
+                }
+
+            pnls = [float(r.get("net_pnl", 0.0)) for r in rows]
+            fees = [float(r.get("fees_usdt", 0.0)) for r in rows]
+            slips = [float(r.get("slippage_drag", 0.0)) for r in rows]
+            durations = [float(r.get("holding_minutes", 0.0)) for r in rows]
+            wins = sum(1 for r in rows if r.get("is_correct") is True)
+
+            return {
+                "trade_count": len(rows),
+                "net_pnl": round(sum(pnls), 4),
+                "fees_paid": round(sum(fees), 4),
+                "avg_slippage_bps": round(np.mean(slips) * 10000.0, 2) if slips else 0.0,
+                "avg_holding_mins": round(np.mean(durations), 1) if durations else 0.0,
+                "win_rate": round(wins / len(rows), 4)
+            }
+
+        except Exception as e:
+            logger.error(f"Failed fetching forensic execution summary: {e}", exc_info=True)
+            return {
+                "trade_count": 0,
+                "net_pnl": 0.0,
+                "fees_paid": 0.0,
+                "avg_slippage_bps": 0.0,
+                "avg_holding_mins": 0.0,
+                "win_rate": 0.0
             }

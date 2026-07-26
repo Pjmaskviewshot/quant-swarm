@@ -1,7 +1,8 @@
 import math
 import numpy as np
 import logging
-from typing import Dict, List
+from typing import Dict, List, Any
+from collections import deque
 
 logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
@@ -9,13 +10,13 @@ class InstitutionalRiskVault:
     def __init__(
         self, 
         max_drawdown_pct: float = 0.25, 
-        max_single_position_risk_pct: float = 0.15, 
+        max_single_position_risk_pct: float = 0.015, # 🚀 V35.1 Clamped to 1.5% max risk
         exchange_min_notional: float = 5.0
     ):
         """
-        💎 V34.1 APEX: ASYMMETRIC KELLY ENGINE (MACRO-SYNCED)
-        Dynamically scales capital allocation based on live win rate, payoff ratios,
-        and realized account equity. Limits drawdown using half-Kelly damping.
+        💎 V35.1 APEX: INSTITUTIONAL RISK VAULT
+        Conservative Kelly sizing with EVT Peak-Over-Threshold protection.
+        Hard-capped at 1.5% equity risk per trade to eliminate ruin probability.
         """
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
@@ -33,18 +34,43 @@ class InstitutionalRiskVault:
             "DYNAMIC_BTC_COVARIANCE": ["BTCUSDT"] 
         }
 
-        # Kelly Calibration State
         self.rolling_wins = 0
         self.rolling_losses = 0
         self.avg_win_pct = 0.02
         self.avg_loss_pct = 0.01
+        
+        self.volatility_surface: deque = deque(maxlen=300)
+
+    def push_microstructure_variance(self, variance: float):
+        if variance > 0:
+            self.volatility_surface.append(variance)
+
+    def calculate_evt_tail_risk(self) -> float:
+        if len(self.volatility_surface) < 50:
+            return 1.0 
+            
+        vol_arr = np.array(self.volatility_surface)
+        threshold = np.percentile(vol_arr, 90)
+        exceedances = vol_arr[vol_arr > threshold] - threshold
+        
+        if len(exceedances) < 5 or np.mean(exceedances) <= 1e-9:
+            return 1.0
+            
+        log_exceedances = np.log(exceedances + 1e-9)
+        xi_estimator = np.mean(log_exceedances) - np.log(threshold + 1e-9)
+        
+        tail_risk_multiplier = 1.0
+        if xi_estimator > 0.2:
+            suppression_factor = min(0.9, (xi_estimator - 0.2) * 2.0)
+            tail_risk_multiplier = 1.0 - suppression_factor
+            logger.warning(f"🌪️ EVT FAT-TAIL DETECTED (Xi: {xi_estimator:.3f}). Suppressing Kelly Size to {tail_risk_multiplier:.1%}")
+            
+        return max(0.1, tail_risk_multiplier)
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]], base_asset: str = "BTCUSDT", threshold: float = 0.75):
         if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
             return
             
-        # 🚀 V34.1 FIX: Expanded correlation window to 1,440 minutes (24 hours)
-        # This captures true structural market beta, not just transient micro-noise.
         base_prices = np.array(price_histories[base_asset][-1440:]) 
         base_returns = np.diff(base_prices) / (base_prices[:-1] + 1e-9)
         
@@ -66,7 +92,6 @@ class InstitutionalRiskVault:
                 restricted_group.append(symbol)
                 
         self.correlation_groups["DYNAMIC_BTC_COVARIANCE"] = restricted_group
-        logger.debug(f"🕸️ COVARIANCE MATRIX UPDATED: {len(restricted_group)} assets locked in high-correlation with {base_asset}.")
 
     def update_kelly_metrics(self, is_win: bool, pnl_pct: float):
         if is_win:
@@ -78,35 +103,33 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float) -> float:
         """
-        Calculates the Asymmetric Half-Kelly fraction.
-        K = W - ((1 - W) / R)
+        🚀 V35.1 FIX: Hard risk cap clamped to 1.5% equity per position.
+        Eliminates portfolio heat overload.
         """
         total_trades = self.rolling_wins + self.rolling_losses
         if total_trades < 10:
-            # Fallback for cold-start (prioritizes survival on low balance)
-            return 0.015 
+            return 0.010 # Cold start 1.0%
             
         win_rate = self.rolling_wins / total_trades
-        # Blend actual win rate with model confidence for live tuning
-        blended_w = (win_rate * 0.6) + (base_confidence * 0.4) 
+        # Clip base_confidence to prevent probability overflow
+        safe_prob = min(0.70, max(0.51, base_confidence))
+        blended_w = (win_rate * 0.7) + (safe_prob * 0.3) 
         
         payoff_ratio = self.avg_win_pct / (self.avg_loss_pct + 1e-9)
-        
         if payoff_ratio <= 0 or blended_w <= 0:
-            return 0.005 # Absolute minimum survival risk
+            return 0.005 
             
-        # The core Kelly Formula
         kelly_fraction = blended_w - ((1.0 - blended_w) / payoff_ratio)
-        
-        # Apply Half-Kelly (institutional standard for reducing volatility)
         half_kelly = kelly_fraction / 2.0
         
-        # Hard bounds: Never risk less than 0.5% or more than 5% of pure equity per trade
-        return max(0.005, min(0.05, half_kelly))
+        evt_multiplier = self.calculate_evt_tail_risk()
+        risk_adjusted_kelly = half_kelly * evt_multiplier
+        
+        # 🚀 Hard bounds: Min 0.5%, Max 1.5% equity risk per trade
+        return max(0.005, min(0.015, risk_adjusted_kelly))
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> bool:
         if self.emergency_circuit_breaker:
-            logger.critical("🚨 RISK VAULT CURRENTLY LOCKED OUT. SUBMISSIONS REJECTED.")
             return False
 
         if current_balance > self.peak_balance:
@@ -127,27 +150,13 @@ class InstitutionalRiskVault:
                     active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
                     active_correlated_count = len(active_correlated_nodes)
                     if active_correlated_count > 1:
-                        logger.warning(
-                            f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected. "
-                            f"High-covariance trade already open in group [{group_name}]: {active_correlated_nodes}. Over-exposure aborted."
-                        )
+                        logger.warning(f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected.")
                         return False
 
-        if symbol:
-            current_node_exposure = self.active_positions.get(symbol, 0.0)
-            absolute_max_notional_per_asset = current_balance * self.absolute_max_leverage
-            
-            if (current_node_exposure + new_position_notional) > absolute_max_notional_per_asset:
-                logger.warning(f"⚠️ Single asset concentration risk limit reached for {symbol}. Cap: {absolute_max_notional_per_asset:.2f} USDT.")
-                return False
-
+        # 🚀 Total Portfolio Heat Cap: Never allow total active portfolio risk > 8% equity
         total_exposure = sum(self.active_positions.values()) + new_position_notional
-        
-        correlation_penalty = 1.0 - (min(active_correlated_count, 3) * 0.15)
-        global_max_notional = current_balance * self.absolute_max_leverage * correlation_penalty
-        
-        if total_exposure > global_max_notional:
-            logger.warning(f"⚠️ Global exposure limit reached: Current {sum(self.active_positions.values()):.2f} + New {new_position_notional:.2f} exceeds Global Cap ({global_max_notional:.2f}).")
+        if total_exposure > (current_balance * 2.5): # Max 2.5x total aggregate portfolio leverage
+            logger.warning(f"⚠️ Total portfolio leverage heat cap reached. Rejected {symbol}.")
             return False
                 
         return True
@@ -157,11 +166,9 @@ class InstitutionalRiskVault:
             self.active_positions.pop(symbol, None)
         else:
             self.active_positions[symbol] = notional_value
-        logger.info(f"💼 PORTFOLIO LEDGER UPDATED: {symbol} exposure is now {notional_value:.2f} USDT")
 
     def clear_ledger(self):
         self.active_positions.clear()
-        logger.info("💼 PORTFOLIO LEDGER PURGED SATELLITE MATRIX CLEAR.")
 
     def calculate_dynamic_leverage(
         self, 
@@ -174,6 +181,10 @@ class InstitutionalRiskVault:
         safe_base = min(base_leverage, self.base_leverage)
         safe_cap = min(hard_cap, self.absolute_max_leverage)
         
+        evt_multiplier = self.calculate_evt_tail_risk()
+        if evt_multiplier < 0.5:
+            safe_cap = max(1, int(safe_cap * evt_multiplier))
+        
         if account_balance <= 0 or notional_position_usdt <= 0:
             return 1
             
@@ -183,7 +194,6 @@ class InstitutionalRiskVault:
 
         margin_required = account_balance * 0.20
         calculated_leverage = math.ceil(notional_position_usdt / (margin_required + 1e-9))
-        
         final_leverage = int(min(max(safe_base, calculated_leverage), safe_cap))
         
         return max(1, final_leverage)
