@@ -587,8 +587,6 @@ class DistributedQuantEngine:
         
         now = time.time()
         if self.circuit_breakers.get(symbol, 0.0) > now: return
-        
-        # 🚀 FIX P1: Unify global lock check strictly through existing FSM property
         if not self.fsm.can_execute_trades: return
 
         try:
@@ -978,7 +976,6 @@ class DistributedQuantEngine:
                 except Exception: pass
 
                 for symbol in list(self.asset_basket):
-                    # 🚀 FIX P1: Unify global lock check strictly through existing FSM property
                     if not self.fsm.can_execute_trades: continue
                     
                     ob = self.orderbook_snapshots.get(symbol)
@@ -1211,8 +1208,11 @@ class DistributedQuantEngine:
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
+                # 🚀 FIX P1: Route drawdown lock through FSM before gracefully shutting down
                 if drawdown_pct >= 0.25:
+                    self.fsm.trigger_global_emergency_lock()
                     await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
+                    await asyncio.sleep(2) # Let daemons observe the lock state
                     await self.graceful_shutdown()
                     sys.exit(0)
                 
@@ -1400,7 +1400,6 @@ class DistributedQuantEngine:
             self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def graceful_shutdown(self):
-        """Restored: Fully verifies zero exposure across 10 retries without false FATALs."""
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
         
         for symbol in list(self.active_positions_lock.keys()):
