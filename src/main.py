@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V35.2_APEX")
+logger = logging.getLogger("QUANT_CORE.V35.3_APEX")
 
 
 class ClusterWarmStartRLS:
@@ -140,7 +140,6 @@ class ContinuousMicrostructureEngine:
         self.historical_probs = deque(maxlen=2000) 
         self.rls_updates = 100 
         
-        # 🚀 V35.2 UPGRADE: Smooth EWMA tracking for errors, no hard resets
         self.ewma_mse = 0.25 
 
     def get_dynamic_decays(self):
@@ -229,14 +228,11 @@ class ContinuousMicrostructureEngine:
 
                     error = y_true - old_pred_prob 
                     
-                    # 🚀 V35.2 UPGRADE: Smooth EWMA Error Tracking
                     self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
 
                     x = features_array.reshape(-1, 1)
                     var_pi = max(1e-4, old_pred_prob * (1.0 - old_pred_prob))  
                     
-                    # 🚀 V35.2 UPGRADE: Adaptive Forgetting Factor (AFF)
-                    # High Entropy = Forget Faster. Smooth Trend = Remember Longer.
                     dynamic_lambda = max(0.990, min(0.9995, 1.0 - (self.shannon_entropy * 0.005)))
                     
                     if r_blend > 0.1:
@@ -247,8 +243,6 @@ class ContinuousMicrostructureEngine:
                         self.weights_trending = self.weights_trending + update_t
                         self.P_trending = (self.P_trending - var_pi * (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
                         
-                        # 🚀 V35.2 UPGRADE: Continuous Tikhonov Regularization (Leaky RLS)
-                        # Mathematically bounds the matrix trace at 1000 so it NEVER blows up.
                         trace_t = np.trace(self.P_trending)
                         if trace_t > 1000.0:
                             self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(9) * 0.01)
@@ -347,9 +341,6 @@ class ContinuousMicrostructureEngine:
         if len(self.historical_probs) > 100:
             mean_prob = np.mean(self.historical_probs)
             std_prob = np.std(self.historical_probs) + 1e-9
-            
-            # 🚀 V35.2 UPGRADE: Apply error penalty to the dynamic gate
-            # If EWMA error is high, the gate rises, demanding higher conviction to trade.
             error_penalty = max(0.0, (self.ewma_mse - 0.25) * 2.0)
             dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty
         else:
@@ -397,7 +388,6 @@ class DistributedQuantEngine:
         
         self.fsm = SystemStateMachine()
         self.memory = MemoryBank()
-        # 🚀 V35.1 FIX: Max 1.5% single position risk
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
         self.ai_matrix = AdversarialDebateMatrix()
         self.data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY", ""))
@@ -416,7 +406,6 @@ class DistributedQuantEngine:
         self.volatility_baseline: Dict[str, float] = {}
         
         self.portfolio_state_lock = asyncio.Lock()
-        # 🚀 V35.1 FIX: Renamed map to prevent type ambiguity
         self.active_positions_map: Dict[str, str] = {}  
         
         self.symbol_locks: Dict[str, asyncio.Lock] = {}
@@ -446,7 +435,9 @@ class DistributedQuantEngine:
             testnet=os.getenv("BYBIT_TESTNET", "false").lower() == "true",
             max_workers=8
         )
-        self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.005)
+        
+        # 🚀 V35.3 FIX: Unified SOR slippage Configuration Drift (Clamped to 12 bps institutional norm)
+        self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
         
         self.omni_scanner = GlobalOmniScanner(self.executor)
         self.stream_feed_instance = None  
@@ -662,10 +653,9 @@ class DistributedQuantEngine:
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 if structural_verdict["action"] == "HOLD": return
                 
-                # 🚀 V35.1 FIX: Keep RLS probability pure! Do NOT overwrite prob_success with raw 0.85 confidence.
                 if structural_verdict["action"] != action:
                     action = structural_verdict["action"]
-                    prob_success = max(max(p_up, p_down), 0.62) # Bounded probability boost
+                    prob_success = max(max(p_up, p_down), 0.62) 
                 else:
                     prob_success = max(p_up, p_down)
                 
@@ -700,8 +690,11 @@ class DistributedQuantEngine:
                         self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, payload_features, True])
                     return 
                 
-                taker_fee_pct = 0.0011 
-                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - taker_fee_pct
+                # 🚀 V35.3 FIX: Regime-Aware Fee Model.
+                # Stop rejecting mean-reversion trades with false Taker assumptions.
+                fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
+                
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
                 net_sharpe = net_ev_pct / (sl_dist_pct + 1e-9)
                 
                 if net_ev_pct <= 0.0005: return
@@ -1262,7 +1255,9 @@ class DistributedQuantEngine:
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False):
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
-        max_lifetime_seconds = 14400 
+        
+        # 🚀 V35.3 FIX: Removed the 4-hour hard timeout. Replaced with trailing PnL timeout logic below.
+        peak_unrealized_pnl = 0.0
 
         if self.test_mode:
             await asyncio.sleep(60)
@@ -1328,19 +1323,25 @@ class DistributedQuantEngine:
                 await asyncio.sleep(20)
                 now = time.time()
                 
-                if now - daemon_start_time > max_lifetime_seconds:
-                    try:
-                        pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        if float(pos_res.get("result", {}).get("list", [{}])[0].get("size", 0.0)) > 0:
-                            await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if pos_res["result"]["list"][0]["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(pos_res["result"]["list"][0]["size"])), timeInForce="IOC", reduceOnly=True)
-                    except Exception as e: logger.error(f"Timeout panic flatten failed for {symbol}: {e}")
-                    async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
-                    self.risk_vault.update_position_ledger(symbol, 0.0)
-                    break
-
                 try:
                     pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                    position_gone = (not pos_res.get("result", {}).get("list", [])) or float(pos_res["result"]["list"][0].get("size", 0.0)) == 0.0
+                    pos_list = pos_res.get("result", {}).get("list", [])
+                    position_gone = (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0
+                    
+                    if not position_gone:
+                        # 🚀 V35.3 FIX: Trailing PnL Timeout Logic
+                        unrealized_pnl = float(pos_list[0].get("unrealisedPnl", 0.0))
+                        peak_unrealized_pnl = max(peak_unrealized_pnl, unrealized_pnl)
+                        
+                        elapsed_hours = (now - daemon_start_time) / 3600.0
+                        
+                        # If open > 4 hours AND (underwater OR gave back > 50% of peak profit), flatten it.
+                        if elapsed_hours > 4.0:
+                            if unrealized_pnl < 0 or (peak_unrealized_pnl > 0 and unrealized_pnl < (peak_unrealized_pnl * 0.5)):
+                                logger.info(f"⏳ TRAILING TIMEOUT: Flattening stale position {symbol} after {elapsed_hours:.1f} hrs.")
+                                await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if pos_list[0]["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(pos_list[0]["size"])), timeInForce="IOC", reduceOnly=True)
+                                position_gone = True
+
                 except Exception as e: logger.debug(f"Position check failed for {symbol}: {e}"); position_gone = False
 
                 if position_gone:

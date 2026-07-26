@@ -1,7 +1,7 @@
 """
-🧪 V35.1 INSTITUTIONAL BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V35.1.
-Fixed Permutation Entropy dictionary updating bug & probability bounds.
+🧪 V35.3 INSTITUTIONAL BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V35.3.
+Includes Regime-Aware Fee Matrix parity fix.
 """
 import argparse
 import time
@@ -139,10 +139,6 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     return 0.0
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
-    """
-    🚀 V35.1 FIX: Restored missing vector rank updating loop.
-    Entropy calculation now functions accurately in the backtester.
-    """
     if len(series) < (order * delay): return 1.0
     
     sub_vectors = []
@@ -151,7 +147,6 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
         
     perm_counts = {perm: 0 for perm in permutations(range(order))}
     
-    # 🚀 FIX: Update rank frequencies
     for vec in sub_vectors:
         rank = tuple(np.argsort(vec))
         perm_counts[rank] += 1
@@ -201,9 +196,10 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     }
     
     regimes = list(archetypes.keys())
+    # 🚀 V35.3 FIX: Reduced inertia from 0.85 to 0.75 for faster adaptation
     transition_matrix = np.array([
-        [0.85, 0.02, 0.08, 0.04, 0.01], 
-        [0.02, 0.85, 0.08, 0.04, 0.01], 
+        [0.75, 0.05, 0.10, 0.08, 0.02], 
+        [0.05, 0.75, 0.10, 0.08, 0.02], 
         [0.10, 0.10, 0.70, 0.05, 0.05], 
         [0.05, 0.05, 0.05, 0.80, 0.05], 
         [0.05, 0.05, 0.15, 0.05, 0.70]  
@@ -386,6 +382,7 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         vol_scalar = min(1.0, max(0.0, inst_variance * 5000.0))
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
+        hawkes_decay = np.clip(1.0 + (vol_scalar * 4.0), 1.0, 5.0)
 
         vol_step = c['volume']
         price_step = (c['close'] - c_prev['close'])
@@ -453,11 +450,9 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if shannon_entropy > 0.85:
             dynamic_gate = 0.99 
             
-        # Simulated Dark Pool Inversion
         t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
         if t_imb_z < -2.5 and abs(skew) < 1.0: 
             action_dir = "BUY"
-            # 🚀 V35.1 FIX: Keep probability bounded naturally, do NOT overwrite with confidence score
             prob_success = max(prob_success, 0.65)
         elif t_imb_z > 2.5 and abs(skew) < 1.0: 
             action_dir = "SELL"
@@ -490,11 +485,14 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     tp_dist_pct = sl_dist_pct * p.rr_ratio
                     
                     dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
-                    taker_fee_pct = 0.0011
+                    
+                    # 🚀 V35.3 FIX: Regime-Aware Fee Assumption in Backtest Parity
+                    taker_fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
                     
                     net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
                     
                     if net_ev_pct > 0.0005:  
+                        
                         entry = c['close']
                         sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
                         outcome, exit_price, bars_held = None, entry, 0
@@ -536,7 +534,7 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         edge = prob_success - 0.50
                         risk_multiplier = edge / 0.10
-                        raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier)) # 🚀 V35.1 Cap at 1.5% max risk
+                        raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                         
                         evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
                         fractional_risk = raw_fractional_risk * evt_penalty
@@ -601,7 +599,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V35.1 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V35.3 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
