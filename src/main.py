@@ -887,12 +887,14 @@ class DistributedQuantEngine:
                 vol_z = stat_engine.hawkes_z
                 
                 macro_state = self.fsm.get_ai_macro_state(symbol)
-                ai_action = macro_state.get("regime", "HOLD") # 🚀 V34.3 FIX: Fetch correct key from FSM
+                ai_action = macro_state.get("action", "HOLD") # 🚀 V34.3 FIX: Fetch correct key from FSM
                 confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
 
                 if ai_action == action:
+                    logger.info(f"🧠 AI CONFLUENCE ACHIEVED // {symbol} LLM agrees with {action}. Boosting confidence.")
                     prob_success = min(0.99, prob_success * confidence_multiplier)
                 elif ai_action != "HOLD":
+                    logger.warning(f"⚠️ AI DIVERGENCE // {symbol} LLM suggests {ai_action}, but math wants {action}. Slicing confidence.")
                     prob_success = prob_success / confidence_multiplier
                 
                 payload_features = {
@@ -950,33 +952,42 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(0.5) 
             
-            async with self.auction_lock:
-                if not self.auction_queue:
-                    continue
-                
-                candidates = []
-                while self.auction_queue:
-                    candidates.append(heapq.heappop(self.auction_queue))
-            
-            if not candidates: continue
-            
-            top_neg_sharpe, _, top_symbol, top_payload = candidates[0]
-            top_sharpe = -top_neg_sharpe
-            
-            async with self.auction_lock:
-                for i in range(1, len(candidates)):
-                    if time.time() - candidates[i][3]["timestamp"] < 5.0:
-                        heapq.heappush(self.auction_queue, candidates[i])
-
+            # 🚀 FIX 3: RACE CONDITION PATCH
+            # Acquire the portfolio lock BEFORE popping from the auction queue
             async with self.portfolio_state_lock:
                 if len(self.active_positions_lock) >= 5:
-                    continue
+                    continue  # Portfolio is full, don't bother checking the queue
                     
-                if top_symbol in self.active_positions_lock:
-                    continue
+                async with self.auction_lock:
+                    if not self.auction_queue:
+                        continue
+                        
+                    valid_candidates = []
                     
-                self.active_positions_lock[top_symbol] = top_payload["action"]
-                
+                    # Filter out stale signals and coins we already own
+                    while self.auction_queue:
+                        item = heapq.heappop(self.auction_queue)
+                        _, _, sym, payload = item
+                        
+                        if time.time() - payload["timestamp"] < 5.0 and sym not in self.active_positions_lock:
+                            valid_candidates.append(item)
+                            
+                    if not valid_candidates:
+                        continue
+                        
+                    # Extract the absolute best candidate
+                    best_candidate = valid_candidates[0]
+                    top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+                    top_sharpe = -top_neg_sharpe
+                    
+                    # Put the remaining valid candidates back in the queue
+                    for i in range(1, len(valid_candidates)):
+                        heapq.heappush(self.auction_queue, valid_candidates[i])
+
+                    # Reserve the symbol instantly while we still hold the lock
+                    self.active_positions_lock[top_symbol] = top_payload["action"]
+            
+            # 🚀 Proceed with execution OUTSIDE the lock to prevent stalling the rest of the swarm
             logger.critical(
                 f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
                 f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
@@ -1027,7 +1038,9 @@ class DistributedQuantEngine:
             signal_id = str(uuid.uuid4())
             sl_atr_mult, rr_ratio = self.live_params.get("sl_atr_mult", 1.5), self.live_params.get("rr_ratio", 2.0)
             
-            sl_distance = max(atr * sl_atr_mult, current_price * 0.005)
+            # 🚀 FIX 1: UNIFIED STOP-LOSS FLOOR (0.8% instead of 0.5%)
+            # This ensures the sizing math perfectly matches the execution daemon.
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
             tp_distance = sl_distance * rr_ratio 
             
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
