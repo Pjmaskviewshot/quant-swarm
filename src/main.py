@@ -588,8 +588,8 @@ class DistributedQuantEngine:
         now = time.time()
         if self.circuit_breakers.get(symbol, 0.0) > now: return
         
-        # 🚀 FIX P1: Unify global lock check strictly through FSM abstraction
-        if self.fsm.is_emergency_locked(): return
+        # 🚀 FIX P1: Unify global lock check strictly through existing FSM property
+        if not self.fsm.can_execute_trades: return
 
         try:
             price = float(trade_data.get("price", 0.0))
@@ -860,7 +860,6 @@ class DistributedQuantEngine:
             async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
 
     async def log_to_wal_async(self, action_type: str, args: list):
-        # 🚀 FIX P1: Hard-cap the WAL queue to prevent OOM memory leaks
         async with self.wal_lock:
             if len(self.wal_batch_queue) > 10000:
                 self.wal_batch_queue.pop(0)
@@ -979,8 +978,8 @@ class DistributedQuantEngine:
                 except Exception: pass
 
                 for symbol in list(self.asset_basket):
-                    # 🚀 FIX P1: Unify global lock check strictly through FSM abstraction
-                    if self.fsm.is_emergency_locked(): continue
+                    # 🚀 FIX P1: Unify global lock check strictly through existing FSM property
+                    if not self.fsm.can_execute_trades: continue
                     
                     ob = self.orderbook_snapshots.get(symbol)
                     if not ob or ob["best_bid"] == 0.0: continue
@@ -1196,8 +1195,6 @@ class DistributedQuantEngine:
                 if self.global_state_cache.get("current_day") != current_day:
                     self.global_state_cache["current_day"] = current_day
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
-                    
-                    # 🚀 FIX P1: Unify global lock release through FSM
                     self.fsm.release_global_emergency_lock()
 
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -1482,7 +1479,6 @@ class DistributedQuantEngine:
                 await asyncio.sleep(sleep_time)
 
     async def run_engine_forever(self):
-        # 🚀 FIX P1: Unify global lock release through FSM abstraction
         self.fsm.release_global_emergency_lock()
         
         try: await self._fetch_exchange_tick_sizes()
