@@ -386,7 +386,6 @@ class DistributedQuantEngine:
         
         self.tick_error_counts: Dict[str, List[float]] = {}
         self.circuit_breakers: Dict[str, float] = {}
-        self.global_emergency_lock = False
         
         self.stream_restart_event = asyncio.Event()
         self.force_dna_refresh = asyncio.Event() 
@@ -589,7 +588,7 @@ class DistributedQuantEngine:
         now = time.time()
         if self.circuit_breakers.get(symbol, 0.0) > now: return
         
-        # 🚀 FIX P1: Route global emergency check through the unified FSM
+        # 🚀 FIX P1: Unify global lock check strictly through FSM abstraction
         if self.fsm.is_emergency_locked(): return
 
         try:
@@ -861,7 +860,10 @@ class DistributedQuantEngine:
             async with self.portfolio_state_lock: self.active_positions_lock.pop(symbol, None)
 
     async def log_to_wal_async(self, action_type: str, args: list):
+        # 🚀 FIX P1: Hard-cap the WAL queue to prevent OOM memory leaks
         async with self.wal_lock:
+            if len(self.wal_batch_queue) > 10000:
+                self.wal_batch_queue.pop(0)
             self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
 
     def log_to_wal_sync(self, action_type: str, args: list):
@@ -977,7 +979,9 @@ class DistributedQuantEngine:
                 except Exception: pass
 
                 for symbol in list(self.asset_basket):
-                    if self.global_emergency_lock: continue
+                    # 🚀 FIX P1: Unify global lock check strictly through FSM abstraction
+                    if self.fsm.is_emergency_locked(): continue
+                    
                     ob = self.orderbook_snapshots.get(symbol)
                     if not ob or ob["best_bid"] == 0.0: continue
                     current_price = (ob["best_bid"] + ob["best_ask"]) / 2.0
@@ -1192,7 +1196,9 @@ class DistributedQuantEngine:
                 if self.global_state_cache.get("current_day") != current_day:
                     self.global_state_cache["current_day"] = current_day
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
-                    self.global_emergency_lock = False
+                    
+                    # 🚀 FIX P1: Unify global lock release through FSM
+                    self.fsm.release_global_emergency_lock()
 
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 try:
@@ -1476,7 +1482,9 @@ class DistributedQuantEngine:
                 await asyncio.sleep(sleep_time)
 
     async def run_engine_forever(self):
-        self.global_emergency_lock = False
+        # 🚀 FIX P1: Unify global lock release through FSM abstraction
+        self.fsm.release_global_emergency_lock()
+        
         try: await self._fetch_exchange_tick_sizes()
         except Exception as e: logger.warning(f"Engine boot tick size fetch failed: {e}")
         
