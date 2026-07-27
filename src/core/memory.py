@@ -2,6 +2,7 @@ import os
 import time
 import math
 import logging
+import asyncio
 import numpy as np
 from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any, Optional
@@ -9,15 +10,14 @@ from supabase import create_client, Client
 
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
-
 class MemoryBank:
     """
-    🌌 V35.0 APEX: AUTONOMOUS VECTORIZED MEMORY LEDGER
+    🌌 V36.0 APEX: OPTIMISTIC DECOUPLED MEMORY LEDGER
     Hyper-optimized Supabase connector featuring:
-    - Shadow-to-Live Auto-Promotion Engine (Rolling Sharpe & Win Rate evaluation)
+    - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
+    - Shadow-to-Live Auto-Promotion Engine
     - Pure NumPy vectorization for shadow OHLC forensics
     - Dynamic Rolling Variance for the Bayesian DNA Matrix
-    - Forensic Execution Drag & Slippage Attribution for Telegram Mission Control
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -37,19 +37,18 @@ class MemoryBank:
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self.cache_ttl_seconds: float = 120.0 
 
-    def _safe_execute(self, query_builder, max_retries: int = 3, base_delay: float = 1.0):
+    def _safe_execute(self, query_builder, max_retries: int = 2):
+        """
+        🚀 V36.0 FIX: Stripped out blocking time.sleep()
+        Cloud faults instantly fail over without freezing the event loop.
+        """
         for attempt in range(max_retries):
             try:
                 return query_builder.execute()
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"❌ SUPABASE FATAL: Operation failed permanently after {max_retries} attempts. {e}", exc_info=True)
-                    raise e
+                    raise Exception(f"Supabase fault after {max_retries} attempts: {e}")
                 
-                sleep_time = base_delay * (1.5 ** attempt)
-                logger.warning(f"⚠️ Supabase connection transient fault. Retrying in {sleep_time:.2f}s... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(sleep_time)
-
     def _parse_iso_timestamp(self, ts_str: str) -> datetime:
         if ts_str.endswith('Z'):
             ts_str = ts_str.replace('Z', '+00:00')
@@ -106,7 +105,8 @@ class MemoryBank:
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
-            logger.error(f"❌ DATABASE INSERT TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
+            # V36.0: Explicitly do NOT log noisy stack traces for transient drops
+            raise Exception(f"Database insert failed: {e}")
 
     def log_live_execution_result(
         self, 
@@ -158,7 +158,7 @@ class MemoryBank:
                 logger.warning(f"⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
                 
         except Exception as e:
-            logger.error(f"❌ DATABASE UPDATE TRANSACTION EXCEPTION for signal {signal_id}: {e}", exc_info=True)
+            raise Exception(f"Database update failed: {e}")
 
     def resolve_batch_historical_predictions(
         self, 
@@ -301,18 +301,10 @@ class MemoryBank:
             return resolved_count
 
         except Exception as e:
-            logger.error(f"❌ KINETIC RESOLUTION ENGINE FAILURE: {e}", exc_info=True)
-            return 0
+            raise Exception(f"Batch resolution fault: {e}")
 
-    # ====================================================================
-    # 🚀 V35 APEX METHOD 1: SHADOW-TO-LIVE AUTO-PROMOTION ENGINE
-    # ====================================================================
 
     def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 15) -> Dict[str, Any]:
-        """
-        Evaluates recent resolved shadow trades for an asset to calculate rolling Sharpe Ratio & Win Rate.
-        Determines whether an disarmed asset has earned promotion back to live execution.
-        """
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -344,10 +336,7 @@ class MemoryBank:
             std_pnl = np.std(pnls) + 1e-9
             shadow_sharpe = float((mean_pnl / std_pnl) * math.sqrt(252.0)) if std_pnl > 1e-6 else 0.0
 
-            # 🚀 PROMOTION CRITERIA: Rolling Win Rate >= 55% AND Sharpe Ratio >= 1.2
             should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.2)
-            
-            # 🛑 DEMOTION CRITERIA: Rolling Win Rate < 45% OR Sharpe Ratio < -0.5
             should_demote = (win_rate < 0.45) or (shadow_sharpe < -0.5)
 
             reason = "STABLE"
@@ -366,7 +355,6 @@ class MemoryBank:
             }
 
         except Exception as e:
-            logger.error(f"Failed shadow promotion evaluation for {target_symbol}: {e}", exc_info=True)
             return {
                 "should_promote": False,
                 "should_demote": False,
@@ -377,10 +365,6 @@ class MemoryBank:
             }
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
-        """
-        🚀 V35 APEX: Dynamic Rolling Variance Normalization + Autonomous Shadow Re-Arming
-        Calculates K-NN Bayesian Edge and evaluates automatic promotion state changes.
-        """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_obi = float(current_dna.get("z_obi", 0.0))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
@@ -411,7 +395,6 @@ class MemoryBank:
             response = self._safe_execute(query)
             historical_data = response.data if response else []
             
-            # Evaluate Shadow-to-Live Promotion metrics in background
             promo_eval = self.evaluate_shadow_promotion(target_symbol)
             
             if len(historical_data) < k_neighbors:
@@ -467,11 +450,8 @@ class MemoryBank:
             wins = sum(n["is_correct"] for n in nearest_neighbors)
             total = len(nearest_neighbors)
             
-            # Laplace Additive Smoothing
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
-            # 🚀 V35 AUTONOMOUS ARMING LOGIC:
-            # An asset is armed if Bayesian Edge >= 55% OR if Shadow Promotion is triggered
             is_armed = (bayesian_edge >= 0.55) or promo_eval["should_promote"]
             if promo_eval["should_demote"] and not promo_eval["should_promote"]:
                 is_armed = False
@@ -498,26 +478,10 @@ class MemoryBank:
             return result_payload
 
         except Exception as e:
-            logger.error(f"❌ LATENT DNA ENGINE MATCHING FAILED: {e}", exc_info=True)
-            return {
-                "bayesian_edge": 0.50, 
-                "is_armed": False, 
-                "matched_samples": 0, 
-                "cluster_win_rate": 0.50,
-                "win_rate": 0.50,
-                "shadow_sharpe": 0.0,
-                "promotion_event": "ERROR_FALLBACK"
-            }
+            raise Exception(f"Latent DNA matching failed: {e}")
 
-    # ====================================================================
-    # 🚀 V35 APEX METHOD 2: TELEGRAM MISSION CONTROL FORENSIC SUMMARY
-    # ====================================================================
 
     def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
-        """
-        Queries today's resolved live executions to extract institutional forensic statistics:
-        Total Net PnL, Total Fees, Average Holding Duration, Total Slippage Drag.
-        """
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -555,12 +519,4 @@ class MemoryBank:
             }
 
         except Exception as e:
-            logger.error(f"Failed fetching forensic execution summary: {e}", exc_info=True)
-            return {
-                "trade_count": 0,
-                "net_pnl": 0.0,
-                "fees_paid": 0.0,
-                "avg_slippage_bps": 0.0,
-                "avg_holding_mins": 0.0,
-                "win_rate": 0.0
-            }
+            raise Exception(f"Forensic summary fetch failed: {e}")

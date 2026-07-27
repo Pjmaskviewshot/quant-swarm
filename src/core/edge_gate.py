@@ -9,8 +9,9 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V35.1 APEX: DARK POOL & ABSORPTION ENGINE
-    Fixed baseline lambda division guard to prevent near-zero float distortion.
+    🚀 V36.1 APEX: PREDATORY MAKER ENGINE
+    Exploits liquidity vacuums using Maker Pegging instead of hiding from them.
+    Features strictly calibrated Institutional Amihud Thresholds.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -111,12 +112,14 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
+        # 🚀 V36.1 FIX: Institutional Amihud Thresholds
+        # Scaled up massively to eliminate false positives on normal retail chop
         if "BTC" in symbol:
-            amihud_threshold = 200000.0  
+            amihud_threshold = 2_500_000.0  
         elif "ETH" in symbol or "SOL" in symbol:
-            amihud_threshold = 50000.0   
+            amihud_threshold = 1_000_000.0   
         else:
-            amihud_threshold = 10000.0   
+            amihud_threshold = 250_000.0   
 
         notional_vol = self.rolling_volume * mid_price
         
@@ -162,7 +165,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK"}
+            return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
 
         current_mlofi = np.mean(list(self.mlofis)[-5:])
         mlofi_std = np.std(self.mlofis)
@@ -171,23 +174,28 @@ class MicrostructureEdgeGate:
         t_imb_std = np.std(self._trade_imbalances)
         
         if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 0.5):
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "MLOFI_FLAT"}
+            return {"action": "HOLD", "confidence": 0.0, "reasoning": "MLOFI_FLAT", "routing": "STANDARD"}
 
         direction = "BUY" if current_mlofi > 0 else "SELL"
         
         current_lambda = self._calculate_instantaneous_lambda()
-        # 🚀 V35.1 FIX: Floor baseline_lambda to prevent zero division in quiet markets
         raw_baseline = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         baseline_lambda = max(1e-6, float(raw_baseline))
         
         roll_spread = self.compute_roll_spread()
         
+        # 🚀 V36.0 UPGRADE: Predatory Maker Mode for Amihud Liquidity Vacuums
         if len(self.amihud_history) >= 10:
             current_amihud = self.amihud_history[-1]
             amihud_mean = np.mean(list(self.amihud_history)[-10:])
             if amihud_mean > 0 and current_amihud > (amihud_mean * 4.0):
-                self._throttled_warn(f"vacuum_{symbol}", f"🕳️ LIQUIDITY VACUUM // {symbol} | Stable Amihud spike detected.")
-                return {"action": "HOLD", "confidence": 0.0, "reasoning": f"AMIHUD_LIQUIDITY_VACUUM | Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x"}
+                self._throttled_warn(f"vacuum_{symbol}", f"🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum.")
+                return {
+                    "action": intended_direction if intended_direction else direction, 
+                    "confidence": 0.75, 
+                    "reasoning": f"PREDATORY_MAKER_VACUUM | Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x",
+                    "routing": "MAKER_ONLY"
+                }
 
         # 🧊 DARK POOL ICEBERG ABSORPTION
         if t_imb_std > 0 and current_lambda < (baseline_lambda * 0.1):
@@ -196,26 +204,26 @@ class MicrostructureEdgeGate:
                 self._throttled_warn(f"darkpool_buy_{symbol}", f"🧊 DARK POOL ABSORPTION // {symbol} | Heavy selling absorbed. Reversing to BUY.")
                 return {
                     "action": "BUY", 
-                    "confidence": 0.75, 
-                    "reasoning": f"DARK_POOL_ICEBERG_SUPPORT | T_IMB_Z: {t_imb_z:.2f}"
+                    "confidence": 0.85, 
+                    "reasoning": f"DARK_POOL_ICEBERG_SUPPORT | T_IMB_Z: {t_imb_z:.2f}",
+                    "routing": "STANDARD"
                 }
             elif t_imb_z > 2.5: 
                 self._throttled_warn(f"darkpool_sell_{symbol}", f"🧊 DARK POOL ABSORPTION // {symbol} | Heavy buying absorbed. Reversing to SELL.")
                 return {
                     "action": "SELL", 
-                    "confidence": 0.75, 
-                    "reasoning": f"DARK_POOL_ICEBERG_RESISTANCE | T_IMB_Z: {t_imb_z:.2f}"
+                    "confidence": 0.85, 
+                    "reasoning": f"DARK_POOL_ICEBERG_RESISTANCE | T_IMB_Z: {t_imb_z:.2f}",
+                    "routing": "STANDARD"
                 }
 
         if intended_direction and direction != intended_direction:
             return {
                 "action": "HOLD", 
                 "confidence": 0.0, 
-                "reasoning": f"CONFLUENCE_FAILURE | RLS wants {intended_direction}, MLOFI wants {direction}"
+                "reasoning": f"CONFLUENCE_FAILURE | RLS wants {intended_direction}, MLOFI wants {direction}",
+                "routing": "STANDARD"
             }
-
-        if roll_spread > 0 and current_lambda < baseline_lambda:
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": f"RETAIL_CHOP | Roll Spread: {roll_spread:.6f}"}
 
         if abs(vpin_z) >= 1.5 and current_lambda >= (baseline_lambda * 0.8):
             lambda_expansion = min(1.5, current_lambda / max(baseline_lambda, 1e-9))
@@ -224,7 +232,8 @@ class MicrostructureEdgeGate:
             return {
                 "action": direction,
                 "confidence": confidence,
-                "reasoning": f"DEEP_BOOK_BREAKOUT | Elasticity: {lambda_expansion:.2f}x, MLOFI confirms {direction}"
+                "reasoning": f"DEEP_BOOK_BREAKOUT | Elasticity: {lambda_expansion:.2f}x",
+                "routing": "STANDARD"
             }
 
-        return {"action": "HOLD", "confidence": 0.0, "reasoning": "EDGE_GATE_UNDECIDED"}
+        return {"action": "HOLD", "confidence": 0.0, "reasoning": "EDGE_GATE_UNDECIDED", "routing": "STANDARD"}

@@ -11,7 +11,7 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V34.3 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🚀 V36.1 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
     Accelerated Maker-Peg execution, and Phantom-Trade Prevention.
     """

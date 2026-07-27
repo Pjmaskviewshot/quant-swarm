@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V35.3_APEX")
+logger = logging.getLogger("QUANT_CORE.V36.1_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -139,7 +139,6 @@ class ContinuousMicrostructureEngine:
         self.prediction_buffer = deque(maxlen=50000)
         self.historical_probs = deque(maxlen=2000) 
         self.rls_updates = 100 
-        
         self.ewma_mse = 0.25 
 
     def get_dynamic_decays(self):
@@ -227,12 +226,10 @@ class ContinuousMicrostructureEngine:
                         y_true = 1.0 if ((price > old_price) == (action_dir == "BUY")) else 0.0
 
                     error = y_true - old_pred_prob 
-                    
                     self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
 
                     x = features_array.reshape(-1, 1)
                     var_pi = max(1e-4, old_pred_prob * (1.0 - old_pred_prob))  
-                    
                     dynamic_lambda = max(0.990, min(0.9995, 1.0 - (self.shannon_entropy * 0.005)))
                     
                     if r_blend > 0.1:
@@ -266,12 +263,9 @@ class ContinuousMicrostructureEngine:
                     
                     self.P_trending = (self.P_trending + self.P_trending.T) / 2.0
                     self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0
-                    
                     self.rls_updates += 1
 
-    def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float) -> dict:
-        current_time = time.time()
-        
+    def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
         if len(self.prices) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.prices)[-20:])
         
@@ -283,7 +277,7 @@ class ContinuousMicrostructureEngine:
         else:
             self.kaufman_er = 0.5
 
-        if len(self.log_returns) > 30 and (current_time - self.last_hurst_time > 5.0):
+        if len(self.log_returns) > 30 and (exchange_timestamp - self.last_hurst_time > 5.0):
             rets = np.array(self.log_returns)
             var_1 = np.var(rets)
             if var_1 > 1e-12:
@@ -295,7 +289,7 @@ class ContinuousMicrostructureEngine:
                         h_est = 0.5 + 0.5 * math.log(vr + 1e-9) / math.log(k)
                         hurst_estimates.append(max(0.1, min(0.9, h_est)))
                 self.hurst = np.mean(hurst_estimates) if hurst_estimates else 0.5
-            self.last_hurst_time = current_time
+            self.last_hurst_time = exchange_timestamp
 
         ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
         liquidation_divergence = (self.hawkes_acceleration / 3.0) * (self.micro_price_skew / 10.0) * -1.0
@@ -352,7 +346,7 @@ class ContinuousMicrostructureEngine:
         virtual_sl = current_price - (sl_dist_pct * current_price) if action_dir == "BUY" else current_price + (sl_dist_pct * current_price)
         virtual_tp = current_price + (tp_dist_pct * current_price) if action_dir == "BUY" else current_price - (tp_dist_pct * current_price)
 
-        self.prediction_buffer.append((time.time(), current_price, attended_features, prob_success, virtual_sl, virtual_tp, action_dir, r_blend))
+        self.prediction_buffer.append((exchange_timestamp, current_price, attended_features, prob_success, virtual_sl, virtual_tp, action_dir, r_blend))
         
         return {
             "p_up": p_up, "p_down": p_down, "action_dir": action_dir, 
@@ -415,6 +409,9 @@ class DistributedQuantEngine:
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
         
+        self.ai_sentinel_queue = asyncio.Queue()
+        self.active_sentinel_locks: Dict[str, float] = {}
+        
         self.auction_queue: List[tuple] = []  
         self.auction_lock = asyncio.Lock()
         
@@ -423,6 +420,7 @@ class DistributedQuantEngine:
         self.global_state_cache = {"last_updated": 0.0}
         
         self.live_params = self._load_live_params()
+        self.api_penalty_cooldown = 0.0 
         
         self._initialize_symbol_structures(self.asset_basket)
         self._load_sgd_state()
@@ -435,10 +433,7 @@ class DistributedQuantEngine:
             testnet=os.getenv("BYBIT_TESTNET", "false").lower() == "true",
             max_workers=8
         )
-        
-        # 🚀 V35.3 FIX: Unified SOR slippage Configuration Drift (Clamped to 12 bps institutional norm)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
-        
         self.omni_scanner = GlobalOmniScanner(self.executor)
         self.stream_feed_instance = None  
 
@@ -642,7 +637,7 @@ class DistributedQuantEngine:
                 tensor_alpha = self.tensor_oracle.compute_lead_lag_signal(symbol)
                 
                 sgd_state = stat_engine.extract_statistical_state(
-                    price, vpin_z, tensor_alpha, sl_dist_pct, tp_dist_pct
+                    price, vpin_z, tensor_alpha, sl_dist_pct, tp_dist_pct, exchange_timestamp
                 )
                 
                 p_up, p_down = sgd_state["p_up"], sgd_state["p_down"]
@@ -660,63 +655,406 @@ class DistributedQuantEngine:
                     prob_success = max(p_up, p_down)
                 
                 regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
+                
+                if structural_verdict.get("routing") == "MAKER_ONLY":
+                    regime = "MEAN_REVERTING" 
+                    
                 vol_z = stat_engine.hawkes_z
                 
-                macro_state = self.fsm.get_ai_macro_state(symbol)
-                ai_action = macro_state.get("action", "HOLD")
-                confidence_multiplier = macro_state.get("confidence_multiplier", 1.0)
+                fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
-                if ai_action == action:
-                    logger.info(f"🧠 AI CONFLUENCE ACHIEVED // {symbol} LLM agrees with {action}.")
-                    prob_success = min(0.99, prob_success * confidence_multiplier)
-                elif ai_action != "HOLD":
-                    logger.warning(f"⚠️ AI DIVERGENCE // {symbol} LLM suggests {ai_action}.")
-                    prob_success = prob_success / confidence_multiplier
+                if net_ev_pct <= 0.0005: return
+                    
+                dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
+                
+                if structural_verdict.get("routing") == "MAKER_ONLY":
+                    dynamic_gate -= 0.08  
+
+                dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+                dna_win_rate = dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))
+                min_threshold = max(dynamic_gate, dna_win_rate)
+                
+                if prob_success < min_threshold: return
+                
+                if time.time() - self.active_sentinel_locks.get(symbol, 0.0) < 60.0:
+                    return
+                self.active_sentinel_locks[symbol] = time.time()
                 
                 payload_features = {
                     "symbol": symbol, "market_regime": regime,
                     "virtual_sl": virtual_sl, "virtual_tp": virtual_tp,
                     "adaptive_obi_z": stat_engine.ofi_fast_z, 
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost,
-                    "ai_verdict": ai_action, 
                     "reasoning": structural_verdict["reasoning"] 
                 }
                 
-                is_shadow_asset = symbol in self.shadow_basket
-                dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+                candidate_data = (symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock)
+                self.ai_sentinel_queue.put_nowait(candidate_data)
                 
-                if is_shadow_asset or not dna_stats.get("is_armed", False):
-                    if prob_success > 0.65: 
-                        self.log_to_wal_sync("prediction", [str(uuid.uuid4()), now, price, action, prob_success, payload_features, True])
-                    return 
+        except Exception as e:
+            logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
+
+    async def run_ai_sentinel_worker(self):
+        logger.info("🦅 EVENT-DRIVEN AI SENTINEL ONLINE: LLMs now act as Last-Mile Execution Filters (Zero Rate Limit Burn).")
+        while True:
+            try:
+                candidate = await self.ai_sentinel_queue.get()
+                symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock = candidate
                 
-                # 🚀 V35.3 FIX: Regime-Aware Fee Model.
-                # Stop rejecting mean-reversion trades with false Taker assumptions.
-                fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
-                
-                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
-                net_sharpe = net_ev_pct / (sl_dist_pct + 1e-9)
-                
-                if net_ev_pct <= 0.0005: return
+                if time.time() < self.api_penalty_cooldown:
+                    logger.info(f"⚡ PREDATORY MATH OVERRIDE // {symbol} AI bypassed due to rate limits. Math edge: {net_ev_pct*10000:.1f} bps.")
+                    prob_success = min(0.99, prob_success * 1.15)
+                    payload_features["ai_verdict"] = "OVERRIDE"
+                else:
+                    vpin_hist = list(clock.vpin_history)
+                    vpin_score = vpin_hist[-1] if vpin_hist else 0.0
+                    vpin_z = float((vpin_score - np.mean(vpin_hist)) / (np.std(vpin_hist) + 1e-9)) if len(vpin_hist) >= 20 else 0.0
+                    dir_hist = list(clock.directional_imbalances)
+                    directional_bias = np.mean(dir_hist) / (clock.bucket_volume + 1e-9) if dir_hist else 0.0
                     
-                dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
-                dna_win_rate = dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))
-                min_threshold = max(dynamic_gate, dna_win_rate)
-                if prob_success < min_threshold: return
+                    vpin_data = {
+                        "vpin_score": vpin_score, "vpin_z_score": vpin_z, 
+                        "directional_bias": directional_bias, "suggested_direction": "BUY" if directional_bias > 0 else "SELL", 
+                        "current_price": price, "is_absorption_anomaly": getattr(clock, 'is_absorption_anomaly', False), 
+                        "avg_trade_size": clock.bucket_volume / max(1, clock.current_bucket_ticks)
+                    }
+                    
+                    try:
+                        verdict = await self.ai_matrix.execute_debate_cycle(symbol, vpin_data, dna_stats, "Event-driven sentinel check.")
+                        ai_action = verdict.get("action", "HOLD")
+                        confidence_multiplier = verdict.get("confidence", 1.0) if ai_action != "HOLD" else 1.0
+                        payload_features["ai_verdict"] = ai_action
+                        
+                        if ai_action == action:
+                            logger.info(f"🧠 AI CONFLUENCE ACHIEVED // {symbol} Sentinel agrees with {action}.")
+                            prob_success = min(0.99, prob_success * (1.0 + (confidence_multiplier * 0.20)))
+                        elif ai_action != "HOLD":
+                            logger.warning(f"⚠️ AI DIVERGENCE // {symbol} Sentinel suggests {ai_action}. Vetoing math.")
+                            prob_success = prob_success * 0.50
+                    except Exception:
+                        logger.warning("⚠️ LLM Sentinel Fault. Tripping 2-hour AI circuit breaker to preserve bandwidth.")
+                        self.api_penalty_cooldown = time.time() + 7200  
+                        prob_success = min(0.99, prob_success * 1.15)
+                        payload_features["ai_verdict"] = "OVERRIDE"
+
+                if prob_success < 0.65 and payload_features["ai_verdict"] != "OVERRIDE":
+                    continue
+
+                is_shadow_asset = symbol in self.shadow_basket
+                if is_shadow_asset or not dna_stats.get("is_armed", False):
+                    self.log_to_wal_sync("prediction", [str(uuid.uuid4()), time.time(), price, action, prob_success, payload_features, True])
+                    continue 
                 
                 payload = {
                     "symbol": symbol, "action": action, "price": price, 
                     "prob_success": prob_success, "dna_stats": dna_stats, 
                     "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                    "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": now,
+                    "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
                     "payload_features": payload_features
                 }
                 
                 async with self.auction_lock:
-                    heapq.heappush(self.auction_queue, (-net_sharpe, time.time(), symbol, payload))
-                
+                    heapq.heappush(self.auction_queue, (- (net_ev_pct / (atr + 1e-9)), time.time(), symbol, payload))
+                    
+            except Exception as e:
+                logger.error(f"AI Sentinel Fault: {e}", exc_info=True)
+
+    async def log_to_wal_async(self, action_type: str, args: list):
+        async with self.wal_lock:
+            if len(self.wal_batch_queue) > 10000:
+                self.wal_batch_queue.pop(0)
+            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
+
+    def log_to_wal_sync(self, action_type: str, args: list):
+        self.track_task(self.log_to_wal_async(action_type, args))
+
+    async def _batch_wal_flush_loop(self):
+        while True:
+            await asyncio.sleep(5.0)
+            async with self.wal_lock:
+                if not self.wal_batch_queue: continue
+                batch_to_process = self.wal_batch_queue[:]
+                self.wal_batch_queue.clear()
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed SQLite WAL write: {e}")
+                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
+
+    async def run_db_wal_worker(self):
+        logger.info("🖲️ SQLITE WAL ENGINE ONLINE: High-Throughput disk logging.")
+        try:
+            async with aiosqlite.connect(self.wal_db_path) as db:
+                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
+                await db.commit()
         except Exception as e:
-            logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
+            logger.critical(f"FATAL: SQLite WAL Initialization Failed: {e}")
+            return
+
+        while True:
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
+                    await db.commit()
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
+                        rows = await cursor.fetchall()
+                for row in rows:
+                    item_id, action_type, payload_str = row
+                    args = json.loads(payload_str)
+                    try:
+                        async with self.db_semaphore:
+                            if action_type == "prediction": await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
+                            elif action_type == "settlement": await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
+                        async with aiosqlite.connect(self.wal_db_path) as db:
+                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
+                            await db.commit()
+                    except asyncio.TimeoutError: break 
+                    except Exception: pass 
+            except Exception: pass
+            await asyncio.sleep(1.0)
+
+    async def run_dna_prewarmer(self):
+        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
+        while True:
+            try:
+                await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
+                self.force_dna_refresh.clear()
+            except asyncio.TimeoutError: pass
+            try:
+                async def _safe_fetch(sym, dna):
+                    try:
+                        async with self.db_semaphore:
+                            return await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                    except Exception:
+                        return {"is_armed": True, "win_rate": 0.50} 
+
+                fetch_tasks = {}
+                for symbol in list(self.asset_basket):
+                    metrics = self.screener_metrics.get(symbol, {})
+                    stat_engine = self.stat_engines.get(symbol)
+                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    spread_pct = 0.001
+                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
+                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
+
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
+                    fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
+                
+                if not fetch_tasks: continue
+                symbols = list(fetch_tasks.keys())
+                results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+                
+                for sym, result in zip(symbols, results):
+                    if isinstance(result, Exception): 
+                        self.ram_dna_cache[sym] = self.ram_dna_cache.get(sym, {"is_armed": True, "win_rate": 0.50})
+                    else: 
+                        prev_state = self.ram_dna_cache.get(sym, {}).get("is_armed", True)
+                        event = result.get("promotion_event", "STABLE")
+                        
+                        if event == "PROMOTED_FROM_SHADOW" and not prev_state:
+                            msg = f"🚀 <b>NODE PROMOTED</b>\n{sym} re-armed for Live Trading.\n• Reason: Shadow Sharpe breached 1.2"
+                            self.track_task(self.telegram.send_html_report(msg))
+                        elif event == "DEMOTED_TO_SHADOW" and prev_state:
+                            msg = f"🦇 <b>NODE DEMOTED</b>\n{sym} shifted to Shadow Ledger.\n• Reason: Trailing Win Rate dropped < 45%"
+                            self.track_task(self.telegram.send_html_report(msg))
+                            
+                        self.ram_dna_cache[sym] = result
+            except Exception as e: logger.error(f"DNA Prewarmer error: {e}")
+
+    async def run_shadow_resolution_daemon(self):
+        logger.info("👻 GHOST FORENSICS ONLINE: Vectorized resolution engine activated.")
+        interval_mins = 15.0
+        try: interval_mins = float(self.timeframe)
+        except Exception: pass
+        while True:
+            await asyncio.sleep(300) 
+            try:
+                current_prices = {}
+                for sym in self.asset_basket + self.shadow_basket:
+                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
+                        current_prices[sym] = {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))}
+                if current_prices:
+                    async with self.db_semaphore:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
+                        except Exception: pass 
+            except Exception as e: logger.error(f"Shadow resolution daemon error: {e}")
+
+    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
+        symbol = depth_data.get("s")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+
+        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
+        if bids and asks:
+            try:
+                best_bid, bid_size = float(bids[0][0]), float(bids[0][1])
+                best_ask, ask_size = float(asks[0][0]), float(asks[0][1])
+                self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": bid_size, "best_ask": best_ask, "ask_size": ask_size, "bids": bids, "asks": asks}
+                stat_engine = self.stat_engines.get(symbol)
+                if stat_engine: 
+                    stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
+                    if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
+            except Exception as e: logger.debug(f"Orderbook pressure update error for {symbol}: {e}")
+
+        is_snapshot = depth_data.get("type") == "snapshot"
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+            edge_gate = self.edge_gates.get(symbol)
+            if edge_gate and bids and asks:
+                try:
+                    f_bids, f_asks = feature_engine.get_deep_book_floats()
+                    mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
+                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
+                except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
+
+    async def run_omni_swarm_director(self):
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
+        while True:
+            await asyncio.sleep(15) 
+            try:
+                async with self.portfolio_state_lock: protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                if dead_sym and hot_sym:
+                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                    self._initialize_symbol_structures([hot_sym])
+                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                    logger.critical(f"🚀 {hot_sym} FULLY ARMED AND INJECTED INTO QUANT MATRIX.")
+            except Exception as e: logger.error(f"Omni-Swarm Director iteration failed: {e}")
+
+    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        self._initialize_symbol_structures([symbol]) 
+        interval, candle = str(data["interval"]), data["candle_data"]
+        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
+
+        async with self.symbol_locks[symbol]:
+            feature_engine = self.feature_engines.get(symbol)
+            if feature_engine:
+                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
+                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
+                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
+                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
+                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
+                    self.screener_memory[symbol]["last_update_time"] = time.time()
+
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        try:
+            raw_data = data.get("raw_data", {})
+            if "turnover24h" in raw_data:
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0:
+                    vol_mult = min(10.0, max(0.1, turnover / baseline))
+                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
+
+    async def run_universe_refresher(self):
+        try:
+            await self._fetch_exchange_tick_sizes()
+            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
+            if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+        except Exception as e:
+            logger.error(f"Universe refresher failed fetching assets: {e}")
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            
+        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
+        new_core_basket = ["BTCUSDT"] + [s for s in self.active_positions_map.keys() if s != "BTCUSDT"]
+        for sym in full_market:
+            if sym not in new_core_basket and len(new_core_basket) < 25: new_core_basket.append(sym)
+                
+        self.asset_basket = new_core_basket
+        self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:15]
+        
+        new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores = {}, {}, {}, {}, {}, {}, {}, {}, {}
+        for s in self.asset_basket + self.shadow_basket:
+            new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
+            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
+            
+            if s in self.ram_dna_cache:
+                new_dna_cache[s] = self.ram_dna_cache[s]
+            else:
+                new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50}
+                
+            new_last_eval[s] = self.last_eval_time.get(s, 0.0)
+            new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
+            new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+            new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate(window_size=100))
+            new_symbol_locks[s] = self.symbol_locks.get(s, asyncio.Lock())
+            new_eval_semaphores[s] = self.eval_semaphores.get(s, asyncio.Semaphore(1))
+            
+        self.vpin_clocks, self.stat_engines, self.ram_dna_cache, self.last_eval_time, self.orderbook_snapshots, self.feature_engines, self.edge_gates, self.symbol_locks, self.eval_semaphores = new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores
+
+        try:
+            historical_data = {sym: list(self.screener_memory[sym]["prices"]) for sym in self.asset_basket if self.screener_memory.get(sym) and len(self.screener_memory[sym].get("prices", [])) > 30}
+            if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
+        except Exception as e: logger.error(f"Correlation matrix update failed: {e}")
+
+        self.stream_restart_event.set()
+        self.force_dna_refresh.set() 
+
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
+
+    async def stream_manager_loop(self):
+        while True:
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:10], 
+                intervals=[self.timeframe], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
+            self.stream_feed_instance = stream_feed  
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            def _on_stream_done(t):
+                if not t.cancelled() and not self.stream_restart_event.is_set(): 
+                    self.stream_restart_event.set()
+                    
+            stream_task.add_done_callback(_on_stream_done)
+            await self.stream_restart_event.wait()
+            stream_task.cancel()
+            stream_feed.terminate_all_feeds()
+            self.stream_restart_event.clear()
+            await asyncio.sleep(2)
+
+    async def run_exchange_state_reconciliation_daemon(self):
+        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
+        while True:
+            await asyncio.sleep(15)
+            try:
+                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+                if pos_response.get("retCode") != 0: continue
+                
+                actual_positions = pos_response.get("result", {}).get("list", [])
+                active_symbols = [p["symbol"] for p in actual_positions if float(p.get("size", 0.0)) > 0]
+                
+                async with self.portfolio_state_lock:
+                    for symbol in list(self.active_positions_map.keys()):
+                        if symbol not in active_symbols:
+                            active_daemon = self.daemon_tasks.get(symbol)
+                            if not active_daemon or active_daemon.done():
+                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
+                                self.active_positions_map.pop(symbol, None)
+                                self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e: logger.debug(f"State reconciliation failed: {e}")
 
     async def run_global_capital_auction_worker(self):
         logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
@@ -863,333 +1201,6 @@ class DistributedQuantEngine:
             logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
             async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
 
-    async def log_to_wal_async(self, action_type: str, args: list):
-        async with self.wal_lock:
-            if len(self.wal_batch_queue) > 10000:
-                self.wal_batch_queue.pop(0)
-            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
-
-    def log_to_wal_sync(self, action_type: str, args: list):
-        self.track_task(self.log_to_wal_async(action_type, args))
-
-    async def _batch_wal_flush_loop(self):
-        while True:
-            await asyncio.sleep(5.0)
-            async with self.wal_lock:
-                if not self.wal_batch_queue: continue
-                batch_to_process = self.wal_batch_queue[:]
-                self.wal_batch_queue.clear()
-            try:
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
-                    await db.commit()
-            except Exception as e:
-                logger.error(f"Failed SQLite WAL write: {e}")
-                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
-
-    async def run_db_wal_worker(self):
-        logger.info("🖲️ SQLITE WAL ENGINE ONLINE: High-Throughput disk logging.")
-        try:
-            async with aiosqlite.connect(self.wal_db_path) as db:
-                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
-                await db.commit()
-        except Exception as e:
-            logger.critical(f"FATAL: SQLite WAL Initialization Failed: {e}")
-            return
-
-        while True:
-            try:
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
-                    await db.commit()
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
-                        rows = await cursor.fetchall()
-                for row in rows:
-                    item_id, action_type, payload_str = row
-                    args = json.loads(payload_str)
-                    try:
-                        async with self.db_semaphore:
-                            if action_type == "prediction": await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
-                            elif action_type == "settlement": await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
-                        async with aiosqlite.connect(self.wal_db_path) as db:
-                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
-                            await db.commit()
-                    except asyncio.TimeoutError: break 
-                    except Exception as e: logger.error(f"WAL worker row error: {e}")
-            except Exception as e: logger.error(f"WAL worker loop error: {e}")
-            await asyncio.sleep(1.0)
-
-    async def run_dna_prewarmer(self):
-        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
-        while True:
-            try:
-                await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
-                self.force_dna_refresh.clear()
-            except asyncio.TimeoutError: pass
-            try:
-                async def _safe_fetch(sym, dna):
-                    async with self.db_semaphore:
-                        return await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=10.0)
-
-                fetch_tasks = {}
-                for symbol in list(self.asset_basket):
-                    metrics = self.screener_metrics.get(symbol, {})
-                    stat_engine = self.stat_engines.get(symbol)
-                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
-                    ob = self.orderbook_snapshots.get(symbol, {})
-                    spread_pct = 0.001
-                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
-                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
-
-                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
-                    fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
-                
-                if not fetch_tasks: continue
-                symbols = list(fetch_tasks.keys())
-                results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
-                
-                for sym, result in zip(symbols, results):
-                    if isinstance(result, Exception): 
-                        self.ram_dna_cache[sym] = self.ram_dna_cache.get(sym, {"is_armed": True, "win_rate": 0.50})
-                    else: 
-                        prev_state = self.ram_dna_cache.get(sym, {}).get("is_armed", True)
-                        event = result.get("promotion_event", "STABLE")
-                        
-                        if event == "PROMOTED_FROM_SHADOW" and not prev_state:
-                            msg = f"🚀 <b>NODE PROMOTED</b>\n{sym} re-armed for Live Trading.\n• Reason: Shadow Sharpe breached 1.2"
-                            self.track_task(self.telegram.send_html_report(msg))
-                        elif event == "DEMOTED_TO_SHADOW" and prev_state:
-                            msg = f"🦇 <b>NODE DEMOTED</b>\n{sym} shifted to Shadow Ledger.\n• Reason: Trailing Win Rate dropped < 45%"
-                            self.track_task(self.telegram.send_html_report(msg))
-                            
-                        self.ram_dna_cache[sym] = result
-            except Exception as e: logger.error(f"DNA Prewarmer error: {e}")
-
-    async def run_shadow_resolution_daemon(self):
-        logger.info("👻 GHOST FORENSICS ONLINE: Vectorized resolution engine activated.")
-        interval_mins = 15.0
-        try: interval_mins = float(self.timeframe)
-        except Exception: pass
-        while True:
-            await asyncio.sleep(300) 
-            try:
-                current_prices = {}
-                for sym in self.asset_basket + self.shadow_basket:
-                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
-                        current_prices[sym] = {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))}
-                if current_prices:
-                    async with self.db_semaphore:
-                        await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
-            except Exception as e: logger.error(f"Shadow resolution daemon error: {e}")
-
-    async def run_ai_macro_evaluator(self):
-        logger.info("🧠 AI MACRO LOOP ONLINE: Background narrative evaluation on 1-Hour schedule.")
-        while True:
-            await asyncio.sleep(3600) 
-            try:
-                news_context = "Market data feed relying on local orderbook."
-                try:
-                    btc_snap = await asyncio.wait_for(self.data_feed.fetch_market_snapshot("BTCUSDT", "60"), timeout=5.0)
-                    if btc_snap: news_context = btc_snap.get("news_context", news_context)
-                except Exception: pass
-
-                for symbol in list(self.asset_basket):
-                    if not self.fsm.can_execute_trades: continue
-                    
-                    ob = self.orderbook_snapshots.get(symbol)
-                    if not ob or ob["best_bid"] == 0.0: continue
-                    current_price = (ob["best_bid"] + ob["best_ask"]) / 2.0
-                    clock = self.vpin_clocks.get(symbol)
-                    if not clock: continue
-                    
-                    vpin_hist = list(clock.vpin_history)
-                    vpin_score = vpin_hist[-1] if vpin_hist else 0.0
-                    vpin_z = float((vpin_score - np.mean(vpin_hist)) / (np.std(vpin_hist) + 1e-9)) if len(vpin_hist) >= 20 else 0.0
-                    dir_hist = list(clock.directional_imbalances)
-                    directional_bias = np.mean(dir_hist) / (clock.bucket_volume + 1e-9) if dir_hist else 0.0
-                    is_absorption = getattr(clock, 'is_absorption_anomaly', False)
-                    
-                    vpin_data = {
-                        "vpin_score": vpin_score, "vpin_z_score": vpin_z, 
-                        "directional_bias": directional_bias, "suggested_direction": "BUY" if directional_bias > 0 else "SELL", 
-                        "current_price": current_price, "is_absorption_anomaly": is_absorption, 
-                        "avg_trade_size": clock.bucket_volume / max(1, clock.current_bucket_ticks)
-                    }
-                    dna_stats = self.ram_dna_cache.get(symbol, {})
-                    verdict = await self.ai_matrix.execute_debate_cycle(symbol, vpin_data, dna_stats, news_context)
-                    if verdict.get("schema_valid") and verdict.get("action") in ["BUY", "SELL", "HOLD"]:
-                        raw_mult = 1.0 + (verdict.get("confidence", 0.0) * 0.20) if verdict.get("action") != "HOLD" else 1.0
-                        self.fsm.update_ai_macro_state(symbol, verdict.get("action"), min(1.20, max(1.0, raw_mult)))
-                    await asyncio.sleep(2) 
-            except Exception as e: logger.error(f"AI Macro Evaluator error: {e}")
-
-    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
-        symbol = depth_data.get("s")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
-
-        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
-        if bids and asks:
-            try:
-                best_bid, bid_size = float(bids[0][0]), float(bids[0][1])
-                best_ask, ask_size = float(asks[0][0]), float(asks[0][1])
-                self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": bid_size, "best_ask": best_ask, "ask_size": ask_size, "bids": bids, "asks": asks}
-                stat_engine = self.stat_engines.get(symbol)
-                if stat_engine: 
-                    stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
-                    if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
-            except Exception as e: logger.debug(f"Orderbook pressure update error for {symbol}: {e}")
-
-        is_snapshot = depth_data.get("type") == "snapshot"
-        feature_engine = self.feature_engines.get(symbol)
-        if feature_engine:
-            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
-            edge_gate = self.edge_gates.get(symbol)
-            if edge_gate and bids and asks:
-                try:
-                    f_bids, f_asks = feature_engine.get_deep_book_floats()
-                    mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
-                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
-                except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
-
-    async def run_omni_swarm_director(self):
-        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
-        while True:
-            await asyncio.sleep(15) 
-            try:
-                async with self.portfolio_state_lock: protected_symbols = set(self.active_positions_map.keys())
-                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
-                if dead_sym and hot_sym:
-                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
-                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
-                    self._initialize_symbol_structures([hot_sym])
-                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
-                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
-                    logger.critical(f"🚀 {hot_sym} FULLY ARMED AND INJECTED INTO QUANT MATRIX.")
-            except Exception as e: logger.error(f"Omni-Swarm Director iteration failed: {e}")
-
-    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
-        symbol = data.get("symbol")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
-        self._initialize_symbol_structures([symbol]) 
-        interval, candle = str(data["interval"]), data["candle_data"]
-        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
-
-        async with self.symbol_locks[symbol]:
-            feature_engine = self.feature_engines.get(symbol)
-            if feature_engine:
-                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
-                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
-                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
-                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
-                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
-                    self.screener_memory[symbol]["last_update_time"] = time.time()
-
-    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        symbol = data.get("symbol")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
-        try:
-            raw_data = data.get("raw_data", {})
-            if "turnover24h" in raw_data:
-                turnover = float(raw_data["turnover24h"])
-                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
-                baseline = self.volatility_baseline.get(symbol, turnover)
-                if baseline > 0:
-                    vol_mult = min(10.0, max(0.1, turnover / baseline))
-                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
-                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
-        except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
-
-    async def run_universe_refresher(self):
-        try:
-            await self._fetch_exchange_tick_sizes()
-            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
-            if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
-        except Exception as e:
-            logger.error(f"Universe refresher failed fetching assets: {e}")
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
-            
-        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
-        new_core_basket = ["BTCUSDT"] + [s for s in self.active_positions_map.keys() if s != "BTCUSDT"]
-        for sym in full_market:
-            if sym not in new_core_basket and len(new_core_basket) < 25: new_core_basket.append(sym)
-                
-        self.asset_basket = new_core_basket
-        self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:15]
-        
-        new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores = {}, {}, {}, {}, {}, {}, {}, {}, {}
-        for s in self.asset_basket + self.shadow_basket:
-            new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
-            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
-            new_dna_cache[s] = self.ram_dna_cache.get(s, {})
-            new_last_eval[s] = self.last_eval_time.get(s, 0.0)
-            new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
-            new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
-            new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate(window_size=100))
-            new_symbol_locks[s] = self.symbol_locks.get(s, asyncio.Lock())
-            new_eval_semaphores[s] = self.eval_semaphores.get(s, asyncio.Semaphore(1))
-            
-        self.vpin_clocks, self.stat_engines, self.ram_dna_cache, self.last_eval_time, self.orderbook_snapshots, self.feature_engines, self.edge_gates, self.symbol_locks, self.eval_semaphores = new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores
-
-        try:
-            historical_data = {sym: list(self.screener_memory[sym]["prices"]) for sym in self.asset_basket if self.screener_memory.get(sym) and len(self.screener_memory[sym].get("prices", [])) > 30}
-            if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
-        except Exception as e: logger.error(f"Correlation matrix update failed: {e}")
-
-        self.stream_restart_event.set()
-        self.force_dna_refresh.set() 
-
-    async def _universe_refresher_loop(self):
-        while True:
-            await asyncio.sleep(14400)
-            await self.run_universe_refresher()
-
-    async def stream_manager_loop(self):
-        while True:
-            stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:10], 
-                intervals=[self.timeframe], 
-                orderbook_callback=self.handle_incoming_orderbook_tick, 
-                screener_callback=self.handle_incoming_basket_screener_update, 
-                kline_callback=self.handle_incoming_kline_update, 
-                trade_callback=self.handle_incoming_trade, 
-                engine_reference=self
-            )
-            self.stream_feed_instance = stream_feed  
-            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
-            
-            def _on_stream_done(t):
-                if not t.cancelled() and not self.stream_restart_event.is_set(): 
-                    self.stream_restart_event.set()
-                    
-            stream_task.add_done_callback(_on_stream_done)
-            await self.stream_restart_event.wait()
-            stream_task.cancel()
-            stream_feed.terminate_all_feeds()
-            self.stream_restart_event.clear()
-            await asyncio.sleep(2)
-
-    async def run_exchange_state_reconciliation_daemon(self):
-        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
-        while True:
-            await asyncio.sleep(15)
-            try:
-                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
-                if pos_response.get("retCode") != 0: continue
-                
-                actual_positions = pos_response.get("result", {}).get("list", [])
-                active_symbols = [p["symbol"] for p in actual_positions if float(p.get("size", 0.0)) > 0]
-                
-                async with self.portfolio_state_lock:
-                    for symbol in list(self.active_positions_map.keys()):
-                        if symbol not in active_symbols:
-                            active_daemon = self.daemon_tasks.get(symbol)
-                            if not active_daemon or active_daemon.done():
-                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
-                                self.active_positions_map.pop(symbol, None)
-                                self.risk_vault.update_position_ledger(symbol, 0.0)
-            except Exception as e: logger.debug(f"State reconciliation failed: {e}")
-
     async def run_system_heartbeat(self):
         start_time = time.time()
         loop_counter = 0
@@ -1216,8 +1227,8 @@ class DistributedQuantEngine:
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 try:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso)
-                    execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=10.0)
-                except Exception as e: logger.debug(f"Heartbeat ledger fetch failed: {e}"); execution_stats = {}
+                    execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
+                except Exception: execution_stats = {} 
 
                 actual_net_pnl = current_vault_balance - self.global_state_cache.get("start_of_day_balance", current_vault_balance)
                 baseline = self.global_state_cache["wallet_baseline"]
@@ -1244,8 +1255,8 @@ class DistributedQuantEngine:
                 dd = self.global_state_cache.get("drawdown_pct", 0.0)
                 dd_bar = self.global_state_cache.get("drawdown_bar", "🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢")
                 
-                shadow_count = len([s for s, d in self.ram_dna_cache.items() if not d.get("is_armed", True)])
-                live_count = len(self.asset_basket) - shadow_count
+                live_count = sum(1 for s in self.asset_basket if self.ram_dna_cache.get(s, {}).get("is_armed", True))
+                shadow_count = len(self.asset_basket) + len(self.shadow_basket) - live_count
 
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
@@ -1255,12 +1266,14 @@ class DistributedQuantEngine:
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False):
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
-        
-        # 🚀 V35.3 FIX: Removed the 4-hour hard timeout. Replaced with trailing PnL timeout logic below.
         peak_unrealized_pnl = 0.0
 
         if self.test_mode:
             await asyncio.sleep(60)
+            
+            # 🚀 V36.1 FIX: Properly resolve test_mode trades so memory/risk_manager clears them
+            self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", exec_details])
+            
             async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
             return
 
@@ -1329,13 +1342,10 @@ class DistributedQuantEngine:
                     position_gone = (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0
                     
                     if not position_gone:
-                        # 🚀 V35.3 FIX: Trailing PnL Timeout Logic
                         unrealized_pnl = float(pos_list[0].get("unrealisedPnl", 0.0))
                         peak_unrealized_pnl = max(peak_unrealized_pnl, unrealized_pnl)
-                        
                         elapsed_hours = (now - daemon_start_time) / 3600.0
                         
-                        # If open > 4 hours AND (underwater OR gave back > 50% of peak profit), flatten it.
                         if elapsed_hours > 4.0:
                             if unrealized_pnl < 0 or (peak_unrealized_pnl > 0 and unrealized_pnl < (peak_unrealized_pnl * 0.5)):
                                 logger.info(f"⏳ TRAILING TIMEOUT: Flattening stale position {symbol} after {elapsed_hours:.1f} hrs.")
@@ -1390,25 +1400,30 @@ class DistributedQuantEngine:
                     self.track_task(self.telegram.send_html_report(receipt_msg))
                     break
 
+                # 🚀 V36.0: MVAR DYNAMIC TRAILING STOP RATChet
                 if stat_engine and stat_engine.true_micro_price > 0:
                     ob = self.orderbook_snapshots.get(symbol, {})
                     b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                     c_price = float(ob.get("best_bid", current_price)) if direction == "BUY" else float(ob.get("best_ask", current_price))
                     
                     if b_vol > 0 and a_vol > 0:
-                        trail_dist = actual_sl_distance * 0.75 
+                        pressure = b_vol / a_vol if direction == "BUY" else a_vol / b_vol
+                        
+                        if pressure > 2.5:
+                            eff_dist = actual_sl_distance * 1.2
+                        elif pressure < 0.6:
+                            eff_dist = actual_sl_distance * 0.25
+                        else:
+                            eff_dist = actual_sl_distance * 0.75
+                            
                         if direction == "BUY":
-                            pressure = b_vol / a_vol
-                            eff_dist = trail_dist / min(2.0, max(0.5, pressure))
-                            new_sl = max(stat_engine.true_micro_price - eff_dist, c_price - trail_dist)
+                            new_sl = max(stat_engine.true_micro_price - eff_dist, c_price - eff_dist)
                             if new_sl > realigned_sl:
                                 realigned_sl = new_sl
                                 try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=align_price(realigned_sl))
                                 except Exception: pass
                         else:
-                            pressure = a_vol / b_vol
-                            eff_dist = trail_dist / min(2.0, max(0.5, pressure))
-                            new_sl = min(stat_engine.true_micro_price + eff_dist, c_price + trail_dist)
+                            new_sl = min(stat_engine.true_micro_price + eff_dist, c_price + eff_dist)
                             if new_sl < realigned_sl:
                                 realigned_sl = new_sl
                                 try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=realigned_tp_str, stopLoss=align_price(realigned_sl))
@@ -1427,7 +1442,6 @@ class DistributedQuantEngine:
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
-        
         for symbol in list(self.active_positions_map.keys()):
             try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
             except Exception as e: logger.error(f"Shutdown cancel order failed for {symbol}: {e}")
@@ -1445,12 +1459,10 @@ class DistributedQuantEngine:
         logger.critical("🔍 VERIFYING ZERO EXPOSURE...")
         max_verify_attempts = 10
         verified_flat = False  
-        
         for attempt in range(max_verify_attempts):
             try:
                 pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
                 active_orphans = [p for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
-                
                 if not active_orphans:
                     logger.critical("✅ EXPOSURE VERIFIED AT ZERO. ALL POSITIONS FLATTENED.")
                     verified_flat = True
@@ -1461,33 +1473,22 @@ class DistributedQuantEngine:
                         sym = p["symbol"]
                         close_side = "Sell" if p["side"] == "Buy" else "Buy"
                         qty = str(float(p["size"]))
-                        try:
-                            await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=sym, side=close_side, orderType="Market", qty=qty, timeInForce="IOC", reduceOnly=True)
+                        try: await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=sym, side=close_side, orderType="Market", qty=qty, timeInForce="IOC", reduceOnly=True)
                         except Exception as e: logger.error(f"Retry flatten failed for {sym}: {e}")
                     await asyncio.sleep(5)
-            except Exception as e:
-                logger.error(f"Exposure verification API call failed: {e}")
-                await asyncio.sleep(5)
+            except Exception as e: await asyncio.sleep(5)
                 
-        if not verified_flat:  
-            logger.critical("💀 FATAL: COULD NOT VERIFY ZERO EXPOSURE AFTER MAXIMUM RETRIES.")
-            if hasattr(self, 'telegram'): 
-                await self.telegram.send_html_report("🚨 <b>FATAL SHUTDOWN ERROR</b>\nCould not flatten all positions.")
+        if not verified_flat: logger.critical("💀 FATAL: COULD NOT VERIFY ZERO EXPOSURE AFTER MAXIMUM RETRIES.")
             
         try:
             async with aiosqlite.connect(self.wal_db_path) as db:
                 async with db.execute("SELECT COUNT(*) FROM pending_wal") as cursor:
                     count = (await cursor.fetchone())[0]
             logger.info(f"⏳ WAL Engine offline. {count} items remaining in local disk buffer for next reboot.")
-        except Exception as e:
-            logger.error(f"WAL shutdown check failed: {e}")
+        except Exception: pass
             
         if hasattr(self, 'telegram'): await self.telegram.close()
-        
-        if hasattr(self.executor, "_api_thread_pool"):
-            logger.info("🧹 Sweeping Executor ThreadPool...")
-            self.executor._api_thread_pool.shutdown(wait=False, cancel_futures=True)
-            
+        if hasattr(self.executor, "_api_thread_pool"): self.executor._api_thread_pool.shutdown(wait=False, cancel_futures=True)
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def _safe_daemon_run(self, coro_func):
@@ -1505,12 +1506,10 @@ class DistributedQuantEngine:
 
     async def run_engine_forever(self):
         self.fsm.release_global_emergency_lock()
-        
         try: await self._fetch_exchange_tick_sizes()
-        except Exception as e: logger.warning(f"Engine boot tick size fetch failed: {e}")
-        
+        except Exception: pass
         try: await self.synchronize_exchange_state()
-        except Exception as e: logger.warning(f"Engine boot sync state failed: {e}")
+        except Exception: pass
             
         try:
             boot_bal = await self.executor.get_wallet_balance_usdt()
@@ -1518,12 +1517,10 @@ class DistributedQuantEngine:
             self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
             self.global_state_cache["last_updated"] = time.time()
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        except Exception as e: logger.warning(f"Engine boot balance fetch failed: {e}")
+        except Exception: pass
         
         try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
-        except Exception as e:
-            logger.error(f"Engine boot full market fetch failed: {e}")
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
+        except Exception: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
             
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
@@ -1534,9 +1531,8 @@ class DistributedQuantEngine:
         daemons = [
             self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, self.cleanup_stale_locks, 
-            self.run_shadow_resolution_daemon, self.run_ai_macro_evaluator, self._universe_refresher_loop,
-            self.run_global_capital_auction_worker,  
-            self.run_omni_swarm_director,            
+            self.run_shadow_resolution_daemon, self.run_ai_sentinel_worker, self._universe_refresher_loop,
+            self.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon 
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
