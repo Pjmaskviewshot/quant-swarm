@@ -11,10 +11,10 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🔬 V39.6 APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🔬 V41.0 APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
     Accelerated Maker-Peg Execution, Adverse Selection Depth Protection,
-    Implied Volatility Dynamic Boundaries, and Pre-Cancel Status Verification.
+    Pre-Cancel Verification, and Threshold-Gated TWAP Iceberg Slicing.
     """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
@@ -74,30 +74,22 @@ class SmartOrderRouter:
 
     async def cancel_order_safe(self, symbol: str, order_id: str) -> bool:
         """
-        🚀 V39.6 INSTITUTIONAL FIX: Queries open orders before canceling 
-        to eliminate Bybit Error 110001 and orphan order noise.
+        Queries open orders before canceling to eliminate Bybit Error 110001.
         """
         for attempt in range(3):
             try:
-                # 1. Check if order is still open on exchange
                 open_orders = await self.executor.safe_call(
                     self.executor.client.get_open_orders, 
-                    category="linear", 
-                    symbol=symbol, 
-                    orderId=order_id
+                    category="linear", symbol=symbol, orderId=order_id
                 )
                 open_list = open_orders.get("result", {}).get("list", [])
                 
                 if not open_list:
-                    # Order is already filled, canceled, or cleared
                     return True
 
-                # 2. Issue cancellation if confirmed open
                 res = await self.executor.safe_call(
                     self.executor.client.cancel_order, 
-                    category="linear", 
-                    symbol=symbol, 
-                    orderId=order_id
+                    category="linear", symbol=symbol, orderId=order_id
                 )
                 if res.get("retCode") == 0:
                     return True
@@ -327,10 +319,80 @@ class SmartOrderRouter:
             
         return False, 0.0, 0.0
 
+    async def _execute_twap_iceberg(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, sl: float, tp: float, slices: int = 4, slice_interval_sec: float = 5.0) -> Tuple[bool, float, float]:
+        """
+        🚀 V41.0 APEX FEATURE: Time-Weighted Iceberg Execution.
+        Slices large institutional orders into undetectable smaller pegs executed sequentially.
+        """
+        logger.critical(f"🧊 ICEBERG ENGAGED // {symbol} large notional size detected. Slicing order into {slices} TWAP chunks.")
+        
+        slice_qty = total_qty / slices
+        total_executed_qty = 0.0
+        weighted_notional_sum = 0.0
+        
+        for i in range(slices):
+            logger.info(f"🧊 TWAP SLICE [{i+1}/{slices}] // Routing {slice_qty:.4f} {symbol}")
+            
+            # Use Maker Peg for each slice, fallback to Flash Strike if it fails
+            success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
+                symbol=symbol, direction=direction, qty=slice_qty, sl=None, tp=None, timeout=20
+            )
+            
+            if not success or fill_qty == 0:
+                logger.warning(f"🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
+                success, fill_price, fill_qty = await self._execute_flash_strike(
+                    symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=None, tp=None
+                )
+                
+            if fill_qty > 0:
+                total_executed_qty += fill_qty
+                weighted_notional_sum += (fill_price * fill_qty)
+                
+            if i < slices - 1:
+                await asyncio.sleep(slice_interval_sec)
+                
+        if total_executed_qty > 0:
+            avg_fill_price = weighted_notional_sum / total_executed_qty
+            
+            # Reattach monolithic SL/TP to the combined sliced position
+            side = "Buy" if direction.upper() == "BUY" else "Sell"
+            tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
+            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(Decimal(str(tick_size)), rounding=ROUND_HALF_UP))
+            
+            try:
+                await self.executor.safe_call(
+                    self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, 
+                    takeProfit=align_price(tp), stopLoss=align_price(sl)
+                )
+            except Exception as e:
+                logger.warning(f"🧊 Failed to reattach bracket to TWAP position: {e}")
+                
+            logger.critical(f"✅ ICEBERG COMPLETE // {symbol} secured {total_executed_qty:.4f} total units at avg price {avg_fill_price:.4f}.")
+            return True, avg_fill_price, total_executed_qty
+            
+        logger.error(f"❌ ICEBERG FAILED // {symbol} could not secure any slices. Evaporated liquidity.")
+        return False, 0.0, 0.0
+
     async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
-        logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
         
+        # 🚀 V41.0 APEX: Threshold-Gated Iceberg Routing Logic
+        is_large_order = False
+        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
+            # Estimate top of book depth
+            top_bid_vol = sum(float(l[1]) for l in depth_snapshot["bids"][:3])
+            top_ask_vol = sum(float(l[1]) for l in depth_snapshot["asks"][:3])
+            avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
+            
+            # If our order is > 5% of the average Top-of-Book depth, we trigger the Iceberg slice
+            if avg_tob_vol > 0 and total_qty > (avg_tob_vol * 0.05):
+                is_large_order = True
+        
+        if is_large_order:
+            logger.info(f"🐋 WHALE ROUTING // {symbol} order size triggers Iceberg Protocol.")
+            return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
+        
+        logger.info(f"🚀 TRENDING REGIME ROUTING // {symbol} {direction}")
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
@@ -338,5 +400,19 @@ class SmartOrderRouter:
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
+        
+        # Mean reversion orders can also trigger the Iceberg if they are massive
+        is_large_order = False
+        if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
+            top_bid_vol = sum(float(l[1]) for l in depth_snapshot["bids"][:3])
+            top_ask_vol = sum(float(l[1]) for l in depth_snapshot["asks"][:3])
+            avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
+            if avg_tob_vol > 0 and total_qty > (avg_tob_vol * 0.05):
+                is_large_order = True
+                
+        if is_large_order:
+            logger.info(f"🐋 WHALE ROUTING // {symbol} order size triggers Iceberg Protocol.")
+            return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
+
         logger.info(f"🕸️ RANGING REGIME ROUTING // Forcing Maker Peg on {symbol}")
         return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=60)

@@ -3,12 +3,13 @@ import time
 import numpy as np
 import logging
 from collections import deque
+from typing import Dict, Any, Tuple, List
 
 logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
     """
-    🌌 V34.3 APEX: STRICT LEAD-LAG TENSOR MATRIX
+    🌌 V41.0 APEX: MACRO-AWARE TENSOR MATRIX
     Computes real-time cross-asset impulse propagation.
     Upgraded: Uses exact Exchange Timestamps (floored to 1-second bins) 
     and strict [t-1] lagging to entirely eradicate Look-Ahead Bias.
@@ -66,7 +67,6 @@ class CrossAssetTensorOracle:
             
             # 🛡️ Look-ahead Bias Prevention: We look for BTC's price at alt_ts - 1
             # If not exactly found, we look at alt_ts - 2. Never current or future.
-            # 🚀 V34.3 FIX: Correct Truthy fallback logic (Checking for None, not 0.0)
             lagged_btc_price = btc_dict.get(alt_ts - 1)
             if lagged_btc_price is None:
                 lagged_btc_price = btc_dict.get(alt_ts - 2)

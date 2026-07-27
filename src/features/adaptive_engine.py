@@ -10,11 +10,10 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V36.2 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
-    Upgraded to track 5 distinct non-linear market states using Log-Space Gaussian emission probabilities.
-    Prevents float underflow when multiplying tiny pdf values.
+    🔬 V41.0 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
+    Upgraded with HTF (Higher-Timeframe) Macro Trend Alignment (1H/4H).
+    Implements Dynamic ER-Scaled Risk-Reward Ratio & Bias Penalties.
     Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
-    Matrix aligned with backtest for perfect predictive parity.
     """
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
         # Local Orderbook Reconstruction Cache
@@ -30,8 +29,14 @@ class AdaptiveFeatureEngine:
         # Aggressive Trade Flow Imbalance
         self.tfi_history = deque(maxlen=memory_window_short)
         
-        # Multi-Timeframe micro-aggregates
-        self.timeframes = {"1": deque(maxlen=100), "5": deque(maxlen=300), "15": deque(maxlen=900)}
+        # 🚀 V41.0: Expanded Timeframe Tracking for Macro-Alignment (up to 4H/240m)
+        self.timeframes = {
+            "1": deque(maxlen=100), 
+            "5": deque(maxlen=300), 
+            "15": deque(maxlen=900),
+            "60": deque(maxlen=200),  # 1 Hour
+            "240": deque(maxlen=100)  # 4 Hour
+        }
         self.long_window = memory_window_long
         
         self._latest_mid = 0.0
@@ -51,7 +56,6 @@ class AdaptiveFeatureEngine:
         self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
         
         # Transition Matrix P(State_t | State_{t-1})
-        # 🚀 V36.2 FIX: Matrix strictly aligned to backtest (0.75 self-persistence)
         self.transition_matrix = np.array([
             [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
             [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
@@ -74,7 +78,7 @@ class AdaptiveFeatureEngine:
 
     def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
         """
-        🚀 V36.2 FIX: Log-Space HMM Emission Probability.
+        Log-Space HMM Emission Probability.
         Computes ln(P) to completely eliminate float underflow when multiplying.
         """
         var = float(std)**2 + 1e-9
@@ -82,7 +86,7 @@ class AdaptiveFeatureEngine:
 
     def detect_market_regime(self) -> str:
         """
-        🚀 V36.2 APEX: Log-Space HMM Gaussian Classifier.
+        Log-Space HMM Gaussian Classifier.
         Matrix Parity aligned with Backtest. Stable probability extraction.
         """
         if len(self.timeframes["5"]) >= 20:
@@ -245,6 +249,68 @@ class AdaptiveFeatureEngine:
             momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / max(historical_close, 1e-9)
             
         return momentum_matrix
+
+    def get_htf_trend_bias(self, current_price: float) -> float:
+        """
+        🚀 V41.0 APEX: Higher-Timeframe Trend Bias Factor (β_HTF).
+        Calculates distance from 4H and 1H Exponential Moving Averages to penalize
+        counter-trend microscopic signals.
+        Returns a float between -1.0 (strongly bearish macro) to 1.0 (strongly bullish macro).
+        """
+        bias = 0.0
+        
+        # Calculate 4-Hour (240m) Trend Bias
+        if len(self.timeframes["240"]) >= 10:
+            candles_4h = list(self.timeframes["240"])
+            closes_4h = np.array([float(c["close"]) for c in candles_4h])
+            
+            # Simple EMA approximation for performance
+            alpha = 2.0 / (len(closes_4h) + 1)
+            ema_4h = closes_4h[0]
+            for val in closes_4h[1:]:
+                ema_4h = (val * alpha) + (ema_4h * (1 - alpha))
+                
+            atr_4h = self.get_computed_atr(period=min(14, len(candles_4h)))
+            if atr_4h > 0:
+                bias_4h = np.clip((current_price - ema_4h) / atr_4h, -1.0, 1.0)
+                bias += (bias_4h * 0.6)  # 4H carries 60% weight
+                
+        # Calculate 1-Hour (60m) Trend Bias
+        if len(self.timeframes["60"]) >= 20:
+            candles_1h = list(self.timeframes["60"])
+            closes_1h = np.array([float(c["close"]) for c in candles_1h])
+            
+            alpha = 2.0 / (min(20, len(closes_1h)) + 1)
+            ema_1h = closes_1h[0]
+            for val in closes_1h[1:]:
+                ema_1h = (val * alpha) + (ema_1h * (1 - alpha))
+                
+            atr_1h = self.get_computed_atr(period=min(14, len(candles_1h)))
+            if atr_1h > 0:
+                bias_1h = np.clip((current_price - ema_1h) / atr_1h, -1.0, 1.0)
+                bias += (bias_1h * 0.4)  # 1H carries 40% weight
+                
+        return np.clip(bias, -1.0, 1.0)
+
+    def get_dynamic_rr_ratio(self) -> float:
+        """
+        🚀 V41.0 APEX: Adaptive Parameter Scaling via Kaufman Efficiency Ratio (ER).
+        In smooth trends (ER approx 1.0), RR expands up to 3.2x.
+        In choppy markets (ER approx 0.0), RR tightens to 1.2x.
+        """
+        if len(self.timeframes["5"]) >= 20:
+            candles = list(self.timeframes["5"])[-20:]
+            closes = np.array([float(c["close"]) for c in candles])
+            
+            directional_change = abs(closes[-1] - closes[0])
+            absolute_changes = np.sum(np.abs(np.diff(closes)))
+            er = float(directional_change / (absolute_changes + 1e-9))
+        else:
+            er = 0.5  # Neutral baseline
+            
+        # ER-Scaled Dynamic RR Formula
+        dynamic_rr = 1.2 + (2.0 * (er ** 2))
+        return np.clip(dynamic_rr, 1.2, 3.2)
 
     def get_latest_mid(self) -> float:
         return getattr(self, '_latest_mid', 0.0)
