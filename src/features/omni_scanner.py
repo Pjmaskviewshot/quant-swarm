@@ -9,7 +9,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V37.0 APEX: PCA Eigenvector Beta-Stripping
+    🚀 V41.13 APEX: PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market beta,
     and returns pure idiosyncratic alpha residuals for each asset.
     """
@@ -37,9 +37,9 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V37.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
-    Scans Bybit 250+ perpetual universe every 10 seconds.
-    Upgraded with Logarithmic Liquidity Weighting to filter out "Junk Alpha".
+    🌌 V41.13 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    Scans Bybit 250+ perpetual universe.
+    Upgraded with Live Microstructure Spread Gating and Logarithmic Liquidity Weighting.
     Enforces a strict 30-minute swap cooldown to preserve matrix stability.
     """
     def __init__(self, executor):
@@ -47,7 +47,7 @@ class GlobalOmniScanner:
         self.market_memory: Dict[str, Dict[str, list]] = {}
         self.btc_returns = []
         self.last_btc_price = 0.0
-        self.last_swap_time = 0.0  # 🚀 V37.0: Global matrix churn prevention
+        self.last_swap_time = 0.0  
 
     async def _fetch_global_tickers(self) -> dict:
         try:
@@ -69,7 +69,6 @@ class GlobalOmniScanner:
         if protected_symbols is None:
             protected_symbols = set()
 
-        # 🚀 V37.0 FIX: Hard 30-Minute Cooldown on Swaps
         if time.time() - self.last_swap_time < 1800.0:
             return None, None
 
@@ -98,9 +97,17 @@ class GlobalOmniScanner:
             try:
                 current_price = float(data.get('lastPrice', 0))
                 turnover24h = float(data.get('turnover24h', 0))
+                bid = float(data.get('bid1Price', 0) or 0)
+                ask = float(data.get('ask1Price', 0) or 0)
                 
-                # 🚀 V37.0 FIX: Raised baseline turnover to $25M to kill micro-cap noise
-                if current_price < 0.05 or turnover24h < 25_000_000.0:
+                if bid <= 0 or ask <= 0 or ask <= bid:
+                    continue
+                    
+                spread_bps = ((ask - bid) / bid) * 10000.0
+                
+                # 🚀 V41.13 FIX: Strict Microstructure Gate
+                # Kills stock perps, dead alts, and wide-spread traps BEFORE they enter the PCA math
+                if current_price < 0.05 or turnover24h < 40_000_000.0 or spread_bps > 8.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -146,8 +153,7 @@ class GlobalOmniScanner:
                 
                 idiosyncratic_alpha = pca_alphas[idx]
                 
-                # 🚀 V37.0 FIX: Logarithmic Liquidity Weighting
-                # Punishes assets with low real liquidity to prevent "Junk Alpha" traps
+                # Logarithmic Liquidity Weighting
                 turnover_weight = math.log10(max(turnover_map[sym], 1e-9)) / 10.0 
                 
                 swarm_score = ((rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)) * turnover_weight
