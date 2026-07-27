@@ -44,7 +44,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.0_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.2_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -678,7 +678,6 @@ class DistributedQuantEngine:
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 
-                # 🚀 V41.0 APEX: Dynamic ER-Scaled Parameters
                 sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
                 dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
                 
@@ -739,7 +738,6 @@ class DistributedQuantEngine:
                     if action == "SELL": prob_success -= 0.06
                     elif action == "BUY": prob_success += 0.06
                     
-                # 🚀 V41.0 APEX: Higher-Timeframe Trend Alignment Bias
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
                     htf_bias = feature_engine.get_htf_trend_bias(price)
                     if action == "BUY": prob_success += (htf_bias * 0.05)
@@ -935,15 +933,26 @@ class DistributedQuantEngine:
                 self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": bid_size, "best_ask": best_ask, "ask_size": ask_size, "bids": bids, "asks": asks}
                 stat_engine = self.stat_engines.get(symbol)
                 
-                spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
-                spread_hist = self.spread_history.get(symbol)
-                if spread_hist is not None:
-                    spread_hist.append(spread_val)
-                    if len(spread_hist) > 10:
-                        med_spread = np.median(spread_hist)
-                        if spread_val > med_spread * 3.0 and spread_val > 0.0015:
-                            logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
-                            self.circuit_breakers[symbol] = time.time() + 60.0
+                # 🚀 V41.2 FIX: Asset-Class Aware Liquidity Fracture Guards & Increased Sample Window
+                now = time.time()
+                if self.circuit_breakers.get(symbol, 0.0) <= now:
+                    spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
+                    spread_hist = self.spread_history.get(symbol)
+                    if spread_hist is not None:
+                        spread_hist.append(spread_val)
+                        if len(spread_hist) >= 30: 
+                            med_spread = np.median(spread_hist)
+                            
+                            if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
+                                spread_floor = 0.0015
+                                multiplier = 4.0
+                            else:
+                                spread_floor = 0.0050
+                                multiplier = 5.0
+                                
+                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
+                                logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
+                                self.circuit_breakers[symbol] = now + 60.0
                 
                 if stat_engine: 
                     stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
@@ -1019,7 +1028,8 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
+            # 🚀 V41.2 FIX: Raise minimum turnover to 50M to permanently block micro-caps
+            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
         except Exception as e:
             logger.error(f"Universe refresher failed fetching assets: {e}")
@@ -1069,7 +1079,6 @@ class DistributedQuantEngine:
 
     async def stream_manager_loop(self):
         while True:
-            # 🚀 V41.0 FIX: Subscribe to 15m, 60m (1H), and 240m (4H) to populate HTF trend buffers!
             stream_feed = HighVelocityMultiFeed(
                 basket=self.asset_basket + self.shadow_basket[:10], 
                 intervals=[self.timeframe, "60", "240"], 
@@ -1420,7 +1429,6 @@ class DistributedQuantEngine:
                     profit_distance = abs(max_favorable_price - actual_entry)
                     r_multiple = profit_distance / (initial_risk + 1e-9)
 
-                    # 1. Conditional Partial Profit Taking
                     if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
                         try:
                             current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
@@ -1447,7 +1455,6 @@ class DistributedQuantEngine:
                         except Exception as e:
                             logger.error(f"Scale-out execution fault for {symbol}: {e}")
 
-                    # 2. Progressive SL Ratchet
                     if r_multiple >= 0.5 and not locked_breakeven:
                         if r_multiple >= 1.0:
                             breakeven_offset = actual_entry * 0.0015 
@@ -1459,7 +1466,6 @@ class DistributedQuantEngine:
                             if (direction == "BUY" and half_risk_sl > current_sl) or (direction == "SELL" and half_risk_sl < current_sl):
                                 current_sl = half_risk_sl
 
-                    # 3. Volatility & Elasticity-Adjusted SL Trail
                     vol_scalar = min(1.0, stat_engine.inst_variance * 5000.0)
                     elasticity = elasticity_engine.orderbook_elasticity if elasticity_engine and hasattr(elasticity_engine, 'orderbook_elasticity') else 1.0
                     
@@ -1480,7 +1486,6 @@ class DistributedQuantEngine:
                     dynamic_trail_dist *= tox_mult
                     calculated_sl = max_favorable_price - dynamic_trail_dist if direction == "BUY" else max_favorable_price + dynamic_trail_dist
 
-                    # 4. Kinematic Trailing Take-Profit (KT-TP)
                     requires_tp_update = False
                     if r_multiple > 1.2:
                         tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
@@ -1662,7 +1667,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=15_000_000)
+        try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
         except Exception: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
             
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
