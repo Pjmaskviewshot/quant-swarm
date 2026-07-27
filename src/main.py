@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.7_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.8_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -262,7 +262,6 @@ class ContinuousMicrostructureEngine:
                         else:
                             self.P_ranging += np.eye(9) * 1e-5
                     
-                    # 🚀 V41.7 FIX: Add light L2 Ridge regularization on matrix diagonals to stabilize collinear features
                     self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(9) * 1e-6)
                     self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(9) * 1e-6)
                     self.rls_updates += 1
@@ -490,7 +489,6 @@ class DistributedQuantEngine:
         except Exception: pass
         return default_params
 
-    # 🚀 V41.7 FIX: Symbol Garbage Collector to prevent memory leaks during universe rotation
     async def _prune_dead_symbols(self):
         async with self.portfolio_state_lock:
             active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()))
@@ -1006,12 +1004,11 @@ class DistributedQuantEngine:
                     protected_symbols = set(self.active_positions_map.keys())
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
                 if dead_sym and hot_sym:
-                    # 🚀 V41.7 FIX: Atomic mutation of asset_basket under portfolio_state_lock
                     async with self.portfolio_state_lock:
                         if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
                         if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
                     self._initialize_symbol_structures([hot_sym])
-                    await self._prune_dead_symbols() # Garbage collection
+                    await self._prune_dead_symbols() 
                     if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
                         await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
                     logger.critical(f"🚀 {hot_sym} FULLY ARMED AND INJECTED INTO QUANT MATRIX.")
@@ -1058,6 +1055,10 @@ class DistributedQuantEngine:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
             
+        # 🚀 V41.8 FIX: Purge highly illiquid index/stock/commodity perps that ruin spread metrics
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         new_core_basket = ["BTCUSDT"]
         
@@ -1160,18 +1161,15 @@ class DistributedQuantEngine:
                                 self.risk_vault.update_position_ledger(symbol, 0.0)
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
-    # 🚀 V41.7 FIX: Un-nested lock structure and added Stale Signal Expiration + Price Drift Filter
     async def run_global_capital_auction_worker(self):
         logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
         while True:
             await asyncio.sleep(0.5) 
             
-            # Step 1: Quick capacity check under portfolio_state_lock
             async with self.portfolio_state_lock:
                 if len(self.active_positions_map) >= 5:
                     continue
 
-            # Step 2: Pop candidates under auction_lock (Decoupled from portfolio lock)
             best_candidate = None
             async with self.auction_lock:
                 if not self.auction_queue:
@@ -1186,7 +1184,6 @@ class DistributedQuantEngine:
                 while self.auction_queue:
                     item = heapq.heappop(self.auction_queue)
                     _, _, sym, payload = item
-                    # Tightened Signal Expiration: 2.0 seconds maximum queue latency
                     if now - payload["timestamp"] < 2.0:
                         valid_candidates.append(item)
                         
@@ -1201,17 +1198,15 @@ class DistributedQuantEngine:
             top_neg_sharpe, _, top_symbol, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
-            # Step 3: Final atomic reservation check & Price Drift Filter
             async with self.portfolio_state_lock:
                 if top_symbol in self.active_positions_map or len(self.active_positions_map) >= 5:
                     continue
                     
-                # 🚀 Price Drift Guard: Verify orderbook mid hasn't moved against us in queue
                 current_ob = self.orderbook_snapshots.get(top_symbol)
                 if current_ob and current_ob.get("best_bid", 0) > 0:
                     live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
                     drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
-                    if drift_pct > 0.0015: # > 15 bps price drift while in queue
+                    if drift_pct > 0.0015: 
                         logger.warning(f"⏳ AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting execution.")
                         continue
 
@@ -1308,7 +1303,6 @@ class DistributedQuantEngine:
                     execution_success = res[0] if isinstance(res, tuple) else bool(res)
                 except Exception as ex:
                     err_str = str(ex)
-                    # 🚀 V41.7 FIX: Bybit Maintenance Window Detection
                     if any(code in err_str for code in ["10004", "10016", "10002", "500"]):
                         logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.circuit_breaker_lock:
@@ -1754,6 +1748,10 @@ class DistributedQuantEngine:
         try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
         except Exception: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
             
+        # 🚀 Filter initial boot basket too
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
         if boot_basket := full_market[:25]:

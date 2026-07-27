@@ -9,9 +9,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V38.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
-    Features absolute sequence gap intolerance for L2 validity
-    with per-symbol isolated resyncing, dynamic O(1) hot-swapping,
+    🚀 V38.1 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    Features absolute sequence gap intolerance for L2 validity,
+    Subscription Chunking (10-arg limit compliance), pure JSON pings,
     and Fast Float Pre-Parsing for low-latency downstream execution.
     """
     def __init__(
@@ -81,9 +81,8 @@ class HighVelocityMultiFeed:
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V38.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
-        Pushes subscribe/unsubscribe JSON commands over the active WebSocket
-        without dropping the connection to the other 24 assets.
+        🚀 V38.1 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -101,8 +100,11 @@ class HighVelocityMultiFeed:
         ] + [f"kline.{i}.{add_symbol}" for i in self.intervals]
 
         try:
-            await self.active_ws.send_json({"op": "unsubscribe", "args": unsub_args})
-            await self.active_ws.send_json({"op": "subscribe", "args": sub_args})
+            # 🚀 Bybit Limit: Max 10 args per payload. Chunking required.
+            for i in range(0, len(unsub_args), 10):
+                await self.active_ws.send_json({"op": "unsubscribe", "args": unsub_args[i:i+10]})
+            for i in range(0, len(sub_args), 10):
+                await self.active_ws.send_json({"op": "subscribe", "args": sub_args[i:i+10]})
             
             # Clean up local sequence memory for dropped coin
             self.orderbook_sequences.pop(drop_symbol, None)
@@ -110,13 +112,11 @@ class HighVelocityMultiFeed:
             logger.info(f"🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
         except Exception as e:
             logger.error(f"Hot-swap socket injection failed: {e}")
-            # If the socket is dead, the main loop will catch it and reconnect everything anyway.
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V38.0 FIX: ISOLATED SNAPSHOT RESYNC
-        Forces Bybit to send a fresh orderbook snapshot for ONE symbol 
-        without dropping the entire multiplexed websocket connection.
+        🚀 V38.1 FIX: ISOLATED SNAPSHOT RESYNC
+        Forces Bybit to send a fresh orderbook snapshot for ONE symbol.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -132,10 +132,7 @@ class HighVelocityMultiFeed:
             logger.error(f"Isolated resync request failed for {symbol}: {e}")
 
     def _fast_float_parse_book(self, levels: list) -> list:
-        """
-        🚀 V38.0 PERFORMANCE UPGRADE: Pre-parses string lists into float arrays 
-        to save downstream CPU cycles in the Kinematic Trailing Engine.
-        """
+        """Pre-parses string lists into float arrays to save downstream CPU cycles."""
         parsed = []
         for lvl in levels:
             try:
@@ -145,10 +142,9 @@ class HighVelocityMultiFeed:
         return parsed
 
     async def initialize_multiplexed_stream(self):
-        """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
+        """Spawns concurrent asynchronous subscription worker processes."""
         self.is_running = True
         
-        # Start background consumer worker
         consumer_task = self.track_task(self._data_consumer_worker())
         
         args_payload = []
@@ -159,11 +155,6 @@ class HighVelocityMultiFeed:
             for interval in self.intervals:
                 args_payload.append(f"kline.{interval}.{symbol}") 
 
-        subscription_request = {
-            "op": "subscribe",
-            "args": args_payload
-        }
-
         reconnect_delay = 1.0
         max_reconnect_delay = 30.0
 
@@ -173,16 +164,18 @@ class HighVelocityMultiFeed:
             
             try:
                 logger.info(f"Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
+                # Removed conflicting aiohttp heartbeat, relying strictly on JSON ping
                 async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(self.ws_url, heartbeat=20.0) as ws:
+                    async with session.ws_connect(self.ws_url) as ws:
                         
                         self.active_ws = ws
                         reconnect_delay = 1.0
+                        self.last_msg_timestamp = time.time()
                         
                         async def connection_watchdog():
                             try:
                                 while not ws.closed and self.is_running:
-                                    await asyncio.sleep(20)
+                                    await asyncio.sleep(20) # Bybit requires a ping exactly every 20s
                                     try:
                                         await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
                                         if time.time() - self.last_msg_timestamp > 45.0:
@@ -197,10 +190,14 @@ class HighVelocityMultiFeed:
                                     
                         watchdog_task = self.track_task(connection_watchdog())
 
-                        await ws.send_str(json.dumps(subscription_request))
-                        logger.info(f"Successfully multiplexed topics for tracking matrix: {self.basket}")
-                        
-                        self.last_msg_timestamp = time.time()
+                        # 🚀 V38.1 Bybit Limit: Max 10 args per request. We must chunk the payload!
+                        chunk_size = 10
+                        for i in range(0, len(args_payload), chunk_size):
+                            chunk = args_payload[i:i + chunk_size]
+                            await ws.send_json({"op": "subscribe", "args": chunk})
+                            await asyncio.sleep(0.05) # Prevent connection flooding
+                            
+                        logger.info(f"Successfully multiplexed topics (chunked) for tracking matrix: {self.basket}")
 
                         async for msg in ws:
                             self.last_msg_timestamp = time.time()
@@ -233,18 +230,15 @@ class HighVelocityMultiFeed:
                                             last_seq = self.orderbook_sequences.get(symbol)
                                             prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
                                             
-                                            # 🚀 V38.0 ZERO SEQUENCE GAP TOLERANCE
+                                            # ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
                                                     logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
-                                                    
-                                                    # Spin off background task to quickly unsubscribe/subscribe to JUST this symbol
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue # Skip processing this broken delta
                                                     
                                             self.orderbook_sequences[symbol] = u_sequence
                                             
-                                        # 🚀 V38.0: Fast Float Pre-Parsing
                                         parsed_bids = self._fast_float_parse_book(data.get("b", []))
                                         parsed_asks = self._fast_float_parse_book(data.get("a", []))
 
