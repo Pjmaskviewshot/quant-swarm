@@ -1,6 +1,6 @@
 """
-🧪 V41.0 APEX BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V41.0.
+🧪 V41.5 APEX BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V41.5.
 Implements Pessimistic Intra-bar Execution, Volatility-Adjusted Kinematic 
 Trailing Compression, 1R Scale-Outs, Kinematic TP Expansion, and Edge-Weighted Risk Allocation.
 """
@@ -230,7 +230,7 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
 
 def calculate_evt_tail_risk(volatility_surface: deque) -> float:
     """
-    🚀 V41.0 BACKTEST PARITY: Adaptive EVT with Dynamic Sizing Floors
+    🚀 V41.5 BACKTEST PARITY: Adaptive EVT with Dynamic Sizing Floors
     """
     if len(volatility_surface) < 30: return 1.05 
         
@@ -256,7 +256,7 @@ def calculate_evt_tail_risk(volatility_surface: deque) -> float:
 
 def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     """
-    🚀 V41.0 BACKTEST PARITY: Regime-Dependent Confidence Shrinkage
+    🚀 V41.5 BACKTEST PARITY: Regime-Dependent Confidence Shrinkage
     """
     floor = 0.52
     ceiling = 0.85
@@ -452,10 +452,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         price_delta_bps = abs((sim_price - c_prev['close']) / (c_prev['close'] + 1e-9)) * 10000.0
         
-        # 🚀 V41.0 BACKTEST PARITY: Orderbook Elasticity Mock Simulation
-        # Since we don't have deep L2 data in backtest, we proxy elasticity via Volatility and Spread Density
         orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
-        
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
         base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
@@ -483,7 +480,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
         
-        # 🚀 V41.0 ADAPTIVE CONFIDENCE SHRINKAGE
         prob_success = calibrate_confidence(prob_success, regime, ewma_mse)
         
         historical_probs.append(prob_success)
@@ -511,7 +507,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
         sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
         
-        # 🚀 V41.0 DYNAMIC ER-SCALED RISK-REWARD RATIO
+        # 🚀 V41.5 DYNAMIC ER-SCALED RISK-REWARD RATIO
         dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
 
@@ -552,7 +548,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     
                     outcome, exit_price, bars_held = None, entry, 0
                     
-                    # 🚀 V41.0 BACKTEST PARITY: Advanced Trailing Simulation
                     max_favorable_price = entry
                     locked_breakeven = False
                     scaled_out = False
@@ -560,7 +555,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     current_sl = sl
                     current_tp = tp
                     
-                    # Store running PnL components
                     pnl_accum = 0.0
                     position_size = 1.0
                     
@@ -574,24 +568,20 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         profit_distance = abs(max_favorable_price - entry)
                         r_multiple = profit_distance / (initial_risk + 1e-9)
                         
-                        # 1. 50% Scale-Out at 1.0R
                         if r_multiple >= 1.0 and not scaled_out:
                             pnl_accum += (1.0 * initial_risk) * 0.5
                             position_size = 0.5
                             scaled_out = True
                         
-                        # 2. Progressive Break-Even Ratchet
                         if r_multiple >= 0.5 and not locked_breakeven:
                             if r_multiple >= 1.0:
                                 current_sl = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
                                 locked_breakeven = True
                             else:
-                                # Progressive trail: Lock in half the risk at 0.5R
                                 half_risk_sl = entry - (initial_risk * 0.5) if action_dir == "BUY" else entry + (initial_risk * 0.5)
                                 if (action_dir == "BUY" and half_risk_sl > current_sl) or (action_dir == "SELL" and half_risk_sl < current_sl):
                                     current_sl = half_risk_sl
                         
-                        # 3. Volatility-Adjusted Compression
                         base_mult = max(0.4, 2.0 - (r_multiple * 0.4))
                         vol_adj = 1.0 + (vol_scalar * 0.5)
                         el_adj = max(0.8, min(1.5, 1.0 / (orderbook_elasticity + 0.2)))
@@ -604,7 +594,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             calc_sl = max_favorable_price + dynamic_trail_dist
                             if calc_sl < current_sl: current_sl = calc_sl
                             
-                        # 4. 🚀 V41.0 BACKTEST PARITY: Kinematic Trailing Take-Profit (KT-TP)
                         if r_multiple > 1.2:
                             tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
                             dynamic_tp_dist = initial_risk * tp_expansion_factor
@@ -613,7 +602,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             if action_dir == "BUY" and calc_tp > current_tp: current_tp = calc_tp
                             elif action_dir == "SELL" and calc_tp < current_tp: current_tp = calc_tp
                             
-                        # Pessimistic Resolver using trailing current_sl and kinematic current_tp
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
                         
@@ -643,7 +631,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     risk_multiplier = edge / 0.10
                     raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                     
-                    # 🚀 V41.0 EDGE-WEIGHTED RISK SCALING
                     net_edge_bps = net_ev_pct * 10000.0
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
@@ -710,7 +697,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V41.0 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V41.5 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
