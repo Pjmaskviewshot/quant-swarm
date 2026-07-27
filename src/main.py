@@ -33,7 +33,7 @@ from execution.sor import SmartOrderRouter
 from ingestion.multi_feed import HighVelocityMultiFeed
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
-from services.adversarial_ai import AdversarialDebateMatrix
+from services.news_sentiment import MacroNewsSentimentAnalyzer # 🚀 V39.0
 from services.data_feed import AsynchronousDataFeed
 from services.tensor_oracle import CrossAssetTensorOracle
 
@@ -44,7 +44,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V38.0_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V39.0_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -384,7 +384,10 @@ class DistributedQuantEngine:
         self.fsm = SystemStateMachine()
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
-        self.ai_matrix = AdversarialDebateMatrix()
+        
+        # 🚀 V39.0: Replaced Adversarial AI with Macro News Sentiment Oracle
+        self.news_analyzer = MacroNewsSentimentAnalyzer()
+        
         self.data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY", ""))
         self.tensor_oracle = CrossAssetTensorOracle()
         
@@ -411,9 +414,6 @@ class DistributedQuantEngine:
         self.last_eval_time: Dict[str, float] = {}
         self._active_tasks = set()
         
-        self.ai_sentinel_queue = asyncio.Queue()
-        self.active_sentinel_locks: Dict[str, float] = {}
-        
         self.auction_queue: List[tuple] = []  
         self.auction_lock = asyncio.Lock()
         
@@ -422,9 +422,6 @@ class DistributedQuantEngine:
         self.global_state_cache = {"last_updated": 0.0}
         
         self.live_params = self._load_live_params()
-        self.api_penalty_cooldown = 0.0 
-        self.ai_failure_count = 0  
-        
         self.last_socket_reconnect = 0.0 
         
         self._initialize_symbol_structures(self.asset_basket)
@@ -686,80 +683,29 @@ class DistributedQuantEngine:
                 
                 if prob_success < min_threshold: return
                 
-                if time.time() - self.active_sentinel_locks.get(symbol, 0.0) < 60.0:
-                    return
-                self.active_sentinel_locks[symbol] = time.time()
+                # 🚀 V39.0: PURE QUANTITATIVE EXECUTION (Zero AI Latency)
+                macro_sentiment = self.news_analyzer.get_latest_sentiment(symbol)
                 
+                if action == "BUY":
+                    prob_success += (macro_sentiment * 0.075) 
+                else:
+                    prob_success -= (macro_sentiment * 0.075) 
+                    
+                prob_success = max(0.01, min(0.99, prob_success))
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
+
+                if net_ev_pct <= 0.0005: return
+
                 payload_features = {
                     "symbol": symbol, "market_regime": regime,
                     "virtual_sl": virtual_sl, "virtual_tp": virtual_tp,
                     "adaptive_obi_z": stat_engine.ofi_fast_z, 
                     "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost,
-                    "reasoning": structural_verdict["reasoning"] 
+                    "reasoning": structural_verdict["reasoning"],
+                    "ai_verdict": f"SENTIMENT_{macro_sentiment:.2f}" 
                 }
                 
                 elasticity = self.elasticity_engines.get(symbol)
-                
-                candidate_data = (symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock, sl_dist_pct, elasticity)
-                self.ai_sentinel_queue.put_nowait(candidate_data)
-                
-        except Exception as e:
-            logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
-
-    async def run_ai_sentinel_worker(self):
-        logger.info("🦅 EVENT-DRIVEN AI SENTINEL ONLINE: LLMs now act as Last-Mile Execution Filters (Zero Rate Limit Burn).")
-        while True:
-            try:
-                candidate = await self.ai_sentinel_queue.get()
-                symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock, sl_dist_pct, elasticity = candidate
-                
-                if time.time() < self.api_penalty_cooldown:
-                    logger.info(f"⚡ PREDATORY MATH OVERRIDE // {symbol} AI bypassed due to rate limits. Math edge: {net_ev_pct*10000:.1f} bps.")
-                    prob_success = min(0.99, prob_success * 1.15)
-                    payload_features["ai_verdict"] = "OVERRIDE"
-                else:
-                    vpin_hist = list(clock.vpin_history)
-                    vpin_score = vpin_hist[-1] if vpin_hist else 0.0
-                    vpin_z = float((vpin_score - np.mean(vpin_hist)) / (np.std(vpin_hist) + 1e-9)) if len(vpin_hist) >= 20 else 0.0
-                    dir_hist = list(clock.directional_imbalances)
-                    directional_bias = np.mean(dir_hist) / (clock.bucket_volume + 1e-9) if dir_hist else 0.0
-                    
-                    vpin_data = {
-                        "vpin_score": vpin_score, "vpin_z_score": vpin_z, 
-                        "directional_bias": directional_bias, "suggested_direction": "BUY" if directional_bias > 0 else "SELL", 
-                        "current_price": price, "is_absorption_anomaly": getattr(clock, 'is_absorption_anomaly', False), 
-                        "avg_trade_size": clock.bucket_volume / max(1, clock.current_bucket_ticks)
-                    }
-                    
-                    try:
-                        verdict = await self.ai_matrix.execute_debate_cycle(symbol, vpin_data, dna_stats, "Event-driven sentinel check.")
-                        ai_action = verdict.get("action", "HOLD")
-                        confidence_multiplier = verdict.get("confidence", 1.0) if ai_action != "HOLD" else 1.0
-                        payload_features["ai_verdict"] = ai_action
-                        
-                        self.ai_failure_count = 0  
-                        
-                        if ai_action == action:
-                            logger.info(f"🧠 AI CONFLUENCE ACHIEVED // {symbol} Sentinel agrees with {action}.")
-                            prob_success = min(0.99, prob_success * (1.0 + (confidence_multiplier * 0.20)))
-                        elif ai_action != "HOLD":
-                            logger.warning(f"⚠️ AI DIVERGENCE // {symbol} Sentinel suggests {ai_action}. Vetoing math.")
-                            prob_success = prob_success * 0.50
-                    except Exception as e:
-                        self.ai_failure_count += 1
-                        cooldown_secs = min(900, 30 * (2 ** (self.ai_failure_count - 1)))
-                        logger.warning(f"⚠️ LLM Sentinel Fault #{self.ai_failure_count} ({e}). Backing off AI for {cooldown_secs}s.")
-                        self.api_penalty_cooldown = time.time() + cooldown_secs
-                        prob_success = min(0.99, prob_success * 1.15)
-                        payload_features["ai_verdict"] = "OVERRIDE"
-
-                if prob_success < 0.65 and payload_features["ai_verdict"] != "OVERRIDE":
-                    continue
-
-                is_shadow_asset = symbol in self.shadow_basket
-                if is_shadow_asset or not dna_stats.get("is_armed", False):
-                    self.log_to_wal_sync("prediction", [str(uuid.uuid4()), time.time(), price, action, prob_success, payload_features, True])
-                    continue 
                 
                 payload = {
                     "symbol": symbol, "action": action, "price": price, 
@@ -773,9 +719,9 @@ class DistributedQuantEngine:
                 async with self.auction_lock:
                     net_sharpe_proxy = net_ev_pct / (sl_dist_pct + 1e-9)
                     heapq.heappush(self.auction_queue, (-net_sharpe_proxy, time.time(), symbol, payload))
-                    
-            except Exception as e:
-                logger.error(f"AI Sentinel Fault: {e}", exc_info=True)
+                
+        except Exception as e:
+            logger.error(f"Trade processing fault for {symbol}: {e}", exc_info=True)
 
     async def log_to_wal_async(self, action_type: str, args: list):
         async with self.wal_lock:
@@ -901,6 +847,29 @@ class DistributedQuantEngine:
                             await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
                         except Exception: pass 
             except Exception as e: logger.error(f"Shadow resolution daemon error: {e}")
+
+    async def run_macro_news_daemon(self):
+        """🚀 V39.0: Background LLM Oracle feeding 0-latency sentiment tensors."""
+        logger.info("📰 MACRO NEWS SENTIMENT DAEMON ONLINE: Updating tensor cache every 15m.")
+        while True:
+            try:
+                for symbol in list(self.asset_basket):
+                    try:
+                        if hasattr(self.data_feed, 'fetch_crypto_news'):
+                            news_items = await self.data_feed.fetch_crypto_news(symbol)
+                            headlines = [n.get('headline', '') for n in news_items if n.get('headline')]
+                        else:
+                            headlines = []
+                        
+                        if headlines:
+                            await self.news_analyzer.analyze_news_batch(symbol, headlines)
+                    except Exception as e:
+                        logger.debug(f"News fetch failed for {symbol}: {e}")
+                    await asyncio.sleep(2.0)
+            except Exception as e:
+                logger.error(f"News daemon fault: {e}")
+            
+            await asyncio.sleep(900)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -1578,7 +1547,7 @@ class DistributedQuantEngine:
         daemons = [
             self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, self.cleanup_stale_locks, 
-            self.run_shadow_resolution_daemon, self.run_ai_sentinel_worker, self._universe_refresher_loop,
+            self.run_shadow_resolution_daemon, self.run_macro_news_daemon, self._universe_refresher_loop,
             self.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon 
         ]
