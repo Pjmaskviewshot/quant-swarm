@@ -11,7 +11,7 @@ import datetime
 import random
 import heapq
 import numpy as np
-import aiosqlite
+import aiosqlite  
 from collections import deque
 from itertools import permutations
 from decimal import Decimal, ROUND_HALF_UP
@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.9_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.11_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -129,6 +129,7 @@ class ContinuousMicrostructureEngine:
         self.last_hurst_time = 0.0
         self.last_price_time = 0.0  
         self.shannon_entropy = 1.0
+        self.entropy_history = deque(maxlen=200) # 🚀 V41.11: Rolling memory for dynamic baseline
         
         w_t, w_r, P_init = ClusterWarmStartRLS.get_cluster_priors(symbol)
         self.weights_trending = w_t
@@ -288,6 +289,7 @@ class ContinuousMicrostructureEngine:
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
         if len(self.prices) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.prices)[-20:])
+            self.entropy_history.append(self.shannon_entropy) # 🚀 V41.11: Store it
         
         if len(self.prices) >= 20:
             prices_arr = np.array(list(self.prices)[-20:])
@@ -360,10 +362,23 @@ class ContinuousMicrostructureEngine:
         else:
             dynamic_gate = 0.58
             
-        dynamic_gate = max(0.58, dynamic_gate)
+        dynamic_gate = max(0.55, dynamic_gate)
             
-        if self.shannon_entropy > 0.85:
-            dynamic_gate = 0.99 
+        # 🚀 V41.11 FIX: Dynamic Z-Scored Entropy Gate
+        # Locks up ONLY if the market suddenly becomes significantly more chaotic than its recent self.
+        if len(self.entropy_history) > 30:
+            entropy_arr = np.array(self.entropy_history)
+            entropy_mean = np.mean(entropy_arr)
+            entropy_std = np.std(entropy_arr) + 1e-9
+            entropy_z = (self.shannon_entropy - entropy_mean) / entropy_std
+            
+            # If current noise is +1.5 standard deviations above the local baseline, raise the gate
+            if entropy_z > 1.5:
+                dynamic_gate = min(0.85, dynamic_gate + 0.05)
+        else:
+            # Fallback for initial boot
+            if self.shannon_entropy > 0.96:
+                dynamic_gate = min(0.85, dynamic_gate + 0.05) 
         
         virtual_sl = current_price - (sl_dist_pct * current_price) if action_dir == "BUY" else current_price + (sl_dist_pct * current_price)
         virtual_tp = current_price + (tp_dist_pct * current_price) if action_dir == "BUY" else current_price - (tp_dist_pct * current_price)
@@ -564,8 +579,12 @@ class DistributedQuantEngine:
             if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
+        if not os.getenv("TELEGRAM_BOT_TOKEN") or len(os.getenv("TELEGRAM_BOT_TOKEN", "")) < 5:
+            return
+            
         if hasattr(self, '_telegram_blocked_until') and time.time() < self._telegram_blocked_until:
             return
+            
         for attempt in range(2):
             try:
                 if is_html: await self.telegram.send_html_report(message)
@@ -742,7 +761,7 @@ class DistributedQuantEngine:
                 fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
-                if net_ev_pct <= 0.0005: return
+                if net_ev_pct <= 0.0002: return
                     
                 dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
                 if structural_verdict.get("routing") == "MAKER_ONLY":
@@ -772,7 +791,7 @@ class DistributedQuantEngine:
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
-                if net_ev_pct <= 0.0005: return
+                if net_ev_pct <= 0.0002: return
 
                 payload_features = {
                     "symbol": symbol, "market_regime": regime,
@@ -1003,10 +1022,16 @@ class DistributedQuantEngine:
                 async with self.portfolio_state_lock:
                     protected_symbols = set(self.active_positions_map.keys())
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
                 if dead_sym and hot_sym:
+                    banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL"]
+                    if any(b in hot_sym for b in banned_keywords):
+                        continue
+                        
                     async with self.portfolio_state_lock:
                         if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
                         if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                        
                     self._initialize_symbol_structures([hot_sym])
                     await self._prune_dead_symbols() 
                     if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
@@ -1049,7 +1074,6 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            # 🚀 V41.9 FIX: Dynamic Microstructure Filter (Spread < 8 bps, Vol > $50M)
             tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
             full_market = []
             
@@ -1083,6 +1107,9 @@ class DistributedQuantEngine:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
             
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         new_core_basket = ["BTCUSDT"]
         
@@ -1801,6 +1828,9 @@ class DistributedQuantEngine:
         except Exception as e:
             logger.error(f"Initial boot universe fetch failed: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
 
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
