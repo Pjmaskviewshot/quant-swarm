@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.12_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.13_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -1009,7 +1009,7 @@ class DistributedQuantEngine:
                     edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
                 except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
 
-    # 🚀 V41.12 FIX: Omni-Swarm Dynamic Liquidity Gate
+    # 🚀 V41.13 FIX: Pure Dynamic Math-Based Omni-Swarm Director
     async def run_omni_swarm_director(self):
         logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
         while True:
@@ -1021,7 +1021,7 @@ class DistributedQuantEngine:
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
                 
                 if dead_sym and hot_sym:
-                    # Mathematically verify the new coin has strict crypto-tier liquidity before accepting it
+                    # Dynamically check real-time ticker stats from Bybit before swapping
                     tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
                     if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
                         t_data = tick_res["result"]["list"][0]
@@ -1033,7 +1033,7 @@ class DistributedQuantEngine:
                             spread_bps = ((ask - bid) / bid) * 10000.0
                             if turnover < 40_000_000.0 or spread_bps > 8.0:
                                 logger.debug(f"Omni-Swarm rejected {hot_sym} (Spread: {spread_bps:.1f}bps, Vol: ${turnover/1e6:.1f}M)")
-                                continue # Fails math gate
+                                continue 
                         else:
                             continue
                     else:
@@ -1082,7 +1082,7 @@ class DistributedQuantEngine:
                 self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
         except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
 
-    # 🚀 V41.12 FIX: Pure Mathematical Universe Initialization
+    # 🚀 V41.13 FIX: Pure Mathematical Universe Initialization
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
@@ -1167,6 +1167,12 @@ class DistributedQuantEngine:
 
         self.stream_restart_event.set()
         self.force_dna_refresh.set() 
+
+    # 🚀 V41.13 FIX: Restored missing loop method wrapper
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
 
     async def stream_manager_loop(self):
         while True:
