@@ -11,7 +11,7 @@ import datetime
 import random
 import heapq
 import numpy as np
-import aiosqlite  
+import aiosqlite
 from collections import deque
 from itertools import permutations
 from decimal import Decimal, ROUND_HALF_UP
@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.8_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.9_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -1049,16 +1049,40 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
-            if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            # 🚀 V41.9 FIX: Dynamic Microstructure Filter (Spread < 8 bps, Vol > $50M)
+            tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            full_market = []
+            
+            if tickers_res.get("retCode") == 0:
+                ticker_list = tickers_res.get("result", {}).get("list", [])
+                
+                for t in ticker_list:
+                    symbol = t.get("symbol", "")
+                    if not symbol.endswith("USDT"): 
+                        continue
+                        
+                    turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                    bid = float(t.get("bid1Price", 0.0) or 0.0)
+                    ask = float(t.get("ask1Price", 0.0) or 0.0)
+                    
+                    if bid <= 0 or ask <= 0 or ask <= bid:
+                        continue
+                        
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
+                        full_market.append((turnover, symbol))
+                        
+                full_market.sort(key=lambda x: x[0], reverse=True)
+                full_market = [item[1] for item in full_market]
+                
+            if len(full_market) < 25: 
+                full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+                
         except Exception as e:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
             
-        # 🚀 V41.8 FIX: Purge highly illiquid index/stock/commodity perps that ruin spread metrics
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR"]
-        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
-        
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         new_core_basket = ["BTCUSDT"]
         
@@ -1073,7 +1097,7 @@ class DistributedQuantEngine:
             self.asset_basket = new_core_basket
             self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:15]
             
-        await self._prune_dead_symbols() # 🚀 Garbage Collect Old Engines
+        await self._prune_dead_symbols() # Garbage Collect Old Engines
         
         new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
         for s in self.asset_basket + self.shadow_basket:
@@ -1745,12 +1769,38 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        try: full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
-        except Exception: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
+        try:
+            tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            full_market = []
             
-        # 🚀 Filter initial boot basket too
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR"]
-        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+            if tickers_res.get("retCode") == 0:
+                ticker_list = tickers_res.get("result", {}).get("list", [])
+                for t in ticker_list:
+                    symbol = t.get("symbol", "")
+                    if not symbol.endswith("USDT"): 
+                        continue
+                        
+                    turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                    bid = float(t.get("bid1Price", 0.0) or 0.0)
+                    ask = float(t.get("ask1Price", 0.0) or 0.0)
+                    
+                    if bid <= 0 or ask <= 0 or ask <= bid:
+                        continue
+                        
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
+                        full_market.append((turnover, symbol))
+                        
+                full_market.sort(key=lambda x: x[0], reverse=True)
+                full_market = [item[1] for item in full_market]
+                
+            if len(full_market) < 25: 
+                full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+                
+        except Exception as e:
+            logger.error(f"Initial boot universe fetch failed: {e}", exc_info=True)
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
 
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
