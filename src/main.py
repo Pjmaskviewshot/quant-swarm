@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V36.1_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V36.2_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -421,6 +421,7 @@ class DistributedQuantEngine:
         
         self.live_params = self._load_live_params()
         self.api_penalty_cooldown = 0.0 
+        self.ai_failure_count = 0  # 🚀 V36.2: Adaptive AI Cooldown Tracker
         
         self._initialize_symbol_structures(self.asset_basket)
         self._load_sgd_state()
@@ -689,7 +690,7 @@ class DistributedQuantEngine:
                     "reasoning": structural_verdict["reasoning"] 
                 }
                 
-                candidate_data = (symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock)
+                candidate_data = (symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock, sl_dist_pct)
                 self.ai_sentinel_queue.put_nowait(candidate_data)
                 
         except Exception as e:
@@ -700,7 +701,7 @@ class DistributedQuantEngine:
         while True:
             try:
                 candidate = await self.ai_sentinel_queue.get()
-                symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock = candidate
+                symbol, action, price, prob_success, dna_stats, atr, regime, net_ev_pct, vol_z, vol_mult, payload_features, clock, sl_dist_pct = candidate
                 
                 if time.time() < self.api_penalty_cooldown:
                     logger.info(f"⚡ PREDATORY MATH OVERRIDE // {symbol} AI bypassed due to rate limits. Math edge: {net_ev_pct*10000:.1f} bps.")
@@ -726,15 +727,20 @@ class DistributedQuantEngine:
                         confidence_multiplier = verdict.get("confidence", 1.0) if ai_action != "HOLD" else 1.0
                         payload_features["ai_verdict"] = ai_action
                         
+                        self.ai_failure_count = 0  # 🚀 V36.2: Reset adaptive cooldown on successful call
+                        
                         if ai_action == action:
                             logger.info(f"🧠 AI CONFLUENCE ACHIEVED // {symbol} Sentinel agrees with {action}.")
                             prob_success = min(0.99, prob_success * (1.0 + (confidence_multiplier * 0.20)))
                         elif ai_action != "HOLD":
                             logger.warning(f"⚠️ AI DIVERGENCE // {symbol} Sentinel suggests {ai_action}. Vetoing math.")
                             prob_success = prob_success * 0.50
-                    except Exception:
-                        logger.warning("⚠️ LLM Sentinel Fault. Tripping 2-hour AI circuit breaker to preserve bandwidth.")
-                        self.api_penalty_cooldown = time.time() + 7200  
+                    except Exception as e:
+                        # 🚀 V36.2: Adaptive Exponential Backoff for API failures
+                        self.ai_failure_count += 1
+                        cooldown_secs = min(900, 30 * (2 ** (self.ai_failure_count - 1)))
+                        logger.warning(f"⚠️ LLM Sentinel Fault #{self.ai_failure_count} ({e}). Backing off AI for {cooldown_secs}s.")
+                        self.api_penalty_cooldown = time.time() + cooldown_secs
                         prob_success = min(0.99, prob_success * 1.15)
                         payload_features["ai_verdict"] = "OVERRIDE"
 
@@ -755,7 +761,9 @@ class DistributedQuantEngine:
                 }
                 
                 async with self.auction_lock:
-                    heapq.heappush(self.auction_queue, (- (net_ev_pct / (atr + 1e-9)), time.time(), symbol, payload))
+                    # 🚀 V36.2: Risk-Adjusted Priority Heap Scoring
+                    net_sharpe_proxy = net_ev_pct / (sl_dist_pct + 1e-9)
+                    heapq.heappush(self.auction_queue, (-net_sharpe_proxy, time.time(), symbol, payload))
                     
             except Exception as e:
                 logger.error(f"AI Sentinel Fault: {e}", exc_info=True)
@@ -1506,6 +1514,20 @@ class DistributedQuantEngine:
 
     async def run_engine_forever(self):
         self.fsm.release_global_emergency_lock()
+        
+        try:
+            # 🚀 V36.2: Verify Bybit Account Position Mode (0 = One-Way, 3 = Hedge Mode)
+            logger.info("🔍 Verifying Bybit account position mode compatibility...")
+            try: 
+                await self.executor.safe_call(self.executor.client.switch_position_mode, category="linear", coin="USDT", mode=0)
+                logger.info("✅ Bybit Unified Account confirmed in One-Way Mode (positionIdx=0).")
+            except Exception as e: 
+                if "not modified" in str(e).lower() or "110025" in str(e):
+                    logger.info("✅ Bybit Unified Account already in One-Way Mode.")
+                else:
+                    logger.debug(f"Position mode verification note: {e}")
+        except Exception: pass
+
         try: await self._fetch_exchange_tick_sizes()
         except Exception: pass
         try: await self.synchronize_exchange_state()

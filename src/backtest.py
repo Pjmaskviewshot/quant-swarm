@@ -1,8 +1,8 @@
 """
-🧪 V36.1 INSTITUTIONAL BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V36.1.
-Includes Regime-Aware Fee Matrix, Simulated MVAR Trailing Stops, 
-and Predatory Maker Vacuum overrides.
+🧪 V36.2 INSTITUTIONAL BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V36.2.
+Fixes Critical Look-Ahead Bias, implements Pessimistic Intra-bar Execution,
+and aligns Log-Space HMM emission probabilities.
 """
 import argparse
 import time
@@ -168,13 +168,13 @@ def get_vpin_bucket_size(symbol: str) -> float:
     if "SOL" in symbol: return 250_000.0
     return 100_000.0
 
-def gaussian_pdf(x: float, mean: float, std: float) -> float:
+def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
+    """🚀 V36.2 Parity: Log-Space HMM Emission Helper"""
     variance = float(std)**2 + 1e-9
-    denom = math.sqrt(2 * math.pi * variance)
-    num = math.exp(-(float(x) - float(mean))**2 / (2 * variance))
-    return num / denom
+    return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
 def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
+    """🚀 V36.2 Parity: Log-Space Emission implementation to prevent underflow."""
     if len(closes_arr) < 20:
         return "MEAN_REVERTING", current_state_probs, 0.5
 
@@ -197,7 +197,6 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     }
     
     regimes = list(archetypes.keys())
-    # 🚀 V36.1 PARITY: Aligned transition matrix to 0.75 self-persistence
     transition_matrix = np.array([
         [0.75, 0.05, 0.10, 0.08, 0.02], 
         [0.05, 0.75, 0.10, 0.08, 0.02], 
@@ -206,22 +205,26 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
         [0.05, 0.05, 0.15, 0.05, 0.70]  
     ])
 
-    emission_probs = np.zeros(5)
+    log_emissions = np.zeros(5)
     for i, regime in enumerate(regimes):
         arch = archetypes[regime]
-        p_ret = gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
-        p_vol = gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
-        p_er  = gaussian_pdf(er, arch["er"][0], arch["er"][1])
+        log_p_ret = log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
+        log_p_vol = log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
+        log_p_er  = log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
         
+        log_emission = log_p_ret + log_p_vol + log_p_er
         if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes_arr, 25):
-            p_er *= 2.0 
+            log_emission += math.log(2.0) 
             
-        emission_probs[i] = p_ret * p_vol * p_er
-        
-    emission_probs += 1e-9
+        log_emissions[i] = log_emission
+
     prior = np.dot(transition_matrix.T, current_state_probs)
-    unnormalized_posterior = emission_probs * prior
-    new_state_probs = unnormalized_posterior / np.sum(unnormalized_posterior)
+    prior_log = np.log(prior + 1e-9)
+    
+    unnormalized_log_posterior = log_emissions + prior_log
+    max_log = np.max(unnormalized_log_posterior)
+    posterior = np.exp(unnormalized_log_posterior - max_log)
+    new_state_probs = posterior / np.sum(posterior)
     
     best_state_idx = int(np.argmax(new_state_probs))
     detected_regime = regimes[best_state_idx]
@@ -291,7 +294,6 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
     
-    # 🚀 V36.1 PARITY: Institutional Amihud Scaling
     if "BTC" in symbol:
         amihud_threshold = 2_500_000.0  
     elif "ETH" in symbol or "SOL" in symbol:
@@ -487,12 +489,11 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
                     
-            # 🚀 V36.1 PARITY: Predatory Maker Overrides (Don't block, exploit)
             routing_mode = "STANDARD"
             if vacuum_blocked and prob_success > 0.65:
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
-                vacuum_blocked = False # Override the block
+                vacuum_blocked = False 
                     
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
                 atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
@@ -501,10 +502,7 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     tp_dist_pct = sl_dist_pct * p.rr_ratio
                     
                     dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
-                    
-                    # 🚀 V36.1 PARITY: Regime-Aware Fee Assumption
                     taker_fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
-                    
                     net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
                     
                     if net_ev_pct > 0.0005:  
@@ -513,26 +511,22 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
                         outcome, exit_price, bars_held = None, entry, 0
                         
-                        # 🚀 V36.1 PARITY: MVAR Trailing Stop Proxy
+                        # 🚀 V36.2 FIX: Pessimistic Intra-Bar Execution (Zero Look-Ahead Bias)
                         for j in range(i + 1, min(i + 61, len(target_candles))): 
                             bars_held = j - i
                             h, l = target_candles[j]["high"], target_candles[j]["low"]
+                            c_close = target_candles[j]["close"]
+                            
                             hit_tp = h >= tp if action_dir == "BUY" else l <= tp
                             hit_sl = l <= sl if action_dir == "BUY" else h >= sl
                             
                             if bars_held > 5:
-                                # Simulate MVAR choke if momentum dies
-                                mock_pressure = 1.0 + (np.random.normal(0, 0.5) if "highs" in locals() else 0) # simplified proxy
-                                if mock_pressure < 0.6: 
-                                    trail_dist = sl_dist_pct * entry * 0.25 # Choke tight
-                                else:
-                                    trail_dist = sl_dist_pct * entry * 0.75 # Normal trail
-                                    
+                                trail_dist = sl_dist_pct * entry * 0.75 
                                 if action_dir == "BUY":
-                                    new_sl = l - trail_dist
+                                    new_sl = c_close - trail_dist
                                     if new_sl > sl: sl = new_sl
                                 else:
-                                    new_sl = h + trail_dist
+                                    new_sl = c_close + trail_dist
                                     if new_sl < sl: sl = new_sl
                                 
                             if hit_tp and hit_sl: outcome, exit_price = "LOSS", sl; break
@@ -622,7 +616,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V36.1 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V36.2 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -699,13 +693,7 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        train = run_v35_backtest(t_cand[:split], b_cand[:split], params, args.symbol)
         test = run_v35_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
-
-        print("\n=== IN-SAMPLE (first 60%) ===")
-        for k, v in train.items():
-            if isinstance(v, float): print(f"  {k}: {v:.4f}")
-            else: print(f"  {k}: {v}")
                 
         print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():

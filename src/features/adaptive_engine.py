@@ -10,8 +10,9 @@ logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
     """
-    🔬 V35.4 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
-    Upgraded to track 5 distinct non-linear market states using Gaussian emission probabilities.
+    🔬 V36.2 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
+    Upgraded to track 5 distinct non-linear market states using Log-Space Gaussian emission probabilities.
+    Prevents float underflow when multiplying tiny pdf values.
     Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
     Matrix aligned with backtest for perfect predictive parity.
     """
@@ -36,7 +37,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V35.4 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 V36.2 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -50,7 +51,7 @@ class AdaptiveFeatureEngine:
         self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
         
         # Transition Matrix P(State_t | State_{t-1})
-        # 🚀 V35.4 FIX: Matrix strictly aligned to backtest! (0.75 self-persistence)
+        # 🚀 V36.2 FIX: Matrix strictly aligned to backtest (0.75 self-persistence)
         self.transition_matrix = np.array([
             [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
             [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
@@ -71,17 +72,18 @@ class AdaptiveFeatureEngine:
             top_asks = heapq.nsmallest(500, self.local_asks.items(), key=lambda x: x[0])
             self.local_asks = dict(top_asks)
 
-    def _gaussian_pdf(self, x: float, mean: float, std: float) -> float:
-        """Helper for HMM Emission Probabilities."""
-        variance = float(std)**2 + 1e-9
-        denom = math.sqrt(2 * math.pi * variance)
-        num = math.exp(-(float(x) - float(mean))**2 / (2 * variance))
-        return num / denom
+    def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
+        """
+        🚀 V36.2 FIX: Log-Space HMM Emission Probability.
+        Computes ln(P) to completely eliminate float underflow when multiplying.
+        """
+        var = float(std)**2 + 1e-9
+        return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
 
     def detect_market_regime(self) -> str:
         """
-        🚀 V35.4 APEX: HMM Gaussian State Classifier.
-        Matrix Parity aligned with Backtest (0.75 self-persistence).
+        🚀 V36.2 APEX: Log-Space HMM Gaussian Classifier.
+        Matrix Parity aligned with Backtest. Stable probability extraction.
         """
         if len(self.timeframes["5"]) >= 20:
             candles = list(self.timeframes["5"])[-20:]
@@ -113,27 +115,31 @@ class AdaptiveFeatureEngine:
             "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
         }
         
-        # 3. Calculate Emission Probabilities
-        emission_probs = np.zeros(5)
+        # 3. Calculate Log-Emission Probabilities
+        log_emissions = np.zeros(5)
         for i, regime in enumerate(self.regimes):
             arch = archetypes[regime]
-            p_ret = self._gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
-            p_vol = self._gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
-            p_er  = self._gaussian_pdf(er, arch["er"][0], arch["er"][1])
+            log_p_ret = self._log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
+            log_p_vol = self._log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
+            log_p_er  = self._log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
+            
+            # Summing in log space is multiplying in linear space
+            log_emission = log_p_ret + log_p_vol + log_p_er
             
             # Liquidity Vacuum uniquely keys off volume drops
             if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes, 25):
-                p_er *= 2.0 
+                log_emission += math.log(2.0) 
                 
-            emission_probs[i] = p_ret * p_vol * p_er
+            log_emissions[i] = log_emission
             
-        # Add epsilon to prevent absolute zero
-        emission_probs += 1e-9
-            
-        # 4. HMM Forward Algorithm: Update Belief State
+        # 4. HMM Forward Algorithm: Update Belief State using Log-Sum-Exp Trick
         prior = np.dot(self.transition_matrix.T, self.state_probs)
-        unnormalized_posterior = emission_probs * prior
-        self.state_probs = unnormalized_posterior / np.sum(unnormalized_posterior)
+        prior_log = np.log(prior + 1e-9)
+        
+        unnormalized_log_posterior = log_emissions + prior_log
+        max_log = np.max(unnormalized_log_posterior)
+        posterior = np.exp(unnormalized_log_posterior - max_log)
+        self.state_probs = posterior / np.sum(posterior)
         
         # 5. Extract Maximum Likelihood Regime
         best_state_idx = int(np.argmax(self.state_probs))
