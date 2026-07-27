@@ -44,7 +44,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V39.6_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V39.9_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -266,6 +266,28 @@ class ContinuousMicrostructureEngine:
                     self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0
                     self.rls_updates += 1
 
+    def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
+        """
+        🚀 V39.7 ADAPTIVE UPGRADE: Regime-Dependent Confidence Shrinkage with MSE Feedback.
+        """
+        floor = 0.52
+        ceiling = 0.85
+
+        if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+            ceiling = min(0.92, ceiling + 0.07)
+            floor = max(0.50, floor - 0.02)
+        elif regime == "LIQUIDITY_VACUUM":
+            ceiling = min(0.90, ceiling + 0.05)
+            floor = max(0.55, floor + 0.03)
+        else:  # Ranging / Mean-reverting / Chop
+            ceiling = min(0.80, ceiling - 0.05)
+            floor = max(0.55, floor + 0.03)
+
+        mse_penalty = min(0.10, mse * 0.4)
+        ceiling = max(floor, ceiling - mse_penalty)
+
+        return max(floor, min(ceiling, prob))
+
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
         if len(self.prices) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.prices)[-20:])
@@ -331,9 +353,6 @@ class ContinuousMicrostructureEngine:
         action_dir = "BUY" if p_up > p_down else "SELL"
         prob_success = max(p_up, p_down)
         
-        # Hard Probability Clamping
-        prob_success = max(0.52, min(0.85, prob_success))
-        
         self.historical_probs.append(prob_success)
         
         if len(self.historical_probs) > 100:
@@ -344,7 +363,6 @@ class ContinuousMicrostructureEngine:
         else:
             dynamic_gate = 0.58
             
-        # 🚀 V39.6 FIX: Enforce absolute minimum dynamic gate floor (0.58)
         dynamic_gate = max(0.58, dynamic_gate)
             
         if self.shannon_entropy > 0.85:
@@ -697,7 +715,9 @@ class DistributedQuantEngine:
                 else:
                     prob_success -= (macro_sentiment * 0.075) 
                     
-                prob_success = max(0.52, min(0.85, prob_success))
+                # 🚀 V39.7 ADAPTIVE UPGRADE: Apply Regime-Dependent Confidence Shrinkage
+                prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
+                
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
                 if net_ev_pct <= 0.0005: return
@@ -1138,7 +1158,7 @@ class DistributedQuantEngine:
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 return
                 
-            fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence)
+            fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
             dollar_risk = available_balance * fractional_risk
             target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
             target_notional = target_position_size * current_price
@@ -1207,7 +1227,7 @@ class DistributedQuantEngine:
                 self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
                 
             self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
-            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime))
+            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime, realigned_tp=target_tp_price))
             
         except Exception as e:
             logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
@@ -1275,7 +1295,7 @@ class DistributedQuantEngine:
                 )
                 self.track_task(self._safe_telegram_dispatch(report))
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None):
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
         
@@ -1286,7 +1306,7 @@ class DistributedQuantEngine:
             return
 
         try:
-            order_filled, actual_entry = False, current_price
+            order_filled, actual_entry, initial_qty = False, current_price, risk_matrix.get("size", 1.0)
             for _ in range(5):  
                 await asyncio.sleep(3)
                 try:
@@ -1295,6 +1315,7 @@ class DistributedQuantEngine:
                     if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
                         order_filled = True
                         actual_entry = float(pos_data[0].get("avgPrice", current_price))
+                        initial_qty = float(pos_data[0].get("size", initial_qty))
                         break
                 except Exception: continue
 
@@ -1309,20 +1330,21 @@ class DistributedQuantEngine:
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
             actual_sl_distance = max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.008)
-            actual_tp_distance = actual_sl_distance * self.live_params.get("rr_ratio", 2.0)
             
             realigned_sl = actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance
-            realigned_tp = actual_entry + actual_tp_distance if direction == "BUY" else actual_entry - actual_tp_distance
+            current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * self.live_params.get("rr_ratio", 2.0)) if direction == "BUY" else actual_entry - (actual_sl_distance * self.live_params.get("rr_ratio", 2.0)))
             
-            try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(realigned_tp), stopLoss=align_price(realigned_sl))
+            try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(current_tp), stopLoss=align_price(realigned_sl))
             except Exception: pass
 
             stat_engine = self.stat_engines.get(symbol)
+            elasticity_engine = self.elasticity_engines.get(symbol)
             max_favorable_price = actual_entry
             current_sl = realigned_sl
             initial_risk = actual_sl_distance
             
             locked_breakeven = False
+            scaled_out_50_pct = False
             last_api_update_time = time.time()
             api_check_counter = 0
 
@@ -1355,42 +1377,103 @@ class DistributedQuantEngine:
                     profit_distance = abs(max_favorable_price - actual_entry)
                     r_multiple = profit_distance / (initial_risk + 1e-9)
 
-                    if r_multiple >= 1.0 and not locked_breakeven:
-                        breakeven_offset = actual_entry * 0.0015 
-                        current_sl = actual_entry + breakeven_offset if direction == "BUY" else actual_entry - breakeven_offset
-                        locked_breakeven = True
-                        logger.info(f"🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even.")
+                    # 1. Partial Profit Taking
+                    if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
+                        try:
+                            current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                            p_list = current_pos_res.get("result", {}).get("list", [])
+                            if p_list and float(p_list[0].get("size", 0.0)) > 0:
+                                curr_size = float(p_list[0]["size"])
+                                half_qty = curr_size * 0.5
+                                limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
+                                min_qty = limits["min_qty"]
+                                qty_step = limits["qty_step"]
+                                aligned_half_qty = math.floor(half_qty / qty_step) * qty_step
+                                
+                                if aligned_half_qty >= min_qty and (aligned_half_qty * current_price) >= 5.0:
+                                    close_side = "Sell" if direction == "BUY" else "Buy"
+                                    logger.critical(f"💰 PARTIAL TAKE-PROFIT // {symbol} reached 1R. Scaling out {aligned_half_qty} units.")
+                                    await self.executor.safe_call(
+                                        self.executor.client.place_order, category="linear", symbol=symbol,
+                                        side=close_side, orderType="Market", qty=str(aligned_half_qty), timeInForce="IOC", reduceOnly=True
+                                    )
+                                    scaled_out_50_pct = True
+                                else:
+                                    logger.info(f"ℹ️ {symbol} reached 1R, but position is at exchange minimum. Skipping scale-out; trailing full position.")
+                                    scaled_out_50_pct = True 
+                        except Exception as e:
+                            logger.error(f"Scale-out execution fault for {symbol}: {e}")
 
-                    compression_factor = max(0.2, 1.0 - (r_multiple * 0.25))
-                    base_trail_dist = actual_sl_distance * compression_factor
+                    # 2. Progressive SL Ratchet
+                    if r_multiple >= 0.5 and not locked_breakeven:
+                        if r_multiple >= 1.0:
+                            breakeven_offset = actual_entry * 0.0015 
+                            current_sl = actual_entry + breakeven_offset if direction == "BUY" else actual_entry - breakeven_offset
+                            locked_breakeven = True
+                            logger.info(f"🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even.")
+                        else:
+                            half_risk_sl = actual_entry - (initial_risk * 0.5) if direction == "BUY" else actual_entry + (initial_risk * 0.5)
+                            if (direction == "BUY" and half_risk_sl > current_sl) or (direction == "SELL" and half_risk_sl < current_sl):
+                                current_sl = half_risk_sl
+
+                    # 3. Volatility & Elasticity-Adjusted SL Trail
+                    vol_scalar = min(1.0, stat_engine.inst_variance * 5000.0)
+                    elasticity = elasticity_engine.orderbook_elasticity if elasticity_engine and hasattr(elasticity_engine, 'orderbook_elasticity') else 1.0
+                    
+                    base_mult = max(0.4, 2.0 - (r_multiple * 0.4))
+                    vol_adj = 1.0 + (vol_scalar * 0.5)
+                    el_adj = max(0.8, min(1.5, 1.0 / (elasticity + 0.2)))
+                    
+                    dynamic_trail_dist = initial_risk * base_mult * vol_adj * el_adj
 
                     ob = self.orderbook_snapshots.get(symbol, {})
                     b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
-                    toxicity_multiplier = 1.0
-                    
+                    tox_mult = 1.0
                     if b_vol > 0 and a_vol > 0:
-                        if direction == "BUY" and a_vol > b_vol * 4.0: toxicity_multiplier = 0.15
-                        elif direction == "SELL" and b_vol > a_vol * 4.0: toxicity_multiplier = 0.15
-                            
-                    dynamic_trail_dist = base_trail_dist * toxicity_multiplier
+                        imbalance = (b_vol - a_vol) / (b_vol + a_vol)
+                        if direction == "BUY" and imbalance < -0.5: tox_mult = max(0.4, 1.0 + imbalance)
+                        elif direction == "SELL" and imbalance > 0.5: tox_mult = max(0.4, 1.0 - imbalance)
+
+                    dynamic_trail_dist *= tox_mult
                     calculated_sl = max_favorable_price - dynamic_trail_dist if direction == "BUY" else max_favorable_price + dynamic_trail_dist
 
-                    requires_api_update = False
-                    if direction == "BUY" and calculated_sl > current_sl:
-                        if (calculated_sl - current_sl) / current_price > 0.0015:
-                            current_sl = calculated_sl
-                            requires_api_update = True
-                    elif direction == "SELL" and calculated_sl < current_sl:
-                        if (current_sl - calculated_sl) / current_price > 0.0015:
-                            current_sl = calculated_sl
-                            requires_api_update = True
+                    # 🚀 V39.9 UPGRADE: Kinematic Trailing Take-Profit (KT-TP)
+                    requires_tp_update = False
+                    if r_multiple > 1.2:
+                        tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
+                        dynamic_tp_dist = initial_risk * tp_expansion_factor
+                        
+                        calc_tp = actual_entry + dynamic_tp_dist if direction == "BUY" else actual_entry - dynamic_tp_dist
+                        
+                        if direction == "BUY" and calc_tp > current_tp:
+                            if (calc_tp - current_tp) / current_price > 0.002:
+                                current_tp = calc_tp
+                                requires_tp_update = True
+                        elif direction == "SELL" and calc_tp < current_tp:
+                            if (current_tp - calc_tp) / current_price > 0.002:
+                                current_tp = calc_tp
+                                requires_tp_update = True
 
-                    if requires_api_update and (now - last_api_update_time > 5.0):
+                    requires_sl_update = False
+                    if direction == "BUY" and calculated_sl > current_sl:
+                        if (calculated_sl - current_sl) / current_price > 0.0010:
+                            current_sl = calculated_sl
+                            requires_sl_update = True
+                    elif direction == "SELL" and calculated_sl < current_sl:
+                        if (current_sl - calculated_sl) / current_price > 0.0010:
+                            current_sl = calculated_sl
+                            requires_sl_update = True
+
+                    if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > 3.0):
                         try:
-                            await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(realigned_tp), stopLoss=align_price(current_sl))
+                            await self.executor.safe_call(
+                                self.executor.client.set_trading_stop, 
+                                category="linear", symbol=symbol, positionIdx=0, 
+                                takeProfit=align_price(current_tp), stopLoss=align_price(current_sl)
+                            )
                             last_api_update_time = now
-                            if toxicity_multiplier < 1.0:
-                                logger.warning(f"🐍 TOXICITY CHOKE ACTIVATED // {symbol} Orderbook inverted. Stop-Loss violently tightened to {align_price(current_sl)}.")
+                            if requires_tp_update:
+                                logger.info(f"🌌 TREND EXPANSION // {symbol} momentum accelerating. Take-Profit pushed out to {align_price(current_tp)}.")
                         except Exception: pass
 
             await asyncio.sleep(2.0) 

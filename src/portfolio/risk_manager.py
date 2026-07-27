@@ -14,9 +14,9 @@ class InstitutionalRiskVault:
         exchange_min_notional: float = 5.0
     ):
         """
-        💎 V39.6 APEX: INSTITUTIONAL RISK VAULT
-        Conservative Kelly sizing with Bounded EVT Peak-Over-Threshold protection.
-        Hard-capped at 1.5% equity risk per trade with safe variance floors.
+        💎 V39.7 APEX: INSTITUTIONAL RISK VAULT
+        Conservative Kelly sizing with Volatility-Adjusted EVT Protection 
+        and Edge-Weighted Capital Allocation.
         """
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
@@ -47,8 +47,8 @@ class InstitutionalRiskVault:
 
     def calculate_evt_tail_risk(self) -> float:
         """
-        🚀 V39.6 INSTITUTIONAL FIX: Computes EVT Tail-Risk with bounded Xi clamping (0.0 to 1.5)
-        and enforces a safety floor of 0.35 so sizing never freezes completely.
+        🚀 V39.7 ADAPTIVE UPGRADE: Volatility-Adjusted EVT Multiplier with Dynamic Floor.
+        Automatically scales the tail-risk floor between 0.35 (high vol) and 0.50 (low vol).
         """
         if len(self.volatility_surface) < 30:
             return 1.05  
@@ -63,16 +63,21 @@ class InstitutionalRiskVault:
                 
             log_exceedances = np.log(exceedances + 1e-9)
             xi_estimator = float(np.mean(log_exceedances) - np.log(threshold + 1e-9))
-            
-            # Hard Clamp Xi between 0.0 and 1.5 to prevent extreme mathematical blowups
             xi_clamped = max(0.0, min(1.5, xi_estimator))
             
-            tail_risk_multiplier = 1.05
-            if xi_clamped > 0.3:
-                suppression_factor = min(0.65, (xi_clamped - 0.3) * 1.5)
-                tail_risk_multiplier = max(0.35, 1.0 - suppression_factor)
-                logger.warning(f"🌪️ EVT FAT-TAIL DETECTED (Xi: {xi_clamped:.3f}). Suppressing Kelly Size to {tail_risk_multiplier:.1%}")
-                
+            if xi_clamped <= 0.3:
+                return 1.05
+
+            raw_suppression = min(0.65, (xi_clamped - 0.3) * 1.2)
+            
+            # Dynamic floor: Higher in calm markets (0.50), lower in volatile markets (0.35)
+            current_variance = self.volatility_surface[-1] if self.volatility_surface else 0.0
+            vol_scalar = min(1.0, current_variance * 1000.0)
+            dynamic_floor = 0.35 + 0.15 * (1.0 - vol_scalar)
+            
+            tail_risk_multiplier = max(dynamic_floor, 1.0 - raw_suppression)
+            logger.warning(f"🌪️ ADAPTIVE EVT (Xi: {xi_clamped:.3f}, Vol Floor: {dynamic_floor:.2f}): Multiplier at {tail_risk_multiplier:.1%}")
+            
             return tail_risk_multiplier
         except Exception as e:
             logger.debug(f"EVT calculation fallback engaged: {e}")
@@ -112,27 +117,32 @@ class InstitutionalRiskVault:
             self.rolling_losses = min(100, self.rolling_losses + 1)
             self.avg_loss_pct = (self.avg_loss_pct * 0.9) + (abs(pnl_pct) * 0.1)
 
-    def calculate_optimal_fraction(self, base_confidence: float) -> float:
+    def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0) -> float:
         """
-        Hard risk cap clamped to 1.5% equity per position with EVT scaling.
+        🚀 V39.7 UPGRADE: Edge-Weighted Kelly Allocation with Adaptive EVT.
+        Scales capital allocation based on signal confidence, tail-risk state, and expected net edge.
         """
         total_trades = self.rolling_wins + self.rolling_losses
         if total_trades < 10:
-            return 0.010 # Cold start 1.0%
+            base_fraction = 0.010 # Cold start 1.0%
+        else:
+            win_rate = self.rolling_wins / total_trades
+            safe_prob = min(0.70, max(0.51, base_confidence))
+            blended_w = (win_rate * 0.7) + (safe_prob * 0.3) 
             
-        win_rate = self.rolling_wins / total_trades
-        safe_prob = min(0.70, max(0.51, base_confidence))
-        blended_w = (win_rate * 0.7) + (safe_prob * 0.3) 
-        
-        payoff_ratio = self.avg_win_pct / (self.avg_loss_pct + 1e-9)
-        if payoff_ratio <= 0 or blended_w <= 0:
-            return 0.005 
-            
-        kelly_fraction = blended_w - ((1.0 - blended_w) / payoff_ratio)
-        half_kelly = kelly_fraction / 2.0
+            payoff_ratio = self.avg_win_pct / (self.avg_loss_pct + 1e-9)
+            if payoff_ratio <= 0 or blended_w <= 0:
+                base_fraction = 0.005 
+            else:
+                kelly_fraction = blended_w - ((1.0 - blended_w) / payoff_ratio)
+                base_fraction = max(0.005, kelly_fraction / 2.0)
         
         evt_multiplier = self.calculate_evt_tail_risk()
-        risk_adjusted_kelly = half_kelly * evt_multiplier
+        
+        # Edge factor scales sizing between 0.5x and 1.5x based on expected net edge
+        edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
+        
+        risk_adjusted_kelly = base_fraction * evt_multiplier * edge_factor
         
         # Hard bounds: Min 0.5%, Max 1.5% equity risk per trade
         return max(0.005, min(0.015, risk_adjusted_kelly))

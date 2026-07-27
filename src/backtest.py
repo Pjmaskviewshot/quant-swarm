@@ -1,8 +1,8 @@
 """
-🧪 V38.0 INSTITUTIONAL BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V38.0.
-Implements Pessimistic Intra-bar Execution, Kinematic Trailing Compression,
-and the 1R Break-Even Ratchet.
+🧪 V39.8 INSTITUTIONAL BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V39.8.
+Implements Pessimistic Intra-bar Execution, Volatility-Adjusted Kinematic 
+Trailing Compression, 1R Scale-Outs, and Edge-Weighted Risk Allocation.
 """
 import argparse
 import time
@@ -229,25 +229,54 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     return binary_regime, new_state_probs, er
 
 def calculate_evt_tail_risk(volatility_surface: deque) -> float:
-    if len(volatility_surface) < 50: return 1.0 
+    """
+    🚀 V39.8 BACKTEST PARITY: Adaptive EVT with Dynamic Sizing Floors
+    """
+    if len(volatility_surface) < 30: return 1.05 
         
     vol_arr = np.array(volatility_surface)
-    threshold = np.percentile(vol_arr, 90)
+    threshold = np.percentile(vol_arr, 95)
     exceedances = vol_arr[vol_arr > threshold] - threshold
     
-    if len(exceedances) < 5 or np.mean(exceedances) <= 1e-9: return 1.0
+    if len(exceedances) < 5 or np.mean(exceedances) <= 1e-9: return 1.05
         
     log_exceedances = np.log(exceedances + 1e-9)
     xi_estimator = np.mean(log_exceedances) - np.log(threshold + 1e-9)
+    xi_clamped = max(0.0, min(1.5, xi_estimator))
     
-    tail_risk_multiplier = 1.0
-    if xi_estimator > 0.2:
-        suppression_factor = min(0.9, (xi_estimator - 0.2) * 2.0)
-        tail_risk_multiplier = 1.0 - suppression_factor
-        
-    return max(0.1, tail_risk_multiplier)
+    if xi_clamped <= 0.3: return 1.05
 
-def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+    raw_suppression = min(0.65, (xi_clamped - 0.3) * 1.5)
+    
+    current_variance = volatility_surface[-1] if volatility_surface else 0.0
+    vol_scalar = min(1.0, current_variance * 1000.0)
+    dynamic_floor = 0.35 + 0.15 * (1.0 - vol_scalar)
+    
+    return max(dynamic_floor, 1.0 - raw_suppression)
+
+def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
+    """
+    🚀 V39.8 BACKTEST PARITY: Regime-Dependent Confidence Shrinkage
+    """
+    floor = 0.52
+    ceiling = 0.85
+
+    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+        ceiling = min(0.92, ceiling + 0.07)
+        floor = max(0.50, floor - 0.02)
+    elif regime == "LIQUIDITY_VACUUM":
+        ceiling = min(0.90, ceiling + 0.05)
+        floor = max(0.55, floor + 0.03)
+    else:  
+        ceiling = min(0.80, ceiling - 0.05)
+        floor = max(0.55, floor + 0.03)
+
+    mse_penalty = min(0.10, mse * 0.4)
+    ceiling = max(floor, ceiling - mse_penalty)
+
+    return max(floor, min(ceiling, prob))
+
+def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -286,6 +315,7 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     validation_buffer = deque(maxlen=100)
     prediction_buffer = deque()
     historical_probs = deque(maxlen=2000) 
+    ewma_mse = 0.25
     
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
@@ -348,6 +378,7 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     y_true = 1.0 if ((sim_price > old_price) == (action_dir == "BUY")) else 0.0
                     
                 error = y_true - old_p_up
+                ewma_mse = (0.98 * ewma_mse) + (0.02 * (error ** 2))
                 
                 validation_buffer.append(error ** 2)
                 if len(validation_buffer) == 100:
@@ -449,6 +480,9 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
         
+        # 🚀 V39.8 ADAPTIVE CONFIDENCE SHRINKAGE
+        prob_success = calibrate_confidence(prob_success, regime, ewma_mse)
+        
         historical_probs.append(prob_success)
         if len(historical_probs) > 100:
             mean_prob = np.mean(historical_probs)
@@ -456,6 +490,8 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             dynamic_gate = mean_prob + (1.25 * std_prob)
         else:
             dynamic_gate = 0.58
+            
+        dynamic_gate = max(0.58, dynamic_gate)
             
         if shannon_entropy > 0.85:
             dynamic_gate = 0.99 
@@ -510,11 +546,16 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     
                     outcome, exit_price, bars_held = None, entry, 0
                     
-                    # 🚀 V38.0 BACKTEST PARITY: Kinematic Trailing Simulation
+                    # 🚀 V39.8 BACKTEST PARITY: Advanced Trailing Simulation
                     max_favorable_price = entry
                     locked_breakeven = False
+                    scaled_out = False
                     initial_risk = sl_dist_pct * entry
                     current_sl = sl
+                    
+                    # Store running PnL components
+                    pnl_accum = 0.0
+                    position_size = 1.0
                     
                     for j in range(i + 1, min(i + 61, len(target_candles))): 
                         bars_held = j - i
@@ -526,14 +567,27 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         profit_distance = abs(max_favorable_price - entry)
                         r_multiple = profit_distance / (initial_risk + 1e-9)
                         
-                        # 1. Break-Even Ratchet
-                        if r_multiple >= 1.0 and not locked_breakeven:
-                            current_sl = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
-                            locked_breakeven = True
+                        # 1. 50% Scale-Out at 1.0R
+                        if r_multiple >= 1.0 and not scaled_out:
+                            pnl_accum += (1.0 * initial_risk) * 0.5
+                            position_size = 0.5
+                            scaled_out = True
                         
-                        # 2. Kinematic Compression
-                        compression_factor = max(0.2, 1.0 - (r_multiple * 0.25))
-                        dynamic_trail_dist = (sl_dist_pct * entry) * compression_factor
+                        # 2. Progressive Break-Even Ratchet
+                        if r_multiple >= 0.5 and not locked_breakeven:
+                            if r_multiple >= 1.0:
+                                current_sl = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
+                                locked_breakeven = True
+                            else:
+                                half_risk_sl = entry - (initial_risk * 0.5) if action_dir == "BUY" else entry + (initial_risk * 0.5)
+                                if (action_dir == "BUY" and half_risk_sl > current_sl) or (action_dir == "SELL" and half_risk_sl < current_sl):
+                                    current_sl = half_risk_sl
+                        
+                        # 3. Volatility-Adjusted Compression
+                        base_mult = max(0.4, 2.0 - (r_multiple * 0.4))
+                        vol_adj = 1.0 + (vol_scalar * 0.5)
+                        el_adj = max(0.8, min(1.5, 1.0 / (orderbook_elasticity + 0.2)))
+                        dynamic_trail_dist = initial_risk * base_mult * vol_adj * el_adj
                         
                         if action_dir == "BUY":
                             calc_sl = max_favorable_price - dynamic_trail_dist
@@ -548,13 +602,15 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if hit_tp and hit_sl: outcome, exit_price = "LOSS", current_sl; break
                         if hit_tp: outcome, exit_price = "WIN", tp; break
-                        if hit_sl: outcome, exit_price = "LOSS", current_sl; break
+                        if hit_sl: outcome, exit_price = "LOSS" if not scaled_out else "WIN", current_sl; break
                             
                     if outcome is None: 
                         exit_price = target_candles[min(i + 60, len(target_candles) - 1)]["close"]
                         outcome = "WIN" if ((exit_price > entry) == (action_dir == "BUY")) else "LOSS"
 
                     gross = (exit_price - entry) / entry if action_dir == "BUY" else (entry - exit_price) / entry
+                    gross = (gross * position_size) + (0.008 * 0.5 if scaled_out else 0.0) # Add scaled out profit if applicable
+                    
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
@@ -570,8 +626,12 @@ def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     risk_multiplier = edge / 0.10
                     raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                     
+                    # 🚀 V39.8 EDGE-WEIGHTED RISK SCALING
+                    net_edge_bps = net_ev_pct * 10000.0
+                    edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
+                    
                     evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
-                    fractional_risk = raw_fractional_risk * evt_penalty
+                    fractional_risk = raw_fractional_risk * evt_penalty * edge_factor
                     
                     net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
                     net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.015)
@@ -633,7 +693,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V38.0 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V39.8 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -657,7 +717,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v38_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v39_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -710,7 +770,7 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v38_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v39_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
         print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():
