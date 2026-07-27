@@ -1385,7 +1385,6 @@ class DistributedQuantEngine:
                         logger.info(f"🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even.")
 
                     # PILLAR 2: Kinematic Compression
-                    # Starts at 100% distance, shrinks to 20% distance as trade reaches 3R profit
                     compression_factor = max(0.2, 1.0 - (r_multiple * 0.25))
                     base_trail_dist = actual_sl_distance * compression_factor
 
@@ -1395,9 +1394,9 @@ class DistributedQuantEngine:
                     toxicity_multiplier = 1.0
                     
                     if b_vol > 0 and a_vol > 0:
-                        if direction == "BUY" and a_vol > b_vol * 4.0: # Huge sell wall appears
-                            toxicity_multiplier = 0.15 # Choke SL to 15% of normal distance
-                        elif direction == "SELL" and b_vol > a_vol * 4.0: # Huge buy wall appears
+                        if direction == "BUY" and a_vol > b_vol * 4.0: 
+                            toxicity_multiplier = 0.15
+                        elif direction == "SELL" and b_vol > a_vol * 4.0: 
                             toxicity_multiplier = 0.15
                             
                     dynamic_trail_dist = base_trail_dist * toxicity_multiplier
@@ -1408,7 +1407,6 @@ class DistributedQuantEngine:
                     # Only move SL forward, never backward
                     requires_api_update = False
                     if direction == "BUY" and calculated_sl > current_sl:
-                        # Only ping API if the move is significant (>0.15% shift) to prevent API bans
                         if (calculated_sl - current_sl) / current_price > 0.0015:
                             current_sl = calculated_sl
                             requires_api_update = True

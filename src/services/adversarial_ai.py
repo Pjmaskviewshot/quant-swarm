@@ -12,10 +12,9 @@ logger = logging.getLogger("QUANT_CORE.ADVERSARIAL_AI")
 
 class AdversarialDebateMatrix:
     """
-    🚀 V28.0 QUANTUM APEX: OFF-PATH ADVERSARIAL AI DEBATE MATRIX
-    Upgraded with Hardened Prompt Sanitization (Anti-Homoglyph/Injection),
-    Strict JSON Schema Validation, and Bounds-Clamped Confidence Normalization 
-    for asynchronous macro regime caching.
+    🚀 V38.0 QUANTUM APEX: OFF-PATH ADVERSARIAL AI DEBATE MATRIX
+    Upgraded with Hardened Prompt Sanitization, Regex-based JSON Extraction,
+    Strict Schema Validation, and Bounds-Clamped Confidence Normalization.
     """
     def __init__(self, router_override: ResilientAIRouter = None):
         # Universal Router Integration across NVIDIA / DeepSeek cascade matrix
@@ -32,7 +31,7 @@ class AdversarialDebateMatrix:
         """
         🛡️ ANTI-PROMPT INJECTION SANITIZER
         Strips control characters, system prompt overrides, and markdown injection syntax 
-        from external macro contexts (e.g., news feeds, RSS, social context).
+        from external macro contexts.
         """
         if not text:
             return ""
@@ -46,22 +45,35 @@ class AdversarialDebateMatrix:
         # 3. Truncate to maximum acceptable context size to prevent overflow attacks
         return clean_text[:2000]
 
+    def _extract_json_from_llm_response(self, text: str) -> str:
+        """
+        🚀 V38.0 FIX: Extracts pure JSON from dirty LLM outputs (bypasses Markdown/Conversational filler).
+        """
+        # Search for content between curly braces, allowing for nested braces
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return match.group(0)
+        return text # Fallback to returning the raw text if no braces are found
+
     def _validate_and_normalize_verdict(self, raw_payload: str) -> Dict[str, Any]:
         """
         🛡️ STRICT JSON SCHEMA VALIDATOR
-        Validates structure, enforces Enum types, and clamps confidence parameters.
+        Extracts JSON, validates structure, enforces Enum types, and clamps confidence parameters.
         """
         try:
-            data = json.loads(raw_payload)
+            # 1. Isolate the JSON object
+            clean_payload = self._extract_json_from_llm_response(raw_payload)
+            data = json.loads(clean_payload)
+            
             if not isinstance(data, dict):
                 raise ValueError("Parsed JSON is not a dictionary.")
 
-            # 1. Validate & Normalize Action Enum
+            # 2. Validate & Normalize Action Enum
             raw_action = str(data.get("action", "HOLD")).upper().strip()
             valid_actions = {"BUY", "SELL", "HOLD"}
             action = raw_action if raw_action in valid_actions else "HOLD"
 
-            # 2. Validate & Clamp Confidence
+            # 3. Validate & Clamp Confidence
             raw_conf = data.get("confidence", 0.50)
             try:
                 conf = float(raw_conf)
@@ -70,7 +82,7 @@ class AdversarialDebateMatrix:
             # Strictly bound between 0.0 and 1.0
             confidence = max(0.0, min(1.0, conf))
 
-            # 3. Sanitize Reasoning String
+            # 4. Sanitize Reasoning String
             reasoning = str(data.get("reasoning", "No reasoning provided.")).strip()
             reasoning = self._sanitize_input(reasoning)[:250]
 

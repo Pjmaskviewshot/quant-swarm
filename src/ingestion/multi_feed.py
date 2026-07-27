@@ -9,9 +9,10 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V34.3 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    🚀 V38.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
     Features absolute sequence gap intolerance for L2 validity
-    with per-symbol isolated resyncing and dynamic O(1) hot-swapping.
+    with per-symbol isolated resyncing, dynamic O(1) hot-swapping,
+    and Fast Float Pre-Parsing for low-latency downstream execution.
     """
     def __init__(
         self, 
@@ -80,7 +81,7 @@ class HighVelocityMultiFeed:
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V33.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        🚀 V38.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
         Pushes subscribe/unsubscribe JSON commands over the active WebSocket
         without dropping the connection to the other 24 assets.
         """
@@ -113,7 +114,7 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V34.3 FIX: ISOLATED SNAPSHOT RESYNC
+        🚀 V38.0 FIX: ISOLATED SNAPSHOT RESYNC
         Forces Bybit to send a fresh orderbook snapshot for ONE symbol 
         without dropping the entire multiplexed websocket connection.
         """
@@ -129,6 +130,19 @@ class HighVelocityMultiFeed:
             await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
         except Exception as e:
             logger.error(f"Isolated resync request failed for {symbol}: {e}")
+
+    def _fast_float_parse_book(self, levels: list) -> list:
+        """
+        🚀 V38.0 PERFORMANCE UPGRADE: Pre-parses string lists into float arrays 
+        to save downstream CPU cycles in the Kinematic Trailing Engine.
+        """
+        parsed = []
+        for lvl in levels:
+            try:
+                parsed.append([float(lvl[0]), float(lvl[1])])
+            except (IndexError, ValueError):
+                pass
+        return parsed
 
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes for the entire asset basket."""
@@ -219,21 +233,23 @@ class HighVelocityMultiFeed:
                                             last_seq = self.orderbook_sequences.get(symbol)
                                             prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
                                             
-                                            # 🚀 V34.3 FIX: ZERO SEQUENCE GAP TOLERANCE
-                                            # If the delta doesn't perfectly lock onto the last sequence, isolate and resync.
+                                            # 🚀 V38.0 ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
                                                     logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
                                                     
-                                                    # 🚀 FIX: Instead of killing the entire socket with `await ws.close()`,
-                                                    # we spin off a background task to quickly unsubscribe/subscribe to JUST this symbol
+                                                    # Spin off background task to quickly unsubscribe/subscribe to JUST this symbol
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue # Skip processing this broken delta
                                                     
                                             self.orderbook_sequences[symbol] = u_sequence
+                                            
+                                        # 🚀 V38.0: Fast Float Pre-Parsing
+                                        parsed_bids = self._fast_float_parse_book(data.get("b", []))
+                                        parsed_asks = self._fast_float_parse_book(data.get("a", []))
 
                                         self.ingestion_queue.put_nowait(("orderbook", {
-                                            "s": symbol, "b": data.get("b", []), "a": data.get("a", []), "u": u_sequence, "type": msg_type
+                                            "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                         }))
                                         
                                     elif topic.startswith("kline"):

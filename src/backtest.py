@@ -1,8 +1,8 @@
 """
-🧪 V37.0 INSTITUTIONAL BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V37.0.
-Implements Pessimistic Intra-bar Execution, Log-Space HMM,
-and Micro-Price Elasticity dynamic bracketing.
+🧪 V38.0 INSTITUTIONAL BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V38.0.
+Implements Pessimistic Intra-bar Execution, Kinematic Trailing Compression,
+and the 1R Break-Even Ratchet.
 """
 import argparse
 import time
@@ -70,8 +70,6 @@ class Params:
     sl_atr_mult: float = 1.5         
     atr_period: int = 14
     leverage: float = 3.0            
-    mlofi_levels: int = 5
-    mlofi_decay: float = 0.5
 
 def get_cluster_priors(symbol: str):
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
@@ -169,12 +167,10 @@ def get_vpin_bucket_size(symbol: str) -> float:
     return 100_000.0
 
 def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
-    """🚀 V37.0 Parity: Log-Space HMM Emission Helper"""
     variance = float(std)**2 + 1e-9
     return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
 def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
-    """🚀 V37.0 Parity: Log-Space Emission implementation to prevent underflow."""
     if len(closes_arr) < 20:
         return "MEAN_REVERTING", current_state_probs, 0.5
 
@@ -251,7 +247,7 @@ def calculate_evt_tail_risk(volatility_surface: deque) -> float:
         
     return max(0.1, tail_risk_multiplier)
 
-def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v38_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -423,8 +419,6 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # 🚀 V37.0 PARITY: Simulated Orderbook Elasticity
-        # Approximated by scaling price standard deviation over aggregated 1-minute signed volume
         price_delta_bps = abs((sim_price - c_prev['close']) / (c_prev['close'] + 1e-9)) * 10000.0
         orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
         
@@ -474,7 +468,6 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             action_dir = "SELL"
             prob_success = max(prob_success, 0.65)
         
-        # 🚀 V37.0 PARITY: Dynamic Elastic Bracketing replaces static ATR mapping
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
         sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
@@ -512,30 +505,50 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 if net_ev_pct > 0.0005:  
                     
                     entry = c['close']
-                    sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
+                    sl = entry - (sl_dist_pct * entry) if action_dir == "BUY" else entry + (sl_dist_pct * entry)
+                    tp = entry + (tp_dist_pct * entry) if action_dir == "BUY" else entry - (tp_dist_pct * entry)
+                    
                     outcome, exit_price, bars_held = None, entry, 0
                     
-                    # Pessimistic Intra-Bar Execution
+                    # 🚀 V38.0 BACKTEST PARITY: Kinematic Trailing Simulation
+                    max_favorable_price = entry
+                    locked_breakeven = False
+                    initial_risk = sl_dist_pct * entry
+                    current_sl = sl
+                    
                     for j in range(i + 1, min(i + 61, len(target_candles))): 
                         bars_held = j - i
                         h, l = target_candles[j]["high"], target_candles[j]["low"]
-                        c_close = target_candles[j]["close"]
                         
-                        hit_tp = h >= tp if action_dir == "BUY" else l <= tp
-                        hit_sl = l <= sl if action_dir == "BUY" else h >= sl
+                        if action_dir == "BUY" and h > max_favorable_price: max_favorable_price = h
+                        elif action_dir == "SELL" and l < max_favorable_price: max_favorable_price = l
                         
-                        if bars_held > 5:
-                            trail_dist = sl_dist_pct * entry * 0.75 
-                            if action_dir == "BUY":
-                                new_sl = c_close - trail_dist
-                                if new_sl > sl: sl = new_sl
-                            else:
-                                new_sl = c_close + trail_dist
-                                if new_sl < sl: sl = new_sl
+                        profit_distance = abs(max_favorable_price - entry)
+                        r_multiple = profit_distance / (initial_risk + 1e-9)
+                        
+                        # 1. Break-Even Ratchet
+                        if r_multiple >= 1.0 and not locked_breakeven:
+                            current_sl = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
+                            locked_breakeven = True
+                        
+                        # 2. Kinematic Compression
+                        compression_factor = max(0.2, 1.0 - (r_multiple * 0.25))
+                        dynamic_trail_dist = (sl_dist_pct * entry) * compression_factor
+                        
+                        if action_dir == "BUY":
+                            calc_sl = max_favorable_price - dynamic_trail_dist
+                            if calc_sl > current_sl: current_sl = calc_sl
+                        else:
+                            calc_sl = max_favorable_price + dynamic_trail_dist
+                            if calc_sl < current_sl: current_sl = calc_sl
                             
-                        if hit_tp and hit_sl: outcome, exit_price = "LOSS", sl; break
+                        # Pessimistic Resolver using trailing current_sl
+                        hit_tp = h >= tp if action_dir == "BUY" else l <= tp
+                        hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
+                        
+                        if hit_tp and hit_sl: outcome, exit_price = "LOSS", current_sl; break
                         if hit_tp: outcome, exit_price = "WIN", tp; break
-                        if hit_sl: outcome, exit_price = "LOSS", sl; break
+                        if hit_sl: outcome, exit_price = "LOSS", current_sl; break
                             
                     if outcome is None: 
                         exit_price = target_candles[min(i + 60, len(target_candles) - 1)]["close"]
@@ -620,7 +633,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V37.0 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V38.0 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -644,7 +657,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v35_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v38_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -697,7 +710,7 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v35_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v38_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
         print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():
