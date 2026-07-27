@@ -44,7 +44,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.2_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.3_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -231,7 +231,9 @@ class ContinuousMicrostructureEngine:
 
                     x = features_array.reshape(-1, 1)
                     var_pi = max(1e-4, old_pred_prob * (1.0 - old_pred_prob))  
-                    dynamic_lambda = max(0.990, min(0.9995, 1.0 - (self.shannon_entropy * 0.005)))
+                    
+                    # 🚀 V41.3 FIX: Inverted entropy-lambda relationship. High entropy = longer memory (stability during chop).
+                    dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
                     
                     if r_blend > 0.1:
                         P_x_t = self.P_trending @ x
@@ -933,26 +935,26 @@ class DistributedQuantEngine:
                 self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": bid_size, "best_ask": best_ask, "ask_size": ask_size, "bids": bids, "asks": asks}
                 stat_engine = self.stat_engines.get(symbol)
                 
-                # 🚀 V41.2 FIX: Asset-Class Aware Liquidity Fracture Guards & Increased Sample Window
+                # 🚀 V41.3 FIX: Continuously record spread history for accurate rolling baselines (Unpaused during breaker)
+                spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
+                spread_hist = self.spread_history.get(symbol)
+                if spread_hist is not None:
+                    spread_hist.append(spread_val)
+                
                 now = time.time()
-                if self.circuit_breakers.get(symbol, 0.0) <= now:
-                    spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
-                    spread_hist = self.spread_history.get(symbol)
-                    if spread_hist is not None:
-                        spread_hist.append(spread_val)
-                        if len(spread_hist) >= 30: 
-                            med_spread = np.median(spread_hist)
-                            
-                            if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
-                                spread_floor = 0.0015
-                                multiplier = 4.0
-                            else:
-                                spread_floor = 0.0050
-                                multiplier = 5.0
-                                
-                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
-                                logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
-                                self.circuit_breakers[symbol] = now + 60.0
+                if len(spread_hist) >= 30 and self.circuit_breakers.get(symbol, 0.0) <= now:
+                    med_spread = np.median(spread_hist)
+                    
+                    if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
+                        spread_floor = 0.0015
+                        multiplier = 4.0
+                    else:
+                        spread_floor = 0.0050
+                        multiplier = 5.0
+                        
+                    if spread_val > med_spread * multiplier and spread_val > spread_floor:
+                        logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
+                        self.circuit_breakers[symbol] = now + 60.0
                 
                 if stat_engine: 
                     stat_engine.update_orderbook_pressure(best_bid, bid_size, best_ask, ask_size)
@@ -1028,7 +1030,6 @@ class DistributedQuantEngine:
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
-            # 🚀 V41.2 FIX: Raise minimum turnover to 50M to permanently block micro-caps
             full_market = await self.executor.get_top_volatile_assets(limit=100, min_turnover=50_000_000)
             if len(full_market) < 25: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
         except Exception as e:
@@ -1429,6 +1430,7 @@ class DistributedQuantEngine:
                     profit_distance = abs(max_favorable_price - actual_entry)
                     r_multiple = profit_distance / (initial_risk + 1e-9)
 
+                    # 1. Conditional Partial Profit Taking (🚀 V41.3 FIX: use live c_price)
                     if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
                         try:
                             current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
@@ -1441,7 +1443,7 @@ class DistributedQuantEngine:
                                 qty_step = limits["qty_step"]
                                 aligned_half_qty = math.floor(half_qty / qty_step) * qty_step
                                 
-                                if aligned_half_qty >= min_qty and (aligned_half_qty * current_price) >= 5.0:
+                                if aligned_half_qty >= min_qty and (aligned_half_qty * c_price) >= 5.0:
                                     close_side = "Sell" if direction == "BUY" else "Buy"
                                     logger.critical(f"💰 PARTIAL TAKE-PROFIT // {symbol} reached 1R. Scaling out {aligned_half_qty} units.")
                                     await self.executor.safe_call(
@@ -1455,6 +1457,7 @@ class DistributedQuantEngine:
                         except Exception as e:
                             logger.error(f"Scale-out execution fault for {symbol}: {e}")
 
+                    # 2. Progressive SL Ratchet
                     if r_multiple >= 0.5 and not locked_breakeven:
                         if r_multiple >= 1.0:
                             breakeven_offset = actual_entry * 0.0015 
@@ -1466,6 +1469,7 @@ class DistributedQuantEngine:
                             if (direction == "BUY" and half_risk_sl > current_sl) or (direction == "SELL" and half_risk_sl < current_sl):
                                 current_sl = half_risk_sl
 
+                    # 3. Volatility & Elasticity-Adjusted SL Trail
                     vol_scalar = min(1.0, stat_engine.inst_variance * 5000.0)
                     elasticity = elasticity_engine.orderbook_elasticity if elasticity_engine and hasattr(elasticity_engine, 'orderbook_elasticity') else 1.0
                     
@@ -1486,6 +1490,7 @@ class DistributedQuantEngine:
                     dynamic_trail_dist *= tox_mult
                     calculated_sl = max_favorable_price - dynamic_trail_dist if direction == "BUY" else max_favorable_price + dynamic_trail_dist
 
+                    # 4. Kinematic Trailing Take-Profit (KT-TP)
                     requires_tp_update = False
                     if r_multiple > 1.2:
                         tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
