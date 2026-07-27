@@ -11,10 +11,10 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🔬 V37.0 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🔬 V39.6 APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
     Accelerated Maker-Peg Execution, Adverse Selection Depth Protection,
-    and Implied Volatility Dynamic Boundary Validation.
+    Implied Volatility Dynamic Boundaries, and Pre-Cancel Status Verification.
     """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
@@ -72,10 +72,45 @@ class SmartOrderRouter:
         ob_data = ob_response.get("result", {})
         return self._get_meaningful_tob({"bids": ob_data.get("b", []), "asks": ob_data.get("a", [])}, side)
 
+    async def cancel_order_safe(self, symbol: str, order_id: str) -> bool:
+        """
+        🚀 V39.6 INSTITUTIONAL FIX: Queries open orders before canceling 
+        to eliminate Bybit Error 110001 and orphan order noise.
+        """
+        for attempt in range(3):
+            try:
+                # 1. Check if order is still open on exchange
+                open_orders = await self.executor.safe_call(
+                    self.executor.client.get_open_orders, 
+                    category="linear", 
+                    symbol=symbol, 
+                    orderId=order_id
+                )
+                open_list = open_orders.get("result", {}).get("list", [])
+                
+                if not open_list:
+                    # Order is already filled, canceled, or cleared
+                    return True
+
+                # 2. Issue cancellation if confirmed open
+                res = await self.executor.safe_call(
+                    self.executor.client.cancel_order, 
+                    category="linear", 
+                    symbol=symbol, 
+                    orderId=order_id
+                )
+                if res.get("retCode") == 0:
+                    return True
+            except Exception as e:
+                err_str = str(e)
+                if "110001" in err_str or "not exists" in err_str or "too late" in err_str:
+                    return True
+                await asyncio.sleep(0.5)
+        return False
+
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float) -> Tuple[bool, float, float]:
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive escalation.")
         
-        # 🚀 V37.0 DYNAMIC BOUNDARY FIX: Derived Implied Volatility Distance (No static 1.5%)
         implied_sl_dist = abs(tp - sl) / 3.0 if (tp and sl and tp != sl) else (current_mid_price * 0.008)
         implied_tp_dist = implied_sl_dist * 2.0
         
@@ -156,16 +191,13 @@ class SmartOrderRouter:
             loop_delay = 0.5 
 
             try:
-                # 🚀 V37.0 ADVERSE SELECTION GUARD: Depth Imbalance Check
                 if feature_engine and hasattr(feature_engine, 'get_book_depth_metrics'):
                     depth_metrics = feature_engine.get_book_depth_metrics()
                     imbalance = depth_metrics.get("depth_imbalance", 0.0)
                     
-                    # Toxic liquidations / sell sweep collapsing bids against a BUY order
                     if side == "Buy" and imbalance < -0.80:
                         logger.warning(f"🛡️ ADVERSE SELECTION GUARD // {symbol} Orderbook toxic (imbalance {imbalance:.2f}). Aborting peg.")
                         break
-                    # Toxic buy sweep collapsing asks against a SELL order
                     elif side == "Sell" and imbalance > 0.80:
                         logger.warning(f"🛡️ ADVERSE SELECTION GUARD // {symbol} Orderbook toxic (imbalance {imbalance:.2f}). Aborting peg.")
                         break
@@ -195,7 +227,6 @@ class SmartOrderRouter:
                     logger.warning(f"🏃 CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
                     break
 
-                # 🚀 V37.0 DYNAMIC BOUNDARY FIX: Implied Volatility Distance relative to live peg price
                 implied_sl_dist = abs(tp - sl) / 3.0 if (tp and sl and tp != sl) else (target_price * 0.008)
                 implied_tp_dist = implied_sl_dist * 2.0
                 
@@ -279,17 +310,8 @@ class SmartOrderRouter:
 
         if current_order_id:
             logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
-            cancel_success = False
+            cancel_success = await self.cancel_order_safe(symbol, current_order_id)
             
-            for c_attempt in range(3):
-                try: 
-                    await self.executor.safe_call(self.executor.client.cancel_order, category="linear", symbol=symbol, orderId=current_order_id)
-                    cancel_success = True
-                    break
-                except Exception as e:
-                    logger.error(f"⚠️ Cancel attempt {c_attempt+1} failed for {symbol}: {e}")
-                    await asyncio.sleep(1.0)
-                    
             if not cancel_success:
                 logger.critical(f"🛑 ORPHAN ORDER ALERT // Failed to cancel peg order {current_order_id} for {symbol}. Manual intervention may be needed.")
                 

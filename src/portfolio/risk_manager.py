@@ -10,13 +10,13 @@ class InstitutionalRiskVault:
     def __init__(
         self, 
         max_drawdown_pct: float = 0.25, 
-        max_single_position_risk_pct: float = 0.015, # 🚀 V35.1 Clamped to 1.5% max risk
+        max_single_position_risk_pct: float = 0.015, # Clamped to 1.5% max risk
         exchange_min_notional: float = 5.0
     ):
         """
-        💎 V35.1 APEX: INSTITUTIONAL RISK VAULT
-        Conservative Kelly sizing with EVT Peak-Over-Threshold protection.
-        Hard-capped at 1.5% equity risk per trade to eliminate ruin probability.
+        💎 V39.6 APEX: INSTITUTIONAL RISK VAULT
+        Conservative Kelly sizing with Bounded EVT Peak-Over-Threshold protection.
+        Hard-capped at 1.5% equity risk per trade with safe variance floors.
         """
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
@@ -46,26 +46,37 @@ class InstitutionalRiskVault:
             self.volatility_surface.append(variance)
 
     def calculate_evt_tail_risk(self) -> float:
-        if len(self.volatility_surface) < 50:
-            return 1.0 
+        """
+        🚀 V39.6 INSTITUTIONAL FIX: Computes EVT Tail-Risk with bounded Xi clamping (0.0 to 1.5)
+        and enforces a safety floor of 0.35 so sizing never freezes completely.
+        """
+        if len(self.volatility_surface) < 30:
+            return 1.05  
             
-        vol_arr = np.array(self.volatility_surface)
-        threshold = np.percentile(vol_arr, 90)
-        exceedances = vol_arr[vol_arr > threshold] - threshold
-        
-        if len(exceedances) < 5 or np.mean(exceedances) <= 1e-9:
-            return 1.0
+        try:
+            vol_arr = np.array(self.volatility_surface)
+            threshold = np.percentile(vol_arr, 95)
+            exceedances = vol_arr[vol_arr > threshold] - threshold
             
-        log_exceedances = np.log(exceedances + 1e-9)
-        xi_estimator = np.mean(log_exceedances) - np.log(threshold + 1e-9)
-        
-        tail_risk_multiplier = 1.0
-        if xi_estimator > 0.2:
-            suppression_factor = min(0.9, (xi_estimator - 0.2) * 2.0)
-            tail_risk_multiplier = 1.0 - suppression_factor
-            logger.warning(f"🌪️ EVT FAT-TAIL DETECTED (Xi: {xi_estimator:.3f}). Suppressing Kelly Size to {tail_risk_multiplier:.1%}")
+            if len(exceedances) < 5 or np.mean(exceedances) <= 1e-9:
+                return 1.05
+                
+            log_exceedances = np.log(exceedances + 1e-9)
+            xi_estimator = float(np.mean(log_exceedances) - np.log(threshold + 1e-9))
             
-        return max(0.1, tail_risk_multiplier)
+            # Hard Clamp Xi between 0.0 and 1.5 to prevent extreme mathematical blowups
+            xi_clamped = max(0.0, min(1.5, xi_estimator))
+            
+            tail_risk_multiplier = 1.05
+            if xi_clamped > 0.3:
+                suppression_factor = min(0.65, (xi_clamped - 0.3) * 1.5)
+                tail_risk_multiplier = max(0.35, 1.0 - suppression_factor)
+                logger.warning(f"🌪️ EVT FAT-TAIL DETECTED (Xi: {xi_clamped:.3f}). Suppressing Kelly Size to {tail_risk_multiplier:.1%}")
+                
+            return tail_risk_multiplier
+        except Exception as e:
+            logger.debug(f"EVT calculation fallback engaged: {e}")
+            return 1.05
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]], base_asset: str = "BTCUSDT", threshold: float = 0.75):
         if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
@@ -103,15 +114,13 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float) -> float:
         """
-        🚀 V35.1 FIX: Hard risk cap clamped to 1.5% equity per position.
-        Eliminates portfolio heat overload.
+        Hard risk cap clamped to 1.5% equity per position with EVT scaling.
         """
         total_trades = self.rolling_wins + self.rolling_losses
         if total_trades < 10:
             return 0.010 # Cold start 1.0%
             
         win_rate = self.rolling_wins / total_trades
-        # Clip base_confidence to prevent probability overflow
         safe_prob = min(0.70, max(0.51, base_confidence))
         blended_w = (win_rate * 0.7) + (safe_prob * 0.3) 
         
@@ -125,7 +134,7 @@ class InstitutionalRiskVault:
         evt_multiplier = self.calculate_evt_tail_risk()
         risk_adjusted_kelly = half_kelly * evt_multiplier
         
-        # 🚀 Hard bounds: Min 0.5%, Max 1.5% equity risk per trade
+        # Hard bounds: Min 0.5%, Max 1.5% equity risk per trade
         return max(0.005, min(0.015, risk_adjusted_kelly))
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> bool:
@@ -153,7 +162,6 @@ class InstitutionalRiskVault:
                         logger.warning(f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected.")
                         return False
 
-        # 🚀 Total Portfolio Heat Cap: Never allow total active portfolio risk > 8% equity
         total_exposure = sum(self.active_positions.values()) + new_position_notional
         if total_exposure > (current_balance * 2.5): # Max 2.5x total aggregate portfolio leverage
             logger.warning(f"⚠️ Total portfolio leverage heat cap reached. Rejected {symbol}.")
@@ -178,8 +186,8 @@ class InstitutionalRiskVault:
         hard_cap: int = 5, 
         sl_distance_pct: float = None
     ) -> int:
-        safe_base = min(base_leverage, self.base_leverage)
-        safe_cap = min(hard_cap, self.absolute_max_leverage)
+        safe_base = min(base_leverage, int(self.base_leverage))
+        safe_cap = min(hard_cap, int(self.absolute_max_leverage))
         
         evt_multiplier = self.calculate_evt_tail_risk()
         if evt_multiplier < 0.5:

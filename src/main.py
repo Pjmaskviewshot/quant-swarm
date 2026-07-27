@@ -33,7 +33,7 @@ from execution.sor import SmartOrderRouter
 from ingestion.multi_feed import HighVelocityMultiFeed
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
-from services.news_sentiment import MacroNewsSentimentAnalyzer # 🚀 V39.0
+from services.news_sentiment import MacroNewsSentimentAnalyzer 
 from services.data_feed import AsynchronousDataFeed
 from services.tensor_oracle import CrossAssetTensorOracle
 
@@ -41,10 +41,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
+    format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V39.0_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V39.6_PREDATOR")
 
 
 class ClusterWarmStartRLS:
@@ -331,6 +331,9 @@ class ContinuousMicrostructureEngine:
         action_dir = "BUY" if p_up > p_down else "SELL"
         prob_success = max(p_up, p_down)
         
+        # Hard Probability Clamping
+        prob_success = max(0.52, min(0.85, prob_success))
+        
         self.historical_probs.append(prob_success)
         
         if len(self.historical_probs) > 100:
@@ -340,6 +343,9 @@ class ContinuousMicrostructureEngine:
             dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty
         else:
             dynamic_gate = 0.58
+            
+        # 🚀 V39.6 FIX: Enforce absolute minimum dynamic gate floor (0.58)
+        dynamic_gate = max(0.58, dynamic_gate)
             
         if self.shannon_entropy > 0.85:
             dynamic_gate = 0.99 
@@ -385,9 +391,7 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
         
-        # 🚀 V39.0: Replaced Adversarial AI with Macro News Sentiment Oracle
         self.news_analyzer = MacroNewsSentimentAnalyzer()
-        
         self.data_feed = AsynchronousDataFeed(finnhub_key=os.getenv("FINNHUB_API_KEY", ""))
         self.tensor_oracle = CrossAssetTensorOracle()
         
@@ -521,12 +525,16 @@ class DistributedQuantEngine:
             if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
-        for attempt in range(3):
+        if hasattr(self, '_telegram_blocked_until') and time.time() < self._telegram_blocked_until:
+            return
+        for attempt in range(2):
             try:
                 if is_html: await self.telegram.send_html_report(message)
                 else: await self.telegram.log_message(message, message_type)
                 return
             except Exception: await asyncio.sleep(2 ** attempt)
+        self._telegram_blocked_until = time.time() + 3600
+        logger.warning("⚠️ Telegram unreachable. Disabling telemetry dispatcher temporarily for 1 hour.")
 
     async def _fetch_exchange_tick_sizes(self):
         try:
@@ -683,15 +691,13 @@ class DistributedQuantEngine:
                 
                 if prob_success < min_threshold: return
                 
-                # 🚀 V39.0: PURE QUANTITATIVE EXECUTION (Zero AI Latency)
                 macro_sentiment = self.news_analyzer.get_latest_sentiment(symbol)
-                
                 if action == "BUY":
                     prob_success += (macro_sentiment * 0.075) 
                 else:
                     prob_success -= (macro_sentiment * 0.075) 
                     
-                prob_success = max(0.01, min(0.99, prob_success))
+                prob_success = max(0.52, min(0.85, prob_success))
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
                 if net_ev_pct <= 0.0005: return
@@ -821,10 +827,10 @@ class DistributedQuantEngine:
                         
                         if event == "PROMOTED_FROM_SHADOW" and not prev_state:
                             msg = f"🚀 <b>NODE PROMOTED</b>\n{sym} re-armed for Live Trading.\n• Reason: Shadow Sharpe breached 1.2"
-                            self.track_task(self.telegram.send_html_report(msg))
+                            self.track_task(self._safe_telegram_dispatch(msg))
                         elif event == "DEMOTED_TO_SHADOW" and prev_state:
                             msg = f"🦇 <b>NODE DEMOTED</b>\n{sym} shifted to Shadow Ledger.\n• Reason: Trailing Win Rate dropped < 45%"
-                            self.track_task(self.telegram.send_html_report(msg))
+                            self.track_task(self._safe_telegram_dispatch(msg))
                             
                         self.ram_dna_cache[sym] = result
             except Exception as e: logger.error(f"DNA Prewarmer error: {e}")
@@ -849,7 +855,6 @@ class DistributedQuantEngine:
             except Exception as e: logger.error(f"Shadow resolution daemon error: {e}")
 
     async def run_macro_news_daemon(self):
-        """🚀 V39.0: Background LLM Oracle feeding 0-latency sentiment tensors."""
         logger.info("📰 MACRO NEWS SENTIMENT DAEMON ONLINE: Updating tensor cache every 15m.")
         while True:
             try:
@@ -860,7 +865,6 @@ class DistributedQuantEngine:
                             headlines = [n.get('headline', '') for n in news_items if n.get('headline')]
                         else:
                             headlines = []
-                        
                         if headlines:
                             await self.news_analyzer.analyze_news_batch(symbol, headlines)
                     except Exception as e:
@@ -868,7 +872,6 @@ class DistributedQuantEngine:
                     await asyncio.sleep(2.0)
             except Exception as e:
                 logger.error(f"News daemon fault: {e}")
-            
             await asyncio.sleep(900)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -1114,31 +1117,37 @@ class DistributedQuantEngine:
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
             
-            raw_sl = current_price - sl_distance if direction == "BUY" else current_price + sl_distance
-            raw_tp = current_price + tp_distance if direction == "BUY" else current_price - tp_distance
+            if direction == "BUY":
+                raw_sl = min(current_price - (tp_distance * 0.1), current_price - sl_distance)
+                raw_tp = current_price + tp_distance
+            else:
+                raw_sl = max(current_price + (tp_distance * 0.1), current_price + sl_distance)
+                raw_tp = current_price - tp_distance
+                
             initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
 
-            try: balance = await self.executor.get_wallet_balance_usdt()
-            except Exception as e: 
-                logger.error(f"Failed balance fetch for {symbol}: {e}")
+            try: 
+                wallet_info = await self.executor.safe_call(self.executor.client.get_wallet_balance, category="linear", coin="USDT")
+                coin_list = wallet_info.get("result", {}).get("list", [])
+                available_balance = float(coin_list[0].get("availableBalance", 0.0)) if coin_list else 0.0
+            except Exception: 
+                available_balance = 0.0
+
+            if available_balance < 5.0: 
+                logger.warning(f"⚠️ MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low.")
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 return
                 
             fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence)
-
-            if balance < 1.0: 
-                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
-                return
-
-            dollar_risk = balance * fractional_risk
+            dollar_risk = available_balance * fractional_risk
             target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
             target_notional = target_position_size * current_price
 
-            if not self.risk_vault.evaluate_portfolio_safety(balance, target_notional, symbol): 
+            if not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 return
 
-            target_leverage = self.risk_vault.calculate_dynamic_leverage(target_notional, balance, sl_distance_pct=(sl_distance / current_price))
+            target_leverage = self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
             
             if self.test_mode:
                 execution_success = random.random() < 0.85
@@ -1155,12 +1164,21 @@ class DistributedQuantEngine:
                 feature_engine = self.feature_engines.get(symbol)
                 current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
 
-                if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
-                    res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
-                else:
-                    res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
-                
-                execution_success = res[0] if isinstance(res, tuple) else bool(res)
+                try:
+                    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+                        res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                    else:
+                        res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
+                    
+                    execution_success = res[0] if isinstance(res, tuple) else bool(res)
+                except Exception as ex:
+                    err_str = str(ex)
+                    if "110007" in err_str or "not enough" in err_str or "10001" in err_str:
+                        logger.warning(f"⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                    else:
+                        logger.error(f"Execution error for {symbol}: {err_str}")
+                    async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                    return
 
             if not execution_success: 
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
@@ -1186,7 +1204,7 @@ class DistributedQuantEngine:
                     symbol, direction, current_price, actual_qty_filled, 
                     edge_bps, fractional_risk, regime, safe_features
                 )
-                self.track_task(self.telegram.send_html_report(ticket_msg))
+                self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
                 
             self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime))
@@ -1255,7 +1273,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                self.track_task(self.telegram.send_html_report(report))
+                self.track_task(self._safe_telegram_dispatch(report))
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False):
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
@@ -1268,7 +1286,6 @@ class DistributedQuantEngine:
             return
 
         try:
-            # --- 1. VERIFY FILL & SET INITIAL BOUNDARIES ---
             order_filled, actual_entry = False, current_price
             for _ in range(5):  
                 await asyncio.sleep(3)
@@ -1297,13 +1314,10 @@ class DistributedQuantEngine:
             realigned_sl = actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance
             realigned_tp = actual_entry + actual_tp_distance if direction == "BUY" else actual_entry - actual_tp_distance
             
-            # Apply initial strict stops to exchange
             try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(realigned_tp), stopLoss=align_price(realigned_sl))
             except Exception: pass
 
-            # --- 2. THE KINEMATIC TRAILING ENGINE (High-Frequency Loop) ---
             stat_engine = self.stat_engines.get(symbol)
-            
             max_favorable_price = actual_entry
             current_sl = realigned_sl
             initial_risk = actual_sl_distance
@@ -1313,20 +1327,18 @@ class DistributedQuantEngine:
             api_check_counter = 0
 
             while True: 
-                await asyncio.sleep(1.0) # ⚡ 1-Second Local Processing Loop (Zero API Cost)
+                await asyncio.sleep(1.0) 
                 now = time.time()
                 api_check_counter += 1
                 
-                # A. Verify if position still exists on exchange (Only ping REST every 15s to save rate limits)
                 if api_check_counter >= 15:
                     api_check_counter = 0
                     try:
                         pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                         pos_list = pos_res.get("result", {}).get("list", [])
                         if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0:
-                            break # Position closed, exit loop and settle
+                            break 
                         
-                        # Time Decay Ejection
                         unrealized_pnl = float(pos_list[0].get("unrealisedPnl", 0.0))
                         elapsed_hours = (now - daemon_start_time) / 3600.0
                         if elapsed_hours > 4.0 and unrealized_pnl < 0:
@@ -1335,45 +1347,34 @@ class DistributedQuantEngine:
                             break
                     except Exception: pass
 
-                # B. High-Frequency Kinematic Math (Runs Locally)
                 if stat_engine and stat_engine.true_micro_price > 0:
                     c_price = stat_engine.true_micro_price
-                    
-                    # Update High Water Mark
                     if direction == "BUY" and c_price > max_favorable_price: max_favorable_price = c_price
                     elif direction == "SELL" and c_price < max_favorable_price: max_favorable_price = c_price
                     
                     profit_distance = abs(max_favorable_price - actual_entry)
                     r_multiple = profit_distance / (initial_risk + 1e-9)
 
-                    # PILLAR 1: The Break-Even Ratchet
                     if r_multiple >= 1.0 and not locked_breakeven:
-                        breakeven_offset = actual_entry * 0.0015 # Cover exchange fees
+                        breakeven_offset = actual_entry * 0.0015 
                         current_sl = actual_entry + breakeven_offset if direction == "BUY" else actual_entry - breakeven_offset
                         locked_breakeven = True
                         logger.info(f"🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even.")
 
-                    # PILLAR 2: Kinematic Compression
                     compression_factor = max(0.2, 1.0 - (r_multiple * 0.25))
                     base_trail_dist = actual_sl_distance * compression_factor
 
-                    # PILLAR 3: Orderbook Toxicity Choke
                     ob = self.orderbook_snapshots.get(symbol, {})
                     b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                     toxicity_multiplier = 1.0
                     
                     if b_vol > 0 and a_vol > 0:
-                        if direction == "BUY" and a_vol > b_vol * 4.0: 
-                            toxicity_multiplier = 0.15
-                        elif direction == "SELL" and b_vol > a_vol * 4.0: 
-                            toxicity_multiplier = 0.15
+                        if direction == "BUY" and a_vol > b_vol * 4.0: toxicity_multiplier = 0.15
+                        elif direction == "SELL" and b_vol > a_vol * 4.0: toxicity_multiplier = 0.15
                             
                     dynamic_trail_dist = base_trail_dist * toxicity_multiplier
-
-                    # Calculate precise new SL location
                     calculated_sl = max_favorable_price - dynamic_trail_dist if direction == "BUY" else max_favorable_price + dynamic_trail_dist
 
-                    # Only move SL forward, never backward
                     requires_api_update = False
                     if direction == "BUY" and calculated_sl > current_sl:
                         if (calculated_sl - current_sl) / current_price > 0.0015:
@@ -1384,7 +1385,6 @@ class DistributedQuantEngine:
                             current_sl = calculated_sl
                             requires_api_update = True
 
-                    # PILLAR 4: Execute API Update
                     if requires_api_update and (now - last_api_update_time > 5.0):
                         try:
                             await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(realigned_tp), stopLoss=align_price(current_sl))
@@ -1393,7 +1393,6 @@ class DistributedQuantEngine:
                                 logger.warning(f"🐍 TOXICITY CHOKE ACTIVATED // {symbol} Orderbook inverted. Stop-Loss violently tightened to {align_price(current_sl)}.")
                         except Exception: pass
 
-            # --- 3. SETTLEMENT & FORENSICS (Executes when loop breaks) ---
             await asyncio.sleep(2.0) 
             try: 
                 closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
@@ -1428,9 +1427,8 @@ class DistributedQuantEngine:
                 net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
             
             self.log_to_wal_sync("settlement", [signal_id, net_pnl, slippage_bps, real_outcome, exec_details])
-            
             receipt_msg = self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)
-            self.track_task(self.telegram.send_html_report(receipt_msg))
+            self.track_task(self._safe_telegram_dispatch(receipt_msg))
 
         except Exception as e:
             logger.error(f"Position daemon critical fault for {symbol}: {e}", exc_info=True)
