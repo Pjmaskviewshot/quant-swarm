@@ -9,7 +9,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V36.2 UPGRADE: PCA Eigenvector Beta-Stripping
+    🚀 V37.0 APEX: PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market beta,
     and returns pure idiosyncratic alpha residuals for each asset.
     """
@@ -37,16 +37,17 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V36.2 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V37.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit 250+ perpetual universe every 10 seconds.
-    Isolates Pure Idiosyncratic Alpha via PCA Beta-Stripping.
-    Features robust anti-churn dampening to prevent excessive socket teardowns.
+    Upgraded with Logarithmic Liquidity Weighting to filter out "Junk Alpha".
+    Enforces a strict 30-minute swap cooldown to preserve matrix stability.
     """
     def __init__(self, executor):
         self.executor = executor
         self.market_memory: Dict[str, Dict[str, list]] = {}
         self.btc_returns = []
         self.last_btc_price = 0.0
+        self.last_swap_time = 0.0  # 🚀 V37.0: Global matrix churn prevention
 
     async def _fetch_global_tickers(self) -> dict:
         try:
@@ -68,14 +69,18 @@ class GlobalOmniScanner:
         if protected_symbols is None:
             protected_symbols = set()
 
+        # 🚀 V37.0 FIX: Hard 30-Minute Cooldown on Swaps
+        if time.time() - self.last_swap_time < 1800.0:
+            return None, None
+
         tickers = await self._fetch_global_tickers()
         if not tickers: 
             return None, None
 
-        current_time = time.time()
         scoring_matrix = []
         valid_symbols = []
         return_matrix_rows = []
+        turnover_map = {}
 
         btc_data = tickers.get("BTCUSDT")
         if btc_data:
@@ -94,7 +99,8 @@ class GlobalOmniScanner:
                 current_price = float(data.get('lastPrice', 0))
                 turnover24h = float(data.get('turnover24h', 0))
                 
-                if current_price < 0.05 or turnover24h < 15_000_000.0:
+                # 🚀 V37.0 FIX: Raised baseline turnover to $25M to kill micro-cap noise
+                if current_price < 0.05 or turnover24h < 25_000_000.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -110,7 +116,6 @@ class GlobalOmniScanner:
                     sym_ret = 0.0
                 
                 self.market_memory[sym]["last_price"] = current_price
-                
                 self.market_memory[sym]["vol"].append(vol)
                 self.market_memory[sym]["returns"].append(sym_ret)
                 
@@ -121,6 +126,7 @@ class GlobalOmniScanner:
                 if len(self.market_memory[sym]["vol"]) >= 10:
                     valid_symbols.append(sym)
                     return_matrix_rows.append(self.market_memory[sym]["returns"][-10:])
+                    turnover_map[sym] = turnover24h
 
             except Exception:
                 continue
@@ -140,7 +146,11 @@ class GlobalOmniScanner:
                 
                 idiosyncratic_alpha = pca_alphas[idx]
                 
-                swarm_score = (rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)
+                # 🚀 V37.0 FIX: Logarithmic Liquidity Weighting
+                # Punishes assets with low real liquidity to prevent "Junk Alpha" traps
+                turnover_weight = math.log10(max(turnover_map[sym], 1e-9)) / 10.0 
+                
+                swarm_score = ((rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)) * turnover_weight
                 scoring_matrix.append((swarm_score, sym, rvol_z))
             except Exception:
                 continue
@@ -152,7 +162,6 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # 🚀 V36.2 FIX: Added absolute floor. Do not churn if the top asset isn't exhibiting massive anomalies.
         if top_sym not in current_basket and top_z > 3.0 and top_score > 2500.0:
             basket_scores = [
                 item for item in scoring_matrix 
@@ -164,12 +173,12 @@ class GlobalOmniScanner:
             if basket_scores:
                 deadest_score, deadest_sym, deadest_z = basket_scores[-1]
                 
-                # 🚀 V36.2 FIX: Increased threshold from 3.0x to 5.0x to stabilize the swarm
                 if top_score > (deadest_score * 5.0):
                     logger.critical(
                         f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
                         f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
+                    self.last_swap_time = time.time()  # Lock the matrix for 30 minutes
                     return deadest_sym, top_sym
 
         return None, None

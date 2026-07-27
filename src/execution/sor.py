@@ -11,11 +11,11 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V36.1 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+    🔬 V37.0 QUANTUM APEX: INSTITUTIONAL SMART ORDER ROUTER
     Features Exact Order-ID Tracking, Strict 12-bps Slippage Clamps, 
-    Accelerated Maker-Peg execution, and Phantom-Trade Prevention.
+    Accelerated Maker-Peg Execution, Adverse Selection Depth Protection,
+    and Implied Volatility Dynamic Boundary Validation.
     """
-    # 🚀 FIX: Hard cap global slippage defaults to 12 bps maximum (0.12%)
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
@@ -72,17 +72,26 @@ class SmartOrderRouter:
         ob_data = ob_response.get("result", {})
         return self._get_meaningful_tob({"bids": ob_data.get("b", []), "asks": ob_data.get("a", [])}, side)
 
-    # 🚀 FIX: Return Tuple[bool, float, float] -> (Success, Average Fill Price, Total Quantity Filled)
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: float, tp: float) -> Tuple[bool, float, float]:
         logger.critical(f"⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive escalation.")
         
+        # 🚀 V37.0 DYNAMIC BOUNDARY FIX: Derived Implied Volatility Distance (No static 1.5%)
+        implied_sl_dist = abs(tp - sl) / 3.0 if (tp and sl and tp != sl) else (current_mid_price * 0.008)
+        implied_tp_dist = implied_sl_dist * 2.0
+        
+        if direction.upper() == "BUY":
+            if sl >= current_mid_price: sl = current_mid_price - implied_sl_dist
+            if tp <= current_mid_price: tp = current_mid_price + implied_tp_dist
+        else:
+            if sl <= current_mid_price: sl = current_mid_price + implied_sl_dist
+            if tp >= current_mid_price: tp = current_mid_price - implied_tp_dist
+            
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
         final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
         final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         for attempt in range(3):
-            # 🚀 FIX: More granular escalation: 2bps, 4bps, 8bps (Capped tightly at 12bps)
             escalation_base = 0.0002
             escalation_pct = escalation_base * (2 ** attempt)
             escalation_pct = min(escalation_pct, self.max_slippage_pct)
@@ -93,7 +102,6 @@ class SmartOrderRouter:
             final_price = self._format_dynamic_price(target_price, symbol)
 
             try:
-                # TimeInForce="IOC" ensures unfilled portions are auto-cancelled. No zombies possible here.
                 response = await self.executor.safe_call(
                     self.executor.client.place_order,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
@@ -133,29 +141,38 @@ class SmartOrderRouter:
         logger.error(f"❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or strict 12-bps Slippage Cap hit.")
         return False, 0.0, 0.0
 
-    # 🚀 FIX: Return Tuple[bool, float, float]
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: float, tp: float, feature_engine=None, depth_snapshot: dict=None, timeout: int = 60) -> Tuple[bool, float, float]:
         logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Anti-Spoofing Scanners.")
         
         start_time = time.time()
         current_order_id = None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
-        final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
-        final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
-
+        
         anchor_price = None
         max_chase_deviation = 0.015 
         rejection_count = 0  
 
         while time.time() - start_time < timeout:
-            # 🚀 FIX: Accelerated limit loop (from 1.5s down to 0.5s)
             loop_delay = 0.5 
 
             try:
+                # 🚀 V37.0 ADVERSE SELECTION GUARD: Depth Imbalance Check
+                if feature_engine and hasattr(feature_engine, 'get_book_depth_metrics'):
+                    depth_metrics = feature_engine.get_book_depth_metrics()
+                    imbalance = depth_metrics.get("depth_imbalance", 0.0)
+                    
+                    # Toxic liquidations / sell sweep collapsing bids against a BUY order
+                    if side == "Buy" and imbalance < -0.80:
+                        logger.warning(f"🛡️ ADVERSE SELECTION GUARD // {symbol} Orderbook toxic (imbalance {imbalance:.2f}). Aborting peg.")
+                        break
+                    # Toxic buy sweep collapsing asks against a SELL order
+                    elif side == "Sell" and imbalance > 0.80:
+                        logger.warning(f"🛡️ ADVERSE SELECTION GUARD // {symbol} Orderbook toxic (imbalance {imbalance:.2f}). Aborting peg.")
+                        break
+
                 target_price = 0.0
                 if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
                     target_price = self._get_meaningful_tob(depth_snapshot, side)
-                    # 🚀 FIX: Hyper-aggressive TOB match timing (0.1s)
                     if target_price > 0.0: loop_delay = 0.1
                     
                 if target_price <= 0.0 and feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
@@ -178,8 +195,23 @@ class SmartOrderRouter:
                     logger.warning(f"🏃 CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
                     break
 
+                # 🚀 V37.0 DYNAMIC BOUNDARY FIX: Implied Volatility Distance relative to live peg price
+                implied_sl_dist = abs(tp - sl) / 3.0 if (tp and sl and tp != sl) else (target_price * 0.008)
+                implied_tp_dist = implied_sl_dist * 2.0
+                
+                current_sl = sl
+                current_tp = tp
+                if direction.upper() == "BUY":
+                    if current_sl >= target_price: current_sl = target_price - implied_sl_dist
+                    if current_tp <= target_price: current_tp = target_price + implied_tp_dist
+                else:
+                    if current_sl <= target_price: current_sl = target_price + implied_sl_dist
+                    if current_tp >= target_price: current_tp = target_price - implied_tp_dist
+
                 cleaned_qty = self._apply_dynamic_exchange_limits(qty, target_price, symbol)
                 final_target_price = self._format_dynamic_price(target_price, symbol)
+                final_sl = self._format_dynamic_price(current_sl, symbol) if current_sl else 0.0
+                final_tp = self._format_dynamic_price(current_tp, symbol) if current_tp else 0.0
                 
                 if not current_order_id:
                     place_response = await self.executor.safe_call(
@@ -245,7 +277,6 @@ class SmartOrderRouter:
                 
             await asyncio.sleep(loop_delay) 
 
-        # 🚀 V28.0 FIX: Robust Cancellation Loop prevents Order Leakage/Zombies
         if current_order_id:
             logger.warning(f"⏳ MAKER CHASE TIMEOUT // Market escaped {symbol} peg range. Canceling to protect capital.")
             cancel_success = False

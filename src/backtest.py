@@ -1,8 +1,8 @@
 """
-🧪 V36.2 INSTITUTIONAL BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V36.2.
-Fixes Critical Look-Ahead Bias, implements Pessimistic Intra-bar Execution,
-and aligns Log-Space HMM emission probabilities.
+🧪 V37.0 INSTITUTIONAL BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V37.0.
+Implements Pessimistic Intra-bar Execution, Log-Space HMM,
+and Micro-Price Elasticity dynamic bracketing.
 """
 import argparse
 import time
@@ -169,12 +169,12 @@ def get_vpin_bucket_size(symbol: str) -> float:
     return 100_000.0
 
 def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
-    """🚀 V36.2 Parity: Log-Space HMM Emission Helper"""
+    """🚀 V37.0 Parity: Log-Space HMM Emission Helper"""
     variance = float(std)**2 + 1e-9
     return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
 def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
-    """🚀 V36.2 Parity: Log-Space Emission implementation to prevent underflow."""
+    """🚀 V37.0 Parity: Log-Space Emission implementation to prevent underflow."""
     if len(closes_arr) < 20:
         return "MEAN_REVERTING", current_state_probs, 0.5
 
@@ -423,6 +423,11 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
+        # 🚀 V37.0 PARITY: Simulated Orderbook Elasticity
+        # Approximated by scaling price standard deviation over aggregated 1-minute signed volume
+        price_delta_bps = abs((sim_price - c_prev['close']) / (c_prev['close'] + 1e-9)) * 10000.0
+        orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
+        
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
         base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
@@ -469,11 +474,14 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             action_dir = "SELL"
             prob_success = max(prob_success, 0.65)
         
-        sim_atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
-        sl_dist = max((sim_atr * p.sl_atr_mult) / sim_price, 0.005) * sim_price
-        tp_dist = sl_dist * p.rr_ratio
-        virt_sl = sim_price - sl_dist if action_dir == "BUY" else sim_price + sl_dist
-        virt_tp = sim_price + tp_dist if action_dir == "BUY" else sim_price - tp_dist
+        # 🚀 V37.0 PARITY: Dynamic Elastic Bracketing replaces static ATR mapping
+        vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
+        elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
+        sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
+        tp_dist_pct = sl_dist_pct * p.rr_ratio
+
+        virt_sl = sim_price - (sl_dist_pct * sim_price) if action_dir == "BUY" else sim_price + (sl_dist_pct * sim_price)
+        virt_tp = sim_price + (tp_dist_pct * sim_price) if action_dir == "BUY" else sim_price - (tp_dist_pct * sim_price)
         
         prediction_buffer.append((now_ts, sim_price, attended_features, p_up, virt_sl, virt_tp, action_dir, r_blend))
 
@@ -496,84 +504,80 @@ def run_v35_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 vacuum_blocked = False 
                     
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
-                atr = compute_atr_5m_wilder(target_candles, i, p.atr_period)
-                if atr > 0:
-                    sl_dist_pct = max((atr * p.sl_atr_mult) / c['close'], 0.008)
-                    tp_dist_pct = sl_dist_pct * p.rr_ratio
+                
+                dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
+                taker_fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
+                
+                if net_ev_pct > 0.0005:  
                     
-                    dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
-                    taker_fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
+                    entry = c['close']
+                    sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
+                    outcome, exit_price, bars_held = None, entry, 0
                     
-                    if net_ev_pct > 0.0005:  
+                    # Pessimistic Intra-Bar Execution
+                    for j in range(i + 1, min(i + 61, len(target_candles))): 
+                        bars_held = j - i
+                        h, l = target_candles[j]["high"], target_candles[j]["low"]
+                        c_close = target_candles[j]["close"]
                         
-                        entry = c['close']
-                        sl, tp = (entry - sl_dist_pct * entry, entry + tp_dist_pct * entry) if action_dir == "BUY" else (entry + sl_dist_pct * entry, entry - tp_dist_pct * entry)
-                        outcome, exit_price, bars_held = None, entry, 0
+                        hit_tp = h >= tp if action_dir == "BUY" else l <= tp
+                        hit_sl = l <= sl if action_dir == "BUY" else h >= sl
                         
-                        # 🚀 V36.2 FIX: Pessimistic Intra-Bar Execution (Zero Look-Ahead Bias)
-                        for j in range(i + 1, min(i + 61, len(target_candles))): 
-                            bars_held = j - i
-                            h, l = target_candles[j]["high"], target_candles[j]["low"]
-                            c_close = target_candles[j]["close"]
-                            
-                            hit_tp = h >= tp if action_dir == "BUY" else l <= tp
-                            hit_sl = l <= sl if action_dir == "BUY" else h >= sl
-                            
-                            if bars_held > 5:
-                                trail_dist = sl_dist_pct * entry * 0.75 
-                                if action_dir == "BUY":
-                                    new_sl = c_close - trail_dist
-                                    if new_sl > sl: sl = new_sl
-                                else:
-                                    new_sl = c_close + trail_dist
-                                    if new_sl < sl: sl = new_sl
-                                
-                            if hit_tp and hit_sl: outcome, exit_price = "LOSS", sl; break
-                            if hit_tp: outcome, exit_price = "WIN", tp; break
-                            if hit_sl: outcome, exit_price = "LOSS", sl; break
-                                
-                        if outcome is None: 
-                            exit_price = target_candles[min(i + 60, len(target_candles) - 1)]["close"]
-                            outcome = "WIN" if ((exit_price > entry) == (action_dir == "BUY")) else "LOSS"
-
-                        gross = (exit_price - entry) / entry if action_dir == "BUY" else (entry - exit_price) / entry
-                        holding_hours = bars_held / 60.0
-                        funding_drag = FUNDING_PER_8H * (holding_hours / 8)
-                        
-                        if regime == "RANGING" or routing_mode == "MAKER_ONLY":
-                            slippage_penalty = 0.0
-                            applied_fee = MAKER_FEE * 2
-                        else:
-                            dynamic_slippage_bps = BASE_SLIPPAGE_BPS * max(1.0, abs(hawkes_z) * 0.5)
-                            slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
-                            applied_fee = TAKER_FEE * 2
-                        
-                        edge = prob_success - 0.50
-                        risk_multiplier = edge / 0.10
-                        raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
-                        
-                        evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
-                        fractional_risk = raw_fractional_risk * evt_penalty
-                        
-                        net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
-                        net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.015)
-
-                        trades.append({
-                            "i": i, "direction": action_dir, "regime": regime,
-                            "outcome": outcome, "net": net_leveraged, "bars": bars_held
-                        })
-                        
-                        rolling_outcomes.append(1.0 if net_leveraged > 0 else 0.0)
-                        
-                        if net_leveraged < 0:
-                            recent_losses = sum(1 for out in list(rolling_outcomes)[-2:] if out == 0.0)
-                            if recent_losses >= 2:
-                                cooldown_until = i + 120 
+                        if bars_held > 5:
+                            trail_dist = sl_dist_pct * entry * 0.75 
+                            if action_dir == "BUY":
+                                new_sl = c_close - trail_dist
+                                if new_sl > sl: sl = new_sl
                             else:
-                                cooldown_until = i + bars_held
+                                new_sl = c_close + trail_dist
+                                if new_sl < sl: sl = new_sl
+                            
+                        if hit_tp and hit_sl: outcome, exit_price = "LOSS", sl; break
+                        if hit_tp: outcome, exit_price = "WIN", tp; break
+                        if hit_sl: outcome, exit_price = "LOSS", sl; break
+                            
+                    if outcome is None: 
+                        exit_price = target_candles[min(i + 60, len(target_candles) - 1)]["close"]
+                        outcome = "WIN" if ((exit_price > entry) == (action_dir == "BUY")) else "LOSS"
+
+                    gross = (exit_price - entry) / entry if action_dir == "BUY" else (entry - exit_price) / entry
+                    holding_hours = bars_held / 60.0
+                    funding_drag = FUNDING_PER_8H * (holding_hours / 8)
+                    
+                    if regime == "RANGING" or routing_mode == "MAKER_ONLY":
+                        slippage_penalty = 0.0
+                        applied_fee = MAKER_FEE * 2
+                    else:
+                        dynamic_slippage_bps = BASE_SLIPPAGE_BPS * max(1.0, abs(hawkes_z) * 0.5)
+                        slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
+                        applied_fee = TAKER_FEE * 2
+                    
+                    edge = prob_success - 0.50
+                    risk_multiplier = edge / 0.10
+                    raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
+                    
+                    evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
+                    fractional_risk = raw_fractional_risk * evt_penalty
+                    
+                    net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
+                    net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.015)
+
+                    trades.append({
+                        "i": i, "direction": action_dir, "regime": regime,
+                        "outcome": outcome, "net": net_leveraged, "bars": bars_held
+                    })
+                    
+                    rolling_outcomes.append(1.0 if net_leveraged > 0 else 0.0)
+                    
+                    if net_leveraged < 0:
+                        recent_losses = sum(1 for out in list(rolling_outcomes)[-2:] if out == 0.0)
+                        if recent_losses >= 2:
+                            cooldown_until = i + 120 
                         else:
-                            cooldown_until = i + bars_held  
+                            cooldown_until = i + bars_held
+                    else:
+                        cooldown_until = i + bars_held  
 
     return summarize(trades)
 
@@ -616,7 +620,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V36.2 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V37.0 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
