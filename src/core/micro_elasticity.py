@@ -3,7 +3,7 @@
 -------------------------------------------------------------------------
 Computes sub-second Orderbook Elasticity (λ_OB) and Micro-Price Variance.
 Provides real-time toxicity cancellation triggers for the Predatory Maker Grid.
-Features X-Ray Diagnostic Telemetry and robust math guards.
+Optimized with NumPy zero-allocation iterators and strict orderbook sanity guards.
 """
 
 import math
@@ -40,8 +40,18 @@ class MicroElasticityEngine:
     def update_depth_state(self, best_bid: float, bid_qty: float, best_ask: float, ask_qty: float, ofi_fast_z: float, timestamp: float) -> dict:
         """
         Calculates Micro-Price, Real-Time Variance, and Orderbook Elasticity on every L2 tick.
-        Protected against ZeroDivision and sub-millisecond batching limits.
+        Protected against ZeroDivision, crossed books, and high-frequency memory allocation spikes.
         """
+        # 🚀 SANITY PRECONDITION: Reject crossed, zero, or invalid orderbook states
+        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask or bid_qty < 0 or ask_qty < 0:
+            return {
+                "micro_price": self.micro_prices[-1] if self.micro_prices else 0.0,
+                "instant_variance": self.instant_variance,
+                "elasticity": self.orderbook_elasticity,
+                "bid_depletion_rate": 0.0,
+                "ask_depletion_rate": 0.0
+            }
+
         dt = max(0.001, timestamp - self.last_update_time) if self.last_update_time > 0 else 0.1
         self.last_update_time = timestamp
         
@@ -54,9 +64,11 @@ class MicroElasticityEngine:
                 log_ret = math.log(micro_price / self.micro_prices[-1])
                 self.log_returns.append(log_ret)
                 
+                # 🚀 OPTIMIZATION: Use np.fromiter instead of list casting for zero allocation overhead
                 if len(self.log_returns) >= 10:
-                    self.instant_variance = float(np.var(list(self.log_returns)[-20:]) + 1e-9)
-                    
+                    log_rets_arr = np.fromiter(self.log_returns, dtype=float, count=len(self.log_returns))
+                    self.instant_variance = float(np.var(log_rets_arr[-20:]) + 1e-9)
+                
                 # 2. Compute Orderbook Elasticity (λ_OB)
                 price_delta_bps = abs((micro_price - self.micro_prices[-1]) / self.micro_prices[-1]) * 10000.0
                 self.orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
@@ -87,13 +99,9 @@ class MicroElasticityEngine:
         Computes SL and TP distances mathematically derived from sub-second Micro-Price 
         Volatility and Elasticity instead of rigid, static percentages.
         """
-        # Convert sub-second variance to 1-minute equivalent standard deviation
         vol_sigma = math.sqrt(self.instant_variance) * math.sqrt(60.0)
-        
-        # Dynamic Multiplier scaled by Orderbook Elasticity
         elasticity_scalar = max(0.8, min(2.5, self.orderbook_elasticity))
         
-        # Micro-Price Stop Loss Distance (%)
         sl_dist_pct = max(0.004, min(0.030, vol_sigma * risk_multiplier * elasticity_scalar))
         tp_dist_pct = sl_dist_pct * 2.0  # Maintain 1:2 Minimum Risk-Reward
         
@@ -116,12 +124,10 @@ class MicroElasticityEngine:
         ask_depletion_rate = depth_metrics.get("ask_depletion_rate", 0.0)
         
         if side.upper() == "BUY":
-            # Toxic sell orderbook sweep collapsing bid liquidity
             if bid_depletion_rate > 3.0 and self.orderbook_elasticity > 1.8:
                 logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
                 return True
         else:
-            # Toxic buy orderbook sweep collapsing ask liquidity
             if ask_depletion_rate > 3.0 and self.orderbook_elasticity > 1.8:
                 logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
                 return True
