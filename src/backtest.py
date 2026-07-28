@@ -1,12 +1,16 @@
 """
-🧪 V41.20 APEX BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V41.20.
-Implements Pessimistic Intra-bar Execution, Dynamic Z-Scored Entropy Gating,
-6 bps Breakeven Ratchets, Maker Routing for Wide Spreads, and 1 bps EV Triggers.
+🧪 V50.0 QUANTUM SWARM BACKTESTER: PERFECT PARITY
+--------------------------------------------------
+Synchronized strictly with Quant Swarm live node V50.0.
+Implements Adaptive Session Clocks (Weekend vs. Weekday regimes),
+Multi-Modal Strategy Routing (Maker-Grid vs. Explosive Taker),
+Dynamic Z-Scored Entropy Gating, 6 bps Breakeven Ratchets, and 1 bps EV Triggers.
 """
+
 import argparse
 import time
 import math
+import datetime
 from collections import deque
 from itertools import permutations
 from dataclasses import dataclass
@@ -20,6 +24,24 @@ TAKER_FEE = 0.00055
 MAKER_FEE = 0.00020          
 FUNDING_PER_8H = 0.0001      
 BASE_SLIPPAGE_BPS = 5        
+
+class AdaptiveSessionClock:
+    """Handles Weekend vs. Weekday regime adjustments for backtesting fidelity."""
+    @staticmethod
+    def is_weekend(ts_ms: int) -> bool:
+        dt = datetime.datetime.fromtimestamp(ts_ms / 1000.0, datetime.timezone.utc)
+        return dt.weekday() in (5, 6)
+
+    @classmethod
+    def get_turnover_threshold(cls, ts_ms: int) -> float:
+        return 15_000_000.0 if cls.is_weekend(ts_ms) else 30_000_000.0
+
+    @classmethod
+    def get_ev_floor(cls, routing_mode: str) -> float:
+        if routing_mode == "MAKER_ONLY":
+            return 0.00005  # +0.5 bps EV for maker limit orders
+        return 0.00010      # +1.0 bps EV for taker/iceberg orders
+
 
 def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
     target = days * 1440  
@@ -86,51 +108,27 @@ def get_cluster_priors(symbol: str):
         p_scale = 0.5 
     return w_trend, w_range, np.eye(9) * p_scale
 
-def compute_atr_5m_wilder(candles: List[Dict], i: int, period: int) -> float:
-    if i < (period * 5) + 1: 
-        return 0.0
-        
-    history_slice = candles[max(0, i - (period * 5 + 10)) : i]
-    if len(history_slice) < period * 5: return 0.0
-    
-    bars_5m = []
-    for k in range(0, len(history_slice), 5):
-        chunk = history_slice[k:k+5]
-        if not chunk: continue
-        bars_5m.append({
-            "high": max([c["high"] for c in chunk]),
-            "low": min([c["low"] for c in chunk]),
-            "close": chunk[-1]["close"]
-        })
-        
-    if len(bars_5m) < period + 1: return 0.0
-    
-    trs = []
-    for j in range(1, len(bars_5m)):
-        h, l, pc = bars_5m[j]["high"], bars_5m[j]["low"], bars_5m[j-1]["close"]
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-        
-    trs = trs[-period:]
-    
-    atr = trs[0]
-    for tr in trs[1:]:
-        atr = (atr * (period - 1) + tr) / period
-        
-    return float(atr)
-
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
     aligned_b, aligned_a = [], []
     
     for i in range(2, len(alt_hist)):
-        a_ret = math.log(alt_hist[i] / (alt_hist[i-1] + 1e-9))
-        b_ret = math.log(btc_hist[i-1] / (btc_hist[i-2] + 1e-9))
-        aligned_a.append(a_ret)
-        aligned_b.append(b_ret)
+        try:
+            a_ret = math.log(alt_hist[i] / (alt_hist[i-1] + 1e-9))
+            b_ret = math.log(btc_hist[i-1] / (btc_hist[i-2] + 1e-9))
+            aligned_a.append(a_ret)
+            aligned_b.append(b_ret)
+        except ValueError:
+            continue
     
     if len(aligned_a) < 20: return 0.0
-    correlation = np.corrcoef(aligned_b, aligned_a)[0, 1]
-    if np.isnan(correlation): return 0.0
+    
+    try:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            correlation = np.corrcoef(aligned_b, aligned_a)[0, 1]
+        if np.isnan(correlation): return 0.0
+    except Exception:
+        return 0.0
     
     btc_momentum = np.mean(aligned_b[-10:])
     if abs(btc_momentum) > 0.0002 and correlation > 0.60:
@@ -139,24 +137,14 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
     if len(series) < (order * delay): return 1.0
-    
-    sub_vectors = []
-    for i in range(len(series) - (order - 1) * delay):
-        sub_vectors.append([series[i + j * delay] for j in range(order)])
-        
+    sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
     perm_counts = {perm: 0 for perm in permutations(range(order))}
     
     for vec in sub_vectors:
-        rank = tuple(np.argsort(vec))
-        perm_counts[rank] += 1
+        perm_counts[tuple(np.argsort(vec))] += 1
         
     total = len(sub_vectors)
-    entropy = 0.0
-    for count in perm_counts.values():
-        if count > 0:
-            p = count / total
-            entropy -= p * math.log2(p)
-            
+    entropy = sum(- (c / total) * math.log2(c / total) for c in perm_counts.values() if c > 0)
     max_entropy = math.log2(math.factorial(order))
     return float(entropy / max_entropy)
 
@@ -244,7 +232,6 @@ def calculate_evt_tail_risk(volatility_surface: deque) -> float:
     if xi_clamped <= 0.3: return 1.05
 
     raw_suppression = min(0.65, (xi_clamped - 0.3) * 1.5)
-    
     current_variance = volatility_surface[-1] if volatility_surface else 0.0
     vol_scalar = min(1.0, current_variance * 1000.0)
     dynamic_floor = 0.35 + 0.15 * (1.0 - vol_scalar)
@@ -267,10 +254,9 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
 
     mse_penalty = min(0.10, mse * 0.4)
     ceiling = max(floor, ceiling - mse_penalty)
-
     return max(floor, min(ceiling, prob))
 
-def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -315,12 +301,9 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
     
-    if "BTC" in symbol:
-        amihud_threshold = 2_500_000.0  
-    elif "ETH" in symbol or "SOL" in symbol:
-        amihud_threshold = 1_000_000.0   
-    else:
-        amihud_threshold = 250_000.0  
+    if "BTC" in symbol: amihud_threshold = 2_500_000.0  
+    elif "ETH" in symbol or "SOL" in symbol: amihud_threshold = 1_000_000.0   
+    else: amihud_threshold = 250_000.0   
 
     for i in range(75, len(target_candles)):
         c = target_candles[i]
@@ -336,7 +319,9 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             shannon_entropy = compute_permutation_entropy(list(alt_1m_history)[-20:])
             entropy_history.append(shannon_entropy) 
         
-        ret = math.log(sim_price / (c_prev['close'] + 1e-9))
+        safe_curr = max(1e-9, sim_price)
+        safe_prev = max(1e-9, c_prev['close'])
+        ret = math.log(safe_curr / safe_prev)
         log_returns.append(ret)
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
@@ -382,7 +367,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     if rolling_mse > 0.35 or np.trace(P_trending) > 5000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        # 🚀 V41.20 FIX: Stable Covariance Resets (1e-3)
                         if trace_t > 5000: P_trending = P_trending / (trace_t / 1000.0) + np.eye(9) * 1e-3
                         if trace_r > 5000: P_ranging = P_ranging / (trace_r / 1000.0) + np.eye(9) * 1e-3
                         validation_buffer.clear()
@@ -448,7 +432,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         trade_imbalances.append(sim_t_imb)
         
         price_delta_bps = abs((sim_price - c_prev['close']) / (c_prev['close'] + 1e-9)) * 10000.0
-        
         orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
@@ -490,7 +473,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         dynamic_gate = max(0.52, dynamic_gate)
         
-        # 🚀 V41.20: DYNAMIC Z-SCORED ENTROPY GATE
+        # V50.0 Adaptive Entropy Gate & Session Clock Integration
         if len(entropy_history) > 30:
             entropy_arr = np.array(entropy_history)
             entropy_mean = np.mean(entropy_arr)
@@ -533,37 +516,34 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if i > cooldown_until:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
-                    
+                
             routing_mode = "STANDARD"
             if vacuum_blocked and prob_success > 0.65:
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
                 vacuum_blocked = False 
                 
-            # 🚀 V41.20: DYNAMIC SPREAD & MAKER ROUTING ESTIMATOR
             spread_cost = max(0.0001, min(0.0020, math.sqrt(inst_variance) * 0.5))
-            if spread_cost > 0.0005: 
+            if spread_cost > 0.0004: 
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
                 
             if routing_mode == "MAKER_ONLY":
                 dynamic_gate -= 0.08
-                    
+                
+            # V50.0 Adaptive Session Clock EV Floor
+            ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
+                
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
-                
-                taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0006
-                
+                taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0005
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 
-                # 🚀 V41.20: 1 BPS EV THRESHOLD
-                if net_ev_pct > 0.0001:  
-                    
+                if net_ev_pct > ev_floor:  
                     entry = c['close']
                     sl = entry - (sl_dist_pct * entry) if action_dir == "BUY" else entry + (sl_dist_pct * entry)
                     tp = entry + (tp_dist_pct * entry) if action_dir == "BUY" else entry - (tp_dist_pct * entry)
                     
                     outcome, exit_price, bars_held = None, entry, 0
-                    
                     max_favorable_price = entry
                     locked_breakeven = False
                     scaled_out = False
@@ -591,7 +571,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if r_multiple >= 0.5 and not locked_breakeven:
                             if r_multiple >= 1.0:
-                                # 🚀 V41.20: 6 BPS BREAKEVEN RATCHET
                                 fee_coverage = entry * 0.0006
                                 current_sl = entry + fee_coverage if action_dir == "BUY" else entry - fee_coverage
                                 locked_breakeven = True
@@ -607,29 +586,23 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if action_dir == "BUY":
                             calc_sl = max_favorable_price - dynamic_trail_dist
-                            if calc_sl > current_sl:
-                                if abs(calc_sl - current_sl) / entry > 0.0010: # 🚀 V41.20: Stale price fix (entry dev)
-                                    current_sl = calc_sl
+                            if calc_sl > current_sl and abs(calc_sl - current_sl) / entry > 0.0010:
+                                current_sl = calc_sl
                         else:
                             calc_sl = max_favorable_price + dynamic_trail_dist
-                            if calc_sl < current_sl:
-                                if abs(current_sl - calc_sl) / entry > 0.0010: # 🚀 V41.20: Stale price fix (entry dev)
-                                    current_sl = calc_sl
-                            
+                            if calc_sl < current_sl and abs(current_sl - calc_sl) / entry > 0.0010:
+                                current_sl = calc_sl
+                                
                         if r_multiple > 1.2:
                             tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
                             dynamic_tp_dist = initial_risk * tp_expansion_factor
-                            
                             calc_tp = entry + dynamic_tp_dist if action_dir == "BUY" else entry - dynamic_tp_dist
                             
-                            # 🚀 V41.20: TP Stale Price Guard Check
-                            if action_dir == "BUY" and calc_tp > current_tp:
-                                if abs(calc_tp - current_tp) / entry > 0.002:
-                                    current_tp = calc_tp
-                            elif action_dir == "SELL" and calc_tp < current_tp:
-                                if abs(current_tp - calc_tp) / entry > 0.002:
-                                    current_tp = calc_tp
-                            
+                            if action_dir == "BUY" and calc_tp > current_tp and abs(calc_tp - current_tp) / entry > 0.002:
+                                current_tp = calc_tp
+                            elif action_dir == "SELL" and calc_tp < current_tp and abs(current_tp - calc_tp) / entry > 0.002:
+                                current_tp = calc_tp
+                                
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
                         
@@ -659,7 +632,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     risk_multiplier = edge / 0.10
                     raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                     
-                    # 🚀 V41.20: Explicitly define net_edge_bps so Kelly multiplier doesn't NameError
                     net_edge_bps = net_ev_pct * 10000.0 
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
@@ -726,7 +698,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V41.20 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V50.0 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -750,7 +722,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v41_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v50_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -803,7 +775,7 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v41_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v50_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
         print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():

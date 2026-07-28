@@ -1,3 +1,11 @@
+"""
+💎 V50.0 QUANTUM SWARM: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
+---------------------------------------------------------------
+Upgraded with HTF (Higher-Timeframe) Macro Trend Alignment (1H/4H).
+Implements Dynamic ER-Scaled Risk-Reward Ratio & Bias Penalties.
+Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
+"""
+
 import math
 import time
 import numpy as np
@@ -9,27 +17,15 @@ from typing import Dict, Any, Tuple, List
 logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
 class AdaptiveFeatureEngine:
-    """
-    🔬 V41.0 APEX: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
-    Upgraded with HTF (Higher-Timeframe) Macro Trend Alignment (1H/4H).
-    Implements Dynamic ER-Scaled Risk-Reward Ratio & Bias Penalties.
-    Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
-    """
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
-        # Local Orderbook Reconstruction Cache
         self.local_bids: Dict[float, float] = {}
         self.local_asks: Dict[float, float] = {}
 
-        # 🚀 O(1) SNAPSHOT OPTIMIZATION CACHE
         self._cached_snapshot: Dict[str, List[List[str]]] = {"bids": [], "asks": []}
-        
-        # 🚀 O(1) MLOFI FLOAT EXPORT CACHE
         self._cached_floats: Dict[str, List[List[float]]] = {"bids": [], "asks": []}
 
-        # Aggressive Trade Flow Imbalance
         self.tfi_history = deque(maxlen=memory_window_short)
         
-        # 🚀 V41.0: Expanded Timeframe Tracking for Macro-Alignment (up to 4H/240m)
         self.timeframes = {
             "1": deque(maxlen=100), 
             "5": deque(maxlen=300), 
@@ -38,11 +34,10 @@ class AdaptiveFeatureEngine:
             "240": deque(maxlen=100)  # 4 Hour
         }
         self.long_window = memory_window_long
-        
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V36.2 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 V50.0 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -52,10 +47,7 @@ class AdaptiveFeatureEngine:
             "LIQUIDITY_VACUUM"
         ]
         
-        # Current belief state probabilities (Uniform initial prior)
         self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
-        
-        # Transition Matrix P(State_t | State_{t-1})
         self.transition_matrix = np.array([
             [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
             [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
@@ -63,11 +55,12 @@ class AdaptiveFeatureEngine:
             [0.05, 0.05, 0.05, 0.80, 0.05], # From MEAN_REVERTING
             [0.05, 0.05, 0.15, 0.05, 0.70]  # From VACUUM
         ])
+        
+        self.last_detected_regime = "UNKNOWN"
+        self._last_log_time = 0.0
 
     def _prune_book(self):
-        """
-        Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels.
-        """
+        """Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels."""
         if len(self.local_bids) > 1000:
             top_bids = heapq.nlargest(500, self.local_bids.items(), key=lambda x: x[0])
             self.local_bids = dict(top_bids)
@@ -77,85 +70,82 @@ class AdaptiveFeatureEngine:
             self.local_asks = dict(top_asks)
 
     def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
-        """
-        Log-Space HMM Emission Probability.
-        Computes ln(P) to completely eliminate float underflow when multiplying.
-        """
+        """Computes ln(P) to completely eliminate float underflow when multiplying."""
         var = float(std)**2 + 1e-9
         return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
 
     def detect_market_regime(self) -> str:
-        """
-        Log-Space HMM Gaussian Classifier.
-        Matrix Parity aligned with Backtest. Stable probability extraction.
-        """
+        """Log-Space HMM Gaussian Classifier with X-Ray Diagnostic Telemetry."""
         if len(self.timeframes["5"]) >= 20:
             candles = list(self.timeframes["5"])[-20:]
         elif len(self.timeframes["1"]) >= 20:
             candles = list(self.timeframes["1"])[-20:]
         else:
-            return "MEAN_REVERTING" # Safe fallback
+            return "MEAN_REVERTING" 
 
         closes = np.array([float(c["close"]) for c in candles])
         volumes = np.array([float(c["volume"]) for c in candles])
         
-        # 1. Calculate Emission Features
-        log_returns = np.diff(np.log(closes + 1e-9))
-        mu_ret = float(np.mean(log_returns))
-        volatility = float(np.std(log_returns)) + 1e-9
-        
-        directional_change = abs(closes[-1] - closes[0])
-        absolute_changes = np.sum(np.abs(np.diff(closes)))
-        er = float(directional_change / (absolute_changes + 1e-9))
-        
-        avg_vol = float(np.mean(volumes))
-        
-        # 2. Define Regime Expected Archetypes (Mean, StdDev) for Emission P(Obs | State)
-        archetypes = {
-            "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-            "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-            "HIGH_VOL_CHOP":    {"ret": (0.0, 0.002), "vol": (0.008, 0.002), "er": (0.3, 0.15)},
-            "MEAN_REVERTING":   {"ret": (0.0, 0.0005), "vol": (0.0015, 0.0005), "er": (0.2, 0.1)},
-            "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
-        }
-        
-        # 3. Calculate Log-Emission Probabilities
-        log_emissions = np.zeros(5)
-        for i, regime in enumerate(self.regimes):
-            arch = archetypes[regime]
-            log_p_ret = self._log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
-            log_p_vol = self._log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
-            log_p_er  = self._log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
+        try:
+            log_returns = np.diff(np.log(closes + 1e-9))
+            mu_ret = float(np.mean(log_returns))
+            volatility = float(np.std(log_returns)) + 1e-9
             
-            # Summing in log space is multiplying in linear space
-            log_emission = log_p_ret + log_p_vol + log_p_er
+            directional_change = abs(closes[-1] - closes[0])
+            absolute_changes = np.sum(np.abs(np.diff(closes)))
+            er = float(directional_change / (absolute_changes + 1e-9))
             
-            # Liquidity Vacuum uniquely keys off volume drops
-            if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes, 25):
-                log_emission += math.log(2.0) 
+            avg_vol = float(np.mean(volumes))
+            
+            archetypes = {
+                "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
+                "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
+                "HIGH_VOL_CHOP":    {"ret": (0.0, 0.002), "vol": (0.008, 0.002), "er": (0.3, 0.15)},
+                "MEAN_REVERTING":   {"ret": (0.0, 0.0005), "vol": (0.0015, 0.0005), "er": (0.2, 0.1)},
+                "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
+            }
+            
+            log_emissions = np.zeros(5)
+            for i, regime in enumerate(self.regimes):
+                arch = archetypes[regime]
+                log_p_ret = self._log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
+                log_p_vol = self._log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
+                log_p_er  = self._log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
                 
-            log_emissions[i] = log_emission
+                log_emission = log_p_ret + log_p_vol + log_p_er
+                if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes, 25):
+                    log_emission += math.log(2.0) 
+                    
+                log_emissions[i] = log_emission
+                
+            prior = np.dot(self.transition_matrix.T, self.state_probs)
+            prior_log = np.log(prior + 1e-9)
             
-        # 4. HMM Forward Algorithm: Update Belief State using Log-Sum-Exp Trick
-        prior = np.dot(self.transition_matrix.T, self.state_probs)
-        prior_log = np.log(prior + 1e-9)
-        
-        unnormalized_log_posterior = log_emissions + prior_log
-        max_log = np.max(unnormalized_log_posterior)
-        posterior = np.exp(unnormalized_log_posterior - max_log)
-        self.state_probs = posterior / np.sum(posterior)
-        
-        # 5. Extract Maximum Likelihood Regime
-        best_state_idx = int(np.argmax(self.state_probs))
-        detected_regime = self.regimes[best_state_idx]
-        
-        # Map back to legacy binary tags for main.py execution pipeline backward compatibility
-        if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"]:
-            return "TRENDING"
-        elif detected_regime in ["HIGH_VOL_CHOP", "MEAN_REVERTING", "LIQUIDITY_VACUUM"]:
+            unnormalized_log_posterior = log_emissions + prior_log
+            max_log = np.max(unnormalized_log_posterior)
+            posterior = np.exp(unnormalized_log_posterior - max_log)
+            self.state_probs = posterior / np.sum(posterior)
+            
+            best_state_idx = int(np.argmax(self.state_probs))
+            detected_regime = self.regimes[best_state_idx]
+            
+            # X-Ray Telemetry for major regime shifts
+            now = time.time()
+            if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
+                logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
+                self.last_detected_regime = detected_regime
+                self._last_log_time = now
+            
+            if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"]:
+                return "TRENDING"
+            elif detected_regime in ["HIGH_VOL_CHOP", "MEAN_REVERTING", "LIQUIDITY_VACUUM"]:
+                return "RANGING"
+                
             return "RANGING"
-            
-        return "RANGING"
+
+        except Exception as e:
+            logger.debug(f"[X-RAY] HMM Regime detection variance absorbed: {e}")
+            return "MEAN_REVERTING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
         """Ingests real-time market execution prints to calculate actual trade aggression."""
@@ -228,7 +218,7 @@ class AdaptiveFeatureEngine:
                     }
 
         except Exception as e:
-            logger.error(f"Microstructure local cache reconstruction failure: {e}")
+            logger.error(f"[X-RAY] Microstructure local cache reconstruction failure: {e}")
 
     def update_multi_timeframe_candle(self, timeframe: str, open_p: float, high_p: float, low_p: float, close_p: float, volume: float):
         tf_key = str(timeframe).rstrip("m")
@@ -252,10 +242,9 @@ class AdaptiveFeatureEngine:
 
     def get_htf_trend_bias(self, current_price: float) -> float:
         """
-        🚀 V41.0 APEX: Higher-Timeframe Trend Bias Factor (β_HTF).
+        🚀 V50.0 APEX: Higher-Timeframe Trend Bias Factor (β_HTF).
         Calculates distance from 4H and 1H Exponential Moving Averages to penalize
-        counter-trend microscopic signals.
-        Returns a float between -1.0 (strongly bearish macro) to 1.0 (strongly bullish macro).
+        counter-trend microscopic signals. Returns float between -1.0 to 1.0.
         """
         bias = 0.0
         
@@ -264,7 +253,6 @@ class AdaptiveFeatureEngine:
             candles_4h = list(self.timeframes["240"])
             closes_4h = np.array([float(c["close"]) for c in candles_4h])
             
-            # Simple EMA approximation for performance
             alpha = 2.0 / (len(closes_4h) + 1)
             ema_4h = closes_4h[0]
             for val in closes_4h[1:]:
@@ -294,7 +282,7 @@ class AdaptiveFeatureEngine:
 
     def get_dynamic_rr_ratio(self) -> float:
         """
-        🚀 V41.0 APEX: Adaptive Parameter Scaling via Kaufman Efficiency Ratio (ER).
+        🚀 Adaptive Parameter Scaling via Kaufman Efficiency Ratio (ER).
         In smooth trends (ER approx 1.0), RR expands up to 3.2x.
         In choppy markets (ER approx 0.0), RR tightens to 1.2x.
         """
@@ -306,9 +294,8 @@ class AdaptiveFeatureEngine:
             absolute_changes = np.sum(np.abs(np.diff(closes)))
             er = float(directional_change / (absolute_changes + 1e-9))
         else:
-            er = 0.5  # Neutral baseline
+            er = 0.5 
             
-        # ER-Scaled Dynamic RR Formula
         dynamic_rr = 1.2 + (2.0 * (er ** 2))
         return np.clip(dynamic_rr, 1.2, 3.2)
 

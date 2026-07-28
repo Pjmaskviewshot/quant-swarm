@@ -1,23 +1,26 @@
+"""
+💎 V50.0 APEX: INSTITUTIONAL RISK VAULT (NANO-CORE ENABLED)
+------------------------------------------------------------
+Conservative Kelly sizing with Volatility-Adjusted EVT Tail-Risk Protection,
+Micro-Account ($17 Balance) Nano-Sizing, and X-Ray Diagnostic Telemetry.
+"""
+
 import math
-import numpy as np
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from collections import deque
+import numpy as np
 
 logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
+
 
 class InstitutionalRiskVault:
     def __init__(
         self, 
         max_drawdown_pct: float = 0.25, 
-        max_single_position_risk_pct: float = 0.015, # Clamped to 1.5% max risk
-        exchange_min_notional: float = 5.0
+        max_single_position_risk_pct: float = 0.015, # Clamped to 1.5% max risk for normal balances
+        exchange_min_notional: float = 6.0
     ):
-        """
-        💎 V39.7 APEX: INSTITUTIONAL RISK VAULT
-        Conservative Kelly sizing with Volatility-Adjusted EVT Protection 
-        and Edge-Weighted Capital Allocation.
-        """
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
         self.exchange_min_notional = exchange_min_notional
@@ -42,13 +45,14 @@ class InstitutionalRiskVault:
         self.volatility_surface: deque = deque(maxlen=300)
 
     def push_microstructure_variance(self, variance: float):
+        """Pushes instantaneous variance into the volatility surface for EVT modeling."""
         if variance > 0:
             self.volatility_surface.append(variance)
 
     def calculate_evt_tail_risk(self) -> float:
         """
-        🚀 V39.7 ADAPTIVE UPGRADE: Volatility-Adjusted EVT Multiplier with Dynamic Floor.
-        Automatically scales the tail-risk floor between 0.35 (high vol) and 0.50 (low vol).
+        🚀 V50.0 ADAPTIVE EVT: Volatility-Adjusted EVT Multiplier with Dynamic Floor.
+        Automatically scales tail-risk suppression between 0.35 (high vol) and 0.50 (low vol).
         """
         if len(self.volatility_surface) < 30:
             return 1.05  
@@ -76,14 +80,15 @@ class InstitutionalRiskVault:
             dynamic_floor = 0.35 + 0.15 * (1.0 - vol_scalar)
             
             tail_risk_multiplier = max(dynamic_floor, 1.0 - raw_suppression)
-            logger.warning(f"🌪️ ADAPTIVE EVT (Xi: {xi_clamped:.3f}, Vol Floor: {dynamic_floor:.2f}): Multiplier at {tail_risk_multiplier:.1%}")
+            logger.debug(f"[X-RAY] 🌪️ EVT Tail Risk (Xi: {xi_clamped:.3f}): Multiplier at {tail_risk_multiplier:.1%}")
             
             return tail_risk_multiplier
         except Exception as e:
-            logger.debug(f"EVT calculation fallback engaged: {e}")
+            logger.debug(f"[X-RAY] EVT calculation fallback engaged: {e}")
             return 1.05
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]], base_asset: str = "BTCUSDT", threshold: float = 0.75):
+        """Dynamically clusters assets correlated with BTC to enforce portfolio exposure limits."""
         if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
             return
             
@@ -103,13 +108,13 @@ class InstitutionalRiskVault:
                 continue
                 
             correlation = np.corrcoef(base_returns, sym_returns)[0, 1]
-            
             if correlation >= threshold:
                 restricted_group.append(symbol)
                 
         self.correlation_groups["DYNAMIC_BTC_COVARIANCE"] = restricted_group
 
     def update_kelly_metrics(self, is_win: bool, pnl_pct: float):
+        """Updates rolling win rate and win/loss payoff ratios for Fractional Kelly calculation."""
         if is_win:
             self.rolling_wins = min(100, self.rolling_wins + 1)
             self.avg_win_pct = (self.avg_win_pct * 0.9) + (abs(pnl_pct) * 0.1)
@@ -119,7 +124,7 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V39.7 UPGRADE: Edge-Weighted Kelly Allocation with Adaptive EVT.
+        🚀 Edge-Weighted Kelly Allocation with Adaptive EVT Tail-Risk.
         Scales capital allocation based on signal confidence, tail-risk state, and expected net edge.
         """
         total_trades = self.rolling_wins + self.rolling_losses
@@ -138,8 +143,6 @@ class InstitutionalRiskVault:
                 base_fraction = max(0.005, kelly_fraction / 2.0)
         
         evt_multiplier = self.calculate_evt_tail_risk()
-        
-        # Edge factor scales sizing between 0.5x and 1.5x based on expected net edge
         edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
         
         risk_adjusted_kelly = base_fraction * evt_multiplier * edge_factor
@@ -148,7 +151,12 @@ class InstitutionalRiskVault:
         return max(0.005, min(0.015, risk_adjusted_kelly))
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> bool:
+        """
+        🚀 V50.0 X-RAY PORTFOLIO SAFETY GUARD:
+        Verifies drawdown limits, correlation group caps, and total portfolio heat limits.
+        """
         if self.emergency_circuit_breaker:
+            logger.warning("[X-RAY] 🚫 SAFETY BLOCK // Emergency circuit breaker is ACTIVE.")
             return False
 
         if current_balance > self.peak_balance:
@@ -162,30 +170,39 @@ class InstitutionalRiskVault:
                     self.emergency_circuit_breaker = True
                 return False
         
-        active_correlated_count = 0
+        # Check Correlation Cluster Caps
         if symbol and new_position_notional > 0:
             for group_name, asset_list in self.correlation_groups.items():
                 if symbol in asset_list:
                     active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
-                    active_correlated_count = len(active_correlated_nodes)
-                    if active_correlated_count > 1:
-                        logger.warning(f"🛡️ CORRELATION GUARD BLOCK // Node {symbol} rejected.")
+                    if len(active_correlated_nodes) >= 2:
+                        logger.warning(f"[X-RAY] 🛡️ CORRELATION GUARD // {symbol} rejected. Too many correlated positions active ({active_correlated_nodes}).")
                         return False
 
+        # Calculate Total Portfolio Exposure Heat
         total_exposure = sum(self.active_positions.values()) + new_position_notional
-        if total_exposure > (current_balance * 2.5): # Max 2.5x total aggregate portfolio leverage
-            logger.warning(f"⚠️ Total portfolio leverage heat cap reached. Rejected {symbol}.")
+        
+        # Nano-Core Micro-Account Heat Bypass (< $50 USDT)
+        if current_balance < 50.0:
+            max_heat = current_balance * 3.5  # Allow up to 3.5x portfolio heat for micro balances
+        else:
+            max_heat = current_balance * 2.5  # Standard institutional 2.5x cap
+
+        if total_exposure > max_heat:
+            logger.warning(f"[X-RAY] ⚠️ LEVERAGE HEAT CAP // Total exposure (${total_exposure:.2f}) exceeds max allowed (${max_heat:.2f}). Rejected {symbol}.")
             return False
                 
         return True
 
     def update_position_ledger(self, symbol: str, notional_value: float):
+        """Updates active tracking ledger for portfolio exposure calculations."""
         if notional_value <= 0:
             self.active_positions.pop(symbol, None)
         else:
             self.active_positions[symbol] = notional_value
 
     def clear_ledger(self):
+        """Clears all position entries in the ledger."""
         self.active_positions.clear()
 
     def calculate_dynamic_leverage(
@@ -194,21 +211,26 @@ class InstitutionalRiskVault:
         account_balance: float, 
         base_leverage: int = 3, 
         hard_cap: int = 5, 
-        sl_distance_pct: float = None
+        sl_distance_pct: Optional[float] = None
     ) -> int:
+        """
+        🚀 Dynamic Leverage Calculation with Division-by-Zero Safety & EVT Protection.
+        """
+        if account_balance <= 0 or notional_position_usdt <= 0:
+            return 1
+
         safe_base = min(base_leverage, int(self.base_leverage))
         safe_cap = min(hard_cap, int(self.absolute_max_leverage))
         
+        # EVT Volatility Compression
         evt_multiplier = self.calculate_evt_tail_risk()
         if evt_multiplier < 0.5:
             safe_cap = max(1, int(safe_cap * evt_multiplier))
-        
-        if account_balance <= 0 or notional_position_usdt <= 0:
-            return 1
             
-        if sl_distance_pct and sl_distance_pct > 0:
+        # 🚀 V50.0 FIX: Division-by-Zero / Near-Zero Safety Guard on Stop-Loss Distance
+        if sl_distance_pct and sl_distance_pct > 0.0001:
             max_safe_leverage = int(1.0 / (sl_distance_pct * 1.5))
-            safe_cap = min(safe_cap, max_safe_leverage)
+            safe_cap = min(safe_cap, max(1, max_safe_leverage))
 
         margin_required = account_balance * 0.20
         calculated_leverage = math.ceil(notional_position_usdt / (margin_required + 1e-9))

@@ -1,3 +1,11 @@
+"""
+💎 V50.0 QUANTUM SWARM: SELF-CALIBRATING HAWKES PROCESS
+-------------------------------------------------------
+Models the arrival intensity of algorithmic trade cascades.
+Features Dynamic Branching Ratio (ρ) calibration, Spectral Radius Stationarity 
+Clamping, and X-Ray Diagnostic Telemetry.
+"""
+
 import time
 import math
 import numpy as np
@@ -7,12 +15,14 @@ from collections import deque
 logger = logging.getLogger("QUANT_CORE.HAWKES")
 
 class BivariateHawkesEngine:
-    def __init__(self, calibration_window: int = 1000):
+    def __init__(self, symbol: str = "GENERIC", calibration_window: int = 1000):
         """
-        🚀 THE APEX UPGRADE: Self-Calibrating Bivariate Hawkes Process
+        🚀 V50.0 APEX: Self-Calibrating Bivariate Hawkes Process
         Node 0: Aggressive BUY trades
         Node 1: Aggressive SELL trades
         """
+        self.symbol = symbol
+        
         # Base parameters to anchor the calibration
         self.base_mu = np.array([0.1, 0.1]) 
         self.base_alpha = np.array([
@@ -37,6 +47,7 @@ class BivariateHawkesEngine:
         self.calibration_window = calibration_window
         self.dt_buffer = deque(maxlen=calibration_window)
         self.tick_count = 0
+        self._last_log_time = 0.0
 
     def _calibrate_engine(self):
         """
@@ -51,7 +62,9 @@ class BivariateHawkesEngine:
         mean_dt = np.mean(dts)
         std_dt = np.std(dts)
         
-        if mean_dt == 0: return
+        # Guard against micro-burst zero-variance (exchange trade batching)
+        if mean_dt < 1e-6: 
+            return
         
         # Coefficient of Variation (CV)
         # CV = 1.0 -> Random noise (No cascades)
@@ -77,17 +90,27 @@ class BivariateHawkesEngine:
         
         # 3. STATIONARITY CLAMP (Spectral Radius < 1.0)
         # The branching matrix M_ij = alpha_ij / beta_ij determines process stability
-        branching_matrix = self.alpha / self.beta
-        spectral_radius = np.max(np.abs(np.linalg.eigvals(branching_matrix)))
-        
-        if spectral_radius >= 0.95:
-            # Rescale alpha to force the spectral radius down to a safe 0.90 limit
-            # This prevents the stochastic process from predicting infinite trade intensities
-            stationarity_correction = 0.90 / spectral_radius
-            self.alpha *= stationarity_correction
-            logger.warning(f"⚠️ HAWKES STATIONARITY CLAMP | Spectral Radius reached {spectral_radius:.3f}. Alpha matrix rescaled by {stationarity_correction:.2f}x to prevent explosive intensity.")
-
-        logger.info(f"⚙️ HAWKES MLE CALIBRATED | CV: {cv:.2f} | Implied Excitation (ρ): {implied_rho:.2f} | Sens: {scale_factor:.2f}x | Spectral Radius: {min(spectral_radius, 0.90):.3f}")
+        # Suppress Numpy invalid division warnings safely
+        with np.errstate(divide='ignore', invalid='ignore'):
+            branching_matrix = self.alpha / self.beta
+            
+        try:
+            spectral_radius = np.max(np.abs(np.linalg.eigvals(branching_matrix)))
+            
+            if spectral_radius >= 0.95:
+                # Rescale alpha to force the spectral radius down to a safe 0.90 limit
+                # This prevents the stochastic process from predicting infinite trade intensities
+                stationarity_correction = 0.90 / spectral_radius
+                self.alpha *= stationarity_correction
+                logger.warning(f"[X-RAY] ⚠️ HAWKES STATIONARITY CLAMP // {self.symbol} | Spectral Radius reached {spectral_radius:.3f}. Alpha matrix rescaled by {stationarity_correction:.2f}x to prevent explosive intensity.")
+            
+            now = time.time()
+            if now - self._last_log_time > 300.0:  # Throttle standard info logs to once every 5 mins per asset
+                logger.debug(f"[X-RAY] ⚙️ HAWKES MLE CALIBRATED // {self.symbol} | CV: {cv:.2f} | Implied Excitation (ρ): {implied_rho:.2f} | Spectral Radius: {min(spectral_radius, 0.90):.3f}")
+                self._last_log_time = now
+                
+        except np.linalg.LinAlgError:
+            logger.debug(f"[X-RAY] Hawkes Eigenvalue convergence failed for {self.symbol}. Skipping calibration step.")
 
     def apply_tick(self, timestamp: float, is_buy: bool, trade_volume: float) -> tuple[float, float]:
         """
@@ -109,7 +132,7 @@ class BivariateHawkesEngine:
         
         # 2. Apply Excitation Jump (Marked by trade volume)
         event_idx = 0 if is_buy else 1
-        volume_mark = math.log1p(trade_volume) 
+        volume_mark = math.log1p(max(0.0, trade_volume)) 
         
         self.I[:, event_idx] += self.alpha[:, event_idx] * volume_mark
         self.last_update_time = timestamp
@@ -117,7 +140,7 @@ class BivariateHawkesEngine:
         # 3. Calculate Instantaneous Intensity: λ(t) = μ + Σ I(t)
         lambda_buy, lambda_sell = self.mu + np.sum(self.I, axis=1)
         
-        return lambda_buy, lambda_sell
+        return float(lambda_buy), float(lambda_sell)
 
     def calculate_imbalance_delta(self) -> float:
         """
@@ -127,7 +150,7 @@ class BivariateHawkesEngine:
         lambda_buy, lambda_sell = self.mu + np.sum(self.I, axis=1)
         total_intensity = lambda_buy + lambda_sell
         
-        if total_intensity == 0:
+        if total_intensity <= 1e-9:
             return 0.0
             
-        return (lambda_buy - lambda_sell) / total_intensity
+        return float((lambda_buy - lambda_sell) / total_intensity)

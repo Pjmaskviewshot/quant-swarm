@@ -1,18 +1,20 @@
+"""
+🚀 V50.0 QUANTUM SWARM: TELEGRAM MISSION CONTROL
+------------------------------------------------
+Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
+and institutional-grade Forensic X-Ray HTML formatters.
+"""
+
 import os
 import re
 import asyncio
 import aiohttp
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.TELEGRAM")
 
 class AsyncTelegramReporter:
-    """
-    🚀 V35.0 APEX: TELEGRAM MISSION CONTROL
-    Upgraded with persistent TCP ClientSession connection pooling, dynamic 
-    HTTP 429 backoff handling, and institutional-grade forensic HTML formatters.
-    """
     def __init__(self, token: str, chat_id: str):
         self.token = token or ""
         self.chat_id = chat_id or ""
@@ -112,44 +114,51 @@ class AsyncTelegramReporter:
         await self._dispatch_payload(payload, max_retries=max_retries)
 
     # ====================================================================
-    # 🚀 V35 APEX: INSTITUTIONAL FORENSIC FORMATTERS
+    # 🚀 V50.0 APEX: X-RAY FORENSIC FORMATTERS
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
-        """Formats the Deep-Dive Entry Ticket for new Live Executions."""
-        ai_action = features.get('ai_verdict', 'HOLD')
-        mlofi_z = features.get('adaptive_obi_z', 0.0)
+        """Formats the Deep-Dive Entry Ticket with X-Ray Diagnostics."""
+        
+        # Extract X-Ray Metrics
+        notional_value = price * size
+        sl_price = features.get("virtual_sl", price)
+        sl_pct = (abs(price - sl_price) / price) if price > 0 else 0.0
+        spread_bps = features.get("bid_ask_spread", 0.0) * 10000.0
         
         micro_status = "STABLE"
+        mlofi_z = features.get('adaptive_obi_z', 0.0)
         if mlofi_z > 2.0: micro_status = "TOXIC BUY PRESSURE"
         elif mlofi_z < -2.0: micro_status = "TOXIC SELL PRESSURE"
-        elif "DARK_POOL" in features.get('reasoning', ''): micro_status = "ICEBERG ABSORPTION DETECTED"
+        elif "DARK_POOL" in features.get('reasoning', ''): micro_status = "ICEBERG ABSORPTION"
+        elif "MAKER_ONLY" in features.get('reasoning', ''): micro_status = "WIDE SPREAD (MAKER PEG)"
 
         return (
-            f"⚡ <b>ENTRY ALERT // {symbol}</b>\n"
+            f"🎯 <b>X-RAY DISPATCH // {symbol}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"• Action: <b>{direction}</b>\n"
-            f"• Entry Price: <code>{price:.5f}</code>\n"
-            f"• Position Size: <code>{size:.2f}</code>\n"
-            f"• Kelly Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
-            f"🧠 <b>CONFLUENCE MATRIX:</b>\n"
+            f"• Fill Price: <code>{price:.5f}</code>\n"
+            f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
+            f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
+            f"🔬 <b>X-RAY DIAGNOSTICS:</b>\n"
             f"• HMM Regime: <code>{regime}</code>\n"
-            f"• Micro Edge: <code>{edge_bps:.1f} bps</code>\n"
-            f"• Macro LLM: <code>{ai_action}</code>\n"
+            f"• Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
+            f"• Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
+            f"• Stop Loss: <code>{sl_pct:.2%}</code>\n"
             f"• Depth Radar: <code>{micro_status}</code>"
         )
 
     def format_execution_receipt(self, symbol: str, net_pnl: float, slippage_bps: float, fees: float, duration_mins: float, is_win: bool) -> str:
-        """Formats the Execution Quality Receipt upon position closure."""
+        """Formats the Post-Trade Autopsy Receipt upon position closure."""
         gross_pnl = net_pnl + fees + (abs(slippage_bps)/10000 * net_pnl)
         outcome_emoji = "🟢 WIN" if is_win else "🔴 LOSS"
         
         return (
-            f"🏁 <b>TRADE CLOSED // {symbol}</b>\n"
+            f"🔬 <b>POST-TRADE AUTOPSY // {symbol}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"• Outcome: <b>{outcome_emoji}</b>\n"
             f"• Net PnL: <code>{net_pnl:+.4f} USDT</code>\n\n"
-            f"🔬 <b>EXECUTION QUALITY:</b>\n"
+            f"📊 <b>EXECUTION METRICS:</b>\n"
             f"• Time in Market: <code>{duration_mins:.1f} mins</code>\n"
             f"• Gross PnL: <code>{gross_pnl:+.4f} USDT</code>\n"
             f"• Maker/Taker Fees: <code>-{fees:.4f} USDT</code>\n"
@@ -157,7 +166,7 @@ class AsyncTelegramReporter:
         )
 
     def format_mission_control_dashboard(self, uptime: float, live_count: int, shadow_count: int, balance: float, session_pnl: float, drawdown: float, dd_bar: str, execution_stats: Dict[str, Any]) -> str:
-        """Formats the 10-Minute Mission Control Heartbeat."""
+        """Formats the 10-Minute Mission Control Heartbeat for V50.0."""
         win_rate = execution_stats.get('win_rate', 0.0)
         trades = execution_stats.get('trade_count', 0)
         avg_slip = execution_stats.get('avg_slippage_bps', 0.0)
@@ -167,7 +176,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANT SWARM (V35.0 APEX)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V50.0 APEX)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"

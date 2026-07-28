@@ -1,6 +1,13 @@
+"""
+💎 V50.0 QUANTUM SWARM: ASYNCHRONOUS DATA FEED & NARRATIVE ENGINE
+-----------------------------------------------------------------
+Features In-Memory News TTL Caching, Malformed Candle Array Guards,
+Rate-Limit Exponential Backoff Protocols, and X-Ray Diagnostic Telemetry.
+"""
+
+import time
 import asyncio
 import aiohttp
-import time
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -8,16 +15,16 @@ logger = logging.getLogger("QUANT_CORE.DATA_FEED")
 
 class AsynchronousDataFeed:
     """
-    🚀 V26.0 APEX: ASYNCHRONOUS DATA FEED & NARRATIVE ENGINE
-    Upgraded with In-Memory News TTL Caching (eliminates Finnhub rate-limit burn across swarm nodes),
-    Safe Array Parsing Guards, and Rate-Limit Backoff Protocols.
+    🚀 V50.0 ASYNCHRONOUS DATA FEED & NARRATIVE ENGINE
+    Pools historical kline snapshots and macro news narratives concurrently with 
+    strict connection pooling, TTL caching, and X-Ray diagnostics.
     """
     def __init__(self, finnhub_key: str, news_ttl_seconds: float = 300.0):
-        self.finnhub_key = finnhub_key
+        self.finnhub_key = finnhub_key or ""
         self.bybit_base_url = "https://api.bybit.com/v5/market/kline"
         self.finnhub_url = "https://finnhub.io/api/v1/news"
         
-        # ⚡ V26 UPGRADE: In-Memory News TTL Cache (Prevents API rate-limit exhaustion across swarm cycles)
+        # In-Memory News TTL Cache (Prevents API rate-limit exhaustion across swarm cycles)
         self._cached_news: str = "Macro narrative feed initializing."
         self._last_news_fetch: float = 0.0
         self._news_ttl: float = news_ttl_seconds
@@ -42,26 +49,25 @@ class AsynchronousDataFeed:
     async def _execute_snapshot(self, session: aiohttp.ClientSession, symbol: str, interval: str) -> Optional[Dict[str, Any]]:
         """Internal execution core for compiling market and narrative arrays."""
         try:
-            # 1 candle fetch for price check
+            # 1 candle fetch for current price check
             market_task = self._get_bybit_klines(session, symbol, interval, limit="1")
             news_task = self._get_finnhub_news(session)
             
             klines, news_headlines = await asyncio.gather(market_task, news_task, return_exceptions=True)
-            
             news_context = news_headlines if isinstance(news_headlines, str) else self._cached_news
             
             # CIRCUIT BREAKER: Quick-fail on empty data arrays to protect downstream processes
             if isinstance(klines, Exception) or not klines:
-                logger.warning(f"Market data absent for {symbol}. Dropping asset from current cycle to protect API limits.")
+                logger.warning(f"[X-RAY] ⚠️ Market data absent for {symbol}. Dropping asset from current snapshot cycle.")
                 return None
             
-            # ⚡ V26 UPGRADE: Safe Parsing Guard against Malformed Candle Arrays
+            # Safe Parsing Guard against Malformed Candle Arrays
             try:
                 current_price = float(klines[0][4])
                 if current_price <= 0:
                     raise ValueError("Non-positive price returned.")
             except (IndexError, ValueError, TypeError) as parse_err:
-                logger.error(f"❌ Malformed candle array structure for {symbol}: {parse_err}")
+                logger.error(f"[X-RAY] ❌ Malformed candle array structure for {symbol}: {parse_err}")
                 return None
             
             return {
@@ -71,11 +77,11 @@ class AsynchronousDataFeed:
                 "news_context": news_context
             }
         except Exception as e:
-            logger.error(f"Systemic ingestion pipeline fault on {symbol}: {e}")
+            logger.error(f"[X-RAY] Systemic ingestion pipeline fault on {symbol}: {e}")
             return None
 
     async def _get_bybit_klines(self, session: aiohttp.ClientSession, symbol: str, interval: str, limit: str = "1") -> List[List[str]]:
-        """Fetches historical data to build the baseline with strict backoff fallbacks."""
+        """Fetches historical data to build baseline candles with strict exponential backoff fallbacks."""
         params = {
             "category": "linear",
             "symbol": symbol,
@@ -87,7 +93,7 @@ class AsynchronousDataFeed:
             try:
                 async with session.get(self.bybit_base_url, params=params, timeout=10.0) as response:
                     if response.status in [429, 403]:
-                        logger.warning(f"Bybit HTTP Rate Limit ({response.status}) on {symbol}. Backoff initiated...")
+                        logger.warning(f"[X-RAY] ⚠️ Bybit HTTP Rate Limit ({response.status}) on {symbol}. Backing off...")
                         await asyncio.sleep(3.0 * (attempt + 1))
                         continue
                         
@@ -99,31 +105,29 @@ class AsynchronousDataFeed:
                         if data_list:
                             return data_list
                         else:
-                            # CIRCUIT BREAKER: Immediate break on empty structural arrays
-                            logger.warning(f"Bybit returned an empty array for {symbol}. Circuit breaker triggered.")
+                            logger.warning(f"[X-RAY] ⚠️ Bybit returned empty kline array for {symbol}.")
                             return []
                     else:
                         ret_code = payload.get("retCode")
                         if ret_code in [10006, 10002]:
-                            logger.error(f"Bybit API JSON Rate Limit ({ret_code}) hit for {symbol}. Forcing thread sleep.")
+                            logger.error(f"[X-RAY] ❌ Bybit API Rate Limit JSON Code ({ret_code}) hit for {symbol}.")
                             await asyncio.sleep(5.0)
                             return []
                             
-                        logger.warning(f"Bybit payload error {ret_code} for {symbol}. Retrying...")
+                        logger.warning(f"[X-RAY] Bybit payload error {ret_code} for {symbol}. Retrying...")
                         
             except Exception as e:
-                logger.error(f"Failed to fetch klines for {symbol} on attempt {attempt + 1}: {e}")
+                logger.error(f"[X-RAY] Failed to fetch klines for {symbol} on attempt {attempt + 1}: {e}")
             
             await asyncio.sleep(1.5 * (attempt + 1))
             
-        logger.critical(f"All historical data retries exhausted for {symbol}. Returning empty to force cooldown.")
+        logger.error(f"[X-RAY] ❌ All historical data retries exhausted for {symbol}.")
         return []
 
     async def _get_finnhub_news(self, session: aiohttp.ClientSession) -> str:
         """
         Fetches macro narrative context from Finnhub.
-        ⚡ V26 UPGRADE: Shared TTL Cache prevents 25 concurrent swarm nodes from 
-        burning Finnhub API limits during every evaluation loop.
+        Shared TTL Cache prevents concurrent swarm nodes from burning Finnhub API limits.
         """
         now = time.time()
         # Return cached news if TTL is unexpired
@@ -154,9 +158,10 @@ class AsynchronousDataFeed:
                         if headlines:
                             self._cached_news = " | ".join(headlines)
                             self._last_news_fetch = now
+                            logger.debug(f"[X-RAY] 📰 Macro News Cache Refreshed: {self._cached_news[:80]}...")
                             return self._cached_news
             except Exception as e:
-                logger.debug(f"Finnhub news fetch attempt {attempt + 1} failed: {e}")
+                logger.debug(f"[X-RAY] Finnhub news fetch attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(1.0)
                 
         return self._cached_news

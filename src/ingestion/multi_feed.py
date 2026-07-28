@@ -1,3 +1,11 @@
+"""
+💎 V50.0 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
+----------------------------------------------------
+Features absolute sequence gap intolerance for L2 validity,
+Subscription Chunking (10-arg limit compliance), Pure JSON Pings,
+Fast Float Pre-Parsing, and X-Ray Diagnostic Telemetry.
+"""
+
 import asyncio
 import aiohttp
 import json
@@ -9,10 +17,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V38.1 OMNI-SWARM: DECOUPLED INGESTION LAYER
-    Features absolute sequence gap intolerance for L2 validity,
-    Subscription Chunking (10-arg limit compliance), pure JSON pings,
-    and Fast Float Pre-Parsing for low-latency downstream execution.
+    🚀 V50.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
+    from downstream processing via a high-capacity asynchronous FIFO queue.
     """
     def __init__(
         self, 
@@ -39,7 +46,6 @@ class HighVelocityMultiFeed:
         self.orderbook_sequences: Dict[str, int] = {}
         
         self.active_ws = None  # Reference to the active WebSocket for hot-swapping
-        
         self._active_tasks = set()
         
         # High-Capacity Decoupling Queue (Prevents network backpressure)
@@ -58,7 +64,7 @@ class HighVelocityMultiFeed:
         Pulls from the high-speed FIFO queue and executes callbacks sequentially.
         Maintains strict chronological L2/L3 ordering without blocking network socket reading.
         """
-        logger.info("⚡ Decoupled Data Consumer Worker ONLINE.")
+        logger.info("[X-RAY] ⚡ Decoupled Data Consumer Worker ONLINE.")
         while self.is_running:
             try:
                 payload_type, payload_data = await self.ingestion_queue.get()
@@ -77,12 +83,13 @@ class HighVelocityMultiFeed:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"❌ Consumer worker failed to process payload: {e}", exc_info=True)
+                logger.error(f"[X-RAY] ❌ Consumer worker failed to process payload: {e}", exc_info=True)
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V38.1 OMNI-SWARM DYNAMIC HOT-SWAPPING
-        Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket.
+        🚀 V50.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
+        without needing to tear down the entire 24-coin connection multiplexer.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -109,19 +116,20 @@ class HighVelocityMultiFeed:
             # Clean up local sequence memory for dropped coin
             self.orderbook_sequences.pop(drop_symbol, None)
             
-            logger.info(f"🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
+            logger.info(f"[X-RAY] 🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
         except Exception as e:
-            logger.error(f"Hot-swap socket injection failed: {e}")
+            logger.error(f"[X-RAY] ❌ Hot-swap socket injection failed: {e}")
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V38.1 FIX: ISOLATED SNAPSHOT RESYNC
-        Forces Bybit to send a fresh orderbook snapshot for ONE symbol.
+        🚀 ISOLATED SNAPSHOT RESYNC
+        Forces Bybit to send a fresh orderbook snapshot for ONE symbol 
+        after a sequence gap is detected.
         """
         if not self.active_ws or self.active_ws.closed:
             return
             
-        logger.warning(f"🔄 Requesting isolated snapshot resync for {symbol}...")
+        logger.warning(f"[X-RAY] 🔄 Requesting isolated snapshot resync for {symbol}...")
         self.orderbook_sequences.pop(symbol, None)
         
         try:
@@ -129,7 +137,7 @@ class HighVelocityMultiFeed:
             await asyncio.sleep(0.1) # Brief pause to clear exchange-side buffers
             await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
         except Exception as e:
-            logger.error(f"Isolated resync request failed for {symbol}: {e}")
+            logger.error(f"[X-RAY] ❌ Isolated resync request failed for {symbol}: {e}")
 
     def _fast_float_parse_book(self, levels: list) -> list:
         """Pre-parses string lists into float arrays to save downstream CPU cycles."""
@@ -163,7 +171,7 @@ class HighVelocityMultiFeed:
             self.orderbook_sequences.clear()
             
             try:
-                logger.info(f"Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
+                logger.info(f"[X-RAY] 📡 Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
                 # Removed conflicting aiohttp heartbeat, relying strictly on JSON ping
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(self.ws_url) as ws:
@@ -179,25 +187,25 @@ class HighVelocityMultiFeed:
                                     try:
                                         await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
                                         if time.time() - self.last_msg_timestamp > 45.0:
-                                            logger.error("🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
+                                            logger.error("[X-RAY] 🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
                                             await ws.close()
                                             break
                                     except Exception as e:
-                                        logger.debug(f"Watchdog ping failed dynamically: {e}")
+                                        logger.debug(f"[X-RAY] Watchdog ping failed dynamically: {e}")
                                         break
                             except asyncio.CancelledError:
                                 pass
                                     
                         watchdog_task = self.track_task(connection_watchdog())
 
-                        # 🚀 V38.1 Bybit Limit: Max 10 args per request. We must chunk the payload!
+                        # 🚀 V50.0 Bybit Limit: Max 10 args per request. We must chunk the payload!
                         chunk_size = 10
                         for i in range(0, len(args_payload), chunk_size):
                             chunk = args_payload[i:i + chunk_size]
                             await ws.send_json({"op": "subscribe", "args": chunk})
                             await asyncio.sleep(0.05) # Prevent connection flooding
                             
-                        logger.info(f"Successfully multiplexed topics (chunked) for tracking matrix: {self.basket}")
+                        logger.info(f"[X-RAY] ✅ Successfully multiplexed topics (chunked) for tracking matrix: {len(self.basket)} nodes.")
 
                         async for msg in ws:
                             self.last_msg_timestamp = time.time()
@@ -233,7 +241,7 @@ class HighVelocityMultiFeed:
                                             # ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
-                                                    logger.critical(f"❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
+                                                    logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue # Skip processing this broken delta
                                                     
@@ -264,7 +272,7 @@ class HighVelocityMultiFeed:
                                             self.ingestion_queue.put_nowait(("trade", tick_payload))
 
                                 except asyncio.QueueFull:
-                                    logger.critical("🚨 OVERLOAD: Ingestion Queue is FULL. Load shedding enabled (packet dropped)!")
+                                    logger.critical("[X-RAY] 🚨 OVERLOAD: Ingestion Queue is FULL. Load shedding enabled (packet dropped)!")
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
@@ -273,13 +281,13 @@ class HighVelocityMultiFeed:
                             watchdog_task.cancel()
                         
             except Exception as e:
-                logger.error(f"Critical connection failure caught in multiplex ingestion loop: {e}", exc_info=True)
+                logger.error(f"[X-RAY] ❌ Critical connection failure caught in multiplex ingestion loop: {e}", exc_info=True)
                 
             if not self.is_running:
                 break
                 
             self.active_ws = None
-            logger.warning(f"⚠️ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
+            logger.warning(f"[X-RAY] ⚠️ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
 
@@ -289,7 +297,7 @@ class HighVelocityMultiFeed:
     def terminate_all_feeds(self):
         """Performs structural teardown actions across active streaming context pipelines."""
         self.is_running = False
-        logger.warning("Terminating multiplexed ingestion pipelines cleanly.")
+        logger.warning("[X-RAY] 🛑 Terminating multiplexed ingestion pipelines cleanly.")
         
         for task in list(self._active_tasks):
             if not task.done():

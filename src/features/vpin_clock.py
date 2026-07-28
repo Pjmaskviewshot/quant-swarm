@@ -1,18 +1,27 @@
+"""
+💎 V50.0 QUANTUM SWARM: O(1) VOLUME SYNCHRONIZED CLOCK (VPIN ENGINE)
+---------------------------------------------------------------------
+Measures Volume-Synchronized Probability of Toxicity (VPIN) and Institutional 
+Orderbook Absorption. Operates in O(1) constant time with X-Ray Diagnostic Telemetry.
+"""
+
 import time
+import logging
 import numpy as np
 from collections import deque
 from typing import Dict, Any, List
-import logging
 
 logger = logging.getLogger("QUANT_CORE.VPIN")
 
 class VolumeSynchronizedClock:
     """
-    🚀 V26.0 APEX: O(1) VOLUME SYNCHRONIZED CLOCK
-    Upgraded with mathematical Running Sums to eliminate O(N) array traversals 
+    🚀 V50.0 APEX: O(1) VOLUME SYNCHRONIZED CLOCK
+    Upgraded with mathematical Running Sums to eliminate array traversals 
     during bucket closures, reducing execution latency to absolute minimums.
+    Features X-Ray Telemetry for Institutional Absorption tracking.
     """
-    def __init__(self, bucket_volume: float = 1_000_000.0, window_size: int = 50):
+    def __init__(self, bucket_volume: float = 1_000_000.0, window_size: int = 50, symbol: str = "GENERIC"):
+        self.symbol = symbol
         self.bucket_volume = bucket_volume
         self.window_size = window_size
         
@@ -20,37 +29,39 @@ class VolumeSynchronizedClock:
         self.current_bucket_sell_vol = 0.0
         self.current_bucket_total_vol = 0.0
         
-        # 🚀 APEX METRICS: Footprint and Absorption Tracking
+        # Footprint and Absorption Tracking
         self.current_bucket_open_price = 0.0
         self.current_bucket_ticks = 0
-        
-        # 🛑 MANDATORY FOR MAIN.PY PIPELINE (Do not delete)
         self.total_buckets_closed = 0
         
-        # Stores absolute imbalances for VPIN calculation
+        # Deques for historical tracking
         self.bucket_imbalances = deque(maxlen=window_size)
-        # Stores signed imbalances for directional bias
         self.directional_imbalances = deque(maxlen=window_size)
-        # Stores VPIN history for anomaly detection (Z-score)
         self.vpin_history = deque(maxlen=window_size * 2)
 
-        # ⚡ V26 UPGRADE: O(1) Running Sum Cache
-        # Replaces expensive sum() operations on the hot path
+        # O(1) Running Sum Cache
         self._running_abs_imbalance = 0.0
         self._running_dir_imbalance = 0.0
+        self._last_log_time = {}
+
+    def _throttled_log(self, category: str, message: str, throttle_sec: float = 60.0):
+        now = time.time()
+        last = self._last_log_time.get(category, 0.0)
+        if now - last > throttle_sec:
+            self._last_log_time[category] = now
+            logger.info(message)
 
     def process_tick(self, price: float, volume: float, is_buyer_maker: bool) -> List[Dict[str, Any]]:
         """
         Ingests raw exchange ticks. Handles 'Whale Overflow' by splitting 
         massive orders across multiple volume buckets mathematically.
-        Returns a list of bucket manifests (usually empty or 1, but can be multiple on whale ticks).
+        Returns a list of bucket manifests.
         """
         manifests = []
-        remaining_volume = volume
+        remaining_volume = max(0.0, volume)
 
         # Fractional Tick Splitting Loop
         while remaining_volume > 0:
-            # Initialize bucket open price on the very first drop of volume
             if self.current_bucket_total_vol == 0.0:
                 self.current_bucket_open_price = price
                 self.current_bucket_ticks = 0
@@ -58,7 +69,7 @@ class VolumeSynchronizedClock:
             available_space = self.bucket_volume - self.current_bucket_total_vol
             chunk_vol = min(remaining_volume, available_space)
             
-            # is_buyer_maker = True means the trade was initiated by a market seller
+            # is_buyer_maker = True means trade was initiated by a market seller
             if is_buyer_maker:
                 self.current_bucket_sell_vol += chunk_vol
             else:
@@ -68,19 +79,17 @@ class VolumeSynchronizedClock:
             self.current_bucket_ticks += 1
             remaining_volume -= chunk_vol
 
-            # The Clock Strikes: Bucket is exactly full
+            # Bucket Complete
             if self.current_bucket_total_vol >= self.bucket_volume:
                 manifest = self._close_bucket(price)
-                if manifest["valid"]:
+                if manifest.get("valid"):
                     manifests.append(manifest)
 
         return manifests
 
     def _close_bucket(self, current_price: float) -> Dict[str, Any]:
-        # 1. Update master execution counter for main.py cooldowns
         self.total_buckets_closed += 1
         
-        # 2. Calculate Imbalances & Price Deltas
         buy_v = self.current_bucket_buy_vol
         sell_v = self.current_bucket_sell_vol
         price_delta = current_price - self.current_bucket_open_price
@@ -88,7 +97,7 @@ class VolumeSynchronizedClock:
         abs_imbalance = abs(buy_v - sell_v)
         signed_imbalance = buy_v - sell_v
         
-        # ⚡ V26 UPGRADE: Maintain O(1) running sums before mutating deques
+        # Maintain O(1) running sums
         if len(self.bucket_imbalances) == self.window_size:
             self._running_abs_imbalance -= self.bucket_imbalances[0]
             self._running_dir_imbalance -= self.directional_imbalances[0]
@@ -99,22 +108,19 @@ class VolumeSynchronizedClock:
         self._running_abs_imbalance += abs_imbalance
         self._running_dir_imbalance += signed_imbalance
         
-        # 3. Calculate Institutional Footprint (Avg trade size per bucket)
         avg_trade_size = self.bucket_volume / max(1, self.current_bucket_ticks)
 
-        # 4. Reset the clock for the next bucket
+        # Reset bucket parameters
         self.current_bucket_buy_vol = 0.0
         self.current_bucket_sell_vol = 0.0
         self.current_bucket_total_vol = 0.0
         self.current_bucket_ticks = 0
         self.current_bucket_open_price = 0.0
 
-        # 5. Wait for statistical significance
+        # Wait for window warm-up
         if len(self.bucket_imbalances) < self.window_size:
             return {"valid": False}
 
-        # ⚡ V26 UPGRADE: O(1) Toxicity (VPIN) and Directional Bias Calculation
-        # Added 1e-9 epsilon guard to definitively prevent ZeroDivision
         divisor = (self.window_size * self.bucket_volume) + 1e-9
         
         vpin_score = self._running_abs_imbalance / divisor
@@ -122,24 +128,35 @@ class VolumeSynchronizedClock:
 
         directional_bias = self._running_dir_imbalance / divisor
 
-        # 6. Calculate Anomaly Z-Score
+        # Calculate Anomaly Z-Score
         vpin_z_score = 0.0
         if len(self.vpin_history) >= 20:
             hist_array = np.array(self.vpin_history)
             mean = np.mean(hist_array)
-            # Standard Deviation bounded safely
             std = np.std(hist_array) + 1e-9
             vpin_z_score = (vpin_score - mean) / std
 
-        # 🚀 7. THE ABSORPTION DETECTOR
-        # If massive directional volume pushes into the market, but price moves the OPPOSITE way,
-        # it proves an institutional limit wall is absorbing the retail flow.
+        # THE ABSORPTION DETECTOR
         is_absorption_anomaly = False
-        if abs(directional_bias) >= 0.15:  # Requires significant skew to trigger
+        if abs(directional_bias) >= 0.15:
             if directional_bias > 0 and price_delta <= 0:
-                is_absorption_anomaly = True  # Heavy buying, but price dropped (Hidden Sellers)
+                is_absorption_anomaly = True  # Heavy buying absorbed by hidden sell wall
+                self._throttled_log(
+                    f"absorp_{self.symbol}", 
+                    f"[X-RAY] 🧊 ABSORPTION DETECTED // {self.symbol} | Heavy BUY flow absorbed by hidden sellers."
+                )
             elif directional_bias < 0 and price_delta >= 0:
-                is_absorption_anomaly = True  # Heavy selling, but price rose (Hidden Buyers)
+                is_absorption_anomaly = True  # Heavy selling absorbed by hidden buy wall
+                self._throttled_log(
+                    f"absorp_{self.symbol}", 
+                    f"[X-RAY] 🧊 ABSORPTION DETECTED // {self.symbol} | Heavy SELL flow absorbed by hidden buyers."
+                )
+
+        if vpin_z_score > 2.5:
+            self._throttled_log(
+                f"vpin_spike_{self.symbol}", 
+                f"[X-RAY] ⚡ VPIN TOXICITY SPIKE // {self.symbol} | Z-Score: {vpin_z_score:.2f} (Informed flow active)."
+            )
 
         return {
             "valid": True,

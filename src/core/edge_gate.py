@@ -1,17 +1,25 @@
+"""
+💎 V50.0 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
+-------------------------------------------------------------------------
+Evaluates L2 Multi-Level Order Flow Imbalance (MLOFI), Dark Pool Iceberg Absorption,
+Amihud Liquidity Vacuums, and Roll Implicit Spreads. Features X-Ray Diagnostic Telemetry.
+"""
+
+import math
+import time
+import logging
 import numpy as np
 from collections import deque
-import math
-import logging
-import time
 from typing import List, Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
+
 class MicrostructureEdgeGate:
     """
-    🚀 V36.1 APEX: PREDATORY MAKER ENGINE
-    Exploits liquidity vacuums using Maker Pegging instead of hiding from them.
-    Features strictly calibrated Institutional Amihud Thresholds.
+    🚀 V50.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
+    Features strictly calibrated Institutional Amihud Thresholds and X-Ray Telemetry.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -37,6 +45,7 @@ class MicrostructureEdgeGate:
         self._last_log_time = {}
 
     def _throttled_warn(self, category: str, message: str, throttle_sec: float = 60.0):
+        """Helper to throttle repeating log warnings and avoid terminal log spam."""
         now = time.time()
         last = self._last_log_time.get(category, 0.0)
         if now - last > throttle_sec:
@@ -44,9 +53,11 @@ class MicrostructureEdgeGate:
             logger.warning(message)
 
     def update_trade_volume(self, volume: float):
+        """Updates cumulative rolling volume for Amihud calculation."""
         self.rolling_volume += volume
         
     def update_trade_flow(self, volume: float, is_buy: bool):
+        """Tracks signed tick trade flow imbalance."""
         self.rolling_volume += volume
         if is_buy:
             self._current_trade_buy_vol += volume
@@ -54,6 +65,10 @@ class MicrostructureEdgeGate:
             self._current_trade_sell_vol += volume
 
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
+        """
+        Updates L2 Multi-Level Order Flow Imbalance (MLOFI) across book depth levels.
+        Calculates rolling Kyle's Lambda (price impact) and Amihud illiquidity metrics.
+        """
         if not self.prev_bids or not self.prev_asks:
             self.prev_bids = bids[:self.mlofi_levels]
             self.prev_asks = asks[:self.mlofi_levels]
@@ -112,8 +127,7 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # 🚀 V36.1 FIX: Institutional Amihud Thresholds
-        # Scaled up massively to eliminate false positives on normal retail chop
+        # 🚀 Institutional Amihud Thresholds (Scaled by Asset Tier)
         if "BTC" in symbol:
             amihud_threshold = 2_500_000.0  
         elif "ETH" in symbol or "SOL" in symbol:
@@ -138,6 +152,7 @@ class MicrostructureEdgeGate:
                 self.lambda_history.append(lmbda)
 
     def _calculate_instantaneous_lambda(self) -> float:
+        """Calculates Kyle's Lambda (instantaneous price impact parameter)."""
         if len(self.prices) < 2 or len(self.mlofis) < 2:
             return 0.0
         p_array = np.array(self.prices)
@@ -150,20 +165,35 @@ class MicrostructureEdgeGate:
         variance = np.var(ofi_array)
         if variance < 1e-12: return 0.0
             
-        covariance = np.cov(ofi_array, dp)[0][1]
-        return max(0.0, covariance / (variance + 1e-9))
+        try:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                covariance = np.cov(ofi_array, dp)[0][1]
+            if np.isnan(covariance): return 0.0
+            return max(0.0, float(covariance / (variance + 1e-9)))
+        except Exception:
+            return 0.0
 
     def compute_roll_spread(self) -> float:
+        """Estimates Richard Roll's implicit bid-ask spread from serial autocovariance of price changes."""
         if len(self.prices) < 10: return 0.0
         p_array = np.array(self.prices)
         dp = np.diff(p_array)
         if len(dp) < 3: return 0.0
         
-        cov = np.cov(dp[1:], dp[:-1])[0][1]
-        if cov >= 0: return 0.0 
-        return 2.0 * math.sqrt(-cov)
+        try:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                cov = np.cov(dp[1:], dp[:-1])[0][1]
+            if np.isnan(cov) or cov >= 0: return 0.0 
+            return 2.0 * math.sqrt(-cov)
+        except Exception:
+            return 0.0
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
+        """
+        🚀 V50.0 STRUCTURAL EDGE EVALUATOR
+        Evaluates confluence between statistical prediction, Order Flow Imbalance, Dark Pool Iceberg
+        absorption, and Amihud liquidity vacuums. Emits X-Ray diagnostics.
+        """
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
 
@@ -182,14 +212,15 @@ class MicrostructureEdgeGate:
         raw_baseline = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         baseline_lambda = max(1e-6, float(raw_baseline))
         
-        roll_spread = self.compute_roll_spread()
-        
-        # 🚀 V36.0 UPGRADE: Predatory Maker Mode for Amihud Liquidity Vacuums
+        # 1. PREDATORY MAKER MODE: Amihud Liquidity Vacuum Detection
         if len(self.amihud_history) >= 10:
             current_amihud = self.amihud_history[-1]
             amihud_mean = np.mean(list(self.amihud_history)[-10:])
             if amihud_mean > 0 and current_amihud > (amihud_mean * 4.0):
-                self._throttled_warn(f"vacuum_{symbol}", f"🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum.")
+                self._throttled_warn(
+                    f"vacuum_{symbol}", 
+                    f"[X-RAY] 🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum (Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x)."
+                )
                 return {
                     "action": intended_direction if intended_direction else direction, 
                     "confidence": 0.75, 
@@ -197,11 +228,11 @@ class MicrostructureEdgeGate:
                     "routing": "MAKER_ONLY"
                 }
 
-        # 🧊 DARK POOL ICEBERG ABSORPTION
+        # 2. DARK POOL ICEBERG ABSORPTION DETECTION
         if t_imb_std > 0 and current_lambda < (baseline_lambda * 0.1):
             t_imb_z = current_t_imb / t_imb_std
             if t_imb_z < -2.5: 
-                self._throttled_warn(f"darkpool_buy_{symbol}", f"🧊 DARK POOL ABSORPTION // {symbol} | Heavy selling absorbed. Reversing to BUY.")
+                self._throttled_warn(f"darkpool_buy_{symbol}", f"[X-RAY] 🧊 DARK POOL ABSORPTION // {symbol} | Heavy selling absorbed. Reversing to BUY.")
                 return {
                     "action": "BUY", 
                     "confidence": 0.85, 
@@ -209,7 +240,7 @@ class MicrostructureEdgeGate:
                     "routing": "STANDARD"
                 }
             elif t_imb_z > 2.5: 
-                self._throttled_warn(f"darkpool_sell_{symbol}", f"🧊 DARK POOL ABSORPTION // {symbol} | Heavy buying absorbed. Reversing to SELL.")
+                self._throttled_warn(f"darkpool_sell_{symbol}", f"[X-RAY] 🧊 DARK POOL ABSORPTION // {symbol} | Heavy buying absorbed. Reversing to SELL.")
                 return {
                     "action": "SELL", 
                     "confidence": 0.85, 
@@ -217,14 +248,16 @@ class MicrostructureEdgeGate:
                     "routing": "STANDARD"
                 }
 
+        # 3. CONFLUENCE GUARD: Model Direction vs. Microstructure OFI
         if intended_direction and direction != intended_direction:
             return {
                 "action": "HOLD", 
                 "confidence": 0.0, 
-                "reasoning": f"CONFLUENCE_FAILURE | RLS wants {intended_direction}, MLOFI wants {direction}",
+                "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, MLOFI wants {direction}",
                 "routing": "STANDARD"
             }
 
+        # 4. DEEP BOOK BREAKOUT: High VPIN & Expanding Price Impact
         if abs(vpin_z) >= 1.5 and current_lambda >= (baseline_lambda * 0.8):
             lambda_expansion = min(1.5, current_lambda / max(baseline_lambda, 1e-9))
             confidence = min(0.95, 0.50 + (lambda_expansion * 0.20) + (abs(vpin_z) * 0.05))

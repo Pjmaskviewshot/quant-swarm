@@ -1,3 +1,11 @@
+"""
+💎 V50.0 QUANTUM SWARM: MACRO-AWARE TENSOR MATRIX
+-------------------------------------------------
+Computes real-time cross-asset impulse propagation (BTC -> Alts).
+Uses strict 1-second binning and [t-1] lagging to eradicate Look-Ahead Bias.
+Includes X-Ray Telemetry for macro-signal detection.
+"""
+
 import math
 import time
 import numpy as np
@@ -8,17 +16,14 @@ from typing import Dict, Any, Tuple, List
 logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
-    """
-    🌌 V41.0 APEX: MACRO-AWARE TENSOR MATRIX
-    Computes real-time cross-asset impulse propagation.
-    Upgraded: Uses exact Exchange Timestamps (floored to 1-second bins) 
-    and strict [t-1] lagging to entirely eradicate Look-Ahead Bias.
-    """
     def __init__(self, history_len: int = 300):
         # Stores tuples of (1-second-binned-timestamp, last_price_in_bin)
         self.btc_prices = deque(maxlen=history_len)
         self.alt_prices = {}
         self.history_len = history_len
+        
+        # X-Ray Log Throttling to prevent console spam
+        self._last_log_time = {}
 
     def ingest_tick(self, symbol: str, price: float, exchange_timestamp: float):
         """Stores real-time tick prices, aligned by strict 1-second bins."""
@@ -76,25 +81,43 @@ class CrossAssetTensorOracle:
                 prev_lagged_btc_price = btc_dict.get(alt_ts - 3)
             
             if lagged_btc_price is not None and prev_lagged_btc_price is not None:
-                a_ret = math.log(alt_price / (prev_alt_price + 1e-9))
-                b_ret = math.log(lagged_btc_price / (prev_lagged_btc_price + 1e-9))
-                
-                aligned_a.append(a_ret)
-                aligned_b.append(b_ret)
+                try:
+                    a_ret = math.log(alt_price / (prev_alt_price + 1e-9))
+                    b_ret = math.log(lagged_btc_price / (prev_lagged_btc_price + 1e-9))
+                    
+                    aligned_a.append(a_ret)
+                    aligned_b.append(b_ret)
+                except ValueError:
+                    continue
                 
         if len(aligned_a) < 20:
             return 0.0
 
-        # 2. Compute true lagged Pearson correlation
-        correlation = np.corrcoef(aligned_b, aligned_a)[0, 1]
-        if np.isnan(correlation):
+        # 2. Compute true lagged Pearson correlation (Guarded against Zero-Variance)
+        try:
+            # Ignore Numpy warnings if price is flat and variance is 0
+            with np.errstate(divide='ignore', invalid='ignore'):
+                correlation = np.corrcoef(aligned_b, aligned_a)[0, 1]
+                
+            if np.isnan(correlation):
+                return 0.0
+        except Exception:
             return 0.0
             
         # 3. Compute leading momentum vector from BTC
         btc_momentum = np.mean(aligned_b[-10:])
         
+        # 4. Signal Generation & X-Ray Logging
         if abs(btc_momentum) > 0.0002 and correlation > 0.60:
             alpha_signal = np.sign(btc_momentum) * min(1.0, abs(correlation))
+            
+            # X-Ray Telemetry Throttler (Alert once per 60 seconds per coin)
+            now = time.time()
+            if now - self._last_log_time.get(target_symbol, 0.0) > 60.0:
+                direction = "BULLISH" if alpha_signal > 0 else "BEARISH"
+                logger.info(f"[X-RAY] 🌌 TENSOR STRIKE // {target_symbol} following BTC {direction} wave. Correlation: {correlation:.2f}")
+                self._last_log_time[target_symbol] = now
+                
             return float(alpha_signal)
             
         return 0.0

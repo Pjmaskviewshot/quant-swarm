@@ -1,3 +1,13 @@
+"""
+💎 V50.0 QUANTUM SWARM: OPTIMISTIC DECOUPLED MEMORY LEDGER
+----------------------------------------------------------
+Hyper-optimized Supabase connector featuring:
+- 100% Non-blocking Cloud execution (Zero trade-loop freezes)
+- Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
+- Pure NumPy vectorization for shadow OHLC forensics
+- Dynamic Rolling Variance for the Bayesian DNA Matrix
+"""
+
 import os
 import time
 import math
@@ -11,14 +21,6 @@ from supabase import create_client, Client
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
-    """
-    🌌 V36.0 APEX: OPTIMISTIC DECOUPLED MEMORY LEDGER
-    Hyper-optimized Supabase connector featuring:
-    - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
-    - Shadow-to-Live Auto-Promotion Engine
-    - Pure NumPy vectorization for shadow OHLC forensics
-    - Dynamic Rolling Variance for the Bayesian DNA Matrix
-    """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
@@ -39,7 +41,7 @@ class MemoryBank:
 
     def _safe_execute(self, query_builder, max_retries: int = 2):
         """
-        🚀 V36.0 FIX: Stripped out blocking time.sleep()
+        🚀 V50.0 FIX: Stripped out blocking time.sleep()
         Cloud faults instantly fail over without freezing the event loop.
         """
         for attempt in range(max_retries):
@@ -47,8 +49,9 @@ class MemoryBank:
                 return query_builder.execute()
             except Exception as e:
                 if attempt == max_retries - 1:
+                    logger.debug(f"[X-RAY] Supabase fault absorbed after {max_retries} attempts: {e}")
                     raise Exception(f"Supabase fault after {max_retries} attempts: {e}")
-                
+
     def _parse_iso_timestamp(self, ts_str: str) -> datetime:
         if ts_str.endswith('Z'):
             ts_str = ts_str.replace('Z', '+00:00')
@@ -103,9 +106,9 @@ class MemoryBank:
         try:
             self._safe_execute(self.supabase.table("quantitative_ledger").insert(payload))
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
-            logger.info(f"{label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
+            logger.info(f"[X-RAY] {label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
-            # V36.0: Explicitly do NOT log noisy stack traces for transient drops
+            # Explicitly do NOT log noisy stack traces for transient drops
             raise Exception(f"Database insert failed: {e}")
 
     def log_live_execution_result(
@@ -151,11 +154,11 @@ class MemoryBank:
                 )
                 
                 if update_res and update_res.data:
-                    logger.info(f"🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
+                    logger.info(f"[X-RAY] 🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
                 else:
-                    logger.error(f"❌ VERIFICATION FAILED: Ledger rejected update for signal {signal_id}")
+                    logger.error(f"[X-RAY] ❌ VERIFICATION FAILED: Ledger rejected update for signal {signal_id}")
             else:
-                logger.warning(f"⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
+                logger.warning(f"[X-RAY] ⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
                 
         except Exception as e:
             raise Exception(f"Database update failed: {e}")
@@ -168,7 +171,7 @@ class MemoryBank:
         interval_mins: float = 15.0
     ) -> int:
         """
-        🚀 V35 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
+        🚀 V50.0 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
         """
         resolved_count = 0
 
@@ -296,15 +299,18 @@ class MemoryBank:
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
                     self._safe_execute(self.supabase.table("quantitative_ledger").upsert(chunk))
-                logger.info(f"📊 GHOST FORENSICS: Vectorized traversal settled {len(update_batch)} predictive ledger paths.")
+                logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Vectorized traversal settled {len(update_batch)} predictive ledger paths.")
                 
             return resolved_count
 
         except Exception as e:
             raise Exception(f"Batch resolution fault: {e}")
 
-
     def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 15) -> Dict[str, Any]:
+        """
+        🚀 V50.0 Evaluates if a shadow coin has proven sufficient statistical edge 
+        to be promoted into the live capital allocation matrix.
+        """
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -356,15 +362,16 @@ class MemoryBank:
 
         except Exception as e:
             return {
-                "should_promote": False,
-                "should_demote": False,
-                "shadow_sharpe": 0.0,
-                "shadow_win_rate": 0.50,
-                "sample_count": 0,
-                "reason": f"Evaluation exception: {e}"
+                "should_promote": False, "should_demote": False, "shadow_sharpe": 0.0,
+                "shadow_win_rate": 0.50, "sample_count": 0, "reason": f"Evaluation exception: {e}"
             }
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
+        """
+        🚀 V50.0 BAYESIAN DNA MATRIX
+        Uses K-Nearest Neighbors matching on historical market regimes to determine 
+        if the current setup is statistically viable.
+        """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_obi = float(current_dna.get("z_obi", 0.0))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
@@ -399,6 +406,8 @@ class MemoryBank:
             
             if len(historical_data) < k_neighbors:
                 is_armed_default = promo_eval["should_promote"]
+                if is_armed_default:
+                    logger.info(f"[X-RAY] 🦇 SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
                 return {
                     "bayesian_edge": 0.50, 
                     "is_armed": is_armed_default, 
@@ -433,23 +442,14 @@ class MemoryBank:
                 norm_obi = (c_obi - h_obi) / std_obi
                 norm_spread = (c_spread - h_spread_pct) / std_spread
                 
-                dist = math.sqrt(
-                    (1.5 * norm_vol)**2 + 
-                    (2.0 * norm_obi)**2 + 
-                    (1.0 * norm_spread)**2
-                )
-                
-                distances.append({
-                    "distance": dist,
-                    "is_correct": 1.0 if row.get("is_correct") is True else 0.0
-                })
+                dist = math.sqrt((1.5 * norm_vol)**2 + (2.0 * norm_obi)**2 + (1.0 * norm_spread)**2)
+                distances.append({"distance": dist, "is_correct": 1.0 if row.get("is_correct") is True else 0.0})
 
             distances.sort(key=lambda x: x["distance"])
             nearest_neighbors = distances[:k_neighbors]
             
             wins = sum(n["is_correct"] for n in nearest_neighbors)
             total = len(nearest_neighbors)
-            
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
             is_armed = (bayesian_edge >= 0.55) or promo_eval["should_promote"]
@@ -460,6 +460,7 @@ class MemoryBank:
             
             promotion_event = "STABLE"
             if promo_eval["should_promote"]:
+                logger.info(f"[X-RAY] 🦇 SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
                 promotion_event = "PROMOTED_FROM_SHADOW"
             elif promo_eval["should_demote"]:
                 promotion_event = "DEMOTED_TO_SHADOW"
@@ -480,8 +481,8 @@ class MemoryBank:
         except Exception as e:
             raise Exception(f"Latent DNA matching failed: {e}")
 
-
     def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
+        """Fetches aggregate daily metrics for the Telegram Mission Control dashboard."""
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -495,12 +496,8 @@ class MemoryBank:
 
             if not rows:
                 return {
-                    "trade_count": 0,
-                    "net_pnl": 0.0,
-                    "fees_paid": 0.0,
-                    "avg_slippage_bps": 0.0,
-                    "avg_holding_mins": 0.0,
-                    "win_rate": 0.0
+                    "trade_count": 0, "net_pnl": 0.0, "fees_paid": 0.0,
+                    "avg_slippage_bps": 0.0, "avg_holding_mins": 0.0, "win_rate": 0.0
                 }
 
             pnls = [float(r.get("net_pnl", 0.0)) for r in rows]

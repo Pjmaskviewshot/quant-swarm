@@ -1,15 +1,24 @@
+"""
+💎 V50.0 QUANTUM SWARM: OMNI-SWARM CROSS-SECTIONAL SCANNER
+----------------------------------------------------------
+Scans the entire Bybit perpetual universe using PCA Beta-Stripped Alpha.
+Features Titanium Blocklist filtering, Adaptive Session Volume Thresholds, 
+Wider Spread Tolerances for Maker-Grid Arbitrage, and X-Ray Telemetry.
+"""
+
 import math
 import time
 import numpy as np
 import logging
 from typing import List, Dict, Tuple, Set, Optional
-import asyncio
+
+from features.micro_models import AdaptiveSessionClock
 
 logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V41.13 APEX: PCA Eigenvector Beta-Stripping
+    🚀 V50.0 APEX: PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market beta,
     and returns pure idiosyncratic alpha residuals for each asset.
     """
@@ -31,13 +40,13 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
             
         return np.array(residuals) * 10000.0  
     except Exception as e:
-        logger.debug(f"PCA SVD Computation failed: {e}")
+        logger.debug(f"[X-RAY] PCA SVD Computation failed (Matrix Singularity): {e}")
         return np.zeros(price_matrix.shape[0])
 
 
 class GlobalOmniScanner:
     """
-    🌌 V41.13 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V50.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit 250+ perpetual universe.
     Upgraded with Live Microstructure Spread Gating and Logarithmic Liquidity Weighting.
     Enforces a strict 30-minute swap cooldown to preserve matrix stability.
@@ -54,7 +63,7 @@ class GlobalOmniScanner:
             res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
             return {item['symbol']: item for item in res.get("result", {}).get("list", []) if item['symbol'].endswith('USDT')}
         except Exception as e:
-            logger.error(f"Global ticker fetch failed: {e}")
+            logger.error(f"[X-RAY] ❌ Global ticker fetch failed during Omni-Scan: {e}")
             return {}
 
     async def scan_and_rank_universe(
@@ -69,6 +78,7 @@ class GlobalOmniScanner:
         if protected_symbols is None:
             protected_symbols = set()
 
+        # Enforce 30-minute cooldown between hot-swaps to prevent matrix thrashing
         if time.time() - self.last_swap_time < 1800.0:
             return None, None
 
@@ -81,6 +91,7 @@ class GlobalOmniScanner:
         return_matrix_rows = []
         turnover_map = {}
 
+        # Track Global Benchmark (BTC)
         btc_data = tickers.get("BTCUSDT")
         if btc_data:
             current_btc_price = float(btc_data.get('lastPrice', 0))
@@ -93,8 +104,17 @@ class GlobalOmniScanner:
                 btc_ret = 0.0
             self.last_btc_price = current_btc_price
 
+        # 🚀 V50.0 TITANIUM BLOCKLIST
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
+        
+        # 🚀 V50.0 ADAPTIVE SESSION CLOCK
+        min_turnover = AdaptiveSessionClock.get_turnover_threshold()
+
         for sym, data in tickers.items():
             try:
+                if any(b in sym for b in banned_keywords):
+                    continue
+
                 current_price = float(data.get('lastPrice', 0))
                 turnover24h = float(data.get('turnover24h', 0))
                 bid = float(data.get('bid1Price', 0) or 0)
@@ -105,9 +125,8 @@ class GlobalOmniScanner:
                     
                 spread_bps = ((ask - bid) / bid) * 10000.0
                 
-                # 🚀 V41.13 FIX: Strict Microstructure Gate
-                # Kills stock perps, dead alts, and wide-spread traps BEFORE they enter the PCA math
-                if current_price < 0.05 or turnover24h < 40_000_000.0 or spread_bps > 8.0:
+                # 🚀 V50.0 FIX: Widened spread tolerance to 12.0 bps to feed the Maker-Grid
+                if current_price < 0.05 or turnover24h < min_turnover or spread_bps > 12.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -156,6 +175,7 @@ class GlobalOmniScanner:
                 # Logarithmic Liquidity Weighting
                 turnover_weight = math.log10(max(turnover_map[sym], 1e-9)) / 10.0 
                 
+                # V50.0 Scoring: 60% RVOL + 40% Idiosyncratic Alpha
                 swarm_score = ((rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)) * turnover_weight
                 scoring_matrix.append((swarm_score, sym, rvol_z))
             except Exception:
@@ -168,6 +188,7 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
+        # 🚀 Omni-Swarm Activation Trigger
         if top_sym not in current_basket and top_z > 3.0 and top_score > 2500.0:
             basket_scores = [
                 item for item in scoring_matrix 
@@ -179,9 +200,10 @@ class GlobalOmniScanner:
             if basket_scores:
                 deadest_score, deadest_sym, deadest_z = basket_scores[-1]
                 
+                # Only execute swap if the new asset is 5x stronger than the weakest asset
                 if top_score > (deadest_score * 5.0):
                     logger.critical(
-                        f"🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
+                        f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
                         f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
                     self.last_swap_time = time.time()  # Lock the matrix for 30 minutes

@@ -1,3 +1,11 @@
+"""
+💎 V50.0 QUANTUM SWARM: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
+-------------------------------------------------------------------------
+Computes sub-second Orderbook Elasticity (λ_OB) and Micro-Price Variance.
+Provides real-time toxicity cancellation triggers for the Predatory Maker Grid.
+Features X-Ray Diagnostic Telemetry and robust math guards.
+"""
+
 import math
 import time
 import numpy as np
@@ -9,9 +17,9 @@ logger = logging.getLogger("QUANT_CORE.MICRO_ELASTICITY")
 
 class MicroElasticityEngine:
     """
-    🔬 V37.0 APEX: MICRO-PRICE ELASTICITY & ANTI-ADVERSE SELECTION ENGINE
-    Computes sub-second Orderbook Elasticity (\lambda_OB) and Micro-Price Variance.
-    Provides real-time toxicity cancellation triggers for Maker Pegging.
+    🚀 V50.0 APEX: MICRO-PRICE ELASTICITY ENGINE
+    Maps the "stretchiness" of the orderbook. High elasticity means the book is 
+    hollow and vulnerable to toxic sweeps. Low elasticity means it's dense and safe.
     """
     def __init__(self, window_ticks: int = 100):
         self.window_ticks = window_ticks
@@ -32,6 +40,7 @@ class MicroElasticityEngine:
     def update_depth_state(self, best_bid: float, bid_qty: float, best_ask: float, ask_qty: float, ofi_fast_z: float, timestamp: float) -> dict:
         """
         Calculates Micro-Price, Real-Time Variance, and Orderbook Elasticity on every L2 tick.
+        Protected against ZeroDivision and sub-millisecond batching limits.
         """
         dt = max(0.001, timestamp - self.last_update_time) if self.last_update_time > 0 else 0.1
         self.last_update_time = timestamp
@@ -41,15 +50,18 @@ class MicroElasticityEngine:
         micro_price = (best_bid * ask_qty + best_ask * bid_qty) / total_qty
         
         if len(self.micro_prices) > 0 and micro_price > 0 and self.micro_prices[-1] > 0:
-            log_ret = math.log(micro_price / self.micro_prices[-1])
-            self.log_returns.append(log_ret)
-            
-            if len(self.log_returns) >= 10:
-                self.instant_variance = float(np.var(list(self.log_returns)[-20:]) + 1e-9)
+            try:
+                log_ret = math.log(micro_price / self.micro_prices[-1])
+                self.log_returns.append(log_ret)
                 
-            # 2. Compute Orderbook Elasticity (\lambda_OB)
-            price_delta_bps = abs((micro_price - self.micro_prices[-1]) / self.micro_prices[-1]) * 10000.0
-            self.orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
+                if len(self.log_returns) >= 10:
+                    self.instant_variance = float(np.var(list(self.log_returns)[-20:]) + 1e-9)
+                    
+                # 2. Compute Orderbook Elasticity (λ_OB)
+                price_delta_bps = abs((micro_price - self.micro_prices[-1]) / self.micro_prices[-1]) * 10000.0
+                self.orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
+            except Exception:
+                pass # Swallow rare float anomalies without breaking the ingestion thread
 
         self.micro_prices.append(micro_price)
         self.timestamps.append(timestamp)
@@ -71,8 +83,9 @@ class MicroElasticityEngine:
 
     def compute_dynamic_micro_brackets(self, current_price: float, side: str, risk_multiplier: float = 1.5) -> Tuple[float, float]:
         """
-        🚀 V37.0 FIX: Computes SL and TP distances from sub-second Micro-Price Volatility 
-        and Elasticity instead of static percentage or 5m ATR.
+        🚀 V50.0 NANO-BRACKETING: 
+        Computes SL and TP distances mathematically derived from sub-second Micro-Price 
+        Volatility and Elasticity instead of rigid, static percentages.
         """
         # Convert sub-second variance to 1-minute equivalent standard deviation
         vol_sigma = math.sqrt(self.instant_variance) * math.sqrt(60.0)
@@ -93,9 +106,9 @@ class MicroElasticityEngine:
             
         return sl_price, tp_price
 
-    def is_adverse_selection_imminent(self, side: str, depth_metrics: dict) -> bool:
+    def is_adverse_selection_imminent(self, side: str, depth_metrics: dict, symbol: str = "UNKNOWN") -> bool:
         """
-        ⚡ ANTI-ADVERSE SELECTION CANCEL TRIGGER
+        ⚡ V50.0 ANTI-ADVERSE SELECTION X-RAY GUARD
         Evaluates whether an active PostOnly order is about to be toxically filled.
         Returns True if the order book is collapsing toward our order.
         """
@@ -105,12 +118,12 @@ class MicroElasticityEngine:
         if side.upper() == "BUY":
             # Toxic sell orderbook sweep collapsing bid liquidity
             if bid_depletion_rate > 3.0 and self.orderbook_elasticity > 1.8:
-                logger.warning("🛡️ ADVERSE SELECTION GUARD // Toxic Bid Sweep Detected! Aborting Limit Peg.")
+                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
                 return True
         else:
             # Toxic buy orderbook sweep collapsing ask liquidity
             if ask_depletion_rate > 3.0 and self.orderbook_elasticity > 1.8:
-                logger.warning("🛡️ ADVERSE SELECTION GUARD // Toxic Ask Sweep Detected! Aborting Limit Peg.")
+                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
                 return True
                 
         return False
