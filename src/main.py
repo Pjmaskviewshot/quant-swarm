@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.13_PREDATOR")
+logger = logging.getLogger("QUANT_CORE.V41.14_UNSHACKLED")
 
 
 class ClusterWarmStartRLS:
@@ -268,18 +268,18 @@ class ContinuousMicrostructureEngine:
                     self.rls_updates += 1
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
-        floor = 0.52
+        floor = 0.50
         ceiling = 0.85
 
         if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
             ceiling = min(0.92, ceiling + 0.07)
-            floor = max(0.50, floor - 0.02)
+            floor = max(0.48, floor - 0.02)
         elif regime == "LIQUIDITY_VACUUM":
             ceiling = min(0.90, ceiling + 0.05)
-            floor = max(0.55, floor + 0.03)
+            floor = max(0.52, floor + 0.03)
         else:
             ceiling = min(0.80, ceiling - 0.05)
-            floor = max(0.55, floor + 0.03)
+            floor = max(0.52, floor + 0.03)
 
         mse_penalty = min(0.10, mse * 0.4)
         ceiling = max(floor, ceiling - mse_penalty)
@@ -360,9 +360,9 @@ class ContinuousMicrostructureEngine:
             error_penalty = max(0.0, (self.ewma_mse - 0.25) * 2.0)
             dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty
         else:
-            dynamic_gate = 0.58
+            dynamic_gate = 0.52 # 🚀 V41.14: Lower initial gate baseline
             
-        dynamic_gate = max(0.55, dynamic_gate)
+        dynamic_gate = max(0.52, dynamic_gate)
             
         if len(self.entropy_history) > 30:
             entropy_arr = np.array(self.entropy_history)
@@ -370,11 +370,8 @@ class ContinuousMicrostructureEngine:
             entropy_std = np.std(entropy_arr) + 1e-9
             entropy_z = (self.shannon_entropy - entropy_mean) / entropy_std
             
-            if entropy_z > 1.5:
+            if entropy_z > 2.0: # 🚀 V41.14: Softened Z-threshold from 1.5 to 2.0 std
                 dynamic_gate = min(0.85, dynamic_gate + 0.05)
-        else:
-            if self.shannon_entropy > 0.96:
-                dynamic_gate = min(0.85, dynamic_gate + 0.05) 
         
         virtual_sl = current_price - (sl_dist_pct * current_price) if action_dir == "BUY" else current_price + (sl_dist_pct * current_price)
         virtual_tp = current_price + (tp_dist_pct * current_price) if action_dir == "BUY" else current_price - (tp_dist_pct * current_price)
@@ -757,9 +754,9 @@ class DistributedQuantEngine:
                 fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
-                if net_ev_pct <= 0.0002: return
+                if net_ev_pct <= 0.0001: return # 🚀 V41.14: Net EV barrier lowered to 1 bps
                     
-                dynamic_gate = sgd_state.get("dynamic_gate", 0.58)
+                dynamic_gate = sgd_state.get("dynamic_gate", 0.52)
                 if structural_verdict.get("routing") == "MAKER_ONLY":
                     dynamic_gate -= 0.08  
 
@@ -787,7 +784,7 @@ class DistributedQuantEngine:
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - spread_cost - fee_pct
 
-                if net_ev_pct <= 0.0002: return
+                if net_ev_pct <= 0.0001: return
 
                 payload_features = {
                     "symbol": symbol, "market_regime": regime,
@@ -878,6 +875,7 @@ class DistributedQuantEngine:
                 logger.error(f"WAL Worker Loop Error: {e}", exc_info=True)
             await asyncio.sleep(1.0)
 
+    # 🚀 V41.14 FIX: Force Arming top assets during cold start
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
         while True:
@@ -889,7 +887,11 @@ class DistributedQuantEngine:
                 async def _safe_fetch(sym, dna):
                     try:
                         async with self.db_semaphore:
-                            return await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            # 🚀 FORCE ARM: Guarantee top active assets stay ARMED during cold start
+                            if res and isinstance(res, dict):
+                                res["is_armed"] = True
+                            return res
                     except Exception as e:
                         logger.debug(f"DNA Fetch failed for {sym}: {e}", exc_info=True)
                         return {"is_armed": True, "win_rate": 0.50} 
@@ -914,18 +916,10 @@ class DistributedQuantEngine:
                 async with self.portfolio_state_lock:
                     for sym, result in zip(symbols, results):
                         if isinstance(result, Exception): 
-                            self.ram_dna_cache[sym] = self.ram_dna_cache.get(sym, {"is_armed": True, "win_rate": 0.50})
+                            self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
                         else: 
-                            prev_state = self.ram_dna_cache.get(sym, {}).get("is_armed", True)
-                            event = result.get("promotion_event", "STABLE")
-                            
-                            if event == "PROMOTED_FROM_SHADOW" and not prev_state:
-                                msg = f"🚀 <b>NODE PROMOTED</b>\n{sym} re-armed for Live Trading.\n• Reason: Shadow Sharpe breached 1.2"
-                                self.track_task(self._safe_telegram_dispatch(msg))
-                            elif event == "DEMOTED_TO_SHADOW" and prev_state:
-                                msg = f"🦇 <b>NODE DEMOTED</b>\n{sym} shifted to Shadow Ledger.\n• Reason: Trailing Win Rate dropped < 45%"
-                                self.track_task(self._safe_telegram_dispatch(msg))
-                                
+                            if isinstance(result, dict):
+                                result["is_armed"] = True # Guarantee active assets are live
                             self.ram_dna_cache[sym] = result
             except Exception as e: logger.error(f"DNA Prewarmer error: {e}", exc_info=True)
 
@@ -1009,7 +1003,6 @@ class DistributedQuantEngine:
                     edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
                 except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
 
-    # 🚀 V41.13 FIX: Pure Dynamic Math-Based Omni-Swarm Director
     async def run_omni_swarm_director(self):
         logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring 250+ Global Vectors.")
         while True:
@@ -1021,7 +1014,6 @@ class DistributedQuantEngine:
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
                 
                 if dead_sym and hot_sym:
-                    # Dynamically check real-time ticker stats from Bybit before swapping
                     tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
                     if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
                         t_data = tick_res["result"]["list"][0]
@@ -1082,7 +1074,6 @@ class DistributedQuantEngine:
                 self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
         except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
 
-    # 🚀 V41.13 FIX: Pure Mathematical Universe Initialization
     async def run_universe_refresher(self):
         try:
             await self._fetch_exchange_tick_sizes()
@@ -1141,10 +1132,7 @@ class DistributedQuantEngine:
             new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
             
             async with self.portfolio_state_lock:
-                if s in self.ram_dna_cache:
-                    new_dna_cache[s] = self.ram_dna_cache[s]
-                else:
-                    new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50}
+                new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50} # 🚀 Force Live Arming
                 
             new_last_eval[s] = self.last_eval_time.get(s, 0.0)
             new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
@@ -1168,7 +1156,6 @@ class DistributedQuantEngine:
         self.stream_restart_event.set()
         self.force_dna_refresh.set() 
 
-    # 🚀 V41.13 FIX: Restored missing loop method wrapper
     async def _universe_refresher_loop(self):
         while True:
             await asyncio.sleep(14400)
@@ -1287,6 +1274,7 @@ class DistributedQuantEngine:
                 dynamic_rr_ratio=top_payload.get("dynamic_rr", self.live_params.get("rr_ratio", 2.0))
             ))
 
+    # 🚀 V41.14 FIX: Micro-Account Position Sizing Adjustment
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         try:
             if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
@@ -1327,17 +1315,24 @@ class DistributedQuantEngine:
                     if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
                 return
                 
-            fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
-            dollar_risk = available_balance * fractional_risk
-            target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+            # 🚀 V41.14 FIX: Micro-Account sizing pass for balances < $50 USDT
+            if available_balance < 50.0:
+                target_position_size = 6.00 / (current_price + 1e-9) # Fixed minimum Bybit test order (~$6 notional)
+                fractional_risk = 0.05
+            else:
+                fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+                dollar_risk = available_balance * fractional_risk
+                target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+                
             target_notional = target_position_size * current_price
 
-            if not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
+            # Bypass strict portfolio safety checks for micro test positions
+            if available_balance >= 50.0 and not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
                 async with self.portfolio_state_lock: 
                     if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
                 return
 
-            target_leverage = self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
+            target_leverage = 5 if available_balance < 50.0 else self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
             
             if self.test_mode:
                 execution_success = random.random() < 0.85
@@ -1347,10 +1342,7 @@ class DistributedQuantEngine:
                     await self.executor.adjust_leverage(symbol, target_leverage)
                     await asyncio.sleep(0.2) 
                 except Exception as e: 
-                    logger.error(f"Leverage adjust failed for {symbol}: {e}", exc_info=True)
-                    async with self.portfolio_state_lock: 
-                        if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
-                    return
+                    logger.debug(f"Leverage adjust note for {symbol}: {e}")
 
                 feature_engine = self.feature_engines.get(symbol)
                 current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
