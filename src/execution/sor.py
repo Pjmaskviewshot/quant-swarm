@@ -2,7 +2,8 @@
 💎 V50.0 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture for volatile assets,
-Strict Slippage Clamps, PostOnly Pegging, and Adverse Selection Protection.
+Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
+and Null-Guard Parity for dynamic price/qty parameters.
 """
 
 import os
@@ -116,7 +117,7 @@ class SmartOrderRouter:
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: Optional[float] = None, tp: Optional[float] = None) -> Tuple[bool, float, float]:
         """
-        Aggressive IOC Execution with robust NoneType defensive guards for SL/TP parameters.
+        Aggressive IOC Execution with robust NoneType and empty-string guards for price/qty parameters.
         Escalates price through orderbook depth to guarantee fill during extreme momentum, 
         capped at a strict max slippage limit.
         """
@@ -181,8 +182,12 @@ class SmartOrderRouter:
                     orders = hist_res.get("result", {}).get("list", [])
                     
                     if orders:
-                        cum_exec = float(orders[0].get("cumExecQty", 0.0))
-                        avg_price = float(orders[0].get("avgPrice", current_mid_price))
+                        raw_exec = orders[0].get("cumExecQty")
+                        raw_avg = orders[0].get("avgPrice")
+                        
+                        cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
+                        avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
+
                         if cum_exec > 0:
                             logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
                             return True, avg_price, cum_exec
@@ -314,8 +319,12 @@ class SmartOrderRouter:
                         hist_list = hist_response.get("result", {}).get("list", [])
                         
                         if hist_list:
-                            cum_exec = float(hist_list[0].get("cumExecQty", 0.0))
-                            avg_price = float(hist_list[0].get("avgPrice", final_target_price))
+                            raw_exec = hist_list[0].get("cumExecQty")
+                            raw_avg = hist_list[0].get("avgPrice")
+                            
+                            cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
+                            avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else final_target_price
+
                             if cum_exec > 0:
                                 logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units at {avg_price}. Spread Captured!")
                                 return True, avg_price, cum_exec
@@ -326,9 +335,14 @@ class SmartOrderRouter:
                             
                     order_info = order_list[0]
                     order_status = order_info.get("orderStatus")
-                    current_peg_price = float(order_info.get("price"))
-                    cum_exec_qty = float(order_info.get("cumExecQty", 0.0))
-                    avg_price = float(order_info.get("avgPrice", current_peg_price))
+                    
+                    raw_price = order_info.get("price")
+                    raw_exec_qty = order_info.get("cumExecQty")
+                    raw_avg = order_info.get("avgPrice")
+
+                    current_peg_price = float(raw_price) if (raw_price is not None and str(raw_price).strip() != "") else final_target_price
+                    cum_exec_qty = float(raw_exec_qty) if (raw_exec_qty is not None and str(raw_exec_qty).strip() != "") else 0.0
+                    avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_peg_price
                     
                     if order_status in ["Filled"]:
                         logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely. Earned Maker Rebates.")
@@ -368,8 +382,11 @@ class SmartOrderRouter:
                 hist_res = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
                 hist_list = hist_res.get("result", {}).get("list", [])
                 if hist_list:
-                    cum_exec = float(hist_list[0].get("cumExecQty", 0.0))
-                    avg_price = float(hist_list[0].get("avgPrice", anchor_price))
+                    raw_exec = hist_list[0].get("cumExecQty")
+                    raw_avg = hist_list[0].get("avgPrice")
+                    
+                    cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
+                    avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else anchor_price
                     if cum_exec > 0:
                         return True, avg_price, cum_exec
             except Exception: pass
