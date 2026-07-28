@@ -10,7 +10,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
 
 from services.bybit_v5 import BybitUnifiedExecutor
