@@ -3,7 +3,7 @@
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Upgraded with strict Math Guards and X-Ray Telemetry for AI memory resets.
+Upgraded with strict Math Guards, absolute gate threshold ceiling clamps, and X-Ray Telemetry.
 """
 
 import math
@@ -36,7 +36,7 @@ class AdaptiveSessionClock:
     def get_ev_floor(cls, routing_mode: str) -> float:
         if routing_mode == "MAKER_ONLY":
             return 0.00005  # +0.5 bps EV for maker limit orders
-        return 0.00010      # +1.0 bps EV for taker/iceberg orders
+        return 0.00010       # +1.0 bps EV for taker/iceberg orders
 
 
 class ClusterWarmStartRLS:
@@ -276,7 +276,13 @@ class ContinuousMicrostructureEngine:
         action_dir = "BUY" if p_up > 0.5 else "SELL"
         
         self.historical_probs.append(prob_success)
-        dynamic_gate = max(0.48, np.mean(self.historical_probs) + np.std(self.historical_probs) + max(0.0, (self.ewma_mse - 0.25) * 2.0)) if len(self.historical_probs) > 100 else 0.50
+        
+        # 🚀 CRITICAL FIX: Absolute Ceiling Clamp on Dynamic Gate [0.48, 0.85] to prevent threshold blowups (>100%)
+        if len(self.historical_probs) > 100:
+            raw_gate = np.mean(self.historical_probs) + np.std(self.historical_probs) + max(0.0, (self.ewma_mse - 0.25) * 2.0)
+            dynamic_gate = max(0.48, min(0.85, raw_gate))
+        else:
+            dynamic_gate = 0.50
             
         if len(self.entropy_history) > 30:
             entropy_z = (self.shannon_entropy - np.mean(self.entropy_history)) / (np.std(self.entropy_history) + 1e-9)
