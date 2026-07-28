@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.17_PATCHED")
+logger = logging.getLogger("QUANT_CORE.V41.18_PATCHED")
 
 
 class ClusterWarmStartRLS:
@@ -373,6 +373,9 @@ class ContinuousMicrostructureEngine:
             
             if entropy_z > 2.0: 
                 dynamic_gate = min(0.85, dynamic_gate + 0.05)
+        else:
+            if self.shannon_entropy > 0.96:
+                dynamic_gate = min(0.85, dynamic_gate + 0.05) 
         
         virtual_sl = current_price - (sl_dist_pct * current_price) if action_dir == "BUY" else current_price + (sl_dist_pct * current_price)
         virtual_tp = current_price + (tp_dist_pct * current_price) if action_dir == "BUY" else current_price - (tp_dist_pct * current_price)
@@ -705,10 +708,16 @@ class DistributedQuantEngine:
             manifests = clock.process_tick(price, volume, not is_buy)
             valid_manifests = [m for m in manifests if m.get("valid")]
             
+            # 🚀 V41.17 FIX: Fixes the vol_z NameError Execution Leak
+            vol_z = stat_engine.hawkes_z if stat_engine else 0.0
+            
             if valid_manifests: vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
             elif clock.vpin_history:
                 hist = np.array(list(clock.vpin_history)[-200:])
-                vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9)) if len(hist) >= 50 and np.std(hist) > 0 else 0.0
+                if len(hist) >= 20 and np.std(hist) > 0:
+                    vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
+                    vol_z = vpin_z # Overwrite if VPIN array is mature
+                else: vpin_z = 0.0
             else: vpin_z = 0.0
         
             throttle_time = 0.2 if abs(vpin_z) > 1.5 else 1.0
@@ -789,10 +798,8 @@ class DistributedQuantEngine:
                     
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
-                # 🚀 V41.17 FIX: NameError execution scope guard
+                # 🚀 V41.17 FIX: NameError execution scope guard around Payload
                 try:
-                    vol_z = stat_engine.hawkes_z if stat_engine else 0.0
-                    
                     payload_features = {
                         "symbol": symbol, "market_regime": regime,
                         "virtual_sl": virtual_sl, "virtual_tp": virtual_tp,
@@ -986,9 +993,10 @@ class DistributedQuantEngine:
                     async with self.circuit_breaker_lock:
                         if len(spread_hist) >= 30 and self.circuit_breakers.get(symbol, 0.0) <= now:
                             med_spread = np.median(spread_hist)
+                            spread_floor = 0.0015 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0050
                             multiplier = 4.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5.0
                                 
-                            if spread_val > med_spread * multiplier and spread_val > max(0.0010, med_spread * 1.5):
+                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
                                 logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
                                 self.circuit_breakers[symbol] = now + 60.0
                     
@@ -1100,19 +1108,24 @@ class DistributedQuantEngine:
                     if bid <= 0 or ask <= 0 or ask <= bid:
                         continue
                         
-                    if turnover >= 20_000_000.0:
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
                         full_market.append((turnover, symbol))
                         
                 full_market.sort(key=lambda x: x[0], reverse=True)
                 full_market = [item[1] for item in full_market]
                 
-            if len(full_market) < 12: 
+            if len(full_market) < 15: 
                 full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
                 
         except Exception as e:
             logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
-
+            
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "SHIB", "PEPE", "XAU", "XAG"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         new_core_basket = ["BTCUSDT"]
         
@@ -1121,11 +1134,11 @@ class DistributedQuantEngine:
                 if s != "BTCUSDT": new_core_basket.append(s)
                 
         for sym in full_market:
-            if sym not in new_core_basket and len(new_core_basket) < 12: new_core_basket.append(sym)
+            if sym not in new_core_basket and len(new_core_basket) < 15: new_core_basket.append(sym)
                 
         async with self.portfolio_state_lock:
             self.asset_basket = new_core_basket
-            self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:3]
+            self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:5]
             
         await self._prune_dead_symbols() 
         
@@ -1159,10 +1172,15 @@ class DistributedQuantEngine:
         self.stream_restart_event.set()
         self.force_dna_refresh.set() 
 
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
+
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:2], 
+                basket=self.asset_basket + self.shadow_basket[:3], 
                 intervals=[self.timeframe, "60", "240"], 
                 orderbook_callback=self.handle_incoming_orderbook_tick, 
                 screener_callback=self.handle_incoming_basket_screener_update, 
@@ -1827,6 +1845,9 @@ class DistributedQuantEngine:
         except Exception as e:
             logger.error(f"Initial boot universe fetch failed: {e}", exc_info=True)
             full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "SHIB", "PEPE", "XAU", "XAG"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
 
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
