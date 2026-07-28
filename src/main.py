@@ -43,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QUANT_CORE.V41.18_PATCHED")
+logger = logging.getLogger("QUANT_CORE.V41.19_LIVE_FIRE")
 
 
 class ClusterWarmStartRLS:
@@ -521,7 +521,6 @@ class DistributedQuantEngine:
                     self.last_eval_time.pop(key, None)
 
     async def _save_sgd_state(self):
-        # 🚀 V41.17 FIX: Thread-safe memory serialization
         state_snapshot = {}
         async with self.portfolio_state_lock:
             for sym, engine in self.stat_engines.items():
@@ -708,7 +707,6 @@ class DistributedQuantEngine:
             manifests = clock.process_tick(price, volume, not is_buy)
             valid_manifests = [m for m in manifests if m.get("valid")]
             
-            # 🚀 V41.17 FIX: Fixes the vol_z NameError Execution Leak
             vol_z = stat_engine.hawkes_z if stat_engine else 0.0
             
             if valid_manifests: vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
@@ -716,7 +714,7 @@ class DistributedQuantEngine:
                 hist = np.array(list(clock.vpin_history)[-200:])
                 if len(hist) >= 20 and np.std(hist) > 0:
                     vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
-                    vol_z = vpin_z # Overwrite if VPIN array is mature
+                    vol_z = vpin_z 
                 else: vpin_z = 0.0
             else: vpin_z = 0.0
         
@@ -798,7 +796,6 @@ class DistributedQuantEngine:
                     
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
-                # 🚀 V41.17 FIX: NameError execution scope guard around Payload
                 try:
                     payload_features = {
                         "symbol": symbol, "market_regime": regime,
@@ -1317,10 +1314,1769 @@ class DistributedQuantEngine:
             initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
 
             try: 
-                # 🚀 V41.17 FIX: Bybit V5 Unified Account Parameter Fix
-                wallet_info = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="UNIFIED", coin="USDT")
-                coin_list = wallet_info.get("result", {}).get("list", [])
-                available_balance = float(coin_list[0].get("availableBalance", 0.0)) if coin_list else 0.0
+                # 🚀 V41.19 FIX: Use executor's built-in parsed balance fetcher
+                available_balance = await self.executor.get_wallet_balance_usdt()
+            except Exception as e: 
+                logger.debug(f"Wallet fetch failed before execution: {e}", exc_info=True)
+                available_balance = 0.0
+
+            if available_balance < 5.0: 
+                logger.warning(f"⚠️ MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+                
+            if available_balance < 50.0:
+                target_position_size = 6.00 / (current_price + 1e-9)
+                fractional_risk = 0.05
+            else:
+                fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+                dollar_risk = available_balance * fractional_risk
+                target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+                
+            target_notional = target_position_size * current_price
+
+            if available_balance >= 50.0 and not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            target_leverage = 5 if available_balance < 50.0 else self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
+            
+            if self.test_mode:
+                execution_success = random.random() < 0.85
+                actual_filled_notional = target_notional
+            else:
+                try:
+                    await self.executor.adjust_leverage(symbol, target_leverage)
+                    await asyncio.sleep(0.2) 
+                except Exception as e: 
+                    logger.debug(f"Leverage adjust note for {symbol}: {e}")
+
+                feature_engine = self.feature_engines.get(symbol)
+                current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
+
+                try:
+                    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+                        res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                    else:
+                        res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
+                    
+                    execution_success = res[0] if isinstance(res, tuple) else bool(res)
+                except Exception as ex:
+                    err_str = str(ex)
+                    if any(code in err_str for code in ["10004", "10016", "10002", "500"]):
+                        logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
+                        async with self.circuit_breaker_lock:
+                            self.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
+                    elif "110007" in err_str or "not enough" in err_str or "10001" in err_str:
+                        logger.warning(f"⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                    else:
+                        logger.error(f"Execution error for {symbol}: {err_str}", exc_info=True)
+                    async with self.portfolio_state_lock: 
+                        if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                    return
+
+            if not execution_success: 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return 
+                
+            if not self.test_mode:
+                try:
+                    pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_data = pos_response.get("result", {}).get("list", [])
+                    actual_qty_filled = float(pos_data[0].get("size", 0.0)) if pos_data else 0.0
+                    actual_filled_notional = actual_qty_filled * current_price
+                    if actual_filled_notional <= 0:
+                        async with self.portfolio_state_lock: 
+                            if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                        return
+                except Exception as e:
+                    logger.warning(f"Position verification failed after execute for {symbol}: {e}", exc_info=True)
+                    actual_qty_filled = target_position_size
+                    actual_filled_notional = target_notional
+                    
+                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+                
+                ticket_msg = self.telegram.format_entry_ticket(
+                    symbol, direction, current_price, actual_qty_filled, 
+                    edge_bps, fractional_risk, regime, safe_features
+                )
+                self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
+                
+            self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
+            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio))
+            
+        except Exception as e:
+            logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
+            async with self.portfolio_state_lock: 
+                if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+
+    async def log_to_wal_async(self, action_type: str, args: list):
+        async with self.wal_lock:
+            if len(self.wal_batch_queue) > 10000:
+                self.wal_batch_queue.pop(0)
+            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
+
+    def log_to_wal_sync(self, action_type: str, args: list):
+        self.track_task(self.log_to_wal_async(action_type, args))
+
+    async def _batch_wal_flush_loop(self):
+        while True:
+            await asyncio.sleep(5.0)
+            async with self.wal_lock:
+                if not self.wal_batch_queue: continue
+                batch_to_process = self.wal_batch_queue[:]
+                self.wal_batch_queue.clear()
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed SQLite WAL write: {e}", exc_info=True)
+                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
+
+    async def run_db_wal_worker(self):
+        logger.info("🖲️ SQLITE WAL ENGINE ONLINE: High-Throughput disk logging.")
+        try:
+            async with aiosqlite.connect(self.wal_db_path) as db:
+                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
+                await db.commit()
+        except Exception as e:
+            logger.critical(f"FATAL: SQLite WAL Initialization Failed: {e}", exc_info=True)
+            return
+
+        while True:
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
+                    await db.commit()
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
+                        rows = await cursor.fetchall()
+                for row in rows:
+                    item_id, action_type, payload_str = row
+                    args = json.loads(payload_str)
+                    try:
+                        async with self.db_semaphore:
+                            if action_type == "prediction": await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
+                            elif action_type == "settlement": await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
+                        async with aiosqlite.connect(self.wal_db_path) as db:
+                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
+                            await db.commit()
+                    except asyncio.TimeoutError: 
+                        logger.debug("WAL Supabase flush timeout, will retry.")
+                        break 
+                    except Exception as e: 
+                        logger.error(f"WAL processing error for item {item_id}: {e}", exc_info=True)
+            except Exception as e: 
+                logger.error(f"WAL Worker Loop Error: {e}", exc_info=True)
+            await asyncio.sleep(1.0)
+
+    async def run_dna_prewarmer(self):
+        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
+        while True:
+            try:
+                await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
+                self.force_dna_refresh.clear()
+            except asyncio.TimeoutError: pass
+            try:
+                async def _safe_fetch(sym, dna):
+                    try:
+                        async with self.db_semaphore:
+                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            if res and isinstance(res, dict):
+                                res["is_armed"] = True
+                            return res
+                    except Exception as e:
+                        logger.debug(f"DNA Fetch failed for {sym}: {e}", exc_info=True)
+                        return {"is_armed": True, "win_rate": 0.50} 
+
+                fetch_tasks = {}
+                for symbol in list(self.asset_basket):
+                    metrics = self.screener_metrics.get(symbol, {})
+                    stat_engine = self.stat_engines.get(symbol)
+                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    spread_pct = 0.001
+                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
+                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
+
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
+                    fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
+                
+                if not fetch_tasks: continue
+                symbols = list(fetch_tasks.keys())
+                results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+                
+                async with self.portfolio_state_lock:
+                    for sym, result in zip(symbols, results):
+                        if isinstance(result, Exception): 
+                            self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
+                        else: 
+                            if isinstance(result, dict):
+                                result["is_armed"] = True 
+                            self.ram_dna_cache[sym] = result
+            except Exception as e: logger.error(f"DNA Prewarmer error: {e}", exc_info=True)
+
+    async def run_shadow_resolution_daemon(self):
+        logger.info("👻 GHOST FORENSICS ONLINE: Vectorized resolution engine activated.")
+        interval_mins = 15.0
+        try: interval_mins = float(self.timeframe)
+        except Exception: pass
+        while True:
+            await asyncio.sleep(300) 
+            try:
+                current_prices = {}
+                for sym in self.asset_basket + self.shadow_basket:
+                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
+                        current_prices[sym] = {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))}
+                if current_prices:
+                    async with self.db_semaphore:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
+                        except Exception as e: logger.debug(f"Shadow resolution batch timeout: {e}", exc_info=True)
+            except Exception as e: logger.error(f"Shadow resolution daemon error: {e}", exc_info=True)
+
+    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
+        symbol = depth_data.get("s")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+
+        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
+        is_snapshot = depth_data.get("type") == "snapshot"
+        
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+            
+            book_metrics = feature_engine.get_book_depth_metrics()
+            if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
+                best_bid = book_metrics["top_bid"]
+                best_ask = book_metrics["top_ask"]
+                
+                top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
+                top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
+                
+                if best_bid > 0 and best_ask > best_bid:
+                    self.orderbook_snapshots[symbol] = {
+                        "best_bid": best_bid, "bid_size": top_bid_size, 
+                        "best_ask": best_ask, "ask_size": top_ask_size, 
+                        "bids": bids, "asks": asks
+                    }
+                    
+                    stat_engine = self.stat_engines.get(symbol)
+                    
+                    now = time.time()
+                    spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
+                    spread_hist = self.spread_history.get(symbol)
+                    if spread_hist is not None:
+                        spread_hist.append(spread_val)
+                        
+                    async with self.circuit_breaker_lock:
+                        if len(spread_hist) >= 30 and self.circuit_breakers.get(symbol, 0.0) <= now:
+                            med_spread = np.median(spread_hist)
+                            spread_floor = 0.0015 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0050
+                            multiplier = 4.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5.0
+                                
+                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
+                                logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
+                                self.circuit_breakers[symbol] = now + 60.0
+                    
+                    if stat_engine: 
+                        stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
+                        if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
+                        
+                    elasticity = self.elasticity_engines.get(symbol)
+                    if elasticity and stat_engine:
+                        exchange_ts = float(depth_data.get("ts", time.time() * 1000)) / 1000.0
+                        elasticity.update_depth_state(best_bid, top_bid_size, best_ask, top_ask_size, stat_engine.ofi_fast_z, exchange_ts)
+
+            edge_gate = self.edge_gates.get(symbol)
+            if edge_gate and bids and asks:
+                try:
+                    f_bids, f_asks = feature_engine.get_deep_book_floats()
+                    mid_price = (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0
+                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
+                except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
+
+    async def run_omni_swarm_director(self):
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
+        while True:
+            await asyncio.sleep(15) 
+            try:
+                protected_symbols = set()
+                async with self.portfolio_state_lock:
+                    protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
+                if dead_sym and hot_sym:
+                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
+                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
+                        t_data = tick_res["result"]["list"][0]
+                        bid = float(t_data.get("bid1Price", 0.0) or 0.0)
+                        ask = float(t_data.get("ask1Price", 0.0) or 0.0)
+                        turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
+                        
+                        if bid > 0 and ask > bid:
+                            spread_bps = ((ask - bid) / bid) * 10000.0
+                            if turnover < 40_000_000.0 or spread_bps > 8.0:
+                                continue 
+                        else:
+                            continue
+                    else:
+                        continue
+                        
+                    async with self.portfolio_state_lock:
+                        if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                        if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                        
+                    self._initialize_symbol_structures([hot_sym])
+                    await self._prune_dead_symbols() 
+                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                    logger.critical(f"🚀 {hot_sym} PASSED DYNAMIC GATE AND INJECTED INTO QUANT MATRIX.")
+            except Exception as e: logger.error(f"Omni-Swarm Director iteration failed: {e}", exc_info=True)
+
+    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        self._initialize_symbol_structures([symbol]) 
+        interval, candle = str(data["interval"]), data["candle_data"]
+        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
+
+        async with self.symbol_locks[symbol]:
+            feature_engine = self.feature_engines.get(symbol)
+            if feature_engine:
+                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
+                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
+                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
+                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
+                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
+                    self.screener_memory[symbol]["last_update_time"] = time.time()
+
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        try:
+            raw_data = data.get("raw_data", {})
+            if "turnover24h" in raw_data:
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0:
+                    vol_mult = min(10.0, max(0.1, turnover / baseline))
+                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
+
+    async def run_universe_refresher(self):
+        try:
+            await self._fetch_exchange_tick_sizes()
+            tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            full_market = []
+            
+            if tickers_res.get("retCode") == 0:
+                ticker_list = tickers_res.get("result", {}).get("list", [])
+                
+                for t in ticker_list:
+                    symbol = t.get("symbol", "")
+                    if not symbol.endswith("USDT"): 
+                        continue
+                        
+                    turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                    bid = float(t.get("bid1Price", 0.0) or 0.0)
+                    ask = float(t.get("ask1Price", 0.0) or 0.0)
+                    
+                    if bid <= 0 or ask <= 0 or ask <= bid:
+                        continue
+                        
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
+                        full_market.append((turnover, symbol))
+                        
+                full_market.sort(key=lambda x: x[0], reverse=True)
+                full_market = [item[1] for item in full_market]
+                
+            if len(full_market) < 15: 
+                full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+                
+        except Exception as e:
+            logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "SHIB", "PEPE", "XAU", "XAG"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
+        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
+        new_core_basket = ["BTCUSDT"]
+        
+        async with self.portfolio_state_lock:
+            for s in self.active_positions_map.keys():
+                if s != "BTCUSDT": new_core_basket.append(s)
+                
+        for sym in full_market:
+            if sym not in new_core_basket and len(new_core_basket) < 15: new_core_basket.append(sym)
+                
+        async with self.portfolio_state_lock:
+            self.asset_basket = new_core_basket
+            self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:5]
+            
+        await self._prune_dead_symbols() 
+        
+        new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+        for s in self.asset_basket + self.shadow_basket:
+            new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
+            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
+            
+            async with self.portfolio_state_lock:
+                new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50} 
+                
+            new_last_eval[s] = self.last_eval_time.get(s, 0.0)
+            new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
+            new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+            new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate(window_size=100))
+            new_el_engines[s] = self.elasticity_engines.get(s, MicroElasticityEngine())
+            new_symbol_locks[s] = self.symbol_locks.get(s, asyncio.Lock())
+            new_eval_semaphores[s] = self.eval_semaphores.get(s, asyncio.Semaphore(1))
+            new_spread_history[s] = self.spread_history.get(s, deque(maxlen=50))
+            
+        self.vpin_clocks, self.stat_engines, self.last_eval_time, self.orderbook_snapshots, self.feature_engines, self.edge_gates, self.symbol_locks, self.eval_semaphores, self.elasticity_engines, self.spread_history = new_vpin_clocks, new_stat, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history
+        
+        async with self.portfolio_state_lock:
+            self.ram_dna_cache = new_dna_cache
+
+        try:
+            historical_data = {sym: list(self.screener_memory[sym]["prices"]) for sym in self.asset_basket if self.screener_memory.get(sym) and len(self.screener_memory[sym].get("prices", [])) > 30}
+            if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
+        except Exception as e: logger.error(f"Correlation matrix update failed: {e}", exc_info=True)
+
+        self.stream_restart_event.set()
+        self.force_dna_refresh.set() 
+
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
+
+    async def stream_manager_loop(self):
+        while True:
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:3], 
+                intervals=[self.timeframe, "60", "240"], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
+            self.stream_feed_instance = stream_feed  
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            def _on_stream_done(t):
+                if not t.cancelled() and not self.stream_restart_event.is_set(): 
+                    self.stream_restart_event.set()
+                    
+            stream_task.add_done_callback(_on_stream_done)
+            await self.stream_restart_event.wait()
+            stream_task.cancel()
+            stream_feed.terminate_all_feeds()
+            self.stream_restart_event.clear()
+            self.last_socket_reconnect = time.time() 
+            await asyncio.sleep(2)
+
+    async def run_exchange_state_reconciliation_daemon(self):
+        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
+        while True:
+            await asyncio.sleep(15)
+            try:
+                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+                if pos_response.get("retCode") != 0: continue
+                
+                actual_positions = pos_response.get("result", {}).get("list", [])
+                active_symbols = [p["symbol"] for p in actual_positions if float(p.get("size", 0.0)) > 0]
+                
+                async with self.portfolio_state_lock:
+                    symbols_to_check = list(self.active_positions_map.keys())
+                    for symbol in symbols_to_check:
+                        if symbol not in active_symbols:
+                            active_daemon = self.daemon_tasks.get(symbol)
+                            if not active_daemon or active_daemon.done():
+                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
+                                self.active_positions_map.pop(symbol, None)
+                                self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
+
+    async def run_global_capital_auction_worker(self):
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
+        while True:
+            await asyncio.sleep(0.5) 
+            
+            async with self.portfolio_state_lock:
+                if len(self.active_positions_map) >= 5:
+                    continue
+
+            best_candidate = None
+            async with self.auction_lock:
+                if not self.auction_queue:
+                    continue
+                    
+                if len(self.auction_queue) > 1000:
+                    self.auction_queue = heapq.nsmallest(500, self.auction_queue) 
+                    heapq.heapify(self.auction_queue)
+                    
+                valid_candidates = []
+                now = time.time()
+                while self.auction_queue:
+                    item = heapq.heappop(self.auction_queue)
+                    _, _, sym, payload = item
+                    if now - payload["timestamp"] < 2.0:
+                        valid_candidates.append(item)
+                        
+                if not valid_candidates: continue
+                    
+                best_candidate = valid_candidates[0]
+                for i in range(1, len(valid_candidates)):
+                    heapq.heappush(self.auction_queue, valid_candidates[i])
+
+            if not best_candidate: continue
+            
+            top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+            top_sharpe = -top_neg_sharpe
+
+            async with self.portfolio_state_lock:
+                if top_symbol in self.active_positions_map or len(self.active_positions_map) >= 5:
+                    continue
+                    
+                current_ob = self.orderbook_snapshots.get(top_symbol)
+                if current_ob and current_ob.get("best_bid", 0) > 0:
+                    live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
+                    drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
+                    if drift_pct > 0.0015: 
+                        logger.warning(f"⏳ AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting execution.")
+                        continue
+
+                self.active_positions_map[top_symbol] = top_payload["action"]
+            
+            logger.critical(
+                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+            )
+            
+            self.track_task(self.execute_statistical_signal(
+                top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                top_payload.get("payload_features"), elasticity=top_payload.get("elasticity"),
+                dynamic_rr_ratio=top_payload.get("dynamic_rr", self.live_params.get("rr_ratio", 2.0))
+            ))
+
+    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
+        try:
+            if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
+                logger.warning(f"⚠️ Lifecycle daemon active for {symbol}. Aborting duplicate.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            signal_id = str(uuid.uuid4())
+            sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
+            
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
+            tp_distance = sl_distance * dynamic_rr_ratio 
+            
+            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+            
+            if direction == "BUY":
+                raw_sl = min(current_price - (tp_distance * 0.1), current_price - sl_distance)
+                raw_tp = current_price + tp_distance
+            else:
+                raw_sl = max(current_price + (tp_distance * 0.1), current_price + sl_distance)
+                raw_tp = current_price - tp_distance
+                
+            initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
+
+            try: 
+                # 🚀 V41.19 FIX: Use executor's built-in parsed balance fetcher
+                available_balance = await self.executor.get_wallet_balance_usdt()
+            except Exception as e: 
+                logger.debug(f"Wallet fetch failed before execution: {e}", exc_info=True)
+                available_balance = 0.0
+
+            if available_balance < 5.0: 
+                logger.warning(f"⚠️ MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+                
+            if available_balance < 50.0:
+                target_position_size = 6.00 / (current_price + 1e-9)
+                fractional_risk = 0.05
+            else:
+                fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+                dollar_risk = available_balance * fractional_risk
+                target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+                
+            target_notional = target_position_size * current_price
+
+            if available_balance >= 50.0 and not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            target_leverage = 5 if available_balance < 50.0 else self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
+            
+            if self.test_mode:
+                execution_success = random.random() < 0.85
+                actual_filled_notional = target_notional
+            else:
+                try:
+                    await self.executor.adjust_leverage(symbol, target_leverage)
+                    await asyncio.sleep(0.2) 
+                except Exception as e: 
+                    logger.debug(f"Leverage adjust note for {symbol}: {e}")
+
+                feature_engine = self.feature_engines.get(symbol)
+                current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
+
+                try:
+                    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+                        res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                    else:
+                        res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
+                    
+                    execution_success = res[0] if isinstance(res, tuple) else bool(res)
+                except Exception as ex:
+                    err_str = str(ex)
+                    if any(code in err_str for code in ["10004", "10016", "10002", "500"]):
+                        logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
+                        async with self.circuit_breaker_lock:
+                            self.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
+                    elif "110007" in err_str or "not enough" in err_str or "10001" in err_str:
+                        logger.warning(f"⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                    else:
+                        logger.error(f"Execution error for {symbol}: {err_str}", exc_info=True)
+                    async with self.portfolio_state_lock: 
+                        if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                    return
+
+            if not execution_success: 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return 
+                
+            if not self.test_mode:
+                try:
+                    pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_data = pos_response.get("result", {}).get("list", [])
+                    actual_qty_filled = float(pos_data[0].get("size", 0.0)) if pos_data else 0.0
+                    actual_filled_notional = actual_qty_filled * current_price
+                    if actual_filled_notional <= 0:
+                        async with self.portfolio_state_lock: 
+                            if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                        return
+                except Exception as e:
+                    logger.warning(f"Position verification failed after execute for {symbol}: {e}", exc_info=True)
+                    actual_qty_filled = target_position_size
+                    actual_filled_notional = target_notional
+                    
+                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+                
+                ticket_msg = self.telegram.format_entry_ticket(
+                    symbol, direction, current_price, actual_qty_filled, 
+                    edge_bps, fractional_risk, regime, safe_features
+                )
+                self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
+                
+            self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
+            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio))
+            
+        except Exception as e:
+            logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
+            async with self.portfolio_state_lock: 
+                if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+
+    async def log_to_wal_async(self, action_type: str, args: list):
+        async with self.wal_lock:
+            if len(self.wal_batch_queue) > 10000:
+                self.wal_batch_queue.pop(0)
+            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
+
+    def log_to_wal_sync(self, action_type: str, args: list):
+        self.track_task(self.log_to_wal_async(action_type, args))
+
+    async def _batch_wal_flush_loop(self):
+        while True:
+            await asyncio.sleep(5.0)
+            async with self.wal_lock:
+                if not self.wal_batch_queue: continue
+                batch_to_process = self.wal_batch_queue[:]
+                self.wal_batch_queue.clear()
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed SQLite WAL write: {e}", exc_info=True)
+                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
+
+    async def run_db_wal_worker(self):
+        logger.info("🖲️ SQLITE WAL ENGINE ONLINE: High-Throughput disk logging.")
+        try:
+            async with aiosqlite.connect(self.wal_db_path) as db:
+                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
+                await db.commit()
+        except Exception as e:
+            logger.critical(f"FATAL: SQLite WAL Initialization Failed: {e}", exc_info=True)
+            return
+
+        while True:
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
+                    await db.commit()
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
+                        rows = await cursor.fetchall()
+                for row in rows:
+                    item_id, action_type, payload_str = row
+                    args = json.loads(payload_str)
+                    try:
+                        async with self.db_semaphore:
+                            if action_type == "prediction": await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
+                            elif action_type == "settlement": await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
+                        async with aiosqlite.connect(self.wal_db_path) as db:
+                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
+                            await db.commit()
+                    except asyncio.TimeoutError: 
+                        logger.debug("WAL Supabase flush timeout, will retry.")
+                        break 
+                    except Exception as e: 
+                        logger.error(f"WAL processing error for item {item_id}: {e}", exc_info=True)
+            except Exception as e: 
+                logger.error(f"WAL Worker Loop Error: {e}", exc_info=True)
+            await asyncio.sleep(1.0)
+
+    async def run_dna_prewarmer(self):
+        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
+        while True:
+            try:
+                await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
+                self.force_dna_refresh.clear()
+            except asyncio.TimeoutError: pass
+            try:
+                async def _safe_fetch(sym, dna):
+                    try:
+                        async with self.db_semaphore:
+                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            if res and isinstance(res, dict):
+                                res["is_armed"] = True
+                            return res
+                    except Exception as e:
+                        logger.debug(f"DNA Fetch failed for {sym}: {e}", exc_info=True)
+                        return {"is_armed": True, "win_rate": 0.50} 
+
+                fetch_tasks = {}
+                for symbol in list(self.asset_basket):
+                    metrics = self.screener_metrics.get(symbol, {})
+                    stat_engine = self.stat_engines.get(symbol)
+                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    spread_pct = 0.001
+                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
+                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
+
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
+                    fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
+                
+                if not fetch_tasks: continue
+                symbols = list(fetch_tasks.keys())
+                results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+                
+                async with self.portfolio_state_lock:
+                    for sym, result in zip(symbols, results):
+                        if isinstance(result, Exception): 
+                            self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
+                        else: 
+                            if isinstance(result, dict):
+                                result["is_armed"] = True 
+                            self.ram_dna_cache[sym] = result
+            except Exception as e: logger.error(f"DNA Prewarmer error: {e}", exc_info=True)
+
+    async def run_shadow_resolution_daemon(self):
+        logger.info("👻 GHOST FORENSICS ONLINE: Vectorized resolution engine activated.")
+        interval_mins = 15.0
+        try: interval_mins = float(self.timeframe)
+        except Exception: pass
+        while True:
+            await asyncio.sleep(300) 
+            try:
+                current_prices = {}
+                for sym in self.asset_basket + self.shadow_basket:
+                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
+                        current_prices[sym] = {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))}
+                if current_prices:
+                    async with self.db_semaphore:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
+                        except Exception as e: logger.debug(f"Shadow resolution batch timeout: {e}", exc_info=True)
+            except Exception as e: logger.error(f"Shadow resolution daemon error: {e}", exc_info=True)
+
+    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
+        symbol = depth_data.get("s")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+
+        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
+        is_snapshot = depth_data.get("type") == "snapshot"
+        
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+            
+            book_metrics = feature_engine.get_book_depth_metrics()
+            if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
+                best_bid = book_metrics["top_bid"]
+                best_ask = book_metrics["top_ask"]
+                
+                top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
+                top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
+                
+                if best_bid > 0 and best_ask > best_bid:
+                    self.orderbook_snapshots[symbol] = {
+                        "best_bid": best_bid, "bid_size": top_bid_size, 
+                        "best_ask": best_ask, "ask_size": top_ask_size, 
+                        "bids": bids, "asks": asks
+                    }
+                    
+                    stat_engine = self.stat_engines.get(symbol)
+                    
+                    now = time.time()
+                    spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
+                    spread_hist = self.spread_history.get(symbol)
+                    if spread_hist is not None:
+                        spread_hist.append(spread_val)
+                        
+                    async with self.circuit_breaker_lock:
+                        if len(spread_hist) >= 30 and self.circuit_breakers.get(symbol, 0.0) <= now:
+                            med_spread = np.median(spread_hist)
+                            spread_floor = 0.0015 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0050
+                            multiplier = 4.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5.0
+                                
+                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
+                                logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
+                                self.circuit_breakers[symbol] = now + 60.0
+                    
+                    if stat_engine: 
+                        stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
+                        if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
+                        
+                    elasticity = self.elasticity_engines.get(symbol)
+                    if elasticity and stat_engine:
+                        exchange_ts = float(depth_data.get("ts", time.time() * 1000)) / 1000.0
+                        elasticity.update_depth_state(best_bid, top_bid_size, best_ask, top_ask_size, stat_engine.ofi_fast_z, exchange_ts)
+
+            edge_gate = self.edge_gates.get(symbol)
+            if edge_gate and bids and asks:
+                try:
+                    f_bids, f_asks = feature_engine.get_deep_book_floats()
+                    mid_price = (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0
+                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
+                except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
+
+    async def run_omni_swarm_director(self):
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
+        while True:
+            await asyncio.sleep(15) 
+            try:
+                protected_symbols = set()
+                async with self.portfolio_state_lock:
+                    protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
+                if dead_sym and hot_sym:
+                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
+                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
+                        t_data = tick_res["result"]["list"][0]
+                        bid = float(t_data.get("bid1Price", 0.0) or 0.0)
+                        ask = float(t_data.get("ask1Price", 0.0) or 0.0)
+                        turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
+                        
+                        if bid > 0 and ask > bid:
+                            spread_bps = ((ask - bid) / bid) * 10000.0
+                            if turnover < 40_000_000.0 or spread_bps > 8.0:
+                                continue 
+                        else:
+                            continue
+                    else:
+                        continue
+                        
+                    async with self.portfolio_state_lock:
+                        if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                        if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                        
+                    self._initialize_symbol_structures([hot_sym])
+                    await self._prune_dead_symbols() 
+                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                    logger.critical(f"🚀 {hot_sym} PASSED DYNAMIC GATE AND INJECTED INTO QUANT MATRIX.")
+            except Exception as e: logger.error(f"Omni-Swarm Director iteration failed: {e}", exc_info=True)
+
+    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        self._initialize_symbol_structures([symbol]) 
+        interval, candle = str(data["interval"]), data["candle_data"]
+        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
+
+        async with self.symbol_locks[symbol]:
+            feature_engine = self.feature_engines.get(symbol)
+            if feature_engine:
+                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
+                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
+                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
+                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
+                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
+                    self.screener_memory[symbol]["last_update_time"] = time.time()
+
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        try:
+            raw_data = data.get("raw_data", {})
+            if "turnover24h" in raw_data:
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0:
+                    vol_mult = min(10.0, max(0.1, turnover / baseline))
+                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
+
+    async def run_universe_refresher(self):
+        try:
+            await self._fetch_exchange_tick_sizes()
+            tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            full_market = []
+            
+            if tickers_res.get("retCode") == 0:
+                ticker_list = tickers_res.get("result", {}).get("list", [])
+                
+                for t in ticker_list:
+                    symbol = t.get("symbol", "")
+                    if not symbol.endswith("USDT"): 
+                        continue
+                        
+                    turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                    bid = float(t.get("bid1Price", 0.0) or 0.0)
+                    ask = float(t.get("ask1Price", 0.0) or 0.0)
+                    
+                    if bid <= 0 or ask <= 0 or ask <= bid:
+                        continue
+                        
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
+                        full_market.append((turnover, symbol))
+                        
+                full_market.sort(key=lambda x: x[0], reverse=True)
+                full_market = [item[1] for item in full_market]
+                
+            if len(full_market) < 15: 
+                full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+                
+        except Exception as e:
+            logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "SHIB", "PEPE", "XAU", "XAG"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
+        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
+        new_core_basket = ["BTCUSDT"]
+        
+        async with self.portfolio_state_lock:
+            for s in self.active_positions_map.keys():
+                if s != "BTCUSDT": new_core_basket.append(s)
+                
+        for sym in full_market:
+            if sym not in new_core_basket and len(new_core_basket) < 15: new_core_basket.append(sym)
+                
+        async with self.portfolio_state_lock:
+            self.asset_basket = new_core_basket
+            self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:5]
+            
+        await self._prune_dead_symbols() 
+        
+        new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+        for s in self.asset_basket + self.shadow_basket:
+            new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
+            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
+            
+            async with self.portfolio_state_lock:
+                new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50} 
+                
+            new_last_eval[s] = self.last_eval_time.get(s, 0.0)
+            new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
+            new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+            new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate(window_size=100))
+            new_el_engines[s] = self.elasticity_engines.get(s, MicroElasticityEngine())
+            new_symbol_locks[s] = self.symbol_locks.get(s, asyncio.Lock())
+            new_eval_semaphores[s] = self.eval_semaphores.get(s, asyncio.Semaphore(1))
+            new_spread_history[s] = self.spread_history.get(s, deque(maxlen=50))
+            
+        self.vpin_clocks, self.stat_engines, self.last_eval_time, self.orderbook_snapshots, self.feature_engines, self.edge_gates, self.symbol_locks, self.eval_semaphores, self.elasticity_engines, self.spread_history = new_vpin_clocks, new_stat, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history
+        
+        async with self.portfolio_state_lock:
+            self.ram_dna_cache = new_dna_cache
+
+        try:
+            historical_data = {sym: list(self.screener_memory[sym]["prices"]) for sym in self.asset_basket if self.screener_memory.get(sym) and len(self.screener_memory[sym].get("prices", [])) > 30}
+            if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
+        except Exception as e: logger.error(f"Correlation matrix update failed: {e}", exc_info=True)
+
+        self.stream_restart_event.set()
+        self.force_dna_refresh.set() 
+
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
+
+    async def stream_manager_loop(self):
+        while True:
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:3], 
+                intervals=[self.timeframe, "60", "240"], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
+            self.stream_feed_instance = stream_feed  
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            def _on_stream_done(t):
+                if not t.cancelled() and not self.stream_restart_event.is_set(): 
+                    self.stream_restart_event.set()
+                    
+            stream_task.add_done_callback(_on_stream_done)
+            await self.stream_restart_event.wait()
+            stream_task.cancel()
+            stream_feed.terminate_all_feeds()
+            self.stream_restart_event.clear()
+            self.last_socket_reconnect = time.time() 
+            await asyncio.sleep(2)
+
+    async def run_exchange_state_reconciliation_daemon(self):
+        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
+        while True:
+            await asyncio.sleep(15)
+            try:
+                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+                if pos_response.get("retCode") != 0: continue
+                
+                actual_positions = pos_response.get("result", {}).get("list", [])
+                active_symbols = [p["symbol"] for p in actual_positions if float(p.get("size", 0.0)) > 0]
+                
+                async with self.portfolio_state_lock:
+                    symbols_to_check = list(self.active_positions_map.keys())
+                    for symbol in symbols_to_check:
+                        if symbol not in active_symbols:
+                            active_daemon = self.daemon_tasks.get(symbol)
+                            if not active_daemon or active_daemon.done():
+                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
+                                self.active_positions_map.pop(symbol, None)
+                                self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
+
+    async def run_global_capital_auction_worker(self):
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
+        while True:
+            await asyncio.sleep(0.5) 
+            
+            async with self.portfolio_state_lock:
+                if len(self.active_positions_map) >= 5:
+                    continue
+
+            best_candidate = None
+            async with self.auction_lock:
+                if not self.auction_queue:
+                    continue
+                    
+                if len(self.auction_queue) > 1000:
+                    self.auction_queue = heapq.nsmallest(500, self.auction_queue) 
+                    heapq.heapify(self.auction_queue)
+                    
+                valid_candidates = []
+                now = time.time()
+                while self.auction_queue:
+                    item = heapq.heappop(self.auction_queue)
+                    _, _, sym, payload = item
+                    if now - payload["timestamp"] < 2.0:
+                        valid_candidates.append(item)
+                        
+                if not valid_candidates: continue
+                    
+                best_candidate = valid_candidates[0]
+                for i in range(1, len(valid_candidates)):
+                    heapq.heappush(self.auction_queue, valid_candidates[i])
+
+            if not best_candidate: continue
+            
+            top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+            top_sharpe = -top_neg_sharpe
+
+            async with self.portfolio_state_lock:
+                if top_symbol in self.active_positions_map or len(self.active_positions_map) >= 5:
+                    continue
+                    
+                current_ob = self.orderbook_snapshots.get(top_symbol)
+                if current_ob and current_ob.get("best_bid", 0) > 0:
+                    live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
+                    drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
+                    if drift_pct > 0.0015: 
+                        logger.warning(f"⏳ AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting execution.")
+                        continue
+
+                self.active_positions_map[top_symbol] = top_payload["action"]
+            
+            logger.critical(
+                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+            )
+            
+            self.track_task(self.execute_statistical_signal(
+                top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                top_payload.get("payload_features"), elasticity=top_payload.get("elasticity"),
+                dynamic_rr_ratio=top_payload.get("dynamic_rr", self.live_params.get("rr_ratio", 2.0))
+            ))
+
+    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
+        try:
+            if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
+                logger.warning(f"⚠️ Lifecycle daemon active for {symbol}. Aborting duplicate.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            signal_id = str(uuid.uuid4())
+            sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
+            
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
+            tp_distance = sl_distance * dynamic_rr_ratio 
+            
+            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+            
+            if direction == "BUY":
+                raw_sl = min(current_price - (tp_distance * 0.1), current_price - sl_distance)
+                raw_tp = current_price + tp_distance
+            else:
+                raw_sl = max(current_price + (tp_distance * 0.1), current_price + sl_distance)
+                raw_tp = current_price - tp_distance
+                
+            initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
+
+            try: 
+                # 🚀 V41.19 FIX: Use executor's built-in parsed balance fetcher
+                available_balance = await self.executor.get_wallet_balance_usdt()
+            except Exception as e: 
+                logger.debug(f"Wallet fetch failed before execution: {e}", exc_info=True)
+                available_balance = 0.0
+
+            if available_balance < 5.0: 
+                logger.warning(f"⚠️ MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+                
+            if available_balance < 50.0:
+                target_position_size = 6.00 / (current_price + 1e-9)
+                fractional_risk = 0.05
+            else:
+                fractional_risk = self.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+                dollar_risk = available_balance * fractional_risk
+                target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
+                
+            target_notional = target_position_size * current_price
+
+            if available_balance >= 50.0 and not self.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            target_leverage = 5 if available_balance < 50.0 else self.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
+            
+            if self.test_mode:
+                execution_success = random.random() < 0.85
+                actual_filled_notional = target_notional
+            else:
+                try:
+                    await self.executor.adjust_leverage(symbol, target_leverage)
+                    await asyncio.sleep(0.2) 
+                except Exception as e: 
+                    logger.debug(f"Leverage adjust note for {symbol}: {e}")
+
+                feature_engine = self.feature_engines.get(symbol)
+                current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
+
+                try:
+                    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
+                        res = await self.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
+                    else:
+                        res = await self.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
+                    
+                    execution_success = res[0] if isinstance(res, tuple) else bool(res)
+                except Exception as ex:
+                    err_str = str(ex)
+                    if any(code in err_str for code in ["10004", "10016", "10002", "500"]):
+                        logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
+                        async with self.circuit_breaker_lock:
+                            self.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
+                    elif "110007" in err_str or "not enough" in err_str or "10001" in err_str:
+                        logger.warning(f"⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                    else:
+                        logger.error(f"Execution error for {symbol}: {err_str}", exc_info=True)
+                    async with self.portfolio_state_lock: 
+                        if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                    return
+
+            if not execution_success: 
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return 
+                
+            if not self.test_mode:
+                try:
+                    pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_data = pos_response.get("result", {}).get("list", [])
+                    actual_qty_filled = float(pos_data[0].get("size", 0.0)) if pos_data else 0.0
+                    actual_filled_notional = actual_qty_filled * current_price
+                    if actual_filled_notional <= 0:
+                        async with self.portfolio_state_lock: 
+                            if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                        return
+                except Exception as e:
+                    logger.warning(f"Position verification failed after execute for {symbol}: {e}", exc_info=True)
+                    actual_qty_filled = target_position_size
+                    actual_filled_notional = target_notional
+                    
+                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+                self.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+                
+                ticket_msg = self.telegram.format_entry_ticket(
+                    symbol, direction, current_price, actual_qty_filled, 
+                    edge_bps, fractional_risk, regime, safe_features
+                )
+                self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
+                
+            self.risk_vault.update_position_ledger(symbol, actual_filled_notional)
+            self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, signal_id, direction, current_price, atr, {"allocated_value_usdt": actual_filled_notional, "size": actual_qty_filled if not self.test_mode else target_position_size}, target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio))
+            
+        except Exception as e:
+            logger.error(f"Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
+            async with self.portfolio_state_lock: 
+                if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+
+    async def log_to_wal_async(self, action_type: str, args: list):
+        async with self.wal_lock:
+            if len(self.wal_batch_queue) > 10000:
+                self.wal_batch_queue.pop(0)
+            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
+
+    def log_to_wal_sync(self, action_type: str, args: list):
+        self.track_task(self.log_to_wal_async(action_type, args))
+
+    async def _batch_wal_flush_loop(self):
+        while True:
+            await asyncio.sleep(5.0)
+            async with self.wal_lock:
+                if not self.wal_batch_queue: continue
+                batch_to_process = self.wal_batch_queue[:]
+                self.wal_batch_queue.clear()
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed SQLite WAL write: {e}", exc_info=True)
+                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
+
+    async def run_db_wal_worker(self):
+        logger.info("🖲️ SQLITE WAL ENGINE ONLINE: High-Throughput disk logging.")
+        try:
+            async with aiosqlite.connect(self.wal_db_path) as db:
+                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
+                await db.commit()
+        except Exception as e:
+            logger.critical(f"FATAL: SQLite WAL Initialization Failed: {e}", exc_info=True)
+            return
+
+        while True:
+            try:
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
+                    await db.commit()
+                async with aiosqlite.connect(self.wal_db_path) as db:
+                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
+                        rows = await cursor.fetchall()
+                for row in rows:
+                    item_id, action_type, payload_str = row
+                    args = json.loads(payload_str)
+                    try:
+                        async with self.db_semaphore:
+                            if action_type == "prediction": await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
+                            elif action_type == "settlement": await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
+                        async with aiosqlite.connect(self.wal_db_path) as db:
+                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
+                            await db.commit()
+                    except asyncio.TimeoutError: 
+                        logger.debug("WAL Supabase flush timeout, will retry.")
+                        break 
+                    except Exception as e: 
+                        logger.error(f"WAL processing error for item {item_id}: {e}", exc_info=True)
+            except Exception as e: 
+                logger.error(f"WAL Worker Loop Error: {e}", exc_info=True)
+            await asyncio.sleep(1.0)
+
+    async def run_dna_prewarmer(self):
+        logger.info("🔥 RAM PRE-WARMER ONLINE: Pre-fetching database edge logic.")
+        while True:
+            try:
+                await asyncio.wait_for(self.force_dna_refresh.wait(), timeout=300.0)
+                self.force_dna_refresh.clear()
+            except asyncio.TimeoutError: pass
+            try:
+                async def _safe_fetch(sym, dna):
+                    try:
+                        async with self.db_semaphore:
+                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            if res and isinstance(res, dict):
+                                res["is_armed"] = True
+                            return res
+                    except Exception as e:
+                        logger.debug(f"DNA Fetch failed for {sym}: {e}", exc_info=True)
+                        return {"is_armed": True, "win_rate": 0.50} 
+
+                fetch_tasks = {}
+                for symbol in list(self.asset_basket):
+                    metrics = self.screener_metrics.get(symbol, {})
+                    stat_engine = self.stat_engines.get(symbol)
+                    z_obi = stat_engine.ofi_fast_z if stat_engine else 0.0
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    spread_pct = 0.001
+                    if ob.get("best_bid", 0) > 0 and ob.get("best_ask", 0) > 0:
+                        spread_pct = (ob["best_ask"] - ob["best_bid"]) / ob["best_bid"]
+
+                    current_dna = {"vol_mult": metrics.get("vol_mult", 1.0), "z_obi": z_obi, "spread_pct": spread_pct, "symbol": symbol}
+                    fetch_tasks[symbol] = _safe_fetch(symbol, current_dna)
+                
+                if not fetch_tasks: continue
+                symbols = list(fetch_tasks.keys())
+                results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+                
+                async with self.portfolio_state_lock:
+                    for sym, result in zip(symbols, results):
+                        if isinstance(result, Exception): 
+                            self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
+                        else: 
+                            if isinstance(result, dict):
+                                result["is_armed"] = True 
+                            self.ram_dna_cache[sym] = result
+            except Exception as e: logger.error(f"DNA Prewarmer error: {e}", exc_info=True)
+
+    async def run_shadow_resolution_daemon(self):
+        logger.info("👻 GHOST FORENSICS ONLINE: Vectorized resolution engine activated.")
+        interval_mins = 15.0
+        try: interval_mins = float(self.timeframe)
+        except Exception: pass
+        while True:
+            await asyncio.sleep(300) 
+            try:
+                current_prices = {}
+                for sym in self.asset_basket + self.shadow_basket:
+                    if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices"):
+                        current_prices[sym] = {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))}
+                if current_prices:
+                    async with self.db_semaphore:
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
+                        except Exception as e: logger.debug(f"Shadow resolution batch timeout: {e}", exc_info=True)
+            except Exception as e: logger.error(f"Shadow resolution daemon error: {e}", exc_info=True)
+
+    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
+        symbol = depth_data.get("s")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+
+        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
+        is_snapshot = depth_data.get("type") == "snapshot"
+        
+        feature_engine = self.feature_engines.get(symbol)
+        if feature_engine:
+            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+            
+            book_metrics = feature_engine.get_book_depth_metrics()
+            if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
+                best_bid = book_metrics["top_bid"]
+                best_ask = book_metrics["top_ask"]
+                
+                top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
+                top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
+                
+                if best_bid > 0 and best_ask > best_bid:
+                    self.orderbook_snapshots[symbol] = {
+                        "best_bid": best_bid, "bid_size": top_bid_size, 
+                        "best_ask": best_ask, "ask_size": top_ask_size, 
+                        "bids": bids, "asks": asks
+                    }
+                    
+                    stat_engine = self.stat_engines.get(symbol)
+                    
+                    now = time.time()
+                    spread_val = (best_ask - best_bid) / (best_bid + 1e-9)
+                    spread_hist = self.spread_history.get(symbol)
+                    if spread_hist is not None:
+                        spread_hist.append(spread_val)
+                        
+                    async with self.circuit_breaker_lock:
+                        if len(spread_hist) >= 30 and self.circuit_breakers.get(symbol, 0.0) <= now:
+                            med_spread = np.median(spread_hist)
+                            spread_floor = 0.0015 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0050
+                            multiplier = 4.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5.0
+                                
+                            if spread_val > med_spread * multiplier and spread_val > spread_floor:
+                                logger.warning(f"⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked to {spread_val*10000:.1f} bps. Tripping 60s Circuit Breaker.")
+                                self.circuit_breakers[symbol] = now + 60.0
+                    
+                    if stat_engine: 
+                        stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
+                        if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
+                        
+                    elasticity = self.elasticity_engines.get(symbol)
+                    if elasticity and stat_engine:
+                        exchange_ts = float(depth_data.get("ts", time.time() * 1000)) / 1000.0
+                        elasticity.update_depth_state(best_bid, top_bid_size, best_ask, top_ask_size, stat_engine.ofi_fast_z, exchange_ts)
+
+            edge_gate = self.edge_gates.get(symbol)
+            if edge_gate and bids and asks:
+                try:
+                    f_bids, f_asks = feature_engine.get_deep_book_floats()
+                    mid_price = (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0
+                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, mid_price)
+                except Exception as e: logger.debug(f"Edge gate update error for {symbol}: {e}")
+
+    async def run_omni_swarm_director(self):
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
+        while True:
+            await asyncio.sleep(15) 
+            try:
+                protected_symbols = set()
+                async with self.portfolio_state_lock:
+                    protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
+                if dead_sym and hot_sym:
+                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
+                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
+                        t_data = tick_res["result"]["list"][0]
+                        bid = float(t_data.get("bid1Price", 0.0) or 0.0)
+                        ask = float(t_data.get("ask1Price", 0.0) or 0.0)
+                        turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
+                        
+                        if bid > 0 and ask > bid:
+                            spread_bps = ((ask - bid) / bid) * 10000.0
+                            if turnover < 40_000_000.0 or spread_bps > 8.0:
+                                continue 
+                        else:
+                            continue
+                    else:
+                        continue
+                        
+                    async with self.portfolio_state_lock:
+                        if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                        if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                        
+                    self._initialize_symbol_structures([hot_sym])
+                    await self._prune_dead_symbols() 
+                    if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                        await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                    logger.critical(f"🚀 {hot_sym} PASSED DYNAMIC GATE AND INJECTED INTO QUANT MATRIX.")
+            except Exception as e: logger.error(f"Omni-Swarm Director iteration failed: {e}", exc_info=True)
+
+    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        self._initialize_symbol_structures([symbol]) 
+        interval, candle = str(data["interval"]), data["candle_data"]
+        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
+
+        async with self.symbol_locks[symbol]:
+            feature_engine = self.feature_engines.get(symbol)
+            if feature_engine:
+                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
+                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
+                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
+                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
+                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
+                    self.screener_memory[symbol]["last_update_time"] = time.time()
+
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        try:
+            raw_data = data.get("raw_data", {})
+            if "turnover24h" in raw_data:
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0:
+                    vol_mult = min(10.0, max(0.1, turnover / baseline))
+                    self.screener_metrics[symbol]["vol_mult"] = vol_mult
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e: logger.debug(f"Screener update parse failed for {symbol}: {e}")
+
+    async def run_universe_refresher(self):
+        try:
+            await self._fetch_exchange_tick_sizes()
+            tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            full_market = []
+            
+            if tickers_res.get("retCode") == 0:
+                ticker_list = tickers_res.get("result", {}).get("list", [])
+                
+                for t in ticker_list:
+                    symbol = t.get("symbol", "")
+                    if not symbol.endswith("USDT"): 
+                        continue
+                        
+                    turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                    bid = float(t.get("bid1Price", 0.0) or 0.0)
+                    ask = float(t.get("ask1Price", 0.0) or 0.0)
+                    
+                    if bid <= 0 or ask <= 0 or ask <= bid:
+                        continue
+                        
+                    spread_bps = ((ask - bid) / bid) * 10000.0
+                    
+                    if turnover >= 50_000_000.0 and spread_bps <= 8.0:
+                        full_market.append((turnover, symbol))
+                        
+                full_market.sort(key=lambda x: x[0], reverse=True)
+                full_market = [item[1] for item in full_market]
+                
+            if len(full_market) < 15: 
+                full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+                
+        except Exception as e:
+            logger.error(f"Universe refresher failed fetching assets: {e}", exc_info=True)
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "SHIB", "PEPE", "XAU", "XAG"]
+        full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
+        
+        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
+        new_core_basket = ["BTCUSDT"]
+        
+        async with self.portfolio_state_lock:
+            for s in self.active_positions_map.keys():
+                if s != "BTCUSDT": new_core_basket.append(s)
+                
+        for sym in full_market:
+            if sym not in new_core_basket and len(new_core_basket) < 15: new_core_basket.append(sym)
+                
+        async with self.portfolio_state_lock:
+            self.asset_basket = new_core_basket
+            self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:5]
+            
+        await self._prune_dead_symbols() 
+        
+        new_vpin_clocks, new_stat, new_dna_cache, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+        for s in self.asset_basket + self.shadow_basket:
+            new_vpin_clocks[s] = self.vpin_clocks.get(s, VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s)))
+            new_stat[s] = self.stat_engines.get(s, ContinuousMicrostructureEngine(symbol=s))
+            
+            async with self.portfolio_state_lock:
+                new_dna_cache[s] = {"is_armed": True, "win_rate": 0.50} 
+                
+            new_last_eval[s] = self.last_eval_time.get(s, 0.0)
+            new_orderbooks[s] = self.orderbook_snapshots.get(s, {"best_bid": 0.0, "best_ask": 0.0})
+            new_feature_engines[s] = self.feature_engines.get(s, AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600))
+            new_edge_gates[s] = self.edge_gates.get(s, MicrostructureEdgeGate(window_size=100))
+            new_el_engines[s] = self.elasticity_engines.get(s, MicroElasticityEngine())
+            new_symbol_locks[s] = self.symbol_locks.get(s, asyncio.Lock())
+            new_eval_semaphores[s] = self.eval_semaphores.get(s, asyncio.Semaphore(1))
+            new_spread_history[s] = self.spread_history.get(s, deque(maxlen=50))
+            
+        self.vpin_clocks, self.stat_engines, self.last_eval_time, self.orderbook_snapshots, self.feature_engines, self.edge_gates, self.symbol_locks, self.eval_semaphores, self.elasticity_engines, self.spread_history = new_vpin_clocks, new_stat, new_last_eval, new_orderbooks, new_feature_engines, new_edge_gates, new_symbol_locks, new_eval_semaphores, new_el_engines, new_spread_history
+        
+        async with self.portfolio_state_lock:
+            self.ram_dna_cache = new_dna_cache
+
+        try:
+            historical_data = {sym: list(self.screener_memory[sym]["prices"]) for sym in self.asset_basket if self.screener_memory.get(sym) and len(self.screener_memory[sym].get("prices", [])) > 30}
+            if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
+        except Exception as e: logger.error(f"Correlation matrix update failed: {e}", exc_info=True)
+
+        self.stream_restart_event.set()
+        self.force_dna_refresh.set() 
+
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(14400)
+            await self.run_universe_refresher()
+
+    async def stream_manager_loop(self):
+        while True:
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:3], 
+                intervals=[self.timeframe, "60", "240"], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
+            self.stream_feed_instance = stream_feed  
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            def _on_stream_done(t):
+                if not t.cancelled() and not self.stream_restart_event.is_set(): 
+                    self.stream_restart_event.set()
+                    
+            stream_task.add_done_callback(_on_stream_done)
+            await self.stream_restart_event.wait()
+            stream_task.cancel()
+            stream_feed.terminate_all_feeds()
+            self.stream_restart_event.clear()
+            self.last_socket_reconnect = time.time() 
+            await asyncio.sleep(2)
+
+    async def run_exchange_state_reconciliation_daemon(self):
+        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
+        while True:
+            await asyncio.sleep(15)
+            try:
+                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+                if pos_response.get("retCode") != 0: continue
+                
+                actual_positions = pos_response.get("result", {}).get("list", [])
+                active_symbols = [p["symbol"] for p in actual_positions if float(p.get("size", 0.0)) > 0]
+                
+                async with self.portfolio_state_lock:
+                    symbols_to_check = list(self.active_positions_map.keys())
+                    for symbol in symbols_to_check:
+                        if symbol not in active_symbols:
+                            active_daemon = self.daemon_tasks.get(symbol)
+                            if not active_daemon or active_daemon.done():
+                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
+                                self.active_positions_map.pop(symbol, None)
+                                self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
+
+    async def run_global_capital_auction_worker(self):
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix.")
+        while True:
+            await asyncio.sleep(0.5) 
+            
+            async with self.portfolio_state_lock:
+                if len(self.active_positions_map) >= 5:
+                    continue
+
+            best_candidate = None
+            async with self.auction_lock:
+                if not self.auction_queue:
+                    continue
+                    
+                if len(self.auction_queue) > 1000:
+                    self.auction_queue = heapq.nsmallest(500, self.auction_queue) 
+                    heapq.heapify(self.auction_queue)
+                    
+                valid_candidates = []
+                now = time.time()
+                while self.auction_queue:
+                    item = heapq.heappop(self.auction_queue)
+                    _, _, sym, payload = item
+                    if now - payload["timestamp"] < 2.0:
+                        valid_candidates.append(item)
+                        
+                if not valid_candidates: continue
+                    
+                best_candidate = valid_candidates[0]
+                for i in range(1, len(valid_candidates)):
+                    heapq.heappush(self.auction_queue, valid_candidates[i])
+
+            if not best_candidate: continue
+            
+            top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+            top_sharpe = -top_neg_sharpe
+
+            async with self.portfolio_state_lock:
+                if top_symbol in self.active_positions_map or len(self.active_positions_map) >= 5:
+                    continue
+                    
+                current_ob = self.orderbook_snapshots.get(top_symbol)
+                if current_ob and current_ob.get("best_bid", 0) > 0:
+                    live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
+                    drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
+                    if drift_pct > 0.0015: 
+                        logger.warning(f"⏳ AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting execution.")
+                        continue
+
+                self.active_positions_map[top_symbol] = top_payload["action"]
+            
+            logger.critical(
+                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+            )
+            
+            self.track_task(self.execute_statistical_signal(
+                top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                top_payload.get("payload_features"), elasticity=top_payload.get("elasticity"),
+                dynamic_rr_ratio=top_payload.get("dynamic_rr", self.live_params.get("rr_ratio", 2.0))
+            ))
+
+    async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
+        try:
+            if symbol in self.daemon_tasks and not self.daemon_tasks[symbol].done():
+                logger.warning(f"⚠️ Lifecycle daemon active for {symbol}. Aborting duplicate.")
+                async with self.portfolio_state_lock: 
+                    if symbol in self.active_positions_map: self.active_positions_map.pop(symbol, None)
+                return
+
+            signal_id = str(uuid.uuid4())
+            sl_atr_mult = self.live_params.get("sl_atr_mult", 1.5)
+            
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
+            tp_distance = sl_distance * dynamic_rr_ratio 
+            
+            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+            
+            if direction == "BUY":
+                raw_sl = min(current_price - (tp_distance * 0.1), current_price - sl_distance)
+                raw_tp = current_price + tp_distance
+            else:
+                raw_sl = max(current_price + (tp_distance * 0.1), current_price + sl_distance)
+                raw_tp = current_price - tp_distance
+                
+            initial_sl_price, target_tp_price = float(align_price(raw_sl)), float(align_price(raw_tp))
+
+            try: 
+                # 🚀 V41.19 FIX: Use executor's built-in parsed balance fetcher
+                available_balance = await self.executor.get_wallet_balance_usdt()
             except Exception as e: 
                 logger.debug(f"Wallet fetch failed before execution: {e}", exc_info=True)
                 available_balance = 0.0
@@ -1598,7 +3354,7 @@ class DistributedQuantEngine:
 
                     if r_multiple >= 0.5 and not locked_breakeven:
                         if r_multiple >= 1.0:
-                            breakeven_offset = actual_entry * 0.0006  # 🚀 V41.17 FIX: Calibrated 6 bps breakeven offset
+                            breakeven_offset = actual_entry * 0.0006  
                             current_sl = actual_entry + breakeven_offset if direction == "BUY" else actual_entry - breakeven_offset
                             locked_breakeven = True
                             logger.info(f"🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even (+6 bps).")
