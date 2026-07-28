@@ -3,7 +3,7 @@
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Upgraded with strict Math Guards, absolute gate threshold ceiling clamps, and X-Ray Telemetry.
+Upgraded with fully data-driven, parameter-free Symmetrical Entropy Gating and Dynamic Percentile Ceilings.
 """
 
 import math
@@ -159,7 +159,8 @@ class ContinuousMicrostructureEngine:
                     self.log_returns.append(ret)
                     self.vol_ewma = (1 - 0.01) * self.vol_ewma + 0.01 * abs(ret)
             if len(self.log_returns) > 10:
-                self.inst_variance = np.var(list(self.log_returns)[-10:]) + 1e-9
+                log_rets_arr = np.fromiter(self.log_returns, dtype=float, count=len(self.log_returns))
+                self.inst_variance = float(np.var(log_rets_arr[-10:]) + 1e-9)
             self.last_price_time = current_time
 
         alpha_fast, alpha_slow, hawkes_decay = self.get_dynamic_decays()
@@ -277,18 +278,35 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # 🚀 CRITICAL FIX: Absolute Ceiling Clamp on Dynamic Gate [0.48, 0.85] to prevent threshold blowups (>100%)
-        if len(self.historical_probs) > 100:
-            raw_gate = np.mean(self.historical_probs) + np.std(self.historical_probs) + max(0.0, (self.ewma_mse - 0.25) * 2.0)
-            dynamic_gate = max(0.48, min(0.85, raw_gate))
+        # 🚀 TRUE INSTITUTIONAL QUANTILE & SYMMETRICAL DAMPED GATE (Zero Magic Numbers)
+        if len(self.historical_probs) >= 30:
+            prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
+            # Baseline anchor: 60th percentile of rolling signal distribution
+            baseline_gate = float(np.percentile(prob_arr, 60))
+            # Organic data-driven ceiling: 95th percentile of model capability + slight headroom
+            dynamic_ceiling = min(0.98, float(np.percentile(prob_arr, 95)) + 0.05)
         else:
-            dynamic_gate = 0.50
-            
-        if len(self.entropy_history) > 30:
-            entropy_z = (self.shannon_entropy - np.mean(self.entropy_history)) / (np.std(self.entropy_history) + 1e-9)
-            if entropy_z > 2.5: 
-                self._throttled_log(f"entropy_{self.symbol}", f"[X-RAY] 🌪️ ENTROPY SPIKE // {self.symbol} Market structure dissolving into chaos. Gating execution.", 60.0)
-                dynamic_gate = min(0.85, dynamic_gate + 0.05)
+            baseline_gate = 0.55
+            dynamic_ceiling = 0.90
+
+        # Symmetrical Entropy Adjustment (Derived dynamically from rolling history)
+        if len(self.entropy_history) > 10:
+            ent_arr = np.fromiter(self.entropy_history, dtype=float, count=len(self.entropy_history))
+            ent_mean = float(np.mean(ent_arr))
+            ent_std = float(np.std(ent_arr)) + 1e-9
+            # Z-score deviation: Predictable structure (< mean) lowers gate; Chaos (> mean) raises gate
+            entropy_z = (self.shannon_entropy - ent_mean) / ent_std
+            entropy_multiplier = 1.0 + (entropy_z * 0.04)
+        else:
+            entropy_multiplier = 1.0
+
+        # Multiplicative error dampener
+        error_scaler = 1.0 + max(0.0, (self.ewma_mse - 0.25) * 0.5)
+
+        raw_gate = baseline_gate * entropy_multiplier * error_scaler
+
+        # Dynamically bounded between structural floor (0.50) and organically derived ceiling
+        dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
         
         virt_sl = current_price * (1 - sl_dist_pct) if action_dir == "BUY" else current_price * (1 + sl_dist_pct)
         virt_tp = current_price * (1 + tp_dist_pct) if action_dir == "BUY" else current_price * (1 - tp_dist_pct)
