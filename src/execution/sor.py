@@ -3,7 +3,7 @@
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture for volatile assets,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
-and Null-Guard Parity for dynamic price/qty parameters.
+Null-Guard Parity for dynamic price/qty parameters, and Dynamic Bracket Sync.
 """
 
 import os
@@ -430,12 +430,24 @@ class SmartOrderRouter:
             tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(Decimal(str(tick_size)), rounding=ROUND_HALF_UP))
             
-            # Reattach monolithic bracket
+            # 🚀 BUG FIX: Dynamically recalculate SL/TP relative to the ACTUAL filled average price
+            sl_dist_pct = abs(sl - current_mid_price) / (current_mid_price + 1e-9)
+            tp_dist_pct = abs(tp - current_mid_price) / (current_mid_price + 1e-9)
+            
+            if side == "Buy":
+                actual_sl = avg_fill_price * (1.0 - sl_dist_pct)
+                actual_tp = avg_fill_price * (1.0 + tp_dist_pct)
+            else:
+                actual_sl = avg_fill_price * (1.0 + sl_dist_pct)
+                actual_tp = avg_fill_price * (1.0 - tp_dist_pct)
+            
+            # Reattach monolithic bracket with mathematically safe parameters
             try:
                 await self.executor.safe_call(
                     self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=self.position_idx, 
-                    takeProfit=align_price(tp), stopLoss=align_price(sl)
+                    takeProfit=align_price(actual_tp), stopLoss=align_price(actual_sl)
                 )
+                logger.info(f"[X-RAY] 🛡️ Bracket synchronized to Avg Fill {avg_fill_price:.5f} | SL: {actual_sl:.5f} | TP: {actual_tp:.5f}")
             except Exception as e:
                 logger.warning(f"[X-RAY] 🧊 Failed to reattach bracket to TWAP position: {e}")
                 

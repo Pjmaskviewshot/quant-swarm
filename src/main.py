@@ -388,7 +388,7 @@ class DistributedQuantEngine:
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 
-                sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 1.5)) / (price + 1e-9), 0.008)
+                sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 1.5)) / (price + 1e-9), 0.018)
                 dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
                 tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                 
@@ -765,10 +765,21 @@ class DistributedQuantEngine:
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
-            actual_sl_distance = max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.008)
+            actual_sl_distance = max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.018)
             realigned_sl = actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance
             current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if direction == "BUY" else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
             
+            # 🚀 SAFETY CLAMP: Initial Bracket Validation to Prevent Exchange Rejection
+            is_buy = direction == "BUY"
+            if is_buy:
+                current_tp = max(current_tp, current_price * 1.001)
+                realigned_sl = min(realigned_sl, current_price * 0.999)
+                if current_tp <= realigned_sl: current_tp = realigned_sl * 1.01
+            else:
+                current_tp = min(current_tp, current_price * 0.999)
+                realigned_sl = max(realigned_sl, current_price * 1.001)
+                if current_tp >= realigned_sl: current_tp = realigned_sl * 0.99
+                
             try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(current_tp), stopLoss=align_price(realigned_sl))
             except Exception as e: logger.debug(f"[X-RAY] Initial TP/SL set failed for {symbol}: {e}", exc_info=True)
 
@@ -801,79 +812,85 @@ class DistributedQuantEngine:
                     
                     r_multiple = abs(max_favorable_price - actual_entry) / (initial_risk + 1e-9)
 
-                    if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
-                        try:
-                            current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                            p_list = current_pos_res.get("result", {}).get("list", [])
-                            if p_list and float(p_list[0].get("size", 0.0)) > 0:
-                                curr_size = float(p_list[0]["size"])
-                                half_qty = curr_size * 0.5
-                                limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
-                                aligned_half_qty = math.floor(half_qty / limits["qty_step"]) * limits["qty_step"]
-                                
-                                if aligned_half_qty >= limits["min_qty"] and (aligned_half_qty * c_price) >= 5.0:
-                                    logger.critical(f"[X-RAY] 💰 PARTIAL TAKE-PROFIT // {symbol} reached 1R. Scaling out {aligned_half_qty} units.")
-                                    await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if direction == "BUY" else "Buy", orderType="Market", qty=str(aligned_half_qty), timeInForce="IOC", reduceOnly=True)
-                                    scaled_out_50_pct = True
-                                else:
-                                    logger.info(f"[X-RAY] ℹ️ {symbol} reached 1R, but position is at exchange minimum. Trailing full position.")
-                                    scaled_out_50_pct = True 
-                        except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}", exc_info=True)
+                if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
+                    try:
+                        current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                        p_list = current_pos_res.get("result", {}).get("list", [])
+                        if p_list and float(p_list[0].get("size", 0.0)) > 0:
+                            curr_size = float(p_list[0]["size"])
+                            half_qty = curr_size * 0.5
+                            limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
+                            aligned_half_qty = math.floor(half_qty / limits["qty_step"]) * limits["qty_step"]
+                            
+                            if aligned_half_qty >= limits["min_qty"] and (aligned_half_qty * c_price) >= 5.0:
+                                logger.critical(f"[X-RAY] 💰 PARTIAL TAKE-PROFIT // {symbol} reached 1R. Scaling out {aligned_half_qty} units.")
+                                await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if direction == "BUY" else "Buy", orderType="Market", qty=str(aligned_half_qty), timeInForce="IOC", reduceOnly=True)
+                                scaled_out_50_pct = True
+                            else:
+                                logger.info(f"[X-RAY] ℹ️ {symbol} reached 1R, but position is at exchange minimum. Trailing full position.")
+                                scaled_out_50_pct = True 
+                    except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}", exc_info=True)
 
-                    if r_multiple >= 0.5 and not locked_breakeven:
-                        if r_multiple >= 1.0:
-                            current_sl = actual_entry + (actual_entry * 0.0006) if direction == "BUY" else actual_entry - (actual_entry * 0.0006)
-                            locked_breakeven = True
-                            logger.info(f"[X-RAY] 🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even (+6 bps).")
-                        else:
-                            half_risk_sl = actual_entry - (initial_risk * 0.5) if direction == "BUY" else actual_entry + (initial_risk * 0.5)
-                            if (direction == "BUY" and half_risk_sl > current_sl) or (direction == "SELL" and half_risk_sl < current_sl):
-                                current_sl = half_risk_sl
-
-                    vol_scalar = min(1.0, stat_engine.inst_variance * 5000.0)
-                    elasticity = elasticity_engine.orderbook_elasticity if elasticity_engine and hasattr(elasticity_engine, 'orderbook_elasticity') else 1.0
-                    
-                    base_mult = max(0.4, 2.0 - (r_multiple * 0.4))
-                    vol_adj = 1.0 + (vol_scalar * 0.5)
-                    el_adj = max(0.8, min(1.5, 1.0 / (elasticity + 0.2)))
-                    
-                    dynamic_trail_dist = initial_risk * base_mult * vol_adj * el_adj
-
-                    ob = self.orderbook_snapshots.get(symbol, {})
-                    b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
-                    tox_mult = 1.0
-                    if b_vol > 0 and a_vol > 0:
-                        imbalance = (b_vol - a_vol) / (b_vol + a_vol)
-                        if direction == "BUY" and imbalance < -0.5: tox_mult = max(0.4, 1.0 + imbalance)
-                        elif direction == "SELL" and imbalance > 0.5: tox_mult = max(0.4, 1.0 - imbalance)
-
-                    dynamic_trail_dist *= tox_mult
-                    calculated_sl = max_favorable_price - dynamic_trail_dist if direction == "BUY" else max_favorable_price + dynamic_trail_dist
-
-                    requires_tp_update = False
-                    if r_multiple > 1.2:
-                        calc_tp = actual_entry + (initial_risk * min(4.0, r_multiple + (vol_scalar * 2.0))) if direction == "BUY" else actual_entry - (initial_risk * min(4.0, r_multiple + (vol_scalar * 2.0)))
-                        if direction == "BUY" and calc_tp > current_tp and abs(calc_tp - current_tp) / actual_entry > 0.002:
-                            current_tp = calc_tp
-                            requires_tp_update = True
-                        elif direction == "SELL" and calc_tp < current_tp and abs(current_tp - calc_tp) / actual_entry > 0.002:
-                            current_tp = calc_tp
-                            requires_tp_update = True
-
-                    requires_sl_update = False
-                    if direction == "BUY" and calculated_sl > current_sl and abs(calculated_sl - current_sl) / actual_entry > 0.0010:
+                # 🚀 V50.0 INSTITUTIONAL MULTI-STAGE TRAILING ENGINE
+                if r_multiple >= 1.0 and r_multiple < 1.5 and not locked_breakeven:
+                    # Phase 2: Ratchet to Breakeven (+0.1% buffer for fees)
+                    fee_buffer = actual_entry * 0.001
+                    calculated_sl = (actual_entry + fee_buffer) if is_buy else (actual_entry - fee_buffer)
+                    if (is_buy and calculated_sl > current_sl) or (not is_buy and calculated_sl < current_sl):
                         current_sl = calculated_sl
+                        locked_breakeven = True
+                        logger.info(f"[X-RAY] 🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even (+ fee buffer).")
                         requires_sl_update = True
-                    elif direction == "SELL" and calculated_sl < current_sl and abs(current_sl - calculated_sl) / actual_entry > 0.0010:
-                        current_sl = calculated_sl
+                
+                elif r_multiple >= 1.5:
+                    # Phase 3: Dynamic Step-Ratchet Trail (Trails 1.2% behind the peak price)
+                    trail_distance = max_favorable_price * 0.012
+                    potential_trail = (max_favorable_price - trail_distance) if is_buy else (max_favorable_price + trail_distance)
+                    
+                    # Ensure stop-loss only moves in favor, never backwards
+                    if is_buy and potential_trail > current_sl:
+                        current_sl = potential_trail
+                        requires_sl_update = True
+                    elif not is_buy and potential_trail < current_sl:
+                        current_sl = potential_trail
                         requires_sl_update = True
 
-                    if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > 3.0):
-                        try:
-                            await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(current_tp), stopLoss=align_price(current_sl))
-                            last_api_update_time = now
-                            if requires_tp_update: logger.info(f"[X-RAY] 🌌 TREND EXPANSION // {symbol} Take-Profit pushed out to {align_price(current_tp)}.")
-                        except Exception as e: logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
+                requires_tp_update = False
+                if r_multiple > 1.2:
+                    calc_tp = actual_entry + (initial_risk * min(4.0, r_multiple + 2.0)) if is_buy else actual_entry - (initial_risk * min(4.0, r_multiple + 2.0))
+                    if is_buy and calc_tp > current_tp and abs(calc_tp - current_tp) / actual_entry > 0.002:
+                        current_tp = calc_tp
+                        requires_tp_update = True
+                    elif not is_buy and calc_tp < current_tp and abs(current_tp - calc_tp) / actual_entry > 0.002:
+                        current_tp = calc_tp
+                        requires_tp_update = True
+
+                if (locals().get('requires_sl_update', False) or requires_tp_update) and (now - last_api_update_time > 3.0):
+                    # 🚀 SAFETY CLAMP: Ensure TP/SL are always valid relative to current market price
+                    safe_c_price = c_price if 'c_price' in locals() else current_price
+                    
+                    if is_buy:
+                        current_tp = max(current_tp, safe_c_price * 1.001)
+                        current_sl = min(current_sl, safe_c_price * 0.999)
+                        if current_tp <= current_sl:
+                            current_tp = current_sl * 1.01
+                    else:
+                        current_tp = min(current_tp, safe_c_price * 0.999)
+                        current_sl = max(current_sl, safe_c_price * 1.001)
+                        if current_tp >= current_sl:
+                            current_tp = current_sl * 0.99
+
+                    try:
+                        await self.executor.safe_call(
+                            self.executor.client.set_trading_stop, 
+                            category="linear", symbol=symbol, positionIdx=0, 
+                            takeProfit=align_price(current_tp), stopLoss=align_price(current_sl)
+                        )
+                        last_api_update_time = now
+                        if requires_tp_update: logger.info(f"[X-RAY] 🌌 TREND EXPANSION // {symbol} Take-Profit pushed out to {align_price(current_tp)}.")
+                        if locals().get('requires_sl_update', False): logger.info(f"[X-RAY] 🛡️ TRAIL RATCHET // {symbol} SL advanced to {align_price(current_sl)}.")
+                    except Exception as e: 
+                        logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
 
             await asyncio.sleep(2.0) 
             try: 

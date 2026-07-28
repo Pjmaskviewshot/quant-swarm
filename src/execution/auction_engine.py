@@ -126,8 +126,9 @@ class CapitalAuctionEngine:
             signal_id = str(uuid.uuid4())
             sl_atr_mult = self.core.live_params.get("sl_atr_mult", 1.5)
             
-            # Kinematic Trailing & Target Generation
-            sl_distance = max(atr * sl_atr_mult, current_price * 0.008)
+            # 🚀 BUG FIX: Widen Stop-Loss structural floor to survive noise (0.80% -> 1.80%)
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.018)
+            # Take-Profit distance scaled accordingly to maintain R:R
             tp_distance = sl_distance * dynamic_rr_ratio 
             
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
