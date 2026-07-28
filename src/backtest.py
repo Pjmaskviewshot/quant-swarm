@@ -1,6 +1,6 @@
 """
-🧪 V41.17 APEX BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V41.17.
+🧪 V41.20 APEX BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V41.20.
 Implements Pessimistic Intra-bar Execution, Dynamic Z-Scored Entropy Gating,
 6 bps Breakeven Ratchets, Maker Routing for Wide Spreads, and 1 bps EV Triggers.
 """
@@ -287,7 +287,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     
     btc_1m_history = deque(maxlen=300)
     alt_1m_history = deque(maxlen=300)
-    entropy_history = deque(maxlen=200) # 🚀 V41.17: Z-Scored Entropy
+    entropy_history = deque(maxlen=200) 
     log_returns = deque(maxlen=500)
     inst_variance = 1e-6
     
@@ -334,7 +334,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         shannon_entropy = 1.0
         if len(alt_1m_history) > 10:
             shannon_entropy = compute_permutation_entropy(list(alt_1m_history)[-20:])
-            entropy_history.append(shannon_entropy) # 🚀 Track for Z-Score
+            entropy_history.append(shannon_entropy) 
         
         ret = math.log(sim_price / (c_prev['close'] + 1e-9))
         log_returns.append(ret)
@@ -382,8 +382,9 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     if rolling_mse > 0.35 or np.trace(P_trending) > 5000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        if trace_t > 5000: P_trending = P_trending / (trace_t / 1000.0) + np.eye(9) * 0.1
-                        if trace_r > 5000: P_ranging = P_ranging / (trace_r / 1000.0) + np.eye(9) * 0.1
+                        # 🚀 V41.20 FIX: Stable Covariance Resets (1e-3)
+                        if trace_t > 5000: P_trending = P_trending / (trace_t / 1000.0) + np.eye(9) * 1e-3
+                        if trace_r > 5000: P_ranging = P_ranging / (trace_r / 1000.0) + np.eye(9) * 1e-3
                         validation_buffer.clear()
                         break
 
@@ -483,13 +484,13 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             mean_prob = np.mean(historical_probs)
             std_prob = np.std(historical_probs) + 1e-9
             error_penalty = max(0.0, (ewma_mse - 0.25) * 2.0)
-            dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty # V41.17 align
+            dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty 
         else:
-            dynamic_gate = 0.52 # V41.17 align
+            dynamic_gate = 0.52 
             
         dynamic_gate = max(0.52, dynamic_gate)
         
-        # 🚀 V41.17: DYNAMIC Z-SCORED ENTROPY GATE
+        # 🚀 V41.20: DYNAMIC Z-SCORED ENTROPY GATE
         if len(entropy_history) > 30:
             entropy_arr = np.array(entropy_history)
             entropy_mean = np.mean(entropy_arr)
@@ -513,7 +514,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
         sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
         
-        # 🚀 V41.17 DYNAMIC ER-SCALED RISK-REWARD RATIO
         dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
 
@@ -540,8 +540,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 regime = "MEAN_REVERTING"
                 vacuum_blocked = False 
                 
-            # 🚀 V41.17: DYNAMIC SPREAD & MAKER ROUTING ESTIMATOR
-            # We estimate spread based on realized local volatility (1m resolution proxy)
+            # 🚀 V41.20: DYNAMIC SPREAD & MAKER ROUTING ESTIMATOR
             spread_cost = max(0.0001, min(0.0020, math.sqrt(inst_variance) * 0.5))
             if spread_cost > 0.0005: 
                 routing_mode = "MAKER_ONLY"
@@ -554,10 +553,9 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 
                 taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0006
                 
-                # V41.17 EV Math
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 
-                # 🚀 V41.17: LOWERED 1 BPS EV THRESHOLD
+                # 🚀 V41.20: 1 BPS EV THRESHOLD
                 if net_ev_pct > 0.0001:  
                     
                     entry = c['close']
@@ -593,7 +591,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if r_multiple >= 0.5 and not locked_breakeven:
                             if r_multiple >= 1.0:
-                                # 🚀 V41.17: 6 BPS BREAKEVEN RATCHET
+                                # 🚀 V41.20: 6 BPS BREAKEVEN RATCHET
                                 fee_coverage = entry * 0.0006
                                 current_sl = entry + fee_coverage if action_dir == "BUY" else entry - fee_coverage
                                 locked_breakeven = True
@@ -609,18 +607,28 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if action_dir == "BUY":
                             calc_sl = max_favorable_price - dynamic_trail_dist
-                            if calc_sl > current_sl: current_sl = calc_sl
+                            if calc_sl > current_sl:
+                                if abs(calc_sl - current_sl) / entry > 0.0010: # 🚀 V41.20: Stale price fix (entry dev)
+                                    current_sl = calc_sl
                         else:
                             calc_sl = max_favorable_price + dynamic_trail_dist
-                            if calc_sl < current_sl: current_sl = calc_sl
+                            if calc_sl < current_sl:
+                                if abs(current_sl - calc_sl) / entry > 0.0010: # 🚀 V41.20: Stale price fix (entry dev)
+                                    current_sl = calc_sl
                             
                         if r_multiple > 1.2:
                             tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
                             dynamic_tp_dist = initial_risk * tp_expansion_factor
                             
                             calc_tp = entry + dynamic_tp_dist if action_dir == "BUY" else entry - dynamic_tp_dist
-                            if action_dir == "BUY" and calc_tp > current_tp: current_tp = calc_tp
-                            elif action_dir == "SELL" and calc_tp < current_tp: current_tp = calc_tp
+                            
+                            # 🚀 V41.20: TP Stale Price Guard Check
+                            if action_dir == "BUY" and calc_tp > current_tp:
+                                if abs(calc_tp - current_tp) / entry > 0.002:
+                                    current_tp = calc_tp
+                            elif action_dir == "SELL" and calc_tp < current_tp:
+                                if abs(current_tp - calc_tp) / entry > 0.002:
+                                    current_tp = calc_tp
                             
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
@@ -651,6 +659,8 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     risk_multiplier = edge / 0.10
                     raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                     
+                    # 🚀 V41.20: Explicitly define net_edge_bps so Kelly multiplier doesn't NameError
+                    net_edge_bps = net_ev_pct * 10000.0 
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
                     evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
@@ -716,7 +726,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V41.17 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V41.20 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
