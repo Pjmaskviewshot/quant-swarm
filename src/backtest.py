@@ -1,8 +1,8 @@
 """
-🧪 V41.5 APEX BACKTESTER: PERFECT PARITY
-Synchronized strictly with Quant Swarm live node V41.5.
-Implements Pessimistic Intra-bar Execution, Volatility-Adjusted Kinematic 
-Trailing Compression, 1R Scale-Outs, Kinematic TP Expansion, and Edge-Weighted Risk Allocation.
+🧪 V41.17 APEX BACKTESTER: PERFECT PARITY
+Synchronized strictly with Quant Swarm live node V41.17.
+Implements Pessimistic Intra-bar Execution, Dynamic Z-Scored Entropy Gating,
+6 bps Breakeven Ratchets, Maker Routing for Wide Spreads, and 1 bps EV Triggers.
 """
 import argparse
 import time
@@ -229,9 +229,6 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     return binary_regime, new_state_probs, er
 
 def calculate_evt_tail_risk(volatility_surface: deque) -> float:
-    """
-    🚀 V41.5 BACKTEST PARITY: Adaptive EVT with Dynamic Sizing Floors
-    """
     if len(volatility_surface) < 30: return 1.05 
         
     vol_arr = np.array(volatility_surface)
@@ -255,21 +252,18 @@ def calculate_evt_tail_risk(volatility_surface: deque) -> float:
     return max(dynamic_floor, 1.0 - raw_suppression)
 
 def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
-    """
-    🚀 V41.5 BACKTEST PARITY: Regime-Dependent Confidence Shrinkage
-    """
-    floor = 0.52
+    floor = 0.50
     ceiling = 0.85
 
     if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
         ceiling = min(0.92, ceiling + 0.07)
-        floor = max(0.50, floor - 0.02)
+        floor = max(0.48, floor - 0.02)
     elif regime == "LIQUIDITY_VACUUM":
         ceiling = min(0.90, ceiling + 0.05)
-        floor = max(0.55, floor + 0.03)
+        floor = max(0.52, floor + 0.03)
     else:  
         ceiling = min(0.80, ceiling - 0.05)
-        floor = max(0.55, floor + 0.03)
+        floor = max(0.52, floor + 0.03)
 
     mse_penalty = min(0.10, mse * 0.4)
     ceiling = max(floor, ceiling - mse_penalty)
@@ -293,6 +287,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     
     btc_1m_history = deque(maxlen=300)
     alt_1m_history = deque(maxlen=300)
+    entropy_history = deque(maxlen=200) # 🚀 V41.17: Z-Scored Entropy
     log_returns = deque(maxlen=500)
     inst_variance = 1e-6
     
@@ -339,6 +334,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         shannon_entropy = 1.0
         if len(alt_1m_history) > 10:
             shannon_entropy = compute_permutation_entropy(list(alt_1m_history)[-20:])
+            entropy_history.append(shannon_entropy) # 🚀 Track for Z-Score
         
         ret = math.log(sim_price / (c_prev['close'] + 1e-9))
         log_returns.append(ret)
@@ -486,14 +482,24 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if len(historical_probs) > 100:
             mean_prob = np.mean(historical_probs)
             std_prob = np.std(historical_probs) + 1e-9
-            dynamic_gate = mean_prob + (1.25 * std_prob)
+            error_penalty = max(0.0, (ewma_mse - 0.25) * 2.0)
+            dynamic_gate = mean_prob + (1.25 * std_prob) + error_penalty # V41.17 align
         else:
-            dynamic_gate = 0.58
+            dynamic_gate = 0.52 # V41.17 align
             
-        dynamic_gate = max(0.58, dynamic_gate)
-            
-        if shannon_entropy > 0.85:
-            dynamic_gate = 0.99 
+        dynamic_gate = max(0.52, dynamic_gate)
+        
+        # 🚀 V41.17: DYNAMIC Z-SCORED ENTROPY GATE
+        if len(entropy_history) > 30:
+            entropy_arr = np.array(entropy_history)
+            entropy_mean = np.mean(entropy_arr)
+            entropy_std = np.std(entropy_arr) + 1e-9
+            entropy_z = (shannon_entropy - entropy_mean) / entropy_std
+            if entropy_z > 2.0:
+                dynamic_gate = min(0.85, dynamic_gate + 0.05)
+        else:
+            if shannon_entropy > 0.96:
+                dynamic_gate = min(0.85, dynamic_gate + 0.05)
             
         t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
         if t_imb_z < -2.5 and abs(skew) < 1.0: 
@@ -507,7 +513,7 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
         sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
         
-        # 🚀 V41.5 DYNAMIC ER-SCALED RISK-REWARD RATIO
+        # 🚀 V41.17 DYNAMIC ER-SCALED RISK-REWARD RATIO
         dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
 
@@ -533,14 +539,26 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
                 vacuum_blocked = False 
+                
+            # 🚀 V41.17: DYNAMIC SPREAD & MAKER ROUTING ESTIMATOR
+            # We estimate spread based on realized local volatility (1m resolution proxy)
+            spread_cost = max(0.0001, min(0.0020, math.sqrt(inst_variance) * 0.5))
+            if spread_cost > 0.0005: 
+                routing_mode = "MAKER_ONLY"
+                regime = "MEAN_REVERTING"
+                
+            if routing_mode == "MAKER_ONLY":
+                dynamic_gate -= 0.08
                     
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
                 
-                dynamic_spread_pct = min(0.0020, max(0.0003, 0.0005 * (1.0 + abs(hawkes_z) * 0.2)))
-                taker_fee_pct = 0.0011 if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"] else 0.0004
-                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - dynamic_spread_pct - taker_fee_pct
+                taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0006
                 
-                if net_ev_pct > 0.0005:  
+                # V41.17 EV Math
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
+                
+                # 🚀 V41.17: LOWERED 1 BPS EV THRESHOLD
+                if net_ev_pct > 0.0001:  
                     
                     entry = c['close']
                     sl = entry - (sl_dist_pct * entry) if action_dir == "BUY" else entry + (sl_dist_pct * entry)
@@ -575,7 +593,9 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         if r_multiple >= 0.5 and not locked_breakeven:
                             if r_multiple >= 1.0:
-                                current_sl = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
+                                # 🚀 V41.17: 6 BPS BREAKEVEN RATCHET
+                                fee_coverage = entry * 0.0006
+                                current_sl = entry + fee_coverage if action_dir == "BUY" else entry - fee_coverage
                                 locked_breakeven = True
                             else:
                                 half_risk_sl = entry - (initial_risk * 0.5) if action_dir == "BUY" else entry + (initial_risk * 0.5)
@@ -631,7 +651,6 @@ def run_v41_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     risk_multiplier = edge / 0.10
                     raw_fractional_risk = max(0.005, min(0.015, 0.01 * risk_multiplier))
                     
-                    net_edge_bps = net_ev_pct * 10000.0
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
                     evt_penalty = calculate_evt_tail_risk(evt_vol_surface)
@@ -697,7 +716,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V41.5 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V41.17 APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
