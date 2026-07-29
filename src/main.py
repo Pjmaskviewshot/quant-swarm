@@ -1,5 +1,5 @@
 """
-🌌 V54.0 OMNI-STATE: MASTER ORCHESTRATOR
+🌌 V54.1 OMNI-STATE: MASTER ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Featuring Continuous POFE Monitoring,
 Volume Death Early Excursions, Sub-1R High-Water Ratchets, and Asymmetric TP Repulsion.
@@ -47,7 +47,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V54.0_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V54.1_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -56,7 +56,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V54.0 OMNI-STATE ACTIVE.")
+        else: logger.critical("🌌 LIVE MODE: V54.1 OMNI-STATE ACTIVE.")
         
         self.asset_basket: List[str] = ["BTCUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -648,10 +648,11 @@ class DistributedQuantEngine:
                 full_market.sort(key=lambda x: x[0], reverse=True)
                 full_market = [item[1] for item in full_market]
                 
-            if len(full_market) < 18: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT"]
+            # 🚀 V54.1: Expanding parallel live node capacity from 18 to 24
+            if len(full_market) < 24: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher failed fetching assets: {e}", exc_info=True)
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT"]
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
             
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
         full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
@@ -664,7 +665,8 @@ class DistributedQuantEngine:
                 if s != "BTCUSDT": new_core_basket.append(s)
                 
         for sym in full_market:
-            if sym not in new_core_basket and len(new_core_basket) < 18: new_core_basket.append(sym)
+            # 🚀 V54.1: Append up to 24 active nodes
+            if sym not in new_core_basket and len(new_core_basket) < 24: new_core_basket.append(sym)
                 
         async with self.portfolio_state_lock:
             self.asset_basket = new_core_basket
@@ -732,12 +734,13 @@ class DistributedQuantEngine:
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
         """
-        V54.0 CONTINUOUS MULTI-FACTOR EXIT DAEMON:
+        V54.1 CONTINUOUS MULTI-FACTOR EXIT DAEMON:
         Continuous POFE Monitoring, Sub-1R Trailing High-Water Mark Ratchets,
         and Volume-Death Early Excursions.
         """
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
+        is_buy = direction == "BUY"
         
         if self.test_mode:
             await asyncio.sleep(60)
@@ -768,10 +771,9 @@ class DistributedQuantEngine:
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
             actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.018)
-            current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance)
-            current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if direction == "BUY" else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
+            current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if is_buy else actual_entry + actual_sl_distance)
+            current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if is_buy else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
             
-            is_buy = direction == "BUY"
             if is_buy:
                 current_tp = max(current_tp, current_price * 1.001)
                 current_sl = min(current_sl, current_price * 0.999)
@@ -813,6 +815,9 @@ class DistributedQuantEngine:
                 api_check_counter += 1
                 time_in_mins = (now - daemon_start_time) / 60.0
                 
+                requires_sl_update = False
+                requires_tp_update = False
+                
                 if api_check_counter % (60 if loop_sleep == 1.0 else 300) == 0:
                     regime = feature_engine.detect_market_regime() if feature_engine else regime
                 
@@ -842,7 +847,7 @@ class DistributedQuantEngine:
                 b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                 imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                 
-                # 🌌 1. CONTINUOUS UN-GATED POFE EJECTION (Runs permanently)
+                # 🌌 1. CONTINUOUS UN-GATED POFE EJECTION
                 if (is_buy and imbalance < -0.75 and hawkes_z > 2.0) or (not is_buy and imbalance > 0.75 and hawkes_z > 2.0):
                     try:
                         logger.critical(f"🛑 POFE EJECTION // {symbol} Orderbook wall shift detected (Imb: {imbalance:.2f}). Front-running Stop-Loss.")
@@ -850,7 +855,7 @@ class DistributedQuantEngine:
                         break 
                     except Exception as e: logger.error(f"[X-RAY] POFE Ejection failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 2. VOLUME DEATH EARLY EXIT (Cuts underwater trades when volume collapses)
+                # 🌌 2. VOLUME DEATH EARLY EXIT
                 if current_r < -0.25 and hawkes_z < -1.2 and time_in_mins > 10.0:
                     try:
                         logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade underwater ({current_r:.2f}R) and Hawkes volume died ({hawkes_z:.2f}z). Cutting early at {time_in_mins:.1f}m.")
@@ -866,7 +871,7 @@ class DistributedQuantEngine:
                         break 
                     except Exception as e: logger.error(f"[X-RAY] Parabolic Ejection failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING (Ratchet SL up on partial profit)
+                # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING
                 if r_multiple >= 0.4 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
                     sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
                     if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
@@ -926,40 +931,17 @@ class DistributedQuantEngine:
                 if r_multiple >= 1.0:
                     raw_sl = (max_favorable_price - raw_trail_dist) if is_buy else (max_favorable_price + raw_trail_dist)
                     be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
-                    raw_sl = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
-
-                    anchored_sl = raw_sl
-                    depth_threshold = 25000.0  
+                    new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
                     
-                    try:
-                        if 'bids' in ob and 'asks' in ob and len(ob['bids']) > 0 and len(ob['asks']) > 0:
-                            cum_vol = 0.0
-                            if is_buy:
-                                for level in ob['bids'][:20]:
-                                    if float(level[0]) >= raw_sl: continue
-                                    cum_vol += float(level[1]) * float(level[0])
-                                    if cum_vol > depth_threshold:
-                                        anchored_sl = float(level[0]) * 0.9995 
-                                        break
-                            else:
-                                for level in ob['asks'][:20]:
-                                    if float(level[0]) <= raw_sl: continue
-                                    cum_vol += float(level[1]) * float(level[0])
-                                    if cum_vol > depth_threshold:
-                                        anchored_sl = float(level[0]) * 1.0005 
-                                        break
-                    except Exception: pass
-
-                    if (is_buy and anchored_sl > current_sl) or (not is_buy and anchored_sl < current_sl):
-                        current_sl = anchored_sl
+                    if (is_buy and new_sl_val > current_sl) or (not is_buy and new_sl_val < current_sl):
+                        current_sl = new_sl_val
                         requires_sl_update = True
 
-                requires_tp_update = False
+                # 🌌 V54.0 ASYMMETRIC TP REPULSION
                 momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                
                 if hawkes_z < -1.5 and r_multiple > 1.0:
                     momentum_stretch -= 0.5 
-                    
+                
                 target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)) 
                 calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
                 
@@ -996,7 +978,7 @@ class DistributedQuantEngine:
                             last_sent_tp_str = new_tp_str
                             
                             if requires_tp_update: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
-                            if requires_sl_update: logger.info(f"[X-RAY] 🛡️ CUMULATIVE LIQUIDITY ANCHOR // {symbol} SL tucked securely behind {depth_threshold/1000:.0f}k orderbook wall at {new_sl_str}.")
+                            if requires_sl_update: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
                         except Exception as e: 
                             logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
 
@@ -1157,19 +1139,20 @@ class DistributedQuantEngine:
                 full_market.sort(key=lambda x: x[0], reverse=True)
                 full_market = [item[1] for item in full_market]
                 
-            if len(full_market) < 18: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT"]
+            # 🚀 V54.1: Expanding parallel live node capacity from 18 to 24
+            if len(full_market) < 24: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
                 
         except Exception as e:
             logger.error(f"[X-RAY] Initial boot universe fetch failed: {e}", exc_info=True)
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT"]
+            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
 
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
         full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
 
         if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
         
-        if boot_basket := full_market[:18]:
-            self.asset_basket = ["BTCUSDT"] + boot_basket[:17]
+        if boot_basket := full_market[:24]:
+            self.asset_basket = ["BTCUSDT"] + boot_basket[:23]
             self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:6]
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
         
