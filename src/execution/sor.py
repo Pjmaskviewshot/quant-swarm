@@ -245,18 +245,15 @@ class SmartOrderRouter:
                         logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} book toxic (buy wall detected: {imbalance:.2f}). Aborting peg to prevent getting squeezed.")
                         break
 
-                # 2. Determine True Top of Book (Target Price)
+                # 🚀 BUG FIX: Always fetch a LIVE orderbook snapshot inside the loop. 
+                # Using a stale snapshot causes Limit orders to cross the spread and get instantly rejected.
                 target_price = 0.0
-                if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
-                    target_price = self._get_meaningful_tob(depth_snapshot, side)
+                fresh_ob = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else None
+                
+                if fresh_ob and "bids" in fresh_ob and "asks" in fresh_ob and len(fresh_ob["bids"]) > 0:
+                    target_price = self._get_meaningful_tob(fresh_ob, side)
                     if target_price > 0.0: loop_delay = 0.5
-                    
-                if target_price <= 0.0 and feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot'):
-                    ob_data = feature_engine.get_orderbook_snapshot()
-                    target_price = self._get_meaningful_tob(ob_data, side)
-                    if target_price > 0.0: loop_delay = 0.5
-                    
-                if target_price <= 0.0:
+                else:
                     target_price = await self._fetch_rest_tob(symbol, side)
                     
                 if target_price <= 0:
@@ -351,6 +348,7 @@ class SmartOrderRouter:
                     elif order_status in ["Cancelled", "Rejected"]: 
                         rejection_count += 1
                         current_order_id = None 
+                        logger.warning(f"[X-RAY] ⚠️ Maker Peg Cancelled by Exchange (Likely spread cross). Retrying with fresh TOB.")
                         if cum_exec_qty > 0:
                             logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
                             return True, avg_price, cum_exec_qty

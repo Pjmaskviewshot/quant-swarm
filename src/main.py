@@ -1,8 +1,9 @@
 """
-💎 V50.0 QUANTUM SWARM: MASTER ORCHESTRATOR
--------------------------------------------
-This is the core event loop. It delegates math to `micro_models`, execution to 
-`auction_engine`, and data ingestion to `multi_feed`.
+👑 V50.0 APEX: MASTER ORCHESTRATOR (TRUE KING EDITION)
+------------------------------------------------------
+This is the core event loop. Featuring Anti-Martingale Scaling, Live Regime
+Refresh, Spread-Protected Clamps, Trend-Suspended Time Decay, and the 
+Chandelier Exit Quantum Ratchet.
 """
 
 import os
@@ -80,7 +81,7 @@ class DistributedQuantEngine:
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
         self.tensor_oracle = CrossAssetTensorOracle()
-        self.auction_engine = CapitalAuctionEngine(self) # The Sniper
+        self.auction_engine = CapitalAuctionEngine(self)
         
         self.stat_engines: Dict[str, ContinuousMicrostructureEngine] = {} 
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {}
@@ -264,10 +265,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(120) 
 
     async def run_system_heartbeat(self):
-        """
-        🚀 V50.0 SYSTEM HEARTBEAT
-        Calculates active PnL, tracks Drawdowns, and fires the Telegram Mission Control Dashboard.
-        """
         start_time = time.time()
         loop_counter = 0
         while True:
@@ -368,11 +365,13 @@ class DistributedQuantEngine:
             
             if valid_manifests: 
                 vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
+                stat_engine.vpin_z = vpin_z
             elif clock.vpin_history:
                 hist = np.array(list(clock.vpin_history)[-200:])
                 if len(hist) >= 20 and np.std(hist) > 0:
                     vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
                     vol_z = vpin_z 
+                    stat_engine.vpin_z = vpin_z
                 else: vpin_z = 0.0
             else: vpin_z = 0.0
         
@@ -769,7 +768,7 @@ class DistributedQuantEngine:
             realigned_sl = actual_entry - actual_sl_distance if direction == "BUY" else actual_entry + actual_sl_distance
             current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if direction == "BUY" else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
             
-            # 🚀 SAFETY CLAMP: Initial Bracket Validation to Prevent Exchange Rejection
+            # Initial Bracket Validation
             is_buy = direction == "BUY"
             if is_buy:
                 current_tp = max(current_tp, current_price * 1.001)
@@ -784,14 +783,24 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"[X-RAY] Initial TP/SL set failed for {symbol}: {e}", exc_info=True)
 
             stat_engine = self.stat_engines.get(symbol)
-            elasticity_engine = self.elasticity_engines.get(symbol)
+            feature_engine = self.feature_engines.get(symbol)
+            
+            highest_since_entry = actual_entry if is_buy else None
+            lowest_since_entry = actual_entry if not is_buy else None
+            scaled_levels = {1.0: False, 2.0: False, 3.0: False}
+            regime = market_regime 
+            
             max_favorable_price, current_sl, initial_risk = actual_entry, realigned_sl, actual_sl_distance
-            locked_breakeven, scaled_out_50_pct, last_api_update_time, api_check_counter = False, False, time.time(), 0
+            locked_breakeven, last_api_update_time, api_check_counter = False, time.time(), 0
 
             while True: 
                 await asyncio.sleep(1.0) 
                 now = time.time()
                 api_check_counter += 1
+                
+                # 👑 TRUE KING: Live Regime Refresh
+                if api_check_counter % 60 == 0:
+                    regime = feature_engine.detect_market_regime() if feature_engine else regime
                 
                 if api_check_counter >= 15:
                     api_check_counter = 0
@@ -800,85 +809,131 @@ class DistributedQuantEngine:
                         pos_list = pos_res.get("result", {}).get("list", [])
                         if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0: break 
                         if (now - daemon_start_time) / 3600.0 > 4.0 and float(pos_list[0].get("unrealisedPnl", 0.0)) < 0:
-                            logger.info(f"[X-RAY] ⏳ TIME DECAY EJECTION // Flattening stale position {symbol}.")
+                            logger.info(f"[X-RAY] ⏳ TIME DECAY EJECTION // Flattening stale underwater position {symbol}.")
                             await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if pos_list[0]["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(pos_list[0]["size"])), timeInForce="IOC", reduceOnly=True)
                             break
                     except Exception as e: logger.debug(f"[X-RAY] Daemon API health check failed for {symbol}: {e}", exc_info=True)
 
+                # 👑 TRUE KING: Universal R-Multiple Tracking (Resilient to stat_engine failures)
+                safe_c_price = current_price
                 if stat_engine and stat_engine.true_micro_price > 0:
-                    c_price = stat_engine.true_micro_price
-                    if direction == "BUY" and c_price > max_favorable_price: max_favorable_price = c_price
-                    elif direction == "SELL" and c_price < max_favorable_price: max_favorable_price = c_price
-                    
-                    r_multiple = abs(max_favorable_price - actual_entry) / (initial_risk + 1e-9)
+                    safe_c_price = stat_engine.true_micro_price
 
-                if r_multiple >= 1.0 and not scaled_out_50_pct and not self.test_mode:
+                if is_buy and safe_c_price > max_favorable_price: 
+                    max_favorable_price = safe_c_price
+                    if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
+                elif not is_buy and safe_c_price < max_favorable_price: 
+                    max_favorable_price = safe_c_price
+                    if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
+                    
+                r_multiple = (max_favorable_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - max_favorable_price) / (initial_risk + 1e-9)
+
+                # --- 🚀 ANTI-MARTINGALE SAFE PARTIAL SCALING ---
+                if not self.test_mode and r_multiple >= 1.0:
                     try:
                         current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                         p_list = current_pos_res.get("result", {}).get("list", [])
                         if p_list and float(p_list[0].get("size", 0.0)) > 0:
-                            curr_size = float(p_list[0]["size"])
-                            half_qty = curr_size * 0.5
+                            current_qty = float(p_list[0]["size"])
                             limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
-                            aligned_half_qty = math.floor(half_qty / limits["qty_step"]) * limits["qty_step"]
                             
-                            if aligned_half_qty >= limits["min_qty"] and (aligned_half_qty * c_price) >= 5.0:
-                                logger.critical(f"[X-RAY] 💰 PARTIAL TAKE-PROFIT // {symbol} reached 1R. Scaling out {aligned_half_qty} units.")
-                                await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if direction == "BUY" else "Buy", orderType="Market", qty=str(aligned_half_qty), timeInForce="IOC", reduceOnly=True)
-                                scaled_out_50_pct = True
-                            else:
-                                logger.info(f"[X-RAY] ℹ️ {symbol} reached 1R, but position is at exchange minimum. Trailing full position.")
-                                scaled_out_50_pct = True 
+                            for target_r, flag in scaled_levels.items():
+                                if r_multiple >= target_r and not flag:
+                                    portion = 0.25 if target_r == 1.0 else (0.35 if target_r == 2.0 else 0.40)
+                                    qty_close = current_qty * portion
+                                    aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
+                                    
+                                    if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
+                                        logger.critical(f"[X-RAY] 💰 MULTI-LEVEL SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units ({portion*100}%).")
+                                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(aligned_qty_close), timeInForce="IOC", reduceOnly=True)
+                                        scaled_levels[target_r] = True
+                                        break
+                                    else:
+                                        if not flag: scaled_levels[target_r] = True
+                                        break
                     except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}", exc_info=True)
 
-                # 🚀 V50.0 INSTITUTIONAL MULTI-STAGE TRAILING ENGINE
-                if r_multiple >= 1.0 and r_multiple < 1.5 and not locked_breakeven:
-                    # Phase 2: Ratchet to Breakeven (+0.1% buffer for fees)
-                    fee_buffer = actual_entry * 0.001
-                    calculated_sl = (actual_entry + fee_buffer) if is_buy else (actual_entry - fee_buffer)
-                    if (is_buy and calculated_sl > current_sl) or (not is_buy and calculated_sl < current_sl):
-                        current_sl = calculated_sl
-                        locked_breakeven = True
-                        logger.info(f"[X-RAY] 🛡️ RISK ELIMINATED // {symbol} reached 1R. Stop-Loss ratcheted to Break-Even (+ fee buffer).")
-                        requires_sl_update = True
+                # --- 👑 APEX PARADIGM 1: CONTINUOUS SIGMOID RATCHET ---
+                live_atr_raw = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
+                live_atr = live_atr_raw if live_atr_raw > 0 else (safe_c_price * 0.005)
+                hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
                 
-                elif r_multiple >= 1.5:
-                    # Phase 3: Dynamic Step-Ratchet Trail (Trails 1.2% behind the peak price)
-                    trail_distance = max_favorable_price * 0.012
-                    potential_trail = (max_favorable_price - trail_distance) if is_buy else (max_favorable_price + trail_distance)
-                    
-                    # Ensure stop-loss only moves in favor, never backwards
-                    if is_buy and potential_trail > current_sl:
-                        current_sl = potential_trail
-                        requires_sl_update = True
-                    elif not is_buy and potential_trail < current_sl:
-                        current_sl = potential_trail
-                        requires_sl_update = True
+                base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
+                min_mult = 0.4 
+                
+                compression_k = 2.5 
+                compression_shift = 2.0 
+                # 👑 Fix: Clamp math.exp to prevent OverflowError during extreme parabolic runs
+                x = compression_k * (r_multiple - compression_shift)
+                if x > 700: x = 700
+                elif x < -700: x = -700
+                sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
 
+                # --- 👑 APEX PARADIGM 2: FORGIVING THETA DECAY ---
+                time_in_mins = (now - daemon_start_time) / 60.0
+                if r_multiple < 0.5 and time_in_mins > 30:
+                    theta_decay = max(0.4, 1.0 - ((time_in_mins - 30) * 0.010)) 
+                else:
+                    theta_decay = 1.0 
+
+                ob = self.orderbook_snapshots.get(symbol, {})
+                b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
+                imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
+                tox_mod = 0.6 if (is_buy and imbalance < -0.5) or (not is_buy and imbalance > 0.5) else 1.0
+                
+                raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
+                
+                if r_multiple < 1.0:
+                    raw_sl = realigned_sl 
+                else:
+                    raw_sl = (max_favorable_price - raw_trail_dist) if is_buy else (max_favorable_price + raw_trail_dist)
+                    be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
+                    raw_sl = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
+
+                # --- 👑 APEX PARADIGM 3: DETERMINISTIC LIQUIDITY ANCHORING ---
+                anchored_sl = raw_sl
+                depth_threshold = 25000.0  # 👑 Fix: Anchor strictly behind $25,000+ institutional walls, ignore retail spoofing
+                
+                try:
+                    if 'bids' in ob and 'asks' in ob and len(ob['bids']) > 0 and len(ob['asks']) > 0:
+                        if is_buy:
+                            walls = [float(b[0]) for b in ob['bids'][:20] if raw_sl < float(b[0]) < safe_c_price and (float(b[1]) * float(b[0])) > depth_threshold]
+                            if walls: anchored_sl = min(walls) * 0.9995 
+                        else:
+                            walls = [float(a[0]) for a in ob['asks'][:20] if safe_c_price < float(a[0]) < raw_sl and (float(a[1]) * float(a[0])) > depth_threshold]
+                            if walls: anchored_sl = max(walls) * 1.0005 
+                except Exception: pass
+
+                requires_sl_update = False
+                if (is_buy and anchored_sl > current_sl) or (not is_buy and anchored_sl < current_sl):
+                    current_sl = anchored_sl
+                    requires_sl_update = True
+
+                # --- 👑 APEX PARADIGM 4: HAWKES-ELASTIC TP EXPANSION ---
                 requires_tp_update = False
-                if r_multiple > 1.2:
-                    calc_tp = actual_entry + (initial_risk * min(4.0, r_multiple + 2.0)) if is_buy else actual_entry - (initial_risk * min(4.0, r_multiple + 2.0))
-                    if is_buy and calc_tp > current_tp and abs(calc_tp - current_tp) / actual_entry > 0.002:
-                        current_tp = calc_tp
-                        requires_tp_update = True
-                    elif not is_buy and calc_tp < current_tp and abs(current_tp - calc_tp) / actual_entry > 0.002:
+                momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
+                target_rr = dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)
+                
+                calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
+                
+                if (is_buy and calc_tp > current_tp) or (not is_buy and calc_tp < current_tp):
+                    if abs(calc_tp - current_tp) / actual_entry > 0.0025:
                         current_tp = calc_tp
                         requires_tp_update = True
 
-                if (locals().get('requires_sl_update', False) or requires_tp_update) and (now - last_api_update_time > 3.0):
-                    # 🚀 SAFETY CLAMP: Ensure TP/SL are always valid relative to current market price
-                    safe_c_price = c_price if 'c_price' in locals() else current_price
+                if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > 3.0):
+                    # 👑 TRUE KING: SPREAD-PROTECTED SAFETY CLAMPS
+                    spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
+                    min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
                     
                     if is_buy:
-                        current_tp = max(current_tp, safe_c_price * 1.001)
-                        current_sl = min(current_sl, safe_c_price * 0.999)
-                        if current_tp <= current_sl:
-                            current_tp = current_sl * 1.01
+                        current_sl = min(current_sl, safe_c_price - min_distance)
+                        current_tp = max(current_tp, safe_c_price + min_distance)
+                        if current_tp <= current_sl: current_tp = current_sl * 1.01
                     else:
-                        current_tp = min(current_tp, safe_c_price * 0.999)
-                        current_sl = max(current_sl, safe_c_price * 1.001)
-                        if current_tp >= current_sl:
-                            current_tp = current_sl * 0.99
+                        current_sl = max(current_sl, safe_c_price + min_distance)
+                        current_tp = min(current_tp, safe_c_price - min_distance)
+                        if current_tp >= current_sl: current_tp = current_sl * 0.99
 
                     try:
                         await self.executor.safe_call(
@@ -887,8 +942,8 @@ class DistributedQuantEngine:
                             takeProfit=align_price(current_tp), stopLoss=align_price(current_sl)
                         )
                         last_api_update_time = now
-                        if requires_tp_update: logger.info(f"[X-RAY] 🌌 TREND EXPANSION // {symbol} Take-Profit pushed out to {align_price(current_tp)}.")
-                        if locals().get('requires_sl_update', False): logger.info(f"[X-RAY] 🛡️ TRAIL RATCHET // {symbol} SL advanced to {align_price(current_sl)}.")
+                        if requires_tp_update: logger.info(f"[X-RAY] 🌌 HAWKES-ELASTIC TP // {symbol} Target repelled outward to {align_price(current_tp)}.")
+                        if requires_sl_update: logger.info(f"[X-RAY] 🛡️ LIQUIDITY ANCHOR // {symbol} SL tucked behind orderbook wall at {align_price(current_sl)}.")
                     except Exception as e: 
                         logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
 
