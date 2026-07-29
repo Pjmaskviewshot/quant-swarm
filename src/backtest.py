@@ -1,10 +1,10 @@
 """
-🧪 V50.0 QUANTUM SWARM BACKTESTER: PERFECT PARITY
+🌌 V52.0 OMNI-STATE BACKTESTER: PERFECT PARITY
 --------------------------------------------------
-Synchronized strictly with Quant Swarm live node V50.0.
-Implements Adaptive Session Clocks (Weekend vs. Weekday regimes),
-Multi-Modal Strategy Routing (Maker-Grid vs. Explosive Taker),
-Dynamic Z-Scored Entropy Gating, 6 bps Breakeven Ratchets, and 1 bps EV Triggers.
+Synchronized strictly with Quant Swarm live node V52.0.
+Implements Continuous Sigmoid Ratchets, Harmonic Scale-Out Mapping,
+Predictive Order Flow Ejection (POFE), PnL-Adjusted Theta Decay, 
+and Asymmetric TP Repulsion.
 """
 
 import argparse
@@ -256,7 +256,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     ceiling = max(floor, ceiling - mse_penalty)
     return max(floor, min(ceiling, prob))
 
-def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v52_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -473,7 +473,6 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         dynamic_gate = max(0.52, dynamic_gate)
         
-        # V50.0 Adaptive Entropy Gate & Session Clock Integration
         if len(entropy_history) > 30:
             entropy_arr = np.array(entropy_history)
             entropy_mean = np.mean(entropy_arr)
@@ -531,7 +530,6 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             if routing_mode == "MAKER_ONLY":
                 dynamic_gate -= 0.08
                 
-            # V50.0 Adaptive Session Clock EV Floor
             ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
                 
             if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
@@ -540,82 +538,106 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 
                 if net_ev_pct > ev_floor:  
                     entry = c['close']
-                    sl = entry - (sl_dist_pct * entry) if action_dir == "BUY" else entry + (sl_dist_pct * entry)
-                    tp = entry + (tp_dist_pct * entry) if action_dir == "BUY" else entry - (tp_dist_pct * entry)
+                    
+                    # 🌌 V52.0 ISO-RISK INITIALIZATION
+                    initial_risk = sl_dist_pct * entry
+                    realigned_sl = entry - initial_risk if action_dir == "BUY" else entry + initial_risk
+                    
+                    r_t1 = round(max(1.0, dynamic_rr_ratio * 0.6), 2)
+                    r_t2 = round(max(1.5, dynamic_rr_ratio * 1.0), 2)
+                    r_t3 = round(max(2.0, dynamic_rr_ratio * 1.5), 2)
+                    scaled_levels = {r_t1: False, r_t2: False, r_t3: False}
+                    
+                    max_favorable_price = entry
+                    current_sl = realigned_sl
+                    current_tp = entry + (tp_dist_pct * entry) if action_dir == "BUY" else entry - (tp_dist_pct * entry)
                     
                     outcome, exit_price, bars_held = None, entry, 0
-                    max_favorable_price = entry
-                    locked_breakeven = False
-                    scaled_out = False
-                    initial_risk = sl_dist_pct * entry
-                    current_sl = sl
-                    current_tp = tp
-                    
                     pnl_accum = 0.0
                     position_size = 1.0
                     
-                    for j in range(i + 1, min(i + 61, len(target_candles))): 
+                    for j in range(i + 1, min(i + 300, len(target_candles))): 
                         bars_held = j - i
                         h, l = target_candles[j]["high"], target_candles[j]["low"]
+                        c_j = target_candles[j]["close"]
+                        vol_j = target_candles[j]["volume"]
                         
                         if action_dir == "BUY" and h > max_favorable_price: max_favorable_price = h
                         elif action_dir == "SELL" and l < max_favorable_price: max_favorable_price = l
                         
-                        profit_distance = abs(max_favorable_price - entry)
-                        r_multiple = profit_distance / (initial_risk + 1e-9)
+                        r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                         
-                        if r_multiple >= 1.0 and not scaled_out:
-                            pnl_accum += (1.0 * initial_risk) * 0.5
-                            position_size = 0.5
-                            scaled_out = True
+                        # 🌌 V52.0 PREDICTIVE ORDER FLOW EJECTION (POFE)
+                        if r_multiple < 0.8 and bars_held < 5:
+                            if vol_j > (vpin_bucket_size / entry) * 0.5: 
+                                if (action_dir == "BUY" and c_j < target_candles[j-1]["close"]) or (action_dir == "SELL" and c_j > target_candles[j-1]["close"]):
+                                    outcome = "POFE_EJECT"
+                                    exit_price = c_j
+                                    break
+                                    
+                        # 🌌 V52.0 PARABOLIC CASCADE EJECTION
+                        if r_multiple >= 1.5 and vol_j > (vpin_bucket_size / entry) * 0.8:
+                            outcome = "PARABOLIC_EJECT"
+                            exit_price = c_j
+                            break
+
+                        # 🌌 V52.0 HARMONIC SCALE-OUT MAPPING
+                        for target_r, flag in scaled_levels.items():
+                            if r_multiple >= target_r and not flag:
+                                portion = 0.25 if target_r == r_t1 else (0.35 if target_r == r_t2 else 0.40)
+                                scale_exit_price = entry + (target_r * initial_risk) if action_dir == "BUY" else entry - (target_r * initial_risk)
+                                gross_r = (scale_exit_price - entry) / entry if action_dir == "BUY" else (entry - scale_exit_price) / entry
+                                pnl_accum += gross_r * position_size * portion
+                                position_size -= (position_size * portion)
+                                scaled_levels[target_r] = True
+
+                        # 🌌 V52.0 CONTINUOUS SIGMOID RATCHET
+                        base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
+                        min_mult = 0.4
+                        x_val = np.clip(2.5 * (r_multiple - 2.0), -700, 700)
+                        sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x_val))
                         
-                        if r_multiple >= 0.5 and not locked_breakeven:
-                            if r_multiple >= 1.0:
-                                fee_coverage = entry * 0.0006
-                                current_sl = entry + fee_coverage if action_dir == "BUY" else entry - fee_coverage
-                                locked_breakeven = True
-                            else:
-                                half_risk_sl = entry - (initial_risk * 0.5) if action_dir == "BUY" else entry + (initial_risk * 0.5)
-                                if (action_dir == "BUY" and half_risk_sl > current_sl) or (action_dir == "SELL" and half_risk_sl < current_sl):
-                                    current_sl = half_risk_sl
+                        # 🌌 V52.0 FORGIVING THETA DECAY
+                        time_in_mins = bars_held
+                        vol_ratio = (initial_risk / p.sl_atr_mult) / entry
+                        dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
                         
-                        base_mult = max(0.4, 2.0 - (r_multiple * 0.4))
-                        vol_adj = 1.0 + (vol_scalar * 0.5)
-                        el_adj = max(0.8, min(1.5, 1.0 / (orderbook_elasticity + 0.2)))
-                        dynamic_trail_dist = initial_risk * base_mult * vol_adj * el_adj
-                        
-                        if action_dir == "BUY":
-                            calc_sl = max_favorable_price - dynamic_trail_dist
-                            if calc_sl > current_sl and abs(calc_sl - current_sl) / entry > 0.0010:
-                                current_sl = calc_sl
+                        if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
+                            theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010))
                         else:
-                            calc_sl = max_favorable_price + dynamic_trail_dist
-                            if calc_sl < current_sl and abs(current_sl - calc_sl) / entry > 0.0010:
-                                current_sl = calc_sl
-                                
-                        if r_multiple > 1.2:
-                            tp_expansion_factor = min(4.0, r_multiple + (vol_scalar * 2.0))
-                            dynamic_tp_dist = initial_risk * tp_expansion_factor
-                            calc_tp = entry + dynamic_tp_dist if action_dir == "BUY" else entry - dynamic_tp_dist
+                            theta_decay = 1.0
                             
-                            if action_dir == "BUY" and calc_tp > current_tp and abs(calc_tp - current_tp) / entry > 0.002:
-                                current_tp = calc_tp
-                            elif action_dir == "SELL" and calc_tp < current_tp and abs(current_tp - calc_tp) / entry > 0.002:
-                                current_tp = calc_tp
-                                
+                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * sigmoid_factor * theta_decay, entry * 0.004)
+                        
+                        if r_multiple < 1.0:
+                            current_sl = realigned_sl
+                        else:
+                            raw_sl = (max_favorable_price - raw_trail_dist) if action_dir == "BUY" else (max_favorable_price + raw_trail_dist)
+                            be_plus = (entry + entry * 0.002) if action_dir == "BUY" else (entry - entry * 0.002)
+                            if action_dir == "BUY": current_sl = max(raw_sl, be_plus)
+                            else: current_sl = min(raw_sl, be_plus)
+
+                        # 🌌 V52.0 ASYMMETRIC TP REPULSION
+                        momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
+                        if vol_j < (vpin_bucket_size / entry) * 0.1 and r_multiple > 1.0:
+                            momentum_stretch -= 0.5 
+                        
+                        target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3))
+                        current_tp = entry + (initial_risk * target_rr) if action_dir == "BUY" else entry - (initial_risk * target_rr)
+                        
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
                         
                         if hit_tp and hit_sl: outcome, exit_price = "LOSS", current_sl; break
                         if hit_tp: outcome, exit_price = "WIN", current_tp; break
-                        if hit_sl: outcome, exit_price = "LOSS" if not scaled_out else "WIN", current_sl; break
+                        if hit_sl: outcome, exit_price = ("LOSS" if r_multiple < 1.0 else "WIN"), current_sl; break
                             
                     if outcome is None: 
-                        exit_price = target_candles[min(i + 60, len(target_candles) - 1)]["close"]
-                        outcome = "WIN" if ((exit_price > entry) == (action_dir == "BUY")) else "LOSS"
+                        exit_price = target_candles[min(i + 299, len(target_candles) - 1)]["close"]
+                        outcome = "TIME_EXIT"
 
                     gross = (exit_price - entry) / entry if action_dir == "BUY" else (entry - exit_price) / entry
-                    gross = (gross * position_size) + (pnl_accum / entry) 
+                    gross = (gross * position_size) + pnl_accum 
                     
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
@@ -698,7 +720,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V50.0 APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V52.0 OMNI-STATE Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [1.2, 1.5, 2.0]
@@ -722,7 +744,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v50_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v52_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -775,7 +797,7 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v50_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v52_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
         print("\n=== OUT-OF-SAMPLE (last 40%) — TRUE MATHEMATICAL REALITY ===")
         for k, v in test.items():

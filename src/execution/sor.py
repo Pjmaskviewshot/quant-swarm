@@ -144,9 +144,17 @@ class SmartOrderRouter:
             if sl <= current_mid_price: sl = current_mid_price + implied_sl_dist
             if tp >= current_mid_price: tp = current_mid_price - implied_tp_dist
             
+        # --- NEW SAFETY CLAMP FOR FLASH STRIKE ---
+        if direction.upper() == "BUY":
+            safe_sl = min(sl, current_mid_price * 0.999) if sl else 0.0
+            safe_tp = max(tp, current_mid_price * 1.001) if tp else 0.0
+        else:
+            safe_sl = max(sl, current_mid_price * 1.001) if sl else 0.0
+            safe_tp = min(tp, current_mid_price * 0.999) if tp else 0.0
+            
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
-        final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
-        final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
+        final_sl = self._format_dynamic_price(safe_sl, symbol) if safe_sl else 0.0
+        final_tp = self._format_dynamic_price(safe_tp, symbol) if safe_tp else 0.0
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         for attempt in range(3):

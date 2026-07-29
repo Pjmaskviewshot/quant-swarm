@@ -1,10 +1,10 @@
 """
-V50.0 QUANTUM SWARM: Capital Auction & Dispatch Engine
-------------------------------------------------------
+🌌 V51.0 SINGULARITY: Capital Auction & Iso-Risk Dispatch Engine
+----------------------------------------------------------------
 This module acts as the "Sniper" of the architecture. It polls the highly-concurrent 
-auction heap, evaluates X-Ray diagnostics, handles Nano-Core sizing for micro-accounts,
-and safely dispatches asynchronous orders to the Smart Order Router without blocking 
-the main L2 WebSocket ingestion threads.
+auction heap and dispatches orders using Constant Value-at-Risk (VaR) Iso-Surface 
+Compression to elegantly bypass exchange hardware limits while maintaining strict
+account equity defense.
 """
 
 import time
@@ -31,14 +31,14 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated.
         """
-        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix & X-Ray Diagnostics.")
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix & Iso-Risk Execution.")
         
         while True:
             await asyncio.sleep(0.5) 
             
             async with self.core.portfolio_state_lock:
                 if len(self.core.active_positions_map) >= 5:
-                    continue # Max portfolio capacity reached
+                    continue 
 
             best_candidate = None
             
@@ -113,8 +113,8 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V50.0 Execution Engine. Handles Nano-Core sizing, safety validations, X-Ray telemetry,
-        and dispatching to the Smart Order Router.
+        V51.0 Execution Engine. Handles Constant VaR Iso-Risk Compression to dynamically 
+        warp Stop-Loss variables against fixed Exchange Hardware Constraints.
         """
         try:
             # Duplicate Daemon Check
@@ -124,13 +124,74 @@ class CapitalAuctionEngine:
                 return
 
             signal_id = str(uuid.uuid4())
+            
+            # 1. Fetch Accurate Balance
+            try: 
+                available_balance = await self.core.executor.get_wallet_balance_usdt()
+            except Exception as e: 
+                logger.debug(f"[X-RAY] Wallet fetch failed before execution: {e}", exc_info=True)
+                available_balance = 0.0
+
+            if available_balance < 5.0: 
+                logger.warning(f"[X-RAY] 🚫 MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low for Bybit minimums.")
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
+
+            # 2. Establish Institutional Value-at-Risk (VaR) Constraints
+            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+            if self.core.test_mode or available_balance < 50.0:
+                # Micro-accounts scale risk more aggressively but strictly cap maximum absolute dollar exposure (Max ~3%)
+                fractional_risk = min(max(fractional_risk, 0.015), 0.03) 
+
+            target_dollar_risk = available_balance * fractional_risk
+
+            # 3. Base Volatility Parameters
             sl_atr_mult = self.core.live_params.get("sl_atr_mult", 1.5)
+            # We lower the hard structural floor so we have room to mathematically compress it if necessary
+            base_sl_dist = max(atr * sl_atr_mult, current_price * 0.005) 
             
-            # 🚀 BUG FIX: Widen Stop-Loss structural floor to survive noise (0.80% -> 1.80%)
-            sl_distance = max(atr * sl_atr_mult, current_price * 0.018)
-            # Take-Profit distance scaled accordingly to maintain R:R
+            ideal_qty = (target_dollar_risk / (base_sl_dist / current_price)) / current_price
+
+            # 4. Exchange Hardware Limits Verification
+            await self.core.sor._fetch_exchange_limits(symbol)
+            limits = self.core.sor.instrument_cache.get(symbol, {"min_qty": 1.0, "qty_step": 1.0})
+            min_qty = limits["min_qty"]
+            qty_step = limits["qty_step"]
+
+            # 5. 🌌 CONSTANT VaR ISO-RISK COMPRESSION MATRIX
+            if ideal_qty < min_qty:
+                actual_qty = min_qty
+                actual_notional = actual_qty * current_price
+                
+                # Warp the Stop-Loss to maintain exact Dollar Risk despite the forced position size increase
+                compressed_sl_pct = target_dollar_risk / actual_notional
+                compressed_sl_dist = compressed_sl_pct * current_price
+                
+                # Microstructure Validation: Does this dynamically compressed SL survive market noise?
+                noise_floor = atr * 0.85 # Minimum required distance to survive tick variance
+                if compressed_sl_dist < noise_floor:
+                    logger.warning(
+                        f"[X-RAY] 🚫 VaR VIOLATION // {symbol} Bybit API forces ${actual_notional:.2f} min position. "
+                        f"Compressing SL to {compressed_sl_pct*100:.2f}% puts it inside the ATR noise floor. Mathematically unviable. Aborting."
+                    )
+                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                    return
+
+                logger.info(
+                    f"[X-RAY] ⚖️ ISO-RISK COMPRESSION // {symbol} oversized to ${actual_notional:.2f}. "
+                    f"Compressing Stop-Loss to {compressed_sl_pct*100:.2f}% to strictly cap VaR exposure at ${target_dollar_risk:.2f}."
+                )
+                
+                sl_distance = compressed_sl_dist
+                target_position_size = actual_qty
+                target_notional = actual_notional
+            else:
+                target_position_size = math.floor(ideal_qty / qty_step) * qty_step
+                sl_distance = base_sl_dist
+                target_notional = target_position_size * current_price
+
+            # 6. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
-            
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
             
@@ -144,40 +205,16 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            # Fetch Accurate Balance
-            try: 
-                available_balance = await self.core.executor.get_wallet_balance_usdt()
-            except Exception as e: 
-                logger.debug(f"[X-RAY] Wallet fetch failed before execution: {e}", exc_info=True)
-                available_balance = 0.0
+            # Dynamic Leverage Engine
+            target_leverage = self.core.risk_vault.calculate_dynamic_leverage(target_notional, available_balance, sl_distance_pct=(sl_distance / current_price))
 
-            # X-RAY: Hard Balance Floor
-            if available_balance < 5.0: 
-                logger.warning(f"[X-RAY] 🚫 MARGIN EXHAUSTED // Skipping {symbol}: Available margin ({available_balance:.2f} USDT) too low for Bybit minimums.")
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
-                
-            # 🚀 V50.0 NANO-CORE MICRO-SIZER
-            if available_balance < 50.0:
-                logger.info(f"[NANO-CORE] 🔬 Micro-Account Detected (${available_balance:.2f}). Scaling to Absolute Minimum Notional.")
-                target_position_size = 6.00 / (current_price + 1e-9) # Fixed ~$6 minimum Bybit contract size
-                fractional_risk = 0.05
-                target_leverage = 5
-            else:
-                fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
-                dollar_risk = available_balance * fractional_risk
-                target_position_size = max(dollar_risk / sl_distance, 6.00 / (current_price + 1e-9))
-                target_leverage = self.core.risk_vault.calculate_dynamic_leverage(target_position_size * current_price, available_balance, sl_distance_pct=(sl_distance / current_price))
-                
-            target_notional = target_position_size * current_price
-
-            # X-RAY: Portfolio Safety Validation
+            # X-RAY: Final Portfolio Safety Sweep
             if available_balance >= 50.0 and not self.core.risk_vault.evaluate_portfolio_safety(available_balance, target_notional, symbol): 
                 logger.warning(f"[X-RAY] 🚫 PORTFOLIO SAFETY VIOLATION // Risk Vault rejected {symbol} to prevent over-exposure.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            logger.info(f"[X-RAY] 🎯 PRE-TRADE DISPATCH // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: {fractional_risk:.2%}")
+            logger.info(f"[X-RAY] 🎯 PRE-TRADE DISPATCH // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | VaR Risk: ${target_dollar_risk:.2f}")
 
             # Paper Trading Bypass
             if self.core.test_mode:
