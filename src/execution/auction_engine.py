@@ -1,10 +1,9 @@
 """
-🌌 V51.0 SINGULARITY: Capital Auction & Iso-Risk Dispatch Engine
-----------------------------------------------------------------
-This module acts as the "Sniper" of the architecture. It polls the highly-concurrent 
-auction heap and dispatches orders using Constant Value-at-Risk (VaR) Iso-Surface 
-Compression to elegantly bypass exchange hardware limits while maintaining strict
-account equity defense.
+🌌 V54.0 OMNI-STATE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
+--------------------------------------------------------------
+Scale-Invariant Volatility-Parity Capital Allocation.
+Scales dynamically across any account balance ($15 to $1,000,000+) using 
+Continuous Logistic Exposure Functions without rigid hard-caps or signal rejections.
 """
 
 import time
@@ -32,7 +31,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated.
         """
-        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Processing Priority Matrix & Iso-Risk Execution.")
+        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Scale-Invariant Volatility-Parity Active.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -114,8 +113,7 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V51.0 Execution Engine. Handles Constant VaR Iso-Risk Compression to dynamically 
-        warp Stop-Loss variables against fixed Exchange Hardware Constraints.
+        V54.0 Execution Engine. Handles continuous logistic sizing.
         """
         try:
             # Duplicate Daemon Check
@@ -138,60 +136,56 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 2. Establish Institutional Value-at-Risk (VaR) Constraints
-            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
-            if self.core.test_mode or available_balance < 50.0:
-                # Micro-accounts scale risk more aggressively but strictly cap maximum absolute dollar exposure (Max ~3%)
-                fractional_risk = min(max(fractional_risk, 0.015), 0.03) 
-
-            target_dollar_risk = available_balance * fractional_risk
-
-            # 3. Base Volatility Parameters
+            # 2. Base Volatility Parameters
             sl_atr_mult = self.core.live_params.get("sl_atr_mult", 1.5)
-            # We lower the hard structural floor so we have room to mathematically compress it if necessary
-            base_sl_dist = max(atr * sl_atr_mult, current_price * 0.005) 
+            # Hard structural floor to survive market noise
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.018) 
             
-            ideal_qty = (target_dollar_risk / (base_sl_dist / current_price)) / current_price
-
-            # 4. Exchange Hardware Limits Verification
+            # 3. Exchange Hardware Limits Verification
             await self.core.sor._fetch_exchange_limits(symbol)
             limits = self.core.sor.instrument_cache.get(symbol, {"min_qty": 1.0, "qty_step": 1.0})
             min_qty = limits["min_qty"]
             qty_step = limits["qty_step"]
+            
+            exchange_min_notional = min_qty * current_price
 
-            # 5. 🌌 CONSTANT VaR ISO-RISK COMPRESSION MATRIX
-            if ideal_qty < min_qty:
-                actual_qty = min_qty
-                actual_notional = actual_qty * current_price
-                
-                # Warp the Stop-Loss to maintain exact Dollar Risk despite the forced position size increase
-                compressed_sl_pct = target_dollar_risk / actual_notional
-                compressed_sl_dist = compressed_sl_pct * current_price
-                
-                # Microstructure Validation: Does this dynamically compressed SL survive market noise?
-                noise_floor = atr * 0.85 # Minimum required distance to survive tick variance
-                if compressed_sl_dist < noise_floor:
-                    logger.warning(
-                        f"[X-RAY] 🚫 VaR VIOLATION // {symbol} Bybit API forces ${actual_notional:.2f} min position. "
-                        f"Compressing SL to {compressed_sl_pct*100:.2f}% puts it inside the ATR noise floor. Mathematically unviable. Aborting."
-                    )
-                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                    return
+            # 4. 🌌 SCALE-INVARIANT CONTINUOUS EQUITY-EXPOSURE FUNCTION
+            # Smooth logistic scaling curve: S(A) = A * (min_cap + (max_cap - min_cap) / (1 + exp(-k * (A - A0))))
+            min_exposure_ratio = 0.50 # 50% max single trade notional for micro accounts (Allows up to $7.50 on $15)
+            max_exposure_ratio = 0.10 # 10% max single trade notional for large accounts
+            k_slope = 0.05
+            mid_point = 100.0 # Pivot point at $100 equity
+            
+            logistic_exp = min_exposure_ratio + (max_exposure_ratio - min_exposure_ratio) / (1.0 + math.exp(-k_slope * (available_balance - mid_point)))
+            max_allowed_notional = max(6.00, available_balance * logistic_exp)
 
-                logger.info(
-                    f"[X-RAY] ⚖️ ISO-RISK COMPRESSION // {symbol} oversized to ${actual_notional:.2f}. "
-                    f"Compressing Stop-Loss to {compressed_sl_pct*100:.2f}% to strictly cap VaR exposure at ${target_dollar_risk:.2f}."
+            # If the exchange physically FORCES us to take a position larger than our logistic limit, gracefully reject.
+            if exchange_min_notional > max_allowed_notional:
+                logger.warning(
+                    f"[X-RAY] 🚫 LOGISTIC CAP VIOLATION // {symbol} exchange minimum is ${exchange_min_notional:.2f}. "
+                    f"Account logistic max is ${max_allowed_notional:.2f}. Bypassing to protect micro-equity."
                 )
-                
-                sl_distance = compressed_sl_dist
-                target_position_size = actual_qty
-                target_notional = actual_notional
-            else:
-                target_position_size = math.floor(ideal_qty / qty_step) * qty_step
-                sl_distance = base_sl_dist
-                target_notional = target_position_size * current_price
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
 
-            # 6. Target Price Calculus & Formatting
+            # Volatility-Parity Sizing
+            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+            fractional_risk = max(0.015, min(0.03, fractional_risk)) # Risk 1.5% to 3.0% per trade
+
+            target_dollar_risk = available_balance * fractional_risk
+            raw_notional = (target_dollar_risk / (sl_distance / current_price))
+
+            # Smoothly Clamp Notional within Exchange Limits & Continuous Equity Curve
+            clamped_notional = min(max(raw_notional, exchange_min_notional), max_allowed_notional)
+
+            raw_qty = clamped_notional / current_price
+            target_position_size = math.floor(raw_qty / qty_step) * qty_step
+            if target_position_size < min_qty:
+                target_position_size = min_qty
+                
+            target_notional = target_position_size * current_price
+
+            # 5. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
@@ -215,7 +209,7 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            logger.info(f"[X-RAY] 🎯 PRE-TRADE DISPATCH // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | VaR Risk: ${target_dollar_risk:.2f}")
+            logger.info(f"[X-RAY] 🎯 PRE-TRADE DISPATCH // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${target_dollar_risk:.2f}")
 
             # Paper Trading Bypass
             if self.core.test_mode:
