@@ -1,9 +1,8 @@
 """
-👑 V50.0 APEX: MASTER ORCHESTRATOR (TRUE KING EDITION)
+🌌 V51.0 SINGULARITY: MASTER ORCHESTRATOR
 ------------------------------------------------------
-This is the core event loop. Featuring Anti-Martingale Scaling, Live Regime
-Refresh, Spread-Protected Clamps, Trend-Suspended Time Decay, and the 
-Chandelier Exit Quantum Ratchet.
+The Apex Execution Engine. Featuring Anti-Spoofing Cumulative Depth Anchoring,
+Parabolic Cascade Ejection, Proximity-Warp Polling, and Continuous Sigmoid Ratchets.
 """
 
 import os
@@ -48,7 +47,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V50.0_QUANTUM_SWARM")
+logger = logging.getLogger("QUANT_CORE.V51.0_SINGULARITY")
 
 
 class DistributedQuantEngine:
@@ -57,7 +56,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🟢 LIVE MODE: V50.0 QUANTUM SWARM ACTIVE.")
+        else: logger.critical("🌌 LIVE MODE: V51.0 SINGULARITY ACTIVE.")
         
         self.asset_basket: List[str] = ["BTCUSDT"]
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -743,14 +742,14 @@ class DistributedQuantEngine:
             return
 
         try:
-            order_filled, actual_entry, initial_qty = False, current_price, risk_matrix.get("size", 1.0)
+            order_filled, actual_entry = False, current_price
             for _ in range(5):  
                 await asyncio.sleep(3)
                 try:
                     pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     pos_data = pos_res.get("result", {}).get("list", [])
                     if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
-                        order_filled, actual_entry, initial_qty = True, float(pos_data[0].get("avgPrice", current_price)), float(pos_data[0].get("size", initial_qty))
+                        order_filled, actual_entry = True, float(pos_data[0].get("avgPrice", current_price))
                         break
                 except Exception as e: logger.debug(f"[X-RAY] Position fill check failed for {symbol}: {e}", exc_info=True); continue
 
@@ -791,18 +790,24 @@ class DistributedQuantEngine:
             regime = market_regime 
             
             max_favorable_price, current_sl, initial_risk = actual_entry, realigned_sl, actual_sl_distance
-            locked_breakeven, last_api_update_time, api_check_counter = False, time.time(), 0
+            last_api_update_time, api_check_counter = time.time(), 0
 
             while True: 
-                await asyncio.sleep(1.0) 
+                # 🌌 V51.0 PROXIMITY-WARP POLLING (Adaptive Loop Throttle)
+                safe_c_price = current_price
+                if stat_engine and stat_engine.true_micro_price > 0: safe_c_price = stat_engine.true_micro_price
+                sl_proximity = abs(safe_c_price - current_sl) / (safe_c_price + 1e-9)
+                loop_sleep = 0.2 if sl_proximity < 0.005 else 1.0
+                await asyncio.sleep(loop_sleep) 
+                
                 now = time.time()
                 api_check_counter += 1
                 
-                # 👑 TRUE KING: Live Regime Refresh
-                if api_check_counter % 60 == 0:
+                # Live Regime Refresh
+                if api_check_counter % (60 if loop_sleep == 1.0 else 300) == 0:
                     regime = feature_engine.detect_market_regime() if feature_engine else regime
                 
-                if api_check_counter >= 15:
+                if api_check_counter >= (15 if loop_sleep == 1.0 else 75):
                     api_check_counter = 0
                     try:
                         pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
@@ -814,19 +819,30 @@ class DistributedQuantEngine:
                             break
                     except Exception as e: logger.debug(f"[X-RAY] Daemon API health check failed for {symbol}: {e}", exc_info=True)
 
-                # 👑 TRUE KING: Universal R-Multiple Tracking (Resilient to stat_engine failures)
-                safe_c_price = current_price
-                if stat_engine and stat_engine.true_micro_price > 0:
-                    safe_c_price = stat_engine.true_micro_price
-
-                if is_buy and safe_c_price > max_favorable_price: 
-                    max_favorable_price = safe_c_price
-                    if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
-                elif not is_buy and safe_c_price < max_favorable_price: 
-                    max_favorable_price = safe_c_price
-                    if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
+                # 👑 UNIVERSAL R-MULTIPLE TRACKING
+                if safe_c_price != current_price:
+                    if is_buy and safe_c_price > max_favorable_price: 
+                        max_favorable_price = safe_c_price
+                        if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
+                    elif not is_buy and safe_c_price < max_favorable_price: 
+                        max_favorable_price = safe_c_price
+                        if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
                     
                 r_multiple = (max_favorable_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - max_favorable_price) / (initial_risk + 1e-9)
+
+                # 🌌 V51.0 PARABOLIC CASCADE EJECTION (Tuned to 2.8z)
+                hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
+                vpin_z = getattr(stat_engine, 'vpin_z', hawkes_z)
+                
+                if r_multiple >= 1.5 and (hawkes_z > 2.8 or vpin_z > 2.8):
+                    try:
+                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength at {r_multiple:.1f}R.")
+                        current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                        p_list = current_pos_res.get("result", {}).get("list", [])
+                        if p_list and float(p_list[0].get("size", 0.0)) > 0:
+                            await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(float(p_list[0]["size"])), timeInForce="IOC", reduceOnly=True)
+                            break 
+                    except Exception as e: logger.error(f"[X-RAY] Parabolic Ejection failed for {symbol}: {e}", exc_info=True)
 
                 # --- 🚀 ANTI-MARTINGALE SAFE PARTIAL SCALING ---
                 if not self.test_mode and r_multiple >= 1.0:
@@ -856,7 +872,6 @@ class DistributedQuantEngine:
                 # --- 👑 APEX PARADIGM 1: CONTINUOUS SIGMOID RATCHET ---
                 live_atr_raw = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 live_atr = live_atr_raw if live_atr_raw > 0 else (safe_c_price * 0.005)
-                hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
                 
                 base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
                 min_mult = 0.4 
@@ -869,10 +884,13 @@ class DistributedQuantEngine:
                 elif x < -700: x = -700
                 sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
 
-                # --- 👑 APEX PARADIGM 2: FORGIVING THETA DECAY ---
+                # --- 🌌 V51.0 FORGIVING & ADAPTIVE THETA DECAY ---
                 time_in_mins = (now - daemon_start_time) / 60.0
-                if r_multiple < 0.5 and time_in_mins > 30:
-                    theta_decay = max(0.4, 1.0 - ((time_in_mins - 30) * 0.010)) 
+                vol_ratio = live_atr / max(safe_c_price, 1e-9)
+                dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
+
+                if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
+                    theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010)) 
                 else:
                     theta_decay = 1.0 
 
@@ -890,18 +908,27 @@ class DistributedQuantEngine:
                     be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
                     raw_sl = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
 
-                # --- 👑 APEX PARADIGM 3: DETERMINISTIC LIQUIDITY ANCHORING ---
+                # --- 🌌 V51.0 ANTI-SPOOFING CUMULATIVE LIQUIDITY ANCHORING ---
                 anchored_sl = raw_sl
                 depth_threshold = 25000.0  # 👑 Fix: Anchor strictly behind $25,000+ institutional walls, ignore retail spoofing
                 
                 try:
                     if 'bids' in ob and 'asks' in ob and len(ob['bids']) > 0 and len(ob['asks']) > 0:
+                        cum_vol = 0.0
                         if is_buy:
-                            walls = [float(b[0]) for b in ob['bids'][:20] if raw_sl < float(b[0]) < safe_c_price and (float(b[1]) * float(b[0])) > depth_threshold]
-                            if walls: anchored_sl = min(walls) * 0.9995 
+                            for level in ob['bids'][:20]:
+                                if float(level[0]) >= raw_sl: continue
+                                cum_vol += float(level[1]) * float(level[0])
+                                if cum_vol > depth_threshold:
+                                    anchored_sl = float(level[0]) * 0.9995 
+                                    break
                         else:
-                            walls = [float(a[0]) for a in ob['asks'][:20] if safe_c_price < float(a[0]) < raw_sl and (float(a[1]) * float(a[0])) > depth_threshold]
-                            if walls: anchored_sl = max(walls) * 1.0005 
+                            for level in ob['asks'][:20]:
+                                if float(level[0]) <= raw_sl: continue
+                                cum_vol += float(level[1]) * float(level[0])
+                                if cum_vol > depth_threshold:
+                                    anchored_sl = float(level[0]) * 1.0005 
+                                    break
                 except Exception: pass
 
                 requires_sl_update = False
@@ -912,7 +939,7 @@ class DistributedQuantEngine:
                 # --- 👑 APEX PARADIGM 4: HAWKES-ELASTIC TP EXPANSION ---
                 requires_tp_update = False
                 momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                target_rr = dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)
+                target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)) # Capped at 6.0R
                 
                 calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
                 
@@ -921,7 +948,7 @@ class DistributedQuantEngine:
                         current_tp = calc_tp
                         requires_tp_update = True
 
-                if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > 3.0):
+                if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > (3.0 if loop_sleep == 1.0 else 1.0)):
                     # 👑 TRUE KING: SPREAD-PROTECTED SAFETY CLAMPS
                     spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
                     min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
@@ -943,7 +970,7 @@ class DistributedQuantEngine:
                         )
                         last_api_update_time = now
                         if requires_tp_update: logger.info(f"[X-RAY] 🌌 HAWKES-ELASTIC TP // {symbol} Target repelled outward to {align_price(current_tp)}.")
-                        if requires_sl_update: logger.info(f"[X-RAY] 🛡️ LIQUIDITY ANCHOR // {symbol} SL tucked behind orderbook wall at {align_price(current_sl)}.")
+                        if requires_sl_update: logger.info(f"[X-RAY] 🛡️ CUMULATIVE LIQUIDITY ANCHOR // {symbol} SL tucked securely behind {depth_threshold/1000:.0f}k orderbook wall at {align_price(current_sl)}.")
                     except Exception as e: 
                         logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
 
