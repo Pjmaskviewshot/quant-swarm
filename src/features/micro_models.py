@@ -1,9 +1,10 @@
 """
-💎 V50.0 QUANTUM SWARM: MICROSTRUCTURE MACHINE LEARNING MODELS
+💎 V55.2 QUANTUM SWARM: MICROSTRUCTURE MACHINE LEARNING MODELS
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Upgraded with fully data-driven, parameter-free Symmetrical Entropy Gating and Dynamic Percentile Ceilings.
+Features fully data-driven, parameter-free Symmetrical Entropy Gating 
+and mathematically stationary Permutation Entropy via log-returns.
 """
 
 import math
@@ -61,6 +62,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
     """
     Calculates Shannon Permutation Entropy to detect market chaos.
     1.0 = Pure random noise. Lower = Highly predictable/structured.
+    MUST be fed stationary data (e.g., returns), not raw prices.
     """
     if len(series) < (order * delay): return 1.0
     sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
@@ -150,7 +152,7 @@ class ContinuousMicrostructureEngine:
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
             if len(self.prices) > 2:
-                # V50.0 Math Guard: Prevent Division by Zero
+                # V55.2 Math Guard: Prevent Division by Zero
                 safe_curr = max(1e-9, self.prices[-1])
                 safe_prev = max(1e-9, self.prices[-2])
                 ret = math.log(safe_curr / safe_prev)
@@ -249,10 +251,12 @@ class ContinuousMicrostructureEngine:
         return max(floor, min(ceiling - min(0.08, mse * 0.3), prob))
 
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
-        if len(self.prices) > 10:
-            self.shannon_entropy = compute_permutation_entropy(list(self.prices)[-20:])
+        # 🚀 V55.2 FIX: Calculate Permutation Entropy using stationary log_returns, NOT prices
+        if len(self.log_returns) > 10:
+            self.shannon_entropy = compute_permutation_entropy(list(self.log_returns)[-20:])
             self.entropy_history.append(self.shannon_entropy) 
         
+        # Kaufman ER still correctly uses absolute prices
         if len(self.prices) >= 20:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
@@ -278,7 +282,7 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # 🚀 TRUE INSTITUTIONAL QUANTILE & SYMMETRICAL DAMPED GATE (Zero Magic Numbers)
+        # 🚀 TRUE INSTITUTIONAL QUANTILE & SYMMETRICAL DAMPED GATE
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
             # Baseline anchor: 60th percentile of rolling signal distribution

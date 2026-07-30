@@ -1,9 +1,9 @@
 """
-💎 V50.0 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
+💎 V55.2 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
-Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture for volatile assets,
+Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
-Null-Guard Parity for dynamic price/qty parameters, and Dynamic Bracket Sync.
+Null-Guard Parity, and Reduced Exposure Timeouts.
 """
 
 import os
@@ -144,7 +144,7 @@ class SmartOrderRouter:
             if sl <= current_mid_price: sl = current_mid_price + implied_sl_dist
             if tp >= current_mid_price: tp = current_mid_price - implied_tp_dist
             
-        # --- NEW SAFETY CLAMP FOR FLASH STRIKE ---
+        # --- SAFETY CLAMP FOR FLASH STRIKE ---
         if direction.upper() == "BUY":
             safe_sl = min(sl, current_mid_price * 0.999) if sl else 0.0
             safe_tp = max(tp, current_mid_price * 1.001) if tp else 0.0
@@ -213,11 +213,11 @@ class SmartOrderRouter:
         logger.error(f"[X-RAY] ❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or Slippage Cap hit.")
         return False, 0.0, 0.0
 
-    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 60) -> Tuple[bool, float, float]:
+    async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 12) -> Tuple[bool, float, float]:
         """
-        🚀 V50.0 MAKER-GRID DUMB COIN ARBITRAGE:
-        Instead of crossing the spread, places a `PostOnly` order EXACTLY at Top-of-Book.
-        Amends intelligently to follow price without getting dumped on. Earns maker fees.
+        🚀 V55.2 MAKER-GRID SPREAD CAPTURE:
+        Tighter chasing rules. Drops timeout to 12s and max rejections to 3.
+        If the market breaks away, it gracefully surrenders the peg to avoid taking a late, poor entry.
         """
         logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners.")
         
@@ -226,7 +226,7 @@ class SmartOrderRouter:
         side = "Buy" if direction.upper() == "BUY" else "Sell"
         
         anchor_price = None
-        max_chase_deviation = 0.015  # Will not chase price if it runs more than 1.5% from signal
+        max_chase_deviation = 0.005  # 🚀 V55.2: Tighter chase abort (0.5% max drift from anchor)
         rejection_count = 0  
 
         tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
@@ -238,7 +238,7 @@ class SmartOrderRouter:
             tp = current_mid * 1.02 if side == "Buy" else current_mid * 0.98
 
         while time.time() - start_time < timeout:
-            loop_delay = 1.0 # 1-second loop to protect against API Rate Limits
+            loop_delay = 1.0
 
             try:
                 # 1. Check for Orderbook Toxicity (Adverse Selection Guard)
@@ -253,8 +253,7 @@ class SmartOrderRouter:
                         logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} book toxic (buy wall detected: {imbalance:.2f}). Aborting peg to prevent getting squeezed.")
                         break
 
-                # 🚀 BUG FIX: Always fetch a LIVE orderbook snapshot inside the loop. 
-                # Using a stale snapshot causes Limit orders to cross the spread and get instantly rejected.
+                # 2. Fetch LIVE Orderbook Snapshot
                 target_price = 0.0
                 fresh_ob = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else None
                 
@@ -308,8 +307,9 @@ class SmartOrderRouter:
                     else:
                         rejection_count += 1
                         logger.warning(f"[X-RAY] PostOnly placement rejected: {place_response.get('retMsg')}")
-                        if rejection_count >= 5:
-                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} PostOnly rejected 5 times. Market is likely running away.")
+                        # 🚀 V55.2: Trip circuit breaker after 3 rejections instead of 5
+                        if rejection_count >= 3:
+                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} PostOnly rejected 3 times. Market is likely running away.")
                             break
                         await asyncio.sleep(loop_delay); continue
                 
@@ -361,12 +361,13 @@ class SmartOrderRouter:
                             logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
                             return True, avg_price, cum_exec_qty
                             
-                        if rejection_count >= 5:
-                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 5 times. Aborting.")
+                        # 🚀 V55.2: Trip circuit breaker after 3 rejections
+                        if rejection_count >= 3:
+                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 3 times. Aborting.")
                             break
                             
                     elif order_status in ["New", "PartiallyFilled"]:
-                        # 🚀 V50.0 RATE LIMIT DEFENSE: Only amend if price drifted significantly (> 1 tick)
+                        # Only amend if price drifted significantly (> 1 tick)
                         if abs(final_target_price - current_peg_price) >= tick_size:
                             logger.info(f"[X-RAY] 🔄 Amending Maker Peg from {current_peg_price} to new Top-of-Book {final_target_price}")
                             await self.executor.safe_call(self.executor.client.amend_order, category="linear", symbol=symbol, orderId=current_order_id, price=str(final_target_price))
@@ -378,7 +379,7 @@ class SmartOrderRouter:
 
         # Timeout Handler
         if current_order_id:
-            logger.warning(f"[X-RAY] ⏳ MAKER CHASE TIMEOUT // 60s elapsed. Market escaped {symbol} peg range. Canceling to protect capital.")
+            logger.warning(f"[X-RAY] ⏳ MAKER CHASE TIMEOUT // {timeout}s elapsed. Market escaped {symbol} peg range. Canceling to protect capital.")
             cancel_success = await self.cancel_order_safe(symbol, current_order_id)
             
             if not cancel_success:
@@ -413,8 +414,9 @@ class SmartOrderRouter:
         for i in range(slices):
             logger.info(f"[X-RAY] 🧊 TWAP SLICE [{i+1}/{slices}] // Routing {slice_qty:.4f} {symbol}")
             
+            # 🚀 V55.2: Iceberg peg chunks use even tighter 8-second timeouts to avoid staggering
             success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
-                symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=20
+                symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=8
             )
             
             if not success or fill_qty == 0:
@@ -436,7 +438,6 @@ class SmartOrderRouter:
             tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(Decimal(str(tick_size)), rounding=ROUND_HALF_UP))
             
-            # 🚀 BUG FIX: Dynamically recalculate SL/TP relative to the ACTUAL filled average price
             sl_dist_pct = abs(sl - current_mid_price) / (current_mid_price + 1e-9)
             tp_dist_pct = abs(tp - current_mid_price) / (current_mid_price + 1e-9)
             
@@ -447,7 +448,6 @@ class SmartOrderRouter:
                 actual_sl = avg_fill_price * (1.0 + sl_dist_pct)
                 actual_tp = avg_fill_price * (1.0 - tp_dist_pct)
             
-            # Reattach monolithic bracket with mathematically safe parameters
             try:
                 await self.executor.safe_call(
                     self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=self.position_idx, 
@@ -482,7 +482,7 @@ class SmartOrderRouter:
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
-            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=30)
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=12)
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
@@ -500,4 +500,5 @@ class SmartOrderRouter:
             return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
 
         logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Forcing Maker-Grid Peg on {symbol} to capture spread edge.")
-        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=60)
+        # 🚀 V55.2 FIX: Strict 12s timeout for Maker Grids. No bad chases.
+        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=12)

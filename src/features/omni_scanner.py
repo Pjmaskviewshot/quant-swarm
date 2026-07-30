@@ -1,7 +1,7 @@
 """
-💎 V50.0 QUANTUM SWARM: OMNI-SWARM CROSS-SECTIONAL SCANNER
+🌌 V55.2 OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
-Scans the entire Bybit perpetual universe using PCA Beta-Stripped Alpha.
+Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
 Features Titanium Blocklist filtering, Adaptive Session Volume Thresholds, 
 Wider Spread Tolerances for Maker-Grid Arbitrage, and X-Ray Telemetry.
 """
@@ -16,29 +16,34 @@ from features.micro_models import AdaptiveSessionClock
 
 logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
+
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V50.0 APEX: PCA Eigenvector Beta-Stripping
-    Computes the top Principal Component (PC1) representing the global market beta,
-    and returns pure idiosyncratic alpha residuals for each asset.
+    🚀 V55.2 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
+    Computes the top Principal Component (PC1) representing the global market factor
+    across a stable 60-period return window, returning idiosyncratic alpha residuals.
     """
-    if price_matrix.shape[0] < 2 or price_matrix.shape[1] < 10:
+    # Require at least 2 assets and 30 time steps for a stable covariance decomposition
+    if price_matrix.shape[0] < 2 or price_matrix.shape[1] < 30:
         return np.zeros(price_matrix.shape[0])
         
     stds = np.std(price_matrix, axis=1, keepdims=True) + 1e-9
     norm_matrix = (price_matrix - np.mean(price_matrix, axis=1, keepdims=True)) / stds
     
     try:
+        # Singular Value Decomposition on N x T matrix
         U, S, Vt = np.linalg.svd(norm_matrix, full_matrices=False)
-        market_factor = Vt[0, :] 
+        market_factor = Vt[0, :]  # Top right-singular vector (Global Market PC1)
         
+        factor_norm = np.dot(market_factor, market_factor) + 1e-9
         residuals = []
+        
         for i in range(norm_matrix.shape[0]):
-            beta = np.dot(norm_matrix[i, :], market_factor) / (np.dot(market_factor, market_factor) + 1e-9)
+            beta = np.dot(norm_matrix[i, :], market_factor) / factor_norm
             residual = norm_matrix[i, -1] - (beta * market_factor[-1])
             residuals.append(residual)
             
-        return np.array(residuals) * 10000.0  
+        return np.array(residuals) * 10000.0  # Return residuals in bps
     except Exception as e:
         logger.debug(f"[X-RAY] PCA SVD Computation failed (Matrix Singularity): {e}")
         return np.zeros(price_matrix.shape[0])
@@ -46,10 +51,9 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V50.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
-    Scans Bybit 250+ perpetual universe.
-    Upgraded with Live Microstructure Spread Gating and Logarithmic Liquidity Weighting.
-    Enforces a strict 30-minute swap cooldown to preserve matrix stability.
+    🌌 V55.2 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    Scans Bybit perpetual universe with live microstructure spread gating and 
+    logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
     def __init__(self, executor):
         self.executor = executor
@@ -72,8 +76,8 @@ class GlobalOmniScanner:
         protected_symbols: Optional[Set[str]] = None
     ) -> Tuple[Optional[str], Optional[str]]:
         """
-        Calculates RVOL and PCA Beta-Stripped Alpha using true log-returns. 
-        Returns (Symbol_To_Drop, Symbol_To_Add) if a severe anomaly is detected.
+        Calculates RVOL and 60-Bar PCA Beta-Stripped Alpha using true log-returns. 
+        Returns (Symbol_To_Drop, Symbol_To_Add) if a severe alpha anomaly is detected.
         """
         if protected_symbols is None:
             protected_symbols = set()
@@ -98,16 +102,14 @@ class GlobalOmniScanner:
             if self.last_btc_price > 0 and current_btc_price > 0:
                 btc_ret = math.log(current_btc_price / self.last_btc_price)
                 self.btc_returns.append(btc_ret)
-                if len(self.btc_returns) > 100: 
+                if len(self.btc_returns) > 120: 
                     self.btc_returns.pop(0)
-            else:
-                btc_ret = 0.0
             self.last_btc_price = current_btc_price
 
-        # 🚀 V50.0 TITANIUM BLOCKLIST
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
+        # 🚀 V55.2 TITANIUM BLOCKLIST
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         
-        # 🚀 V50.0 ADAPTIVE SESSION CLOCK
+        # 🚀 ADAPTIVE SESSION CLOCK
         min_turnover = AdaptiveSessionClock.get_turnover_threshold()
 
         for sym, data in tickers.items():
@@ -125,8 +127,7 @@ class GlobalOmniScanner:
                     
                 spread_bps = ((ask - bid) / bid) * 10000.0
                 
-                # 🚀 V50.0 FIX: Widened spread tolerance to 12.0 bps to feed the Maker-Grid
-                if current_price < 0.05 or turnover24h < min_turnover or spread_bps > 12.0:
+                if current_price < 0.01 or turnover24h < min_turnover or spread_bps > 12.0:
                     continue
 
                 vol = float(data.get('volume24h', 0))
@@ -145,13 +146,15 @@ class GlobalOmniScanner:
                 self.market_memory[sym]["vol"].append(vol)
                 self.market_memory[sym]["returns"].append(sym_ret)
                 
-                if len(self.market_memory[sym]["vol"]) > 100:
+                # Maintain up to 120 historical observations
+                if len(self.market_memory[sym]["vol"]) > 120:
                     self.market_memory[sym]["vol"].pop(0)
                     self.market_memory[sym]["returns"].pop(0)
 
-                if len(self.market_memory[sym]["vol"]) >= 10:
+                # Require at least 60 return observations for PCA stability
+                if len(self.market_memory[sym]["returns"]) >= 60:
                     valid_symbols.append(sym)
-                    return_matrix_rows.append(self.market_memory[sym]["returns"][-10:])
+                    return_matrix_rows.append(self.market_memory[sym]["returns"][-60:])
                     turnover_map[sym] = turnover24h
 
             except Exception:
@@ -175,7 +178,7 @@ class GlobalOmniScanner:
                 # Logarithmic Liquidity Weighting
                 turnover_weight = math.log10(max(turnover_map[sym], 1e-9)) / 10.0 
                 
-                # V50.0 Scoring: 60% RVOL + 40% Idiosyncratic Alpha
+                # Scoring: 60% RVOL Z-Score + 40% Idiosyncratic Alpha
                 swarm_score = ((rvol_z * 0.6) + (abs(idiosyncratic_alpha) * 0.4)) * turnover_weight
                 scoring_matrix.append((swarm_score, sym, rvol_z))
             except Exception:
@@ -200,7 +203,7 @@ class GlobalOmniScanner:
             if basket_scores:
                 deadest_score, deadest_sym, deadest_z = basket_scores[-1]
                 
-                # Only execute swap if the new asset is 5x stronger than the weakest asset
+                # Only execute swap if the candidate is 5x stronger than the weakest active symbol
                 if top_score > (deadest_score * 5.0):
                     logger.critical(
                         f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "

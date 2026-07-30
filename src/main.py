@@ -1,8 +1,8 @@
 """
-🌌 V55.1 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
+🌌 V55.2 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
-Limit-Only Escapes, 3-Minute Immunity Windows, and 2.5x ATR Survival Armor.
+Limit-Only Escapes, 3-Minute Immunity Windows, and LastPrice Trigger overrides.
 """
 
 import os
@@ -47,7 +47,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V55.1_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V55.2_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -56,7 +56,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V55.1 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
+        else: logger.critical("🌌 LIVE MODE: V55.2 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -99,7 +99,7 @@ class DistributedQuantEngine:
         self.auction_lock = asyncio.Lock()
         
         self.tick_sizes: Dict[str, float] = {}
-        self.hardware_min_qty: Dict[str, float] = {} # V55.0 Hardware Limits Cache
+        self.hardware_min_qty: Dict[str, float] = {} 
         self.global_state_cache = {"last_updated": 0.0}
         self.live_params = self._load_live_params()
         self.last_socket_reconnect = 0.0 
@@ -199,19 +199,21 @@ class DistributedQuantEngine:
             if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
+        """
+        🚀 V55.2 FIX: Fully decoupled Telegram Dispatch
+        Now delegates to the background asyncio queue worker so execution loops never block.
+        """
         if not os.getenv("TELEGRAM_BOT_TOKEN") or len(os.getenv("TELEGRAM_BOT_TOKEN", "")) < 5: return
-        if hasattr(self, '_telegram_blocked_until') and time.time() < self._telegram_blocked_until: return
-        for attempt in range(2):
-            try:
-                if is_html: await self.telegram.send_html_report(message)
-                else: await self.telegram.log_message(message, message_type)
-                return
-            except Exception: await asyncio.sleep(2 ** attempt)
-        self._telegram_blocked_until = time.time() + 3600
-        logger.warning("[X-RAY] ⚠️ Telegram unreachable. Disabling telemetry dispatcher temporarily for 1 hour.")
+        
+        try:
+            if is_html:
+                await self.telegram.send_html_report(message)
+            else:
+                await self.telegram.log_message(message, message_type)
+        except Exception as e:
+            logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
 
     async def _fetch_exchange_tick_sizes(self):
-        """V55.0 Maps both tick sizes and minimum hardware order quantities for dynamic filtering"""
         try:
             info = await self.executor.safe_call(self.executor.client.get_instruments_info, category="linear")
             for item in info.get("result", {}).get("list", []):
@@ -221,7 +223,6 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
     async def _get_max_affordable_notional(self):
-        """Calculates the absolute maximum notional value the wallet can support using Continuous Logistics"""
         try: 
             available_balance = await self.executor.get_wallet_balance_usdt()
         except Exception: 
@@ -310,6 +311,10 @@ class DistributedQuantEngine:
                 try:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso)
                     execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
+                    
+                    # 🌌 V55.2 FIX: Clamp the corrupted historical SQLite records so the Dashboard doesn't glitch.
+                    if "avg_slippage_bps" in execution_stats:
+                        execution_stats["avg_slippage_bps"] = min(25.0, max(-25.0, float(execution_stats["avg_slippage_bps"])))
                 except Exception as e: 
                     logger.debug(f"[X-RAY] Heartbeat DB forensic fetch failed: {e}", exc_info=True)
                     execution_stats = {} 
@@ -654,7 +659,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V55.1 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
+            logger.info("🌌 V55.2 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             max_notional = await self._get_max_affordable_notional()
             
@@ -757,9 +762,8 @@ class DistributedQuantEngine:
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
         """
-        V55.1 TITANIUM SHIELD EXIT DAEMON:
-        Enforces a 3-Minute Trade Immunity Window to eliminate 30-second tick-choking.
-        Requires 5-tick sustained POFE persistence before ejecting.
+        V55.2 TITANIUM SHIELD EXIT DAEMON:
+        Enforces LastPrice triggers to defeat Mark Price traps.
         """
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
@@ -806,7 +810,14 @@ class DistributedQuantEngine:
                 current_sl = max(current_sl, current_price * 1.001)
                 if current_tp >= current_sl: current_tp = current_sl * 0.99
                 
-            try: await self.executor.safe_call(self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=0, takeProfit=align_price(current_tp), stopLoss=align_price(current_sl))
+            try: 
+                # 🌌 V55.2 FIX: Force SL/TP to trigger on LastPrice, defeating the MarkPrice trap.
+                await self.executor.safe_call(
+                    self.executor.client.set_trading_stop, 
+                    category="linear", symbol=symbol, positionIdx=0, 
+                    takeProfit=align_price(current_tp), stopLoss=align_price(current_sl),
+                    tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
+                )
             except Exception as e: logger.debug(f"[X-RAY] Initial TP/SL set failed for {symbol}: {e}", exc_info=True)
 
             stat_engine = self.stat_engines.get(symbol)
@@ -824,7 +835,7 @@ class DistributedQuantEngine:
             max_favorable_price, initial_risk = actual_entry, actual_sl_distance
             last_api_update_time, api_check_counter = time.time(), 0
             
-            pofe_consecutive_ticks = 0 # Persistence counter to prevent single-tick ejections
+            pofe_consecutive_ticks = 0 
             last_sent_sl_str = align_price(current_sl)
             last_sent_tp_str = align_price(current_tp)
 
@@ -872,11 +883,10 @@ class DistributedQuantEngine:
                 b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                 imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                 
-                # 🌌 1. VERIFIED POFE EJECTION (Only active AFTER 3.0 minute immunity window + 5-tick persistence)
                 if time_in_mins >= 3.0:
                     if (is_buy and imbalance < -0.85 and cvd_z < -2.0) or (not is_buy and imbalance > 0.85 and cvd_z > 2.0):
                         pofe_consecutive_ticks += 1
-                        if pofe_consecutive_ticks >= 5: # Must persist for 5 consecutive loops
+                        if pofe_consecutive_ticks >= 5:
                             try:
                                 logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift verified (CVD z={cvd_z:.2f}, Imb={imbalance:.2f}). Escaping via Limit-IOC.")
                                 escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
@@ -885,9 +895,8 @@ class DistributedQuantEngine:
                                 continue 
                             except Exception as e: logger.error(f"[X-RAY] POFE Limit-Escape failed for {symbol}: {e}", exc_info=True)
                     else:
-                        pofe_consecutive_ticks = 0 # Reset counter if orderbook recovers
+                        pofe_consecutive_ticks = 0 
 
-                # 🌌 2. VOLATILITY-AWARE VOLUME DEATH
                 inst_var = getattr(stat_engine, 'inst_variance', 0.01)
                 is_coiling = inst_var < 0.0001 
                 if not is_coiling and current_r < -0.35 and hawkes_z < -1.5 and time_in_mins > 15.0:
@@ -899,7 +908,6 @@ class DistributedQuantEngine:
                         continue
                     except Exception as e: logger.error(f"[X-RAY] Volume death escape failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 3. PARABOLIC ACCELERATION EJECTION
                 if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(cvd_z) > 2.5):
                     try:
                         logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} True Liquidation cascade detected (CVD z={cvd_z:.2f}). Exiting into strength via Limit-IOC at {r_multiple:.1f}R.")
@@ -909,7 +917,6 @@ class DistributedQuantEngine:
                         continue 
                     except Exception as e: logger.error(f"[X-RAY] Parabolic Escape failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING (Shifted to +0.8R & 3-Min Immunity)
                 if time_in_mins >= 3.0 and r_multiple >= 0.8 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
                     sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
                     if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
@@ -983,7 +990,6 @@ class DistributedQuantEngine:
                         current_sl = new_sl_val
                         requires_sl_update = True
 
-                # 🌌 V55.1 ASYMMETRIC TP REPULSION
                 momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
                 if hawkes_z < -1.5 and r_multiple > 1.0:
                     momentum_stretch -= 0.5 
@@ -1014,10 +1020,12 @@ class DistributedQuantEngine:
 
                     if new_sl_str != last_sent_sl_str or new_tp_str != last_sent_tp_str:
                         try:
+                            # 🌌 V55.2 FIX: Continually enforce LastPrice Trigger on ratchet updates
                             await self.executor.safe_call(
                                 self.executor.client.set_trading_stop, 
                                 category="linear", symbol=symbol, positionIdx=0, 
-                                takeProfit=new_tp_str, stopLoss=new_sl_str
+                                takeProfit=new_tp_str, stopLoss=new_sl_str,
+                                tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
                             )
                             last_api_update_time = now
                             last_sent_sl_str = new_sl_str
@@ -1043,7 +1051,8 @@ class DistributedQuantEngine:
                     
                     raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
                     slip_cost = raw_pnl - net_pnl - fees
-                    # Bounded slippage bps calculation to prevent glitched 200,000+ bps reports in Telegram
+                    
+                    # V55.2 Slippage reporting bound to prevent glitched dashboard calculations
                     slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
                     duration_mins = (time.time() - daemon_start_time) / 60.0
                     

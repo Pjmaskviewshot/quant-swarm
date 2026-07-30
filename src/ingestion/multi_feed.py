@@ -1,7 +1,7 @@
 """
-💎 V50.0 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
+🌌 V55.2 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
-Features absolute sequence gap intolerance for L2 validity,
+Features absolute sequence gap intolerance with Seamless REST Bridging,
 Subscription Chunking (10-arg limit compliance), Pure JSON Pings,
 Fast Float Pre-Parsing, and X-Ray Diagnostic Telemetry.
 """
@@ -17,7 +17,7 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V50.0 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    🚀 V55.2 OMNI-SWARM: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
     from downstream processing via a high-capacity asynchronous FIFO queue.
     """
@@ -87,7 +87,7 @@ class HighVelocityMultiFeed:
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V50.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        🚀 V55.2 OMNI-SWARM DYNAMIC HOT-SWAPPING
         Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
         without needing to tear down the entire 24-coin connection multiplexer.
         """
@@ -107,7 +107,7 @@ class HighVelocityMultiFeed:
         ] + [f"kline.{i}.{add_symbol}" for i in self.intervals]
 
         try:
-            # 🚀 Bybit Limit: Max 10 args per payload. Chunking required.
+            # Bybit Limit: Max 10 args per payload. Chunking required.
             for i in range(0, len(unsub_args), 10):
                 await self.active_ws.send_json({"op": "unsubscribe", "args": unsub_args[i:i+10]})
             for i in range(0, len(sub_args), 10):
@@ -122,9 +122,10 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 ISOLATED SNAPSHOT RESYNC
-        Forces Bybit to send a fresh orderbook snapshot for ONE symbol 
-        after a sequence gap is detected.
+        🚀 V55.2 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
+        Instead of going blind for 100ms+ during an unsub/sub cycle, we immediately 
+        fetch a REST snapshot and inject it into the high-speed queue. This prevents 
+        MLOFI and toxicity metrics from processing corrupted gap deltas.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -133,8 +134,31 @@ class HighVelocityMultiFeed:
         self.orderbook_sequences.pop(symbol, None)
         
         try:
+            # 1. Seamless REST Bridge
+            if self.engine_reference and hasattr(self.engine_reference, "executor"):
+                try:
+                    rest_ob = await self.engine_reference.executor.safe_call(
+                        self.engine_reference.executor.client.get_orderbook, 
+                        category="linear", symbol=symbol
+                    )
+                    data = rest_ob.get("result", {})
+                    if data and "b" in data and "a" in data:
+                        parsed_bids = self._fast_float_parse_book(data.get("b", []))
+                        parsed_asks = self._fast_float_parse_book(data.get("a", []))
+                        
+                        # Inject REST snapshot directly into the fast-queue
+                        self.ingestion_queue.put_nowait(("orderbook", {
+                            "s": symbol, "b": parsed_bids, "a": parsed_asks, 
+                            "u": int(data.get("u", 0)), "type": "snapshot", 
+                            "ts": int(data.get("ts", time.time() * 1000))
+                        }))
+                        # Re-anchor sequence state to the fresh REST snapshot
+                        self.orderbook_sequences[symbol] = int(data.get("u", 0))
+                except Exception as e:
+                    logger.debug(f"[X-RAY] REST bridge failed during resync for {symbol}: {e}")
+
+            # 2. Cycle WS without artificial sleep to repair the delta stream behind the scenes
             await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
-            await asyncio.sleep(0.1) # Brief pause to clear exchange-side buffers
             await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
         except Exception as e:
             logger.error(f"[X-RAY] ❌ Isolated resync request failed for {symbol}: {e}")
@@ -172,7 +196,6 @@ class HighVelocityMultiFeed:
             
             try:
                 logger.info(f"[X-RAY] 📡 Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
-                # Removed conflicting aiohttp heartbeat, relying strictly on JSON ping
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(self.ws_url) as ws:
                         
@@ -198,7 +221,7 @@ class HighVelocityMultiFeed:
                                     
                         watchdog_task = self.track_task(connection_watchdog())
 
-                        # 🚀 V50.0 Bybit Limit: Max 10 args per request. We must chunk the payload!
+                        # Bybit Limit: Max 10 args per request. We must chunk the payload.
                         chunk_size = 10
                         for i in range(0, len(args_payload), chunk_size):
                             chunk = args_payload[i:i + chunk_size]
@@ -236,12 +259,12 @@ class HighVelocityMultiFeed:
                                             self.orderbook_sequences[symbol] = u_sequence
                                         elif msg_type == "delta":
                                             last_seq = self.orderbook_sequences.get(symbol)
-                                            prev_seq = data.get("pu")  # Bybit V5 Linear docs prev_seq
+                                            prev_seq = data.get("pu")  
                                             
                                             # ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
-                                                    logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating isolated resync.")
+                                                    logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating seamless REST resync.")
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue # Skip processing this broken delta
                                                     

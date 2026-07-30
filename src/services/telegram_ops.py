@@ -1,5 +1,5 @@
 """
-🚀 V50.0 QUANTUM SWARM: TELEGRAM MISSION CONTROL
+🚀 V55.2 QUANTUM SWARM: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
 and institutional-grade Forensic X-Ray HTML formatters.
@@ -20,6 +20,10 @@ class AsyncTelegramReporter:
         self.chat_id = chat_id or ""
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self._session: Optional[aiohttp.ClientSession] = None
+        
+        # 🚀 V55.2 Decoupled Message Queue
+        self._message_queue = asyncio.Queue()
+        self._worker_task: Optional[asyncio.Task] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Lazy initialization of persistent aiohttp session for high-throughput connection pooling."""
@@ -29,8 +33,32 @@ class AsyncTelegramReporter:
             )
         return self._session
 
+    def start_worker(self):
+        """Starts the background worker that processes the message queue out-of-band."""
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._queue_worker())
+            logger.info("📡 Telegram Background Dispatch Worker ONLINE.")
+
+    async def _queue_worker(self):
+        """Background worker that continuously pulls from the queue and dispatches payloads."""
+        while True:
+            try:
+                payload, max_retries = await self._message_queue.get()
+                await self._execute_dispatch(payload, max_retries)
+                self._message_queue.task_done()
+                
+                # Small safety sleep to naturally pace Telegram rate limits (30 msgs/sec max)
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[X-RAY] Telegram worker encountered an error: {e}", exc_info=True)
+
     async def close(self):
-        """Gracefully closes persistent HTTP session during main daemon teardown."""
+        """Gracefully closes persistent HTTP session and worker during main daemon teardown."""
+        if self._worker_task and not self._worker_task.done():
+            self._worker_task.cancel()
+            
         if self._session and not self._session.closed:
             await self._session.close()
             logger.info("🔌 Telegram Reporter HTTP session gracefully closed.")
@@ -46,7 +74,7 @@ class AsyncTelegramReporter:
         cleaner = re.compile(r'<.*?>')
         return re.sub(cleaner, '', text)
 
-    async def _dispatch_payload(self, payload: Dict[str, Any], max_retries: int = 3) -> bool:
+    async def _execute_dispatch(self, payload: Dict[str, Any], max_retries: int = 3) -> bool:
         """Core request worker with dynamic HTTP 429 backoff support and token protection."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram credentials unpopulated. Skipping dispatch.")
@@ -93,7 +121,7 @@ class AsyncTelegramReporter:
         return False
 
     async def log_message(self, text: str, alert_level: str = "INFO", max_retries: int = 3):
-        """Fires markdown-formatted alert downstream."""
+        """Places markdown-formatted alert into the dispatch queue."""
         emojis = {"INFO": "ℹ️", "SUCCESS": "🟢", "WARNING": "⚠️", "CRITICAL": "🚨"}
         prefix = emojis.get(str(alert_level).upper(), "🤖")
 
@@ -102,19 +130,27 @@ class AsyncTelegramReporter:
             "text": f"{prefix} *[SYSTEM ALERT]*\n\n{text}",
             "parse_mode": "Markdown"
         }
-        await self._dispatch_payload(payload, max_retries=max_retries)
+        
+        # Ensure worker is running
+        self.start_worker()
+        # Fire-and-forget: Put payload into the queue non-blockingly
+        await self._message_queue.put((payload, max_retries))
 
     async def send_html_report(self, html_text: str, max_retries: int = 3):
-        """Dispatches HTML payloads to Telegram with auto-retry and plain-text fallback."""
+        """Places HTML payloads into the dispatch queue with auto-retry and plain-text fallback."""
         payload = {
             "chat_id": self.chat_id,
             "text": html_text,
             "parse_mode": "HTML"
         }
-        await self._dispatch_payload(payload, max_retries=max_retries)
+        
+        # Ensure worker is running
+        self.start_worker()
+        # Fire-and-forget
+        await self._message_queue.put((payload, max_retries))
 
     # ====================================================================
-    # 🚀 V50.0 APEX: X-RAY FORENSIC FORMATTERS
+    # 🚀 V55.2 APEX: X-RAY FORENSIC FORMATTERS
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
@@ -166,7 +202,7 @@ class AsyncTelegramReporter:
         )
 
     def format_mission_control_dashboard(self, uptime: float, live_count: int, shadow_count: int, balance: float, session_pnl: float, drawdown: float, dd_bar: str, execution_stats: Dict[str, Any]) -> str:
-        """Formats the 10-Minute Mission Control Heartbeat for V50.0."""
+        """Formats the 10-Minute Mission Control Heartbeat for V55.2."""
         win_rate = execution_stats.get('win_rate', 0.0)
         trades = execution_stats.get('trade_count', 0)
         avg_slip = execution_stats.get('avg_slippage_bps', 0.0)
@@ -176,7 +212,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V50.0 APEX)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V55.2 APEX)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
