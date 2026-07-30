@@ -135,7 +135,7 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     return 0.0
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
-    # V55.2 FIX: Series must be stationary log returns, NOT raw prices
+    # Series must be stationary log returns, NOT raw prices
     if len(series) < (order * delay): return 1.0
     sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
     perm_counts = {perm: 0 for perm in permutations(range(order))}
@@ -231,7 +231,6 @@ def calculate_rolling_cvar(returns_history: deque, percentile: float = 5.0) -> f
         
     cvar = np.mean(tail_returns)
     
-    # If the expected shortfall is worse than -1.5% in a minute, penalize sizing
     if cvar < -0.015:
         penalty = min(0.65, (abs(cvar) - 0.015) * 10.0)
         return max(0.35, 1.0 - penalty)
@@ -304,19 +303,14 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     elif "ETH" in symbol or "SOL" in symbol: amihud_threshold = 1_000_000.0   
     else: amihud_threshold = 250_000.0   
 
-    # Start at 76 to allow for lookback and t-1 offset
     for i in range(76, len(target_candles)):
-        
-        # V55.2 FIX: Eliminate Look-Ahead Bias by isolating t-1 data for feature generation
         c_prev = target_candles[i-1]
         c_prev_prev = target_candles[i-2]
         
-        # Actual entry candle
         c = target_candles[i]
         now_ts = c['ts']
-        sim_price = c['open'] # Assume entry on the open of the current candle
+        sim_price = c['open'] 
         
-        # History is updated with t-1 data
         btc_1m_history.append(btc_candles[i-1]['close'])
         alt_1m_history.append(c_prev['close'])
         
@@ -328,11 +322,9 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         shannon_entropy = 1.0
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
-            # Entropy on stationary log returns
             shannon_entropy = compute_permutation_entropy(list(log_returns)[-20:])
             entropy_history.append(shannon_entropy) 
 
-        # Build Volume Profile from t-1
         vol_notional = c_prev['volume'] * c_prev['close']
         current_bucket_vol += vol_notional
         if c_prev['close'] >= c_prev['open']: current_bucket_buy_vol += vol_notional
@@ -349,7 +341,6 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             current_bucket_vol = 0.0
             current_bucket_buy_vol = 0.0
 
-        # Feature Engine (Using strictly t-1 data)
         closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-21):i]])
         vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-21):i]])
         regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
@@ -501,7 +492,6 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
         
-        # V55.2 SURVIVAL ARMOR FLOOR
         sl_dist_pct = max(0.025, min(0.050, vol_sigma * 1.5 * elasticity_scalar))
         
         dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
@@ -545,7 +535,7 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 
                 if net_ev_pct > ev_floor:  
-                    entry = c['open'] # Realistic execution at open of the target candle
+                    entry = c['open'] 
                     initial_risk = sl_dist_pct * entry
                     realigned_sl = entry - initial_risk if action_dir == "BUY" else entry + initial_risk
                     
@@ -673,7 +663,6 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     net_edge_bps = net_ev_pct * 10000.0 
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
-                    # V55.2 FIX: Use robust CVaR scaling
                     cvar_penalty = calculate_rolling_cvar(log_returns)
                     fractional_risk = raw_fractional_risk * cvar_penalty * edge_factor
                     

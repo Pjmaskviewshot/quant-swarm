@@ -251,7 +251,7 @@ class ContinuousMicrostructureEngine:
         return max(floor, min(ceiling - min(0.08, mse * 0.3), prob))
 
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
-        # 🚀 V55.2 FIX: Calculate Permutation Entropy using stationary log_returns, NOT prices
+        # Calculate Permutation Entropy using stationary log_returns, NOT prices
         if len(self.log_returns) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.log_returns)[-20:])
             self.entropy_history.append(self.shannon_entropy) 
@@ -282,34 +282,27 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # 🚀 TRUE INSTITUTIONAL QUANTILE & SYMMETRICAL DAMPED GATE
+        # True Institutional Quantile & Symmetrical Damped Gate
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
-            # Baseline anchor: 60th percentile of rolling signal distribution
             baseline_gate = float(np.percentile(prob_arr, 60))
-            # Organic data-driven ceiling: 95th percentile of model capability + slight headroom
             dynamic_ceiling = min(0.98, float(np.percentile(prob_arr, 95)) + 0.05)
         else:
             baseline_gate = 0.55
             dynamic_ceiling = 0.90
 
-        # Symmetrical Entropy Adjustment (Derived dynamically from rolling history)
+        # Symmetrical Entropy Adjustment
         if len(self.entropy_history) > 10:
             ent_arr = np.fromiter(self.entropy_history, dtype=float, count=len(self.entropy_history))
             ent_mean = float(np.mean(ent_arr))
             ent_std = float(np.std(ent_arr)) + 1e-9
-            # Z-score deviation: Predictable structure (< mean) lowers gate; Chaos (> mean) raises gate
             entropy_z = (self.shannon_entropy - ent_mean) / ent_std
             entropy_multiplier = 1.0 + (entropy_z * 0.04)
         else:
             entropy_multiplier = 1.0
 
-        # Multiplicative error dampener
         error_scaler = 1.0 + max(0.0, (self.ewma_mse - 0.25) * 0.5)
-
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-
-        # Dynamically bounded between structural floor (0.50) and organically derived ceiling
         dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
         
         virt_sl = current_price * (1 - sl_dist_pct) if action_dir == "BUY" else current_price * (1 + sl_dist_pct)

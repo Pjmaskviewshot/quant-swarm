@@ -2,7 +2,8 @@
 🌌 V55.2 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
-Limit-Only Escapes, 3-Minute Immunity Windows, and LastPrice Trigger overrides.
+Limit-Only Escapes, 3-Minute Immunity Windows, LastPrice Trigger overrides,
+Dust-Sweep Position Closures, and GIL-Protected Process Pools.
 """
 
 import os
@@ -21,6 +22,7 @@ import aiosqlite
 from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any
+from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
 
 # Core & Feature Modules
@@ -74,6 +76,9 @@ class DistributedQuantEngine:
         
         self.stream_restart_event = asyncio.Event()
         self.force_dna_refresh = asyncio.Event() 
+        
+        # 🚀 GIL Protection: Dedicated Process Pool for Heavy Matrix Math
+        self.process_pool = ProcessPoolExecutor(max_workers=2)
         
         # 🚀 MICROSERVICES
         self.fsm = SystemStateMachine()
@@ -312,7 +317,7 @@ class DistributedQuantEngine:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso)
                     execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
                     
-                    # 🌌 V55.2 FIX: Clamp the corrupted historical SQLite records so the Dashboard doesn't glitch.
+                    # Clamp historical SQLite records to prevent dashboard glitches
                     if "avg_slippage_bps" in execution_stats:
                         execution_stats["avg_slippage_bps"] = min(25.0, max(-25.0, float(execution_stats["avg_slippage_bps"])))
                 except Exception as e: 
@@ -811,7 +816,7 @@ class DistributedQuantEngine:
                 if current_tp >= current_sl: current_tp = current_sl * 0.99
                 
             try: 
-                # 🌌 V55.2 FIX: Force SL/TP to trigger on LastPrice, defeating the MarkPrice trap.
+                # Force SL/TP to trigger on LastPrice, defeating the MarkPrice trap.
                 await self.executor.safe_call(
                     self.executor.client.set_trading_stop, 
                     category="linear", symbol=symbol, positionIdx=0, 
@@ -938,6 +943,13 @@ class DistributedQuantEngine:
                                     qty_close = current_qty * portion
                                     aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
                                     
+                                    # 🚀 V55.2 DUST SWEEP: Check if remaining position drops below exchange minimum notional ($6.0)
+                                    remaining_qty = current_qty - aligned_qty_close
+                                    remaining_notional = remaining_qty * safe_c_price
+                                    if remaining_notional > 0 and remaining_notional < 6.0:
+                                        aligned_qty_close = current_qty # Sweep entire remaining balance
+                                        logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below exchange minimum. Sweeping full remainder.")
+
                                     if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
                                         logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units ({portion*100}%).")
                                         await self.executor.safe_call(
@@ -950,6 +962,8 @@ class DistributedQuantEngine:
                                             timeInForce="IOC", reduceOnly=True
                                         )
                                         scaled_levels[target_r] = True
+                                        if remaining_notional > 0 and remaining_notional < 6.0:
+                                            break
                                         break
                                     else:
                                         if not flag: scaled_levels[target_r] = True
@@ -1020,7 +1034,7 @@ class DistributedQuantEngine:
 
                     if new_sl_str != last_sent_sl_str or new_tp_str != last_sent_tp_str:
                         try:
-                            # 🌌 V55.2 FIX: Continually enforce LastPrice Trigger on ratchet updates
+                            # Continually enforce LastPrice Trigger on ratchet updates
                             await self.executor.safe_call(
                                 self.executor.client.set_trading_stop, 
                                 category="linear", symbol=symbol, positionIdx=0, 
@@ -1052,7 +1066,7 @@ class DistributedQuantEngine:
                     raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
                     slip_cost = raw_pnl - net_pnl - fees
                     
-                    # V55.2 Slippage reporting bound to prevent glitched dashboard calculations
+                    # Slippage reporting bound to prevent glitched dashboard calculations
                     slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
                     duration_mins = (time.time() - daemon_start_time) / 60.0
                     
@@ -1140,6 +1154,9 @@ class DistributedQuantEngine:
         except Exception: pass
             
         if hasattr(self, 'telegram'): await self.telegram.close()
+        if hasattr(self, 'process_pool'):
+            self.process_pool.shutdown(wait=False, cancel_futures=True)
+            logger.info("🔌 ProcessPoolExecutor gracefully shut down.")
         if hasattr(self.executor, "_api_thread_pool"): self.executor._api_thread_pool.shutdown(wait=False, cancel_futures=True)
         logger.critical("✅ MATRIX DISCONNECTED.")
 

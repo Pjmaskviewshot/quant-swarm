@@ -1,5 +1,5 @@
 """
-💎 V50.0 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
+💎 V55.2 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
 -------------------------------------------------------------------------
 Evaluates L2 Multi-Level Order Flow Imbalance (MLOFI), Dark Pool Iceberg Absorption,
 Amihud Liquidity Vacuums, and Roll Implicit Spreads. Features X-Ray Diagnostic Telemetry.
@@ -17,7 +17,7 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V50.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    🚀 V55.2 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
     Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
     Features strictly calibrated Institutional Amihud Thresholds and X-Ray Telemetry.
     """
@@ -127,7 +127,7 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # 🚀 Institutional Amihud Thresholds (Scaled by Asset Tier)
+        # Institutional Amihud Thresholds (Scaled by Asset Tier)
         if "BTC" in symbol:
             amihud_threshold = 2_500_000.0  
         elif "ETH" in symbol or "SOL" in symbol:
@@ -190,7 +190,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 V50.0 STRUCTURAL EDGE EVALUATOR
+        🚀 V55.2 STRUCTURAL EDGE EVALUATOR
         Evaluates confluence between statistical prediction, Order Flow Imbalance, Dark Pool Iceberg
         absorption, and Amihud liquidity vacuums. Emits X-Ray diagnostics.
         """
