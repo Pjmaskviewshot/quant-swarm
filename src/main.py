@@ -1,8 +1,8 @@
 """
-🌌 V54.1 OMNI-STATE: MASTER ORCHESTRATOR
+🌌 V55.0 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
-The Apex Execution Engine. Featuring Continuous POFE Monitoring,
-Volume Death Early Excursions, Sub-1R High-Water Ratchets, and Asymmetric TP Repulsion.
+The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
+Limit-Only Escapes, and 2.5x ATR Survival Armor.
 """
 
 import os
@@ -47,7 +47,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V54.1_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V55.0_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -56,9 +56,9 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V54.1 OMNI-STATE ACTIVE.")
+        else: logger.critical("🌌 LIVE MODE: V55.0 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
         
-        self.asset_basket: List[str] = ["BTCUSDT"]
+        self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
@@ -99,6 +99,7 @@ class DistributedQuantEngine:
         self.auction_lock = asyncio.Lock()
         
         self.tick_sizes: Dict[str, float] = {}
+        self.hardware_min_qty: Dict[str, float] = {} # V55.0 Hardware Limits Cache
         self.global_state_cache = {"last_updated": 0.0}
         self.live_params = self._load_live_params()
         self.last_socket_reconnect = 0.0 
@@ -128,7 +129,7 @@ class DistributedQuantEngine:
         return task
 
     def _load_live_params(self) -> dict:
-        default_params = {"sl_atr_mult": 1.5, "rr_ratio": 2.0}
+        default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.0}
         try:
             if os.path.exists("params.json"):
                 with open("params.json", "r") as f: return {**default_params, **json.load(f)}
@@ -210,11 +211,27 @@ class DistributedQuantEngine:
         logger.warning("[X-RAY] ⚠️ Telegram unreachable. Disabling telemetry dispatcher temporarily for 1 hour.")
 
     async def _fetch_exchange_tick_sizes(self):
+        """V55.0 Maps both tick sizes and minimum hardware order quantities for dynamic filtering"""
         try:
             info = await self.executor.safe_call(self.executor.client.get_instruments_info, category="linear")
             for item in info.get("result", {}).get("list", []):
-                self.tick_sizes[item.get("symbol")] = float(item.get("priceFilter", {}).get("tickSize", "0.0001"))
-        except Exception as e: logger.error(f"[X-RAY] Failed fetching tick sizes: {e}", exc_info=True)
+                sym = item.get("symbol")
+                self.tick_sizes[sym] = float(item.get("priceFilter", {}).get("tickSize", "0.0001"))
+                self.hardware_min_qty[sym] = float(item.get("lotSizeFilter", {}).get("minOrderQty", "1.0"))
+        except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
+
+    async def _get_max_affordable_notional(self):
+        """Calculates the absolute maximum notional value the wallet can support using Continuous Logistics"""
+        try: 
+            available_balance = await self.executor.get_wallet_balance_usdt()
+        except Exception: 
+            available_balance = 7.00
+        min_exposure_ratio = 0.40 
+        max_exposure_ratio = 0.10
+        k_slope = 0.05
+        mid_point = 100.0
+        logistic_exp = min_exposure_ratio + (max_exposure_ratio - min_exposure_ratio) / (1.0 + math.exp(-k_slope * (available_balance - mid_point)))
+        return max(5.00, available_balance * logistic_exp)
 
     async def synchronize_exchange_state(self):
         try:
@@ -386,7 +403,8 @@ class DistributedQuantEngine:
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 
-                sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 1.5)) / (price + 1e-9), 0.018)
+                sl_atr_mult = max(2.5, self.live_params.get("sl_atr_mult", 2.5))
+                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.025)
                 dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
                 tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                 
@@ -595,14 +613,17 @@ class DistributedQuantEngine:
                         bid, ask, turnover = float(t_data.get("bid1Price", 0.0) or 0.0), float(t_data.get("ask1Price", 0.0) or 0.0), float(t_data.get("turnover24h", 0.0) or 0.0)
                         
                         if bid > 0 and ask > bid and turnover >= AdaptiveSessionClock.get_turnover_threshold() and (((ask - bid) / bid) * 10000.0) <= 12.0:
-                            async with self.portfolio_state_lock:
-                                if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
-                                if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
-                            self._initialize_symbol_structures([hot_sym])
-                            await self._prune_dead_symbols() 
-                            if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
-                                await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
-                            logger.critical(f"[X-RAY] 🚀 {hot_sym} PASSED DYNAMIC GATE AND INJECTED INTO QUANT MATRIX.")
+                            # 🌌 V55.0 DYNAMIC UNIVERSE FILTER
+                            max_notional = await self._get_max_affordable_notional()
+                            if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
+                                async with self.portfolio_state_lock:
+                                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                                self._initialize_symbol_structures([hot_sym])
+                                await self._prune_dead_symbols() 
+                                if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                                    await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                                logger.critical(f"[X-RAY] 🚀 {hot_sym} PASSED DYNAMIC GATE AND INJECTED INTO QUANT MATRIX.")
             except Exception as e: logger.error(f"[X-RAY] Omni-Swarm Director iteration failed: {e}", exc_info=True)
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
@@ -634,7 +655,10 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
+            logger.info("🌌 V55.0 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
+            max_notional = await self._get_max_affordable_notional()
+            
             tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
             full_market, min_turnover = [], AdaptiveSessionClock.get_turnover_threshold()
             
@@ -643,29 +667,31 @@ class DistributedQuantEngine:
                     if not (symbol := t.get("symbol", "")).endswith("USDT"): continue
                     turnover, bid, ask = float(t.get("turnover24h", 0.0) or 0.0), float(t.get("bid1Price", 0.0) or 0.0), float(t.get("ask1Price", 0.0) or 0.0)
                     if bid > 0 and ask > bid and turnover >= min_turnover and (((ask - bid) / bid) * 10000.0) <= 12.0:
-                        full_market.append((turnover, symbol))
+                        
+                        # 🌌 V55.0 BESPOKE FILTER: Only allow coins the wallet can mathematically afford
+                        if (self.hardware_min_qty.get(symbol, 1.0) * bid) <= max_notional:
+                            full_market.append((turnover, symbol))
                         
                 full_market.sort(key=lambda x: x[0], reverse=True)
                 full_market = [item[1] for item in full_market]
                 
-            # 🚀 V54.1: Expanding parallel live node capacity from 18 to 24
-            if len(full_market) < 24: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
+            if len(full_market) < 24: 
+                logger.warning(f"[X-RAY] Only {len(full_market)} coins pass the affordable micro-cap filter. Adjusting matrix.")
+                
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher failed fetching assets: {e}", exc_info=True)
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
+            full_market = []
             
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
         
-        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
-        new_core_basket = ["BTCUSDT"]
+        new_core_basket = []
         
         async with self.portfolio_state_lock:
             for s in self.active_positions_map.keys():
-                if s != "BTCUSDT": new_core_basket.append(s)
+                if s not in new_core_basket: new_core_basket.append(s)
                 
         for sym in full_market:
-            # 🚀 V54.1: Append up to 24 active nodes
             if sym not in new_core_basket and len(new_core_basket) < 24: new_core_basket.append(sym)
                 
         async with self.portfolio_state_lock:
@@ -733,11 +759,6 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
-        """
-        V54.1 CONTINUOUS MULTI-FACTOR EXIT DAEMON:
-        Continuous POFE Monitoring, Sub-1R Trailing High-Water Mark Ratchets,
-        and Volume-Death Early Excursions.
-        """
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
         is_buy = direction == "BUY"
@@ -842,34 +863,43 @@ class DistributedQuantEngine:
 
                 hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
                 vpin_z = getattr(stat_engine, 'vpin_z', hawkes_z)
+                cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) 
                 
                 ob = self.orderbook_snapshots.get(symbol, {})
                 b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                 imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                 
-                # 🌌 1. CONTINUOUS UN-GATED POFE EJECTION
-                if (is_buy and imbalance < -0.75 and hawkes_z > 2.0) or (not is_buy and imbalance > 0.75 and hawkes_z > 2.0):
+                # 🌌 1. VERIFIED POFE EJECTION (Requires Tape Execution)
+                if (is_buy and imbalance < -0.80 and cvd_z < -1.5) or (not is_buy and imbalance > 0.80 and cvd_z > 1.5):
                     try:
-                        logger.critical(f"🛑 POFE EJECTION // {symbol} Orderbook wall shift detected (Imb: {imbalance:.2f}). Front-running Stop-Loss.")
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
-                        break 
-                    except Exception as e: logger.error(f"[X-RAY] POFE Ejection failed for {symbol}: {e}", exc_info=True)
+                        logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} True momentum shift verified via CVD (z={cvd_z:.2f}). Escaping via Limit-IOC.")
+                        escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
+                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                        await asyncio.sleep(1.0)
+                        continue 
+                    except Exception as e: logger.error(f"[X-RAY] POFE Limit-Escape failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 2. VOLUME DEATH EARLY EXIT
-                if current_r < -0.25 and hawkes_z < -1.2 and time_in_mins > 10.0:
+                # 🌌 2. VOLATILITY-AWARE VOLUME DEATH
+                inst_var = getattr(stat_engine, 'inst_variance', 0.01)
+                is_coiling = inst_var < 0.0001 
+                if not is_coiling and current_r < -0.35 and hawkes_z < -1.5 and time_in_mins > 15.0:
                     try:
-                        logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade underwater ({current_r:.2f}R) and Hawkes volume died ({hawkes_z:.2f}z). Cutting early at {time_in_mins:.1f}m.")
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
-                        break
-                    except Exception as e: logger.error(f"[X-RAY] Volume death exit failed for {symbol}: {e}", exc_info=True)
+                        logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC at {time_in_mins:.1f}m.")
+                        escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
+                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                        await asyncio.sleep(1.0)
+                        continue
+                    except Exception as e: logger.error(f"[X-RAY] Volume death escape failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 3. PARABOLIC CASCADE EJECTION
-                if r_multiple >= 1.5 and (hawkes_z > 2.8 or vpin_z > 2.8):
+                # 🌌 3. PARABOLIC ACCELERATION EJECTION
+                if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(cvd_z) > 2.5):
                     try:
-                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength at {r_multiple:.1f}R.")
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
-                        break 
-                    except Exception as e: logger.error(f"[X-RAY] Parabolic Ejection failed for {symbol}: {e}", exc_info=True)
+                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} True Liquidation cascade detected (CVD z={cvd_z:.2f}). Exiting into strength via Limit-IOC at {r_multiple:.1f}R.")
+                        escape_price = (safe_c_price * 0.9995) if is_buy else (safe_c_price * 1.0005)
+                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                        await asyncio.sleep(1.0)
+                        continue 
+                    except Exception as e: logger.error(f"[X-RAY] Parabolic Escape failed for {symbol}: {e}", exc_info=True)
 
                 # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING
                 if r_multiple >= 0.4 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
@@ -895,7 +925,15 @@ class DistributedQuantEngine:
                                     
                                     if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
                                         logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units ({portion*100}%).")
-                                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Market", qty=str(aligned_qty_close), timeInForce="IOC", reduceOnly=True)
+                                        await self.executor.safe_call(
+                                            self.executor.client.place_order, 
+                                            category="linear", symbol=symbol, 
+                                            side="Sell" if is_buy else "Buy", 
+                                            orderType="Limit", 
+                                            price=align_price(safe_c_price),
+                                            qty=str(aligned_qty_close), 
+                                            timeInForce="IOC", reduceOnly=True
+                                        )
                                         scaled_levels[target_r] = True
                                         break
                                     else:
@@ -937,7 +975,7 @@ class DistributedQuantEngine:
                         current_sl = new_sl_val
                         requires_sl_update = True
 
-                # 🌌 V54.0 ASYMMETRIC TP REPULSION
+                # 🌌 V54.3 ASYMMETRIC TP REPULSION
                 momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
                 if hawkes_z < -1.5 and r_multiple > 1.0:
                     momentum_stretch -= 0.5 
@@ -1025,7 +1063,15 @@ class DistributedQuantEngine:
             try:
                 pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                 if float(pos_res.get("result", {}).get("list", [{}])[0].get("size", 0.0)) > 0:
-                    await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if pos_res["result"]["list"][0]["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(pos_res["result"]["list"][0]["size"])), timeInForce="IOC", reduceOnly=True)
+                    escape_price = (current_price * 0.999) if direction == "BUY" else (current_price * 1.001)
+                    await self.executor.safe_call(
+                        self.executor.client.place_order, 
+                        category="linear", symbol=symbol, 
+                        side="Sell" if pos_res["result"]["list"][0]["side"] == "Buy" else "Buy", 
+                        orderType="Limit", price=align_price(escape_price),
+                        qty=str(float(pos_res["result"]["list"][0]["size"])), 
+                        timeInForce="IOC", reduceOnly=True
+                    )
             except Exception as e2: logger.error(f"[X-RAY] Emergency daemon flatten failed for {symbol}: {e2}", exc_info=True)
         finally:
             async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
@@ -1119,6 +1165,7 @@ class DistributedQuantEngine:
         except Exception: pass
         
         try:
+            max_notional = await self._get_max_affordable_notional()
             tickers_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
             full_market = []
             min_turnover = AdaptiveSessionClock.get_turnover_threshold()
@@ -1134,25 +1181,27 @@ class DistributedQuantEngine:
                     ask = float(t.get("ask1Price", 0.0) or 0.0)
                     
                     if bid <= 0 or ask <= 0 or ask <= bid: continue
-                    if turnover >= min_turnover: full_market.append((turnover, symbol))
+                    if turnover >= min_turnover:
+                        # 🌌 V55.0 BESPOKE BOOT FILTER
+                        if (self.hardware_min_qty.get(symbol, 1.0) * bid) <= max_notional:
+                            full_market.append((turnover, symbol))
                         
                 full_market.sort(key=lambda x: x[0], reverse=True)
                 full_market = [item[1] for item in full_market]
                 
-            # 🚀 V54.1: Expanding parallel live node capacity from 18 to 24
-            if len(full_market) < 24: full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
+            if len(full_market) < 24: 
+                logger.warning(f"[X-RAY] Only {len(full_market)} coins pass the initial boot affordable micro-cap filter.")
                 
         except Exception as e:
             logger.error(f"[X-RAY] Initial boot universe fetch failed: {e}", exc_info=True)
-            full_market = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "SUIUSDT", "NEARUSDT", "APTUSDT", "OPUSDT", "ARBUSDT", "INJUSDT", "FETUSDT", "TIAUSDT", "PEPEUSDT", "SHIBUSDT", "MATICUSDT", "RNDRUSDT", "RENDERUSDT", "TONUSDT", "WLDUSDT", "AAVEUSDT"]
+            full_market = []
 
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         full_market = [s for s in full_market if not any(b in s for b in banned_keywords)]
 
-        if "BTCUSDT" in full_market: full_market.remove("BTCUSDT")
-        
+        new_core_basket = []
         if boot_basket := full_market[:24]:
-            self.asset_basket = ["BTCUSDT"] + boot_basket[:23]
+            self.asset_basket = boot_basket[:24]
             self.shadow_basket = [s for s in full_market if s not in self.asset_basket][:6]
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
         

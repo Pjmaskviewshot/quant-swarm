@@ -1,10 +1,9 @@
 """
-🌌 V54.0 OMNI-STATE BACKTESTER: PERFECT PARITY
+🌌 V55.0 OMNI-STATE BACKTESTER: QUANTUM MICRO-CORE
 --------------------------------------------------
-Synchronized strictly with Quant Swarm live node V54.0.
-Implements Continuous Sigmoid Ratchets, Harmonic Scale-Out Mapping,
-Continuous POFE, Volume Death Early Exits, Sub-1R Trailing Ratchets, 
-and Asymmetric TP Repulsion.
+Synchronized strictly with Quant Swarm live node V55.0.
+Implements Verified Proof-of-Execution (POFE), Volatility-Aware Volume Death,
+Zero-Slippage Limit-IOC Escapes, and 2.5x ATR Survival Armor.
 """
 
 import argparse
@@ -89,7 +88,7 @@ def fetch_aligned_data(symbol: str, days: int) -> Tuple[List[Dict], List[Dict]]:
 @dataclass
 class Params:
     rr_ratio: float = 2.0            
-    sl_atr_mult: float = 1.5         
+    sl_atr_mult: float = 2.5         # V55.0 Survival Armor Baseline
     atr_period: int = 14
     leverage: float = 3.0            
 
@@ -256,7 +255,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     ceiling = max(floor, ceiling - mse_penalty)
     return max(floor, min(ceiling, prob))
 
-def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -401,7 +400,6 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         vol_scalar = min(1.0, max(0.0, inst_variance * 5000.0))
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
-        hawkes_decay = np.clip(1.0 + (vol_scalar * 4.0), 1.0, 5.0)
 
         vol_step = c['volume']
         price_step = (c['close'] - c_prev['close'])
@@ -473,7 +471,6 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         dynamic_gate = max(0.52, dynamic_gate)
         
-        # V54.0 Adaptive Entropy Gate
         if len(entropy_history) > 30:
             entropy_arr = np.array(entropy_history)
             entropy_mean = np.mean(entropy_arr)
@@ -495,7 +492,9 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
-        sl_dist_pct = max(0.004, min(0.030, vol_sigma * 1.5 * elasticity_scalar))
+        
+        # V55.0 SURVIVAL ARMOR FLOOR: Absolute minimum stop-loss distance is 2.5%
+        sl_dist_pct = max(0.025, min(0.050, vol_sigma * 1.5 * elasticity_scalar))
         
         dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
@@ -539,8 +538,6 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 
                 if net_ev_pct > ev_floor:  
                     entry = c['close']
-                    
-                    # 🌌 V54.0 RISK INITIALIZATION
                     initial_risk = sl_dist_pct * entry
                     realigned_sl = entry - initial_risk if action_dir == "BUY" else entry + initial_risk
                     
@@ -569,33 +566,35 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                         current_r = (c_j - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - c_j) / (initial_risk + 1e-9)
                         
-                        # 🌌 V54.0 CONTINUOUS UN-GATED POFE EJECTION
+                        # 🌌 V55.0 VERIFIED POFE EJECTION (Requires Tape Execution via CVD)
                         if r_multiple < 0.8:
-                            if vol_j > (vpin_bucket_size / entry) * 0.6: 
-                                if (action_dir == "BUY" and c_j < target_candles[j-1]["close"]) or (action_dir == "SELL" and c_j > target_candles[j-1]["close"]):
-                                    outcome = "POFE_EJECT"
-                                    exit_price = c_j
-                                    break
+                            proxy_imbalance = -1.0 if (skew < -0.5 and ofi_fast_z < -1.0) else (1.0 if (skew > 0.5 and ofi_fast_z > 1.0) else 0.0)
+                            if (action_dir == "BUY" and proxy_imbalance < -0.80 and ofi_fast_z < -1.5) or \
+                               (action_dir == "SELL" and proxy_imbalance > 0.80 and ofi_fast_z > 1.5):
+                                outcome = "VERIFIED_POFE_EJECT"
+                                exit_price = c_j
+                                break
                                     
-                        # 🌌 V54.0 VOLUME DEATH EARLY EXIT
-                        if current_r < -0.25 and vol_j < (vpin_bucket_size / entry) * 0.1 and bars_held > 10.0:
-                            outcome = "VOLUME_DEATH"
+                        # 🌌 V55.0 VOLATILITY-AWARE VOLUME DEATH
+                        is_coiling = inst_variance < 0.0001
+                        if not is_coiling and current_r < -0.35 and hawkes_z < -1.5 and bars_held > 15.0:
+                            outcome = "VOLUME_DEATH_ESCAPE"
                             exit_price = c_j
                             break
 
-                        # 🌌 V54.0 PARABOLIC CASCADE EJECTION
-                        if r_multiple >= 1.5 and vol_j > (vpin_bucket_size / entry) * 0.8:
-                            outcome = "PARABOLIC_EJECT"
+                        # 🌌 V55.0 PARABOLIC CASCADE EJECTION (Limit Escape)
+                        if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(ofi_fast_z) > 2.5):
+                            outcome = "PARABOLIC_ESCAPE"
                             exit_price = c_j
                             break
 
-                        # 🌌 V54.0 SUB-1R HIGH-WATER MARK TRAILING
+                        # 🌌 V55.0 SUB-1R HIGH-WATER MARK TRAILING
                         if r_multiple >= 0.4 and current_sl == realigned_sl:
                             sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if action_dir == "BUY" else (max_favorable_price + (initial_risk * 0.5))
                             if (action_dir == "BUY" and sub_1r_sl > current_sl) or (action_dir == "SELL" and sub_1r_sl < current_sl):
                                 current_sl = sub_1r_sl
 
-                        # 🌌 V54.0 HARMONIC SCALE-OUT MAPPING
+                        # 🌌 V55.0 HARMONIC SCALE-OUT MAPPING (Zero Slippage Partials)
                         for target_r, flag in scaled_levels.items():
                             if r_multiple >= target_r and not flag:
                                 portion = 0.25 if target_r == r_t1 else (0.35 if target_r == r_t2 else 0.40)
@@ -605,13 +604,12 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                                 position_size -= (position_size * portion)
                                 scaled_levels[target_r] = True
 
-                        # 🌌 V54.0 CONTINUOUS SIGMOID RATCHET
-                        base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
-                        min_mult = 0.4
+                        # 🌌 V55.0 CONTINUOUS SIGMOID RATCHET
+                        base_mult = 3.0 if regime in ["TRENDING", "VOLATILE"] else 1.8
+                        min_mult = 1.0
                         x_val = np.clip(2.5 * (r_multiple - 2.0), -700, 700)
                         sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x_val))
                         
-                        # 🌌 V54.0 FORGIVING THETA DECAY
                         time_in_mins = bars_held
                         vol_ratio = (initial_risk / p.sl_atr_mult) / entry
                         dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
@@ -621,7 +619,7 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         else:
                             theta_decay = 1.0
                             
-                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * sigmoid_factor * theta_decay, entry * 0.004)
+                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * sigmoid_factor * theta_decay, entry * 0.015)
                         
                         if r_multiple < 1.0:
                             current_sl = max(current_sl, realigned_sl) if action_dir == "BUY" else min(current_sl, realigned_sl)
@@ -631,9 +629,9 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             if action_dir == "BUY": current_sl = max(raw_sl, be_plus)
                             else: current_sl = min(raw_sl, be_plus)
 
-                        # 🌌 V54.0 ASYMMETRIC TP REPULSION
+                        # 🌌 V55.0 ASYMMETRIC TP REPULSION
                         momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                        if vol_j < (vpin_bucket_size / entry) * 0.1 and r_multiple > 1.0:
+                        if hawkes_z < -1.5 and r_multiple > 1.0:
                             momentum_stretch -= 0.5 
                         
                         target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3))
@@ -656,7 +654,11 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
-                    if regime == "RANGING" or routing_mode == "MAKER_ONLY":
+                    # 🌌 V55.0 LIMIT-ONLY ESCAPE FEES
+                    if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
+                        slippage_penalty = 0.0  # Limit orders physically cannot suffer negative slippage
+                        applied_fee = TAKER_FEE * 2  # Assuming IOC crosses the spread to fill
+                    elif regime == "RANGING" or routing_mode == "MAKER_ONLY":
                         slippage_penalty = 0.0
                         applied_fee = MAKER_FEE * 2
                     else:
@@ -666,7 +668,7 @@ def run_v54_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     
                     edge = prob_success - 0.50
                     risk_multiplier = edge / 0.10
-                    # V54.0 Risk Bounds: 1.5% to 3.0%
+                    # V55.0 Static Micro-Account Risk Emulation
                     raw_fractional_risk = max(0.015, min(0.030, 0.015 * risk_multiplier))
                     
                     net_edge_bps = net_ev_pct * 10000.0 
@@ -735,10 +737,10 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V54.0 OMNI-STATE Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V55.0 QUANTUM MICRO-CORE Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
-    atr_mults = [1.2, 1.5, 2.0]
+    atr_mults = [2.0, 2.5, 3.0] # Forced higher limits to test survival armor
     
     total_len = len(t_cand)
     fold_size = int(total_len / 6) 
@@ -759,7 +761,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v54_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v55_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -812,9 +814,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v54_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v55_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V54.0 OMNI-STATE OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V55.0 OMNI-STATE OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

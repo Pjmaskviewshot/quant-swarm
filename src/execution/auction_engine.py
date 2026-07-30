@@ -1,9 +1,9 @@
 """
-🌌 V54.0 OMNI-STATE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
+🌌 V54.1 OMNI-STATE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
 --------------------------------------------------------------
 Scale-Invariant Volatility-Parity Capital Allocation.
-Scales dynamically across any account balance ($15 to $1,000,000+) using 
-Continuous Logistic Exposure Functions without rigid hard-caps or signal rejections.
+Hard-capped at 40% max equity exposure for micro-accounts.
+Strict Maker-Only limit routing and widened 2.5x ATR survival armor.
 """
 
 import time
@@ -113,7 +113,7 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V54.0 Execution Engine. Handles continuous logistic sizing.
+        V54.1 Execution Engine. Handles continuous logistic sizing with strict 40% retail caps.
         """
         try:
             # Duplicate Daemon Check
@@ -137,9 +137,9 @@ class CapitalAuctionEngine:
                 return
 
             # 2. Base Volatility Parameters
-            sl_atr_mult = self.core.live_params.get("sl_atr_mult", 1.5)
-            # Hard structural floor to survive market noise
-            sl_distance = max(atr * sl_atr_mult, current_price * 0.018) 
+            # Forced widened stop-loss (2.5x ATR or 2.5%) to survive altcoin market noise without panic
+            sl_atr_mult = max(2.5, self.core.live_params.get("sl_atr_mult", 2.5))
+            sl_distance = max(atr * sl_atr_mult, current_price * 0.025) 
             
             # 3. Exchange Hardware Limits Verification
             await self.core.sor._fetch_exchange_limits(symbol)
@@ -150,14 +150,14 @@ class CapitalAuctionEngine:
             exchange_min_notional = min_qty * current_price
 
             # 4. 🌌 SCALE-INVARIANT CONTINUOUS EQUITY-EXPOSURE FUNCTION
-            # Smooth logistic scaling curve: S(A) = A * (min_cap + (max_cap - min_cap) / (1 + exp(-k * (A - A0))))
-            min_exposure_ratio = 0.50 # 50% max single trade notional for micro accounts (Allows up to $7.50 on $15)
+            # Smooth logistic scaling curve strictly capped at 40% for micro-accounts
+            min_exposure_ratio = 0.40 # 40% max single trade notional
             max_exposure_ratio = 0.10 # 10% max single trade notional for large accounts
             k_slope = 0.05
             mid_point = 100.0 # Pivot point at $100 equity
             
             logistic_exp = min_exposure_ratio + (max_exposure_ratio - min_exposure_ratio) / (1.0 + math.exp(-k_slope * (available_balance - mid_point)))
-            max_allowed_notional = max(6.00, available_balance * logistic_exp)
+            max_allowed_notional = max(5.00, available_balance * logistic_exp)
 
             # If the exchange physically FORCES us to take a position larger than our logistic limit, gracefully reject.
             if exchange_min_notional > max_allowed_notional:
@@ -226,11 +226,15 @@ class CapitalAuctionEngine:
                 current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
 
                 try:
-                    # 🚀 SOR DISPATCH: Switch between Aggressive Taker Block and Passive Maker Bracket
-                    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
-                        res = await self.core.sor.execute_iceberg_block(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine)
-                    else:
-                        res = await self.core.sor.execute_mean_reversion_bracket(symbol=symbol, direction=direction, total_qty=target_position_size, current_mid_price=current_price, stop_loss=initial_sl_price, take_profit=target_tp_price, depth_snapshot=current_depth, vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, elasticity=elasticity)
+                    # 🚀 SOR DISPATCH: STRICT MAKER-ONLY LIMIT ORDERS
+                    # Ban Aggressive Taker blocks to eliminate entry slippage.
+                    res = await self.core.sor.execute_mean_reversion_bracket(
+                        symbol=symbol, direction=direction, total_qty=target_position_size, 
+                        current_mid_price=current_price, stop_loss=initial_sl_price, 
+                        take_profit=target_tp_price, depth_snapshot=current_depth, 
+                        vol_z=vol_z, vol_mult=vol_mult, feature_engine=feature_engine, 
+                        elasticity=elasticity
+                    )
                     
                     execution_success = res[0] if isinstance(res, tuple) else bool(res)
                 
