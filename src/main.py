@@ -1,8 +1,8 @@
 """
-🌌 V55.0 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
+🌌 V55.1 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
-Limit-Only Escapes, and 2.5x ATR Survival Armor.
+Limit-Only Escapes, 3-Minute Immunity Windows, and 2.5x ATR Survival Armor.
 """
 
 import os
@@ -47,7 +47,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V55.0_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V55.1_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -56,7 +56,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V55.0 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
+        else: logger.critical("🌌 LIVE MODE: V55.1 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -613,7 +613,6 @@ class DistributedQuantEngine:
                         bid, ask, turnover = float(t_data.get("bid1Price", 0.0) or 0.0), float(t_data.get("ask1Price", 0.0) or 0.0), float(t_data.get("turnover24h", 0.0) or 0.0)
                         
                         if bid > 0 and ask > bid and turnover >= AdaptiveSessionClock.get_turnover_threshold() and (((ask - bid) / bid) * 10000.0) <= 12.0:
-                            # 🌌 V55.0 DYNAMIC UNIVERSE FILTER
                             max_notional = await self._get_max_affordable_notional()
                             if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
                                 async with self.portfolio_state_lock:
@@ -655,7 +654,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V55.0 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
+            logger.info("🌌 V55.1 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             max_notional = await self._get_max_affordable_notional()
             
@@ -667,8 +666,6 @@ class DistributedQuantEngine:
                     if not (symbol := t.get("symbol", "")).endswith("USDT"): continue
                     turnover, bid, ask = float(t.get("turnover24h", 0.0) or 0.0), float(t.get("bid1Price", 0.0) or 0.0), float(t.get("ask1Price", 0.0) or 0.0)
                     if bid > 0 and ask > bid and turnover >= min_turnover and (((ask - bid) / bid) * 10000.0) <= 12.0:
-                        
-                        # 🌌 V55.0 BESPOKE FILTER: Only allow coins the wallet can mathematically afford
                         if (self.hardware_min_qty.get(symbol, 1.0) * bid) <= max_notional:
                             full_market.append((turnover, symbol))
                         
@@ -759,6 +756,11 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
+        """
+        V55.1 TITANIUM SHIELD EXIT DAEMON:
+        Enforces a 3-Minute Trade Immunity Window to eliminate 30-second tick-choking.
+        Requires 5-tick sustained POFE persistence before ejecting.
+        """
         exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
         daemon_start_time = time.time()
         is_buy = direction == "BUY"
@@ -791,7 +793,7 @@ class DistributedQuantEngine:
             tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
-            actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 1.5), actual_entry * 0.018)
+            actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 2.5), actual_entry * 0.025)
             current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if is_buy else actual_entry + actual_sl_distance)
             current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if is_buy else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
             
@@ -822,6 +824,7 @@ class DistributedQuantEngine:
             max_favorable_price, initial_risk = actual_entry, actual_sl_distance
             last_api_update_time, api_check_counter = time.time(), 0
             
+            pofe_consecutive_ticks = 0 # Persistence counter to prevent single-tick ejections
             last_sent_sl_str = align_price(current_sl)
             last_sent_tp_str = align_price(current_tp)
 
@@ -869,15 +872,20 @@ class DistributedQuantEngine:
                 b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
                 imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                 
-                # 🌌 1. VERIFIED POFE EJECTION (Requires Tape Execution)
-                if (is_buy and imbalance < -0.80 and cvd_z < -1.5) or (not is_buy and imbalance > 0.80 and cvd_z > 1.5):
-                    try:
-                        logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} True momentum shift verified via CVD (z={cvd_z:.2f}). Escaping via Limit-IOC.")
-                        escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
-                        await asyncio.sleep(1.0)
-                        continue 
-                    except Exception as e: logger.error(f"[X-RAY] POFE Limit-Escape failed for {symbol}: {e}", exc_info=True)
+                # 🌌 1. VERIFIED POFE EJECTION (Only active AFTER 3.0 minute immunity window + 5-tick persistence)
+                if time_in_mins >= 3.0:
+                    if (is_buy and imbalance < -0.85 and cvd_z < -2.0) or (not is_buy and imbalance > 0.85 and cvd_z > 2.0):
+                        pofe_consecutive_ticks += 1
+                        if pofe_consecutive_ticks >= 5: # Must persist for 5 consecutive loops
+                            try:
+                                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift verified (CVD z={cvd_z:.2f}, Imb={imbalance:.2f}). Escaping via Limit-IOC.")
+                                escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
+                                await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                                await asyncio.sleep(1.0)
+                                continue 
+                            except Exception as e: logger.error(f"[X-RAY] POFE Limit-Escape failed for {symbol}: {e}", exc_info=True)
+                    else:
+                        pofe_consecutive_ticks = 0 # Reset counter if orderbook recovers
 
                 # 🌌 2. VOLATILITY-AWARE VOLUME DEATH
                 inst_var = getattr(stat_engine, 'inst_variance', 0.01)
@@ -901,8 +909,8 @@ class DistributedQuantEngine:
                         continue 
                     except Exception as e: logger.error(f"[X-RAY] Parabolic Escape failed for {symbol}: {e}", exc_info=True)
 
-                # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING
-                if r_multiple >= 0.4 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
+                # 🌌 4. SUB-1R HIGH-WATER MARK TRAILING (Shifted to +0.8R & 3-Min Immunity)
+                if time_in_mins >= 3.0 and r_multiple >= 0.8 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
                     sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
                     if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
                         current_sl = sub_1r_sl
@@ -975,7 +983,7 @@ class DistributedQuantEngine:
                         current_sl = new_sl_val
                         requires_sl_update = True
 
-                # 🌌 V54.3 ASYMMETRIC TP REPULSION
+                # 🌌 V55.1 ASYMMETRIC TP REPULSION
                 momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
                 if hawkes_z < -1.5 and r_multiple > 1.0:
                     momentum_stretch -= 0.5 
@@ -1035,7 +1043,8 @@ class DistributedQuantEngine:
                     
                     raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
                     slip_cost = raw_pnl - net_pnl - fees
-                    slippage_bps = (slip_cost / capital_risked) * 10000 if capital_risked > 0 else 0.0
+                    # Bounded slippage bps calculation to prevent glitched 200,000+ bps reports in Telegram
+                    slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
                     duration_mins = (time.time() - daemon_start_time) / 60.0
                     
                     exec_details["fees_usdt"] = fees
@@ -1182,7 +1191,6 @@ class DistributedQuantEngine:
                     
                     if bid <= 0 or ask <= 0 or ask <= bid: continue
                     if turnover >= min_turnover:
-                        # 🌌 V55.0 BESPOKE BOOT FILTER
                         if (self.hardware_min_qty.get(symbol, 1.0) * bid) <= max_notional:
                             full_market.append((turnover, symbol))
                         
