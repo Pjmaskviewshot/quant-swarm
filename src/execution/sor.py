@@ -424,6 +424,7 @@ class SmartOrderRouter:
             if not success or fill_qty == 0:
                 logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike with valid SL/TP floats.")
                 success, fill_price, fill_qty = await self._execute_flash_strike(
+                    # 🚀 V55.2 FIX: Correctly pass slice_qty, not total_qty, to avoid massive dump slippage
                     symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=sl, tp=tp
                 )
                 
