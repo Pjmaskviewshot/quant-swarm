@@ -1,9 +1,9 @@
 """
-💎 V50.0 QUANTUM SWARM: HIDDEN MARKOV MODEL (HMM) REGIME ENGINE
----------------------------------------------------------------
-Upgraded with HTF (Higher-Timeframe) Macro Trend Alignment (1H/4H).
-Implements Dynamic ER-Scaled Risk-Reward Ratio & Bias Penalties.
-Maintains O(N log K) Heap Extraction for Top-10 Deep Book reconstruction.
+💎 V55.2 QUANTUM SWARM: ADAPTIVE FEATURE ENGINE
+--------------------------------------------------------------
+Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
+Eradicates fixed-threshold Look-Ahead Bias by dynamically scaling
+archetypes to the asset's realized volatility envelope.
 """
 
 import math
@@ -37,7 +37,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V50.0 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 V55.2 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -75,7 +75,9 @@ class AdaptiveFeatureEngine:
         return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
 
     def detect_market_regime(self) -> str:
-        """Log-Space HMM Gaussian Classifier with X-Ray Diagnostic Telemetry."""
+        """
+        🚀 V55.2 FIX: Dynamically Calibrated HMM (Look-ahead bias eliminated, pure adaptive percentiles)
+        """
         if len(self.timeframes["5"]) >= 20:
             candles = list(self.timeframes["5"])[-20:]
         elif len(self.timeframes["1"]) >= 20:
@@ -96,13 +98,18 @@ class AdaptiveFeatureEngine:
             er = float(directional_change / (absolute_changes + 1e-9))
             
             avg_vol = float(np.mean(volumes))
+            vol_baseline = float(np.median(volumes)) + 1e-9
+            
+            # 🚀 V55.2 FIX: Archetypes scale dynamically with the asset's realized volatility
+            # We calculate a rolling variance envelope to construct the dynamic mean expectations
+            base_vol = max(0.001, np.median([np.std(log_returns[max(0, i-5):i]) for i in range(5, len(log_returns)+1, 5)]))
             
             archetypes = {
-                "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-                "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-                "HIGH_VOL_CHOP":    {"ret": (0.0, 0.002), "vol": (0.008, 0.002), "er": (0.3, 0.15)},
-                "MEAN_REVERTING":   {"ret": (0.0, 0.0005), "vol": (0.0015, 0.0005), "er": (0.2, 0.1)},
-                "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
+                "TRENDING_BULL":    {"ret": (base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
+                "TRENDING_BEAR":    {"ret": (-base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
+                "HIGH_VOL_CHOP":    {"ret": (0.0, base_vol * 2.5), "vol": (base_vol * 3.0, base_vol * 1.5), "er": (0.2, 0.15)},
+                "MEAN_REVERTING":   {"ret": (0.0, base_vol * 0.8), "vol": (base_vol * 1.0, base_vol * 0.5), "er": (0.3, 0.15)},
+                "LIQUIDITY_VACUUM": {"ret": (0.0, base_vol * 0.5), "vol": (base_vol * 0.5, base_vol * 0.3), "er": (0.5, 0.2)}
             }
             
             log_emissions = np.zeros(5)
@@ -113,7 +120,7 @@ class AdaptiveFeatureEngine:
                 log_p_er  = self._log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
                 
                 log_emission = log_p_ret + log_p_vol + log_p_er
-                if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes, 25):
+                if regime == "LIQUIDITY_VACUUM" and avg_vol < vol_baseline * 0.5:
                     log_emission += math.log(2.0) 
                     
                 log_emissions[i] = log_emission

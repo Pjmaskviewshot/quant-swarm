@@ -3,7 +3,7 @@
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
 Limit-Only Escapes, 3-Minute Immunity Windows, LastPrice Trigger overrides,
-Dust-Sweep Position Closures, and GIL-Protected Process Pools.
+Dust-Sweep Position Closures, Rate-Limit Protection, and GIL-Protected Process Pools.
 """
 
 import os
@@ -44,7 +44,6 @@ from portfolio.risk_manager import InstitutionalRiskVault
 from ingestion.multi_feed import HighVelocityMultiFeed
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
-from services.data_feed import AsynchronousDataFeed
 from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -66,6 +65,9 @@ class DistributedQuantEngine:
         
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(10)
+        
+        self.execution_semaphore = asyncio.Semaphore(5)
+        
         self.wal_db_path = "quant_swarm_wal.db"
         self.wal_batch_queue = []
         self.wal_lock = asyncio.Lock()  
@@ -77,10 +79,9 @@ class DistributedQuantEngine:
         self.stream_restart_event = asyncio.Event()
         self.force_dna_refresh = asyncio.Event() 
         
-        # 🚀 GIL Protection: Dedicated Process Pool for Heavy Matrix Math
         self.process_pool = ProcessPoolExecutor(max_workers=2)
         
-        # 🚀 MICROSERVICES
+        # MICROSERVICES
         self.fsm = SystemStateMachine()
         self.memory = MemoryBank()
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
@@ -128,6 +129,9 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] ❌ BACKGROUND TASK CRASHED: {task.exception()}", exc_info=task.exception())
 
     def track_task(self, coro: Any):
+        if len(self._active_tasks) > 500:
+            logger.warning("[X-RAY] ⚠️ TASK LIMIT EXCEEDED. Dropping non-critical task to prevent memory leak.")
+            return None
         task = asyncio.create_task(coro)
         self._active_tasks.add(task)
         task.add_done_callback(self._on_task_done)
@@ -204,12 +208,7 @@ class DistributedQuantEngine:
             if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
-        """
-        🚀 V55.2 FIX: Fully decoupled Telegram Dispatch
-        Now delegates to the background asyncio queue worker so execution loops never block.
-        """
         if not os.getenv("TELEGRAM_BOT_TOKEN") or len(os.getenv("TELEGRAM_BOT_TOKEN", "")) < 5: return
-        
         try:
             if is_html:
                 await self.telegram.send_html_report(message)
@@ -238,6 +237,40 @@ class DistributedQuantEngine:
         mid_point = 100.0
         logistic_exp = min_exposure_ratio + (max_exposure_ratio - min_exposure_ratio) / (1.0 + math.exp(-k_slope * (available_balance - mid_point)))
         return max(5.00, available_balance * logistic_exp)
+
+    def _align_price(self, symbol: str, price: float) -> str:
+        """🚀 V55.2 Helper to format prices exactly to exchange tick requirements."""
+        tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
+        return str(Decimal(str(price)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+
+    async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
+        """🚀 V55.2 Helper to cleanly amend stops without duplicating code."""
+        try:
+            await self.executor.safe_call(
+                self.executor.client.set_trading_stop, 
+                category="linear", symbol=symbol, positionIdx=0, 
+                takeProfit=self._align_price(symbol, new_tp), 
+                stopLoss=self._align_price(symbol, new_sl),
+                tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}")
+            return False
+            
+    async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_buy: bool):
+        """🚀 V55.2 Helper to execute Limit-IOC escapes securely."""
+        escape_price = current_price * 0.99 if is_buy else current_price * 1.01
+        try:
+            await self.executor.safe_call(
+                self.executor.client.place_order, 
+                category="linear", symbol=symbol, 
+                side="Sell" if is_buy else "Buy", 
+                orderType="Limit", price=self._align_price(symbol, escape_price),
+                qty=str(qty), timeInForce="IOC", reduceOnly=True
+            )
+        except Exception as e:
+            logger.error(f"[X-RAY] Emergency escape failed for {symbol}: {e}")
 
     async def synchronize_exchange_state(self):
         try:
@@ -316,8 +349,6 @@ class DistributedQuantEngine:
                 try:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso)
                     execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
-                    
-                    # Clamp historical SQLite records to prevent dashboard glitches
                     if "avg_slippage_bps" in execution_stats:
                         execution_stats["avg_slippage_bps"] = min(25.0, max(-25.0, float(execution_stats["avg_slippage_bps"])))
                 except Exception as e: 
@@ -535,7 +566,6 @@ class DistributedQuantEngine:
                     try:
                         async with self.db_semaphore:
                             res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
-                            if res and isinstance(res, dict): res["is_armed"] = True
                             return res
                     except Exception: return {"is_armed": True, "win_rate": 0.50} 
 
@@ -547,7 +577,6 @@ class DistributedQuantEngine:
                     for sym, result in zip(list(fetch_tasks.keys()), results):
                         if isinstance(result, Exception): self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
                         else:
-                            if isinstance(result, dict): result["is_armed"] = True 
                             self.ram_dna_cache[sym] = result
             except Exception as e: logger.error(f"[X-RAY] DNA Prewarmer error: {e}", exc_info=True)
 
@@ -595,7 +624,6 @@ class DistributedQuantEngine:
                     
                     if stat_engine: 
                         stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
-                        if symbol == "BTCUSDT": self.global_btc_ofi_z = stat_engine.ofi_fast_z
                         
                     if (elasticity := self.elasticity_engines.get(symbol)) and stat_engine:
                         elasticity.update_depth_state(best_bid, top_bid_size, best_ask, top_ask_size, stat_engine.ofi_fast_z, float(depth_data.get("ts", time.time() * 1000)) / 1000.0)
@@ -770,344 +798,319 @@ class DistributedQuantEngine:
         V55.2 TITANIUM SHIELD EXIT DAEMON:
         Enforces LastPrice triggers to defeat Mark Price traps.
         """
-        exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
-        daemon_start_time = time.time()
-        is_buy = direction == "BUY"
-        
-        if self.test_mode:
-            await asyncio.sleep(60)
-            self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", exec_details])
-            async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
-            return
-
-        try:
-            order_filled, actual_entry, actual_qty_filled = False, current_price, risk_matrix.get("size", 1.0)
-            for _ in range(5):  
-                await asyncio.sleep(3)
-                try:
-                    pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                    pos_data = pos_res.get("result", {}).get("list", [])
-                    if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
-                        order_filled, actual_entry, actual_qty_filled = True, float(pos_data[0].get("avgPrice", current_price)), float(pos_data[0].get("size", actual_qty_filled))
-                        break
-                except Exception as e: logger.debug(f"[X-RAY] Position fill check failed for {symbol}: {e}", exc_info=True); continue
-
-            if not order_filled:
-                try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
-                except Exception as e: logger.debug(f"[X-RAY] Cancel all orders failed for {symbol}: {e}", exc_info=True)
-                self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+        async with self.execution_semaphore:
+            exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
+            daemon_start_time = time.time()
+            is_buy = direction == "BUY"
+            
+            if self.test_mode:
+                await asyncio.sleep(60)
+                self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", exec_details])
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 return
 
-            tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
-            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
-
-            actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 2.5), actual_entry * 0.025)
-            current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if is_buy else actual_entry + actual_sl_distance)
-            current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if is_buy else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
-            
-            if is_buy:
-                current_tp = max(current_tp, current_price * 1.001)
-                current_sl = min(current_sl, current_price * 0.999)
-                if current_tp <= current_sl: current_tp = current_sl * 1.01
-            else:
-                current_tp = min(current_tp, current_price * 0.999)
-                current_sl = max(current_sl, current_price * 1.001)
-                if current_tp >= current_sl: current_tp = current_sl * 0.99
-                
-            try: 
-                # Force SL/TP to trigger on LastPrice, defeating the MarkPrice trap.
-                await self.executor.safe_call(
-                    self.executor.client.set_trading_stop, 
-                    category="linear", symbol=symbol, positionIdx=0, 
-                    takeProfit=align_price(current_tp), stopLoss=align_price(current_sl),
-                    tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
-                )
-            except Exception as e: logger.debug(f"[X-RAY] Initial TP/SL set failed for {symbol}: {e}", exc_info=True)
-
-            stat_engine = self.stat_engines.get(symbol)
-            feature_engine = self.feature_engines.get(symbol)
-            
-            highest_since_entry = actual_entry if is_buy else None
-            lowest_since_entry = actual_entry if not is_buy else None
-            
-            r_t1 = round(max(1.0, dynamic_rr_ratio * 0.6), 2)
-            r_t2 = round(max(1.5, dynamic_rr_ratio * 1.0), 2)
-            r_t3 = round(max(2.0, dynamic_rr_ratio * 1.5), 2)
-            scaled_levels = {r_t1: False, r_t2: False, r_t3: False}
-            
-            regime = market_regime 
-            max_favorable_price, initial_risk = actual_entry, actual_sl_distance
-            last_api_update_time, api_check_counter = time.time(), 0
-            
-            pofe_consecutive_ticks = 0 
-            last_sent_sl_str = align_price(current_sl)
-            last_sent_tp_str = align_price(current_tp)
-
-            while True: 
-                safe_c_price = current_price
-                if stat_engine and stat_engine.true_micro_price > 0: safe_c_price = stat_engine.true_micro_price
-                sl_proximity = abs(safe_c_price - current_sl) / (safe_c_price + 1e-9)
-                loop_sleep = 0.2 if sl_proximity < 0.005 else 1.0
-                await asyncio.sleep(loop_sleep) 
-                
-                now = time.time()
-                api_check_counter += 1
-                time_in_mins = (now - daemon_start_time) / 60.0
-                
-                requires_sl_update = False
-                requires_tp_update = False
-                
-                if api_check_counter % (60 if loop_sleep == 1.0 else 300) == 0:
-                    regime = feature_engine.detect_market_regime() if feature_engine else regime
-                
-                if api_check_counter >= (15 if loop_sleep == 1.0 else 75):
-                    api_check_counter = 0
+            try:
+                # [STATE: VERIFY ENTRY]
+                order_filled, actual_entry, actual_qty_filled = False, current_price, risk_matrix.get("size", 1.0)
+                for _ in range(5):  
+                    await asyncio.sleep(3)
                     try:
                         pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        pos_list = pos_res.get("result", {}).get("list", [])
-                        if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0: break 
-                    except Exception as e: logger.debug(f"[X-RAY] Daemon API health check failed for {symbol}: {e}", exc_info=True)
+                        pos_data = pos_res.get("result", {}).get("list", [])
+                        if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
+                            order_filled, actual_entry, actual_qty_filled = True, float(pos_data[0].get("avgPrice", current_price)), float(pos_data[0].get("size", actual_qty_filled))
+                            break
+                    except Exception as e: logger.debug(f"[X-RAY] Position fill check failed for {symbol}: {e}"); continue
 
-                if safe_c_price != current_price:
-                    if is_buy and safe_c_price > max_favorable_price: 
-                        max_favorable_price = safe_c_price
-                        if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
-                    elif not is_buy and safe_c_price < max_favorable_price: 
-                        max_favorable_price = safe_c_price
-                        if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
+                if not order_filled:
+                    try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
+                    except Exception: pass
+                    self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
+                    async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                    return
+
+                # [STATE: INITIALIZE STOPS]
+                actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 2.5), actual_entry * 0.025)
+                current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if is_buy else actual_entry + actual_sl_distance)
+                current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if is_buy else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
+                
+                if is_buy:
+                    current_tp = max(current_tp, current_price * 1.001)
+                    current_sl = min(current_sl, current_price * 0.999)
+                    if current_tp <= current_sl: current_tp = current_sl * 1.01
+                else:
+                    current_tp = min(current_tp, current_price * 0.999)
+                    current_sl = max(current_sl, current_price * 1.001)
+                    if current_tp >= current_sl: current_tp = current_sl * 0.99
                     
-                r_multiple = (max_favorable_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - max_favorable_price) / (initial_risk + 1e-9)
-                current_r = (safe_c_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - safe_c_price) / (initial_risk + 1e-9)
+                await self._amend_trailing_stop(symbol, current_sl, current_tp)
 
-                hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
-                vpin_z = getattr(stat_engine, 'vpin_z', hawkes_z)
-                cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) 
+                # [STATE: TRAILING & SCALE-OUT LOOP]
+                stat_engine = self.stat_engines.get(symbol)
+                feature_engine = self.feature_engines.get(symbol)
                 
-                ob = self.orderbook_snapshots.get(symbol, {})
-                b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
-                imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
+                highest_since_entry = actual_entry if is_buy else None
+                lowest_since_entry = actual_entry if not is_buy else None
                 
-                if time_in_mins >= 3.0:
-                    if (is_buy and imbalance < -0.85 and cvd_z < -2.0) or (not is_buy and imbalance > 0.85 and cvd_z > 2.0):
-                        pofe_consecutive_ticks += 1
-                        if pofe_consecutive_ticks >= 5:
-                            try:
-                                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift verified (CVD z={cvd_z:.2f}, Imb={imbalance:.2f}). Escaping via Limit-IOC.")
-                                escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
-                                await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                r_t1 = round(max(1.0, dynamic_rr_ratio * 0.6), 2)
+                r_t2 = round(max(1.5, dynamic_rr_ratio * 1.0), 2)
+                r_t3 = round(max(2.0, dynamic_rr_ratio * 1.5), 2)
+                scaled_levels = {r_t1: False, r_t2: False, r_t3: False}
+                
+                regime = market_regime 
+                max_favorable_price, initial_risk = actual_entry, actual_sl_distance
+                last_api_update_time, api_check_counter = time.time(), 0
+                
+                pofe_consecutive_ticks = 0 
+                last_sent_sl_str = self._align_price(symbol, current_sl)
+                last_sent_tp_str = self._align_price(symbol, current_tp)
+
+                while True: 
+                    # 🚀 V55.2 FIX: Pure L2 Fallback to prevent Blind Daemon
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    safe_c_price = ob.get("best_bid" if is_buy else "best_ask", current_price)
+                    
+                    if stat_engine and stat_engine.true_micro_price > 0: 
+                        safe_c_price = stat_engine.true_micro_price
+                        
+                    sl_proximity = abs(safe_c_price - current_sl) / (safe_c_price + 1e-9)
+                    loop_sleep = 0.2 if sl_proximity < 0.005 else 1.0
+                    await asyncio.sleep(loop_sleep) 
+                    
+                    now = time.time()
+                    api_check_counter += 1
+                    time_in_mins = (now - daemon_start_time) / 60.0
+                    
+                    requires_sl_update = False
+                    requires_tp_update = False
+                    
+                    if api_check_counter % (60 if loop_sleep == 1.0 else 300) == 0:
+                        regime = feature_engine.detect_market_regime() if feature_engine else regime
+                    
+                    if api_check_counter >= (15 if loop_sleep == 1.0 else 75):
+                        api_check_counter = 0
+                        try:
+                            pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                            pos_list = pos_res.get("result", {}).get("list", [])
+                            if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0: break 
+                        except Exception: pass
+
+                    if safe_c_price != current_price:
+                        if is_buy and safe_c_price > max_favorable_price: 
+                            max_favorable_price = safe_c_price
+                            if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
+                        elif not is_buy and safe_c_price < max_favorable_price: 
+                            max_favorable_price = safe_c_price
+                            if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
+                        
+                    r_multiple = (max_favorable_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - max_favorable_price) / (initial_risk + 1e-9)
+                    current_r = (safe_c_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - safe_c_price) / (initial_risk + 1e-9)
+
+                    hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
+                    cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) 
+                    
+                    b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
+                    imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
+                    
+                    # Escape Check 1: POFE
+                    if time_in_mins >= 3.0:
+                        if (is_buy and imbalance < -0.85 and cvd_z < -2.0) or (not is_buy and imbalance > 0.85 and cvd_z > 2.0):
+                            pofe_consecutive_ticks += 1
+                            if pofe_consecutive_ticks >= 5:
+                                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift. Escaping via Limit-IOC.")
+                                await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
                                 await asyncio.sleep(1.0)
                                 continue 
-                            except Exception as e: logger.error(f"[X-RAY] POFE Limit-Escape failed for {symbol}: {e}", exc_info=True)
-                    else:
-                        pofe_consecutive_ticks = 0 
+                        else:
+                            pofe_consecutive_ticks = 0 
 
-                inst_var = getattr(stat_engine, 'inst_variance', 0.01)
-                is_coiling = inst_var < 0.0001 
-                if not is_coiling and current_r < -0.35 and hawkes_z < -1.5 and time_in_mins > 15.0:
-                    try:
-                        logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC at {time_in_mins:.1f}m.")
-                        escape_price = (safe_c_price * 0.999) if is_buy else (safe_c_price * 1.001)
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                    # Escape Check 2: Volume Death
+                    inst_var = getattr(stat_engine, 'inst_variance', 0.01)
+                    if inst_var >= 0.0001 and current_r < -0.35 and hawkes_z < -1.5 and time_in_mins > 15.0:
+                        logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC.")
+                        await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
                         await asyncio.sleep(1.0)
                         continue
-                    except Exception as e: logger.error(f"[X-RAY] Volume death escape failed for {symbol}: {e}", exc_info=True)
 
-                if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(cvd_z) > 2.5):
-                    try:
-                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} True Liquidation cascade detected (CVD z={cvd_z:.2f}). Exiting into strength via Limit-IOC at {r_multiple:.1f}R.")
-                        escape_price = (safe_c_price * 0.9995) if is_buy else (safe_c_price * 1.0005)
-                        await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if is_buy else "Buy", orderType="Limit", price=align_price(escape_price), qty=str(actual_qty_filled), timeInForce="IOC", reduceOnly=True)
+                    # Escape Check 3: Parabolic Liquidation Cascade
+                    if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(cvd_z) > 2.5):
+                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength via Limit-IOC.")
+                        await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
                         await asyncio.sleep(1.0)
                         continue 
-                    except Exception as e: logger.error(f"[X-RAY] Parabolic Escape failed for {symbol}: {e}", exc_info=True)
 
-                if time_in_mins >= 3.0 and r_multiple >= 0.8 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
-                    sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
-                    if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
-                        current_sl = sub_1r_sl
-                        requires_sl_update = True
-                        logger.info(f"[X-RAY] 🛡️ SUB-1R RATCHET // {symbol} Excursion hit +{r_multiple:.2f}R. Tightened risk floor to {align_price(current_sl)}.")
+                    # Sub-1R Ratchet
+                    if time_in_mins >= 3.0 and r_multiple >= 0.8 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
+                        sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
+                        if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
+                            current_sl = sub_1r_sl
+                            requires_sl_update = True
+                            logger.info(f"[X-RAY] 🛡️ SUB-1R RATCHET // {symbol} Excursion hit +{r_multiple:.2f}R. Tightened risk floor.")
 
-                if not self.test_mode and r_multiple >= 1.0:
-                    try:
-                        current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        p_list = current_pos_res.get("result", {}).get("list", [])
-                        if p_list and float(p_list[0].get("size", 0.0)) > 0:
-                            current_qty = float(p_list[0]["size"])
-                            limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
-                            
-                            for target_r, flag in scaled_levels.items():
-                                if r_multiple >= target_r and not flag:
-                                    portion = 0.25 if target_r == r_t1 else (0.35 if target_r == r_t2 else 0.40)
-                                    qty_close = current_qty * portion
-                                    aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
-                                    
-                                    # 🚀 V55.2 DUST SWEEP: Check if remaining position drops below exchange minimum notional ($6.0)
-                                    remaining_qty = current_qty - aligned_qty_close
-                                    remaining_notional = remaining_qty * safe_c_price
-                                    if remaining_notional > 0 and remaining_notional < 6.0:
-                                        aligned_qty_close = current_qty # Sweep entire remaining balance
-                                        logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below exchange minimum. Sweeping full remainder.")
-
-                                    if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
-                                        logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units ({portion*100}%).")
-                                        await self.executor.safe_call(
-                                            self.executor.client.place_order, 
-                                            category="linear", symbol=symbol, 
-                                            side="Sell" if is_buy else "Buy", 
-                                            orderType="Limit", 
-                                            price=align_price(safe_c_price),
-                                            qty=str(aligned_qty_close), 
-                                            timeInForce="IOC", reduceOnly=True
-                                        )
-                                        scaled_levels[target_r] = True
-                                        if remaining_notional > 0 and remaining_notional < 6.0:
-                                            break
-                                        break
-                                    else:
-                                        if not flag: scaled_levels[target_r] = True
-                                        break
-                    except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}", exc_info=True)
-
-                live_atr_raw = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
-                live_atr = live_atr_raw if live_atr_raw > 0 else (safe_c_price * 0.005)
-                
-                base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
-                min_mult = 0.4 
-                
-                compression_k = 2.5 
-                compression_shift = 2.0 
-                x = compression_k * (r_multiple - compression_shift)
-                if x > 700: x = 700
-                elif x < -700: x = -700
-                sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
-
-                vol_ratio = live_atr / max(safe_c_price, 1e-9)
-                dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
-
-                if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
-                    theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010)) 
-                else:
-                    theta_decay = 1.0 
-
-                tox_mod = 0.6 if (is_buy and imbalance < -0.5) or (not is_buy and imbalance > 0.5) else 1.0
-                
-                raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
-                
-                if r_multiple >= 1.0:
-                    raw_sl = (max_favorable_price - raw_trail_dist) if is_buy else (max_favorable_price + raw_trail_dist)
-                    be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
-                    new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
-                    
-                    if (is_buy and new_sl_val > current_sl) or (not is_buy and new_sl_val < current_sl):
-                        current_sl = new_sl_val
-                        requires_sl_update = True
-
-                momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                if hawkes_z < -1.5 and r_multiple > 1.0:
-                    momentum_stretch -= 0.5 
-                
-                target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)) 
-                calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
-                
-                if (is_buy and calc_tp > current_tp) or (not is_buy and calc_tp < current_tp):
-                    if abs(calc_tp - current_tp) / actual_entry > 0.0025:
-                        current_tp = calc_tp
-                        requires_tp_update = True
-
-                if (requires_sl_update or requires_tp_update) and (now - last_api_update_time > (3.0 if loop_sleep == 1.0 else 1.0)):
-                    spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
-                    min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
-                    
-                    if is_buy:
-                        current_sl = min(current_sl, safe_c_price - min_distance)
-                        current_tp = max(current_tp, safe_c_price + min_distance)
-                        if current_tp <= current_sl: current_tp = current_sl * 1.01
-                    else:
-                        current_sl = max(current_sl, safe_c_price + min_distance)
-                        current_tp = min(current_tp, safe_c_price - min_distance)
-                        if current_tp >= current_sl: current_tp = current_sl * 0.99
-
-                    new_sl_str = align_price(current_sl)
-                    new_tp_str = align_price(current_tp)
-
-                    if new_sl_str != last_sent_sl_str or new_tp_str != last_sent_tp_str:
+                    # Harmonic Scale-Outs & Dust Sweeps
+                    if not self.test_mode and r_multiple >= 1.0:
                         try:
-                            # Continually enforce LastPrice Trigger on ratchet updates
-                            await self.executor.safe_call(
-                                self.executor.client.set_trading_stop, 
-                                category="linear", symbol=symbol, positionIdx=0, 
-                                takeProfit=new_tp_str, stopLoss=new_sl_str,
-                                tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
-                            )
-                            last_api_update_time = now
-                            last_sent_sl_str = new_sl_str
-                            last_sent_tp_str = new_tp_str
-                            
-                            if requires_tp_update: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
-                            if requires_sl_update: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
-                        except Exception as e: 
-                            logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}", exc_info=True)
+                            current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                            p_list = current_pos_res.get("result", {}).get("list", [])
+                            if p_list and float(p_list[0].get("size", 0.0)) > 0:
+                                current_qty = float(p_list[0]["size"])
+                                limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
+                                
+                                for target_r, flag in scaled_levels.items():
+                                    if r_multiple >= target_r and not flag:
+                                        portion = 0.25 if target_r == r_t1 else (0.35 if target_r == r_t2 else 0.40)
+                                        qty_close = current_qty * portion
+                                        aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
+                                        
+                                        remaining_qty = current_qty - aligned_qty_close
+                                        remaining_notional = remaining_qty * safe_c_price
+                                        if 0 < remaining_notional < 6.0:
+                                            aligned_qty_close = current_qty 
+                                            logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
 
-            await asyncio.sleep(2.0) 
-            try: 
-                closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
-                closed_list = closed_data.get("result", {}).get("list", [])
-                if closed_list:
-                    net_pnl = float(closed_list[0].get("closedPnl", 0.0))
-                    real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
-                    capital_risked = (actual_entry * float(closed_list[0].get("qty", 1))) / target_leverage
-                    self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (capital_risked + 1e-9))
+                                        if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
+                                            logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units.")
+                                            await self.executor.safe_call(
+                                                self.executor.client.place_order, 
+                                                category="linear", symbol=symbol, 
+                                                side="Sell" if is_buy else "Buy", 
+                                                orderType="Limit", 
+                                                price=self._align_price(symbol, safe_c_price),
+                                                qty=str(aligned_qty_close), 
+                                                timeInForce="IOC", reduceOnly=True
+                                            )
+                                            scaled_levels[target_r] = True
+                                            if 0 < remaining_notional < 6.0:
+                                                break
+                                            break
+                                        else:
+                                            if not flag: scaled_levels[target_r] = True
+                                            break
+                        except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}")
+
+                    # Dynamic Trailing Stop Calculus
+                    live_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else (safe_c_price * 0.005)
+                    live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
                     
-                    fees = float(closed_list[0].get("execFee", 0.0))
-                    exit_price = float(closed_list[0].get("avgExitPrice", actual_entry))
+                    base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
+                    min_mult = 0.4 
                     
-                    raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
-                    slip_cost = raw_pnl - net_pnl - fees
+                    x = 2.5 * (r_multiple - 2.0)
+                    x = max(-700, min(700, x))
+                    sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
+
+                    vol_ratio = live_atr / max(safe_c_price, 1e-9)
+                    dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
+
+                    if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
+                        theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010)) 
+                    else:
+                        theta_decay = 1.0 
+
+                    tox_mod = 0.6 if (is_buy and imbalance < -0.5) or (not is_buy and imbalance > 0.5) else 1.0
                     
-                    # Slippage reporting bound to prevent glitched dashboard calculations
-                    slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
-                    duration_mins = (time.time() - daemon_start_time) / 60.0
+                    raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
                     
-                    exec_details["fees_usdt"] = fees
+                    if r_multiple >= 1.0:
+                        raw_sl = (max_favorable_price - raw_trail_dist) if is_buy else (max_favorable_price + raw_trail_dist)
+                        be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
+                        new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
+                        
+                        if (is_buy and new_sl_val > current_sl) or (not is_buy and new_sl_val < current_sl):
+                            current_sl = new_sl_val
+                            requires_sl_update = True
+
+                    momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
+                    if hawkes_z < -1.5 and r_multiple > 1.0:
+                        momentum_stretch -= 0.5 
                     
-                    if net_pnl < 0:
-                        async with self.circuit_breaker_lock:
-                            prev_loss = [t for t in self.tick_error_counts.get(symbol, []) if time.time() - t < 7200]
-                            prev_loss.append(time.time())
-                            self.tick_error_counts[symbol] = prev_loss
-                            if len(prev_loss) >= 2:
-                                dynamic_lockout = 1800 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if stat_engine else 0.0) * 2.0)
-                                self.circuit_breakers[symbol] = time.time() + dynamic_lockout
-                                logger.warning(f"[X-RAY] ⏸️ VOLATILITY LOCKOUT: {symbol} paused for {dynamic_lockout/60:.1f} mins after 2 consecutive losses.")
-                else: 
+                    target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)) 
+                    calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
+                    
+                    if (is_buy and calc_tp > current_tp) or (not is_buy and calc_tp < current_tp):
+                        if abs(calc_tp - current_tp) / actual_entry > 0.0025:
+                            current_tp = calc_tp
+                            requires_tp_update = True
+
+                    # 🚀 V55.2 FIX: Strict 5-Second Cooldown on API updates
+                    if (requires_sl_update or requires_tp_update) and (now - last_api_update_time >= 5.0):
+                        spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
+                        min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
+                        
+                        if is_buy:
+                            current_sl = min(current_sl, safe_c_price - min_distance)
+                            current_tp = max(current_tp, safe_c_price + min_distance)
+                            if current_tp <= current_sl: current_tp = current_sl * 1.01
+                        else:
+                            current_sl = max(current_sl, safe_c_price + min_distance)
+                            current_tp = min(current_tp, safe_c_price - min_distance)
+                            if current_tp >= current_sl: current_tp = current_sl * 0.99
+
+                        new_sl_str = self._align_price(symbol, current_sl)
+                        new_tp_str = self._align_price(symbol, current_tp)
+
+                        if new_sl_str != last_sent_sl_str or new_tp_str != last_sent_tp_str:
+                            if await self._amend_trailing_stop(symbol, current_sl, current_tp):
+                                last_api_update_time = now
+                                last_sent_sl_str = new_sl_str
+                                last_sent_tp_str = new_tp_str
+                                
+                                if requires_tp_update: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
+                                if requires_sl_update: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
+
+                # [STATE: SETTLEMENT]
+                await asyncio.sleep(2.0) 
+                try: 
+                    closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
+                    closed_list = closed_data.get("result", {}).get("list", [])
+                    if closed_list:
+                        net_pnl = float(closed_list[0].get("closedPnl", 0.0))
+                        real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
+                        capital_risked = (actual_entry * float(closed_list[0].get("qty", 1))) / target_leverage
+                        self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (capital_risked + 1e-9))
+                        
+                        fees = float(closed_list[0].get("execFee", 0.0))
+                        exit_price = float(closed_list[0].get("avgExitPrice", actual_entry))
+                        
+                        raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
+                        slip_cost = raw_pnl - net_pnl - fees
+                        
+                        slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
+                        duration_mins = (time.time() - daemon_start_time) / 60.0
+                        exec_details["fees_usdt"] = fees
+                        
+                        if net_pnl < 0:
+                            async with self.circuit_breaker_lock:
+                                prev_loss = [t for t in self.tick_error_counts.get(symbol, []) if time.time() - t < 7200]
+                                prev_loss.append(time.time())
+                                self.tick_error_counts[symbol] = prev_loss
+                                if len(prev_loss) >= 2:
+                                    dynamic_lockout = 1800 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if stat_engine else 0.0) * 2.0)
+                                    self.circuit_breakers[symbol] = time.time() + dynamic_lockout
+                                    logger.warning(f"[X-RAY] ⏸️ VOLATILITY LOCKOUT: {symbol} paused for {dynamic_lockout/60:.1f} mins after 2 consecutive losses.")
+                    else: 
+                        net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
+                except Exception as e: 
+                    logger.error(f"[X-RAY] Failed to fetch closed PnL for {symbol}: {e}")
                     net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
-            except Exception as e: 
-                logger.error(f"[X-RAY] Failed to fetch closed PnL for {symbol}: {e}", exc_info=True)
-                net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
-            
-            self.log_to_wal_sync("settlement", [signal_id, net_pnl, slippage_bps, real_outcome, exec_details])
-            self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)))
+                
+                self.log_to_wal_sync("settlement", [signal_id, net_pnl, slippage_bps, real_outcome, exec_details])
+                self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)))
 
-        except Exception as e:
-            logger.error(f"[X-RAY] Position daemon critical fault for {symbol}: {e}", exc_info=True)
-            try:
-                pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                if float(pos_res.get("result", {}).get("list", [{}])[0].get("size", 0.0)) > 0:
-                    escape_price = (current_price * 0.999) if direction == "BUY" else (current_price * 1.001)
-                    await self.executor.safe_call(
-                        self.executor.client.place_order, 
-                        category="linear", symbol=symbol, 
-                        side="Sell" if pos_res["result"]["list"][0]["side"] == "Buy" else "Buy", 
-                        orderType="Limit", price=align_price(escape_price),
-                        qty=str(float(pos_res["result"]["list"][0]["size"])), 
-                        timeInForce="IOC", reduceOnly=True
-                    )
-            except Exception as e2: logger.error(f"[X-RAY] Emergency daemon flatten failed for {symbol}: {e2}", exc_info=True)
-        finally:
-            async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
-            self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e:
+                logger.error(f"[X-RAY] Position daemon critical fault for {symbol}: {e}", exc_info=True)
+                try:
+                    pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    pos_list = pos_res.get("result", {}).get("list", [])
+                    if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
+                        qty = float(pos_list[0]["size"])
+                        side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
+                        current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
+                        await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
+                except Exception as e2: logger.error(f"[X-RAY] Emergency daemon flatten failed for {symbol}: {e2}", exc_info=True)
+            finally:
+                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
@@ -1121,8 +1124,12 @@ class DistributedQuantEngine:
         for symbol in symbols_to_cancel:
             try:
                 pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                if float(pos_res.get("result", {}).get("list", [{}])[0].get("size", 0.0)) > 0:
-                    await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=symbol, side="Sell" if pos_res["result"]["list"][0]["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(pos_res["result"]["list"][0]["size"])), timeInForce="IOC", reduceOnly=True)
+                pos_list = pos_res.get("result", {}).get("list", [])
+                if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
+                    qty = float(pos_list[0]["size"])
+                    side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
+                    current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
+                    await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
             except Exception as e: logger.error(f"[X-RAY] Shutdown flatten order failed for {symbol}: {e}", exc_info=True)
                 
         logger.critical("🔍 VERIFYING ZERO EXPOSURE...")
@@ -1139,7 +1146,11 @@ class DistributedQuantEngine:
                     logger.error(f"⚠️ {len(active_orphans)} positions still open. Retrying flatten sequence ({attempt+1}/10).")
                     for p in active_orphans:
                         sym = p["symbol"]
-                        try: await self.executor.safe_call(self.executor.client.place_order, category="linear", symbol=sym, side="Sell" if p["side"] == "Buy" else "Buy", orderType="Market", qty=str(float(p["size"])), timeInForce="IOC", reduceOnly=True)
+                        try: 
+                            qty = float(p["size"])
+                            side = "Sell" if p["side"] == "Buy" else "Buy"
+                            current_p = float(p.get("markPrice", p.get("avgPrice", 0.0)))
+                            await self._execute_emergency_escape(sym, current_p, qty, side == "Sell")
                         except Exception as e: logger.error(f"[X-RAY] Retry flatten failed for {sym}: {e}", exc_info=True)
                     await asyncio.sleep(5)
             except Exception as e: await asyncio.sleep(5)

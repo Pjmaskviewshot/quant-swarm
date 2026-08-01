@@ -1,8 +1,8 @@
 """
-💎 V50.0 QUANTUM SWARM: MACRO-AWARE TENSOR MATRIX
+💎 V55.2 QUANTUM SWARM: MACRO-AWARE TENSOR MATRIX
 -------------------------------------------------
 Computes real-time cross-asset impulse propagation (BTC -> Alts).
-Uses strict 1-second binning and [t-1] lagging to eradicate Look-Ahead Bias.
+Uses Millisecond-Precise Event-Time Alignment to eradicate Look-Ahead Bias.
 Includes X-Ray Telemetry for macro-signal detection.
 """
 
@@ -16,8 +16,8 @@ from typing import Dict, Any, Tuple, List
 logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
-    def __init__(self, history_len: int = 300):
-        # Stores tuples of (1-second-binned-timestamp, last_price_in_bin)
+    def __init__(self, history_len: int = 1000):
+        # Stores tuples of (millisecond_timestamp, price)
         self.btc_prices = deque(maxlen=history_len)
         self.alt_prices = {}
         self.history_len = history_len
@@ -26,28 +26,18 @@ class CrossAssetTensorOracle:
         self._last_log_time = {}
 
     def ingest_tick(self, symbol: str, price: float, exchange_timestamp: float):
-        """Stores real-time tick prices, aligned by strict 1-second bins."""
-        binned_ts = int(exchange_timestamp)
-        
+        """Stores real-time tick prices with raw millisecond precision."""
         if symbol == "BTCUSDT":
-            # Update the price for the current second bin, or append a new one
-            if self.btc_prices and self.btc_prices[-1][0] == binned_ts:
-                self.btc_prices[-1] = (binned_ts, price)
-            else:
-                self.btc_prices.append((binned_ts, price))
+            self.btc_prices.append((exchange_timestamp, price))
         else:
             if symbol not in self.alt_prices:
                 self.alt_prices[symbol] = deque(maxlen=self.history_len)
-                
-            alt_deque = self.alt_prices[symbol]
-            if alt_deque and alt_deque[-1][0] == binned_ts:
-                alt_deque[-1] = (binned_ts, price)
-            else:
-                alt_deque.append((binned_ts, price))
+            self.alt_prices[symbol].append((exchange_timestamp, price))
 
     def compute_lead_lag_signal(self, target_symbol: str) -> float:
         """
-        Calculates cross-covariance tensor. 
+        🚀 V55.2 FIX: Sub-Second Asynchronous Merge Alignment
+        Calculates cross-covariance tensor using exact millisecond timestamps.
         Strictly maps BTC[t-1] to ALT[t] to guarantee no future data leakage.
         """
         if target_symbol == "BTCUSDT" or target_symbol not in self.alt_prices:
@@ -59,26 +49,30 @@ class CrossAssetTensorOracle:
         if len(btc_p) < 30 or len(alt_p) < 30: 
             return 0.0
             
-        # 1. Align time series based on exact exchange timestamps
+        # 1. Align time series based on exact exchange timestamps (Millisecond Pointer Scan)
         aligned_b = []
         aligned_a = []
         
-        # We need alt prices and the BTC price from exactly 1 second BEFORE it
-        btc_dict = {ts: price for ts, price in btc_p}
+        # Fast pointer to avoid O(N^2) searches
+        btc_idx = 0
+        btc_len = len(btc_p)
         
         for i in range(1, len(alt_p)):
             alt_ts, alt_price = alt_p[i]
             prev_alt_price = alt_p[i-1][1]
             
-            # 🛡️ Look-ahead Bias Prevention: We look for BTC's price at alt_ts - 1
-            # If not exactly found, we look at alt_ts - 2. Never current or future.
-            lagged_btc_price = btc_dict.get(alt_ts - 1)
-            if lagged_btc_price is None:
-                lagged_btc_price = btc_dict.get(alt_ts - 2)
+            # 🛡️ Look-ahead Bias Prevention: Find the latest BTC trade that occurred STRICTLY BEFORE alt_ts
+            # This is a pure Python implementation of pandas.merge_asof(direction='backward')
+            lagged_btc_price = None
+            prev_lagged_btc_price = None
+            
+            # Move the pointer forward until we hit the future, then step back one
+            while btc_idx < btc_len and btc_p[btc_idx][0] < alt_ts:
+                btc_idx += 1
                 
-            prev_lagged_btc_price = btc_dict.get(alt_ts - 2)
-            if prev_lagged_btc_price is None:
-                prev_lagged_btc_price = btc_dict.get(alt_ts - 3)
+            if btc_idx > 1:
+                lagged_btc_price = btc_p[btc_idx - 1][1]
+                prev_lagged_btc_price = btc_p[btc_idx - 2][1]
             
             if lagged_btc_price is not None and prev_lagged_btc_price is not None:
                 try:

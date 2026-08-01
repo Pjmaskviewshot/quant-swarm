@@ -3,7 +3,7 @@
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
-Null-Guard Parity, and Reduced Exposure Timeouts.
+Null-Guard Parity, Reduced Exposure Timeouts, and IOC Partial-Fill Handlers.
 """
 
 import os
@@ -119,7 +119,7 @@ class SmartOrderRouter:
         """
         Aggressive IOC Execution with robust NoneType and empty-string guards for price/qty parameters.
         Escalates price through orderbook depth to guarantee fill during extreme momentum, 
-        capped at a strict max slippage limit.
+        capped at a strict max slippage limit. Handles Partial Fills gracefully.
         """
         logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive momentum escalation.")
         
@@ -196,6 +196,8 @@ class SmartOrderRouter:
                         cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
                         avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
 
+                        # 🚀 V55.2 FIX: IOC Partial Fill Handler
+                        # If we get ANY fill, we consider it a success and stop escalating.
                         if cum_exec > 0:
                             logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
                             return True, avg_price, cum_exec

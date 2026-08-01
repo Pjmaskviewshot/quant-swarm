@@ -1,5 +1,5 @@
 """
-💎 V50.0 QUANTUM SWARM: SELF-CALIBRATING HAWKES PROCESS
+💎 V55.2 QUANTUM SWARM: SELF-CALIBRATING HAWKES PROCESS
 -------------------------------------------------------
 Models the arrival intensity of algorithmic trade cascades.
 Features Dynamic Branching Ratio (ρ) calibration, Spectral Radius Stationarity 
@@ -11,13 +11,14 @@ import math
 import numpy as np
 import logging
 from collections import deque
+from typing import Tuple
 
 logger = logging.getLogger("QUANT_CORE.HAWKES")
 
 class BivariateHawkesEngine:
     def __init__(self, symbol: str = "GENERIC", calibration_window: int = 1000):
         """
-        🚀 V50.0 APEX: Self-Calibrating Bivariate Hawkes Process
+        🚀 V55.2 APEX: Self-Calibrating Bivariate Hawkes Process
         Node 0: Aggressive BUY trades
         Node 1: Aggressive SELL trades
         """
@@ -43,7 +44,7 @@ class BivariateHawkesEngine:
         self.I = np.zeros((2, 2))
         self.last_update_time = time.time()
         
-        # 🚀 ONLINE ESTIMATION BUFFER
+        # ONLINE ESTIMATION BUFFER
         self.calibration_window = calibration_window
         self.dt_buffer = deque(maxlen=calibration_window)
         self.tick_count = 0
@@ -90,7 +91,6 @@ class BivariateHawkesEngine:
         
         # 3. STATIONARITY CLAMP (Spectral Radius < 1.0)
         # The branching matrix M_ij = alpha_ij / beta_ij determines process stability
-        # Suppress Numpy invalid division warnings safely
         with np.errstate(divide='ignore', invalid='ignore'):
             branching_matrix = self.alpha / self.beta
             
@@ -112,12 +112,13 @@ class BivariateHawkesEngine:
         except np.linalg.LinAlgError:
             logger.debug(f"[X-RAY] Hawkes Eigenvalue convergence failed for {self.symbol}. Skipping calibration step.")
 
-    def apply_tick(self, timestamp: float, is_buy: bool, trade_volume: float) -> tuple[float, float]:
+    def apply_tick(self, timestamp: float, is_buy: bool, trade_volume: float) -> Tuple[float, float]:
         """
         Processes a single websocket trade tick in O(1) constant time.
         """
-        dt = timestamp - self.last_update_time
-        if dt < 0: dt = 0.001 
+        raw_dt = timestamp - self.last_update_time
+        # Clamp dt to prevent exponential underflow/overflow during initial ticks or gaps
+        dt = max(0.0, min(60.0, raw_dt)) if self.last_update_time > 0 else 0.001
         
         # Add to rolling buffer for Online Parameter Estimation
         self.dt_buffer.append(dt)

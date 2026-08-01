@@ -2,7 +2,8 @@
 💎 V55.2 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
 -------------------------------------------------------------------------
 Evaluates L2 Multi-Level Order Flow Imbalance (MLOFI), Dark Pool Iceberg Absorption,
-Amihud Liquidity Vacuums, and Roll Implicit Spreads. Features X-Ray Diagnostic Telemetry.
+Micro-Price Effective Spreads (Liquidity Vacuums), and Roll Implicit Spreads. 
+Features X-Ray Diagnostic Telemetry.
 """
 
 import math
@@ -19,7 +20,7 @@ class MicrostructureEdgeGate:
     """
     🚀 V55.2 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
     Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
-    Features strictly calibrated Institutional Amihud Thresholds and X-Ray Telemetry.
+    Upgraded with Micro-Price Effective Spreads to eradicate false Amihud spikes.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -35,12 +36,12 @@ class MicrostructureEdgeGate:
         self._current_trade_sell_vol = 0.0
         
         self.lambda_history = deque(maxlen=window_size)
-        self.amihud_history = deque(maxlen=window_size)
+        
+        # 🚀 V55.2 FIX: Replaced low-timeframe Amihud with Micro-Price Effective Spread
+        self.micro_spread_history = deque(maxlen=window_size)
         
         self.prev_bids = []
         self.prev_asks = []
-        self.rolling_volume = 0.0
-        self.amihud_anchor_price = 0.0
         
         self._last_log_time = {}
 
@@ -51,14 +52,9 @@ class MicrostructureEdgeGate:
         if now - last > throttle_sec:
             self._last_log_time[category] = now
             logger.warning(message)
-
-    def update_trade_volume(self, volume: float):
-        """Updates cumulative rolling volume for Amihud calculation."""
-        self.rolling_volume += volume
         
     def update_trade_flow(self, volume: float, is_buy: bool):
-        """Tracks signed tick trade flow imbalance."""
-        self.rolling_volume += volume
+        """Tracks signed tick trade flow imbalance (True Aggressor Side)."""
         if is_buy:
             self._current_trade_buy_vol += volume
         else:
@@ -67,7 +63,7 @@ class MicrostructureEdgeGate:
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         """
         Updates L2 Multi-Level Order Flow Imbalance (MLOFI) across book depth levels.
-        Calculates rolling Kyle's Lambda (price impact) and Amihud illiquidity metrics.
+        Calculates rolling Kyle's Lambda (price impact) and Micro-Price Spread metrics.
         """
         if not self.prev_bids or not self.prev_asks:
             self.prev_bids = bids[:self.mlofi_levels]
@@ -76,7 +72,7 @@ class MicrostructureEdgeGate:
             self.ofis.append(0.0)
             self.mlofis.append(0.0)
             self._trade_imbalances.append(0.0)
-            self.amihud_anchor_price = mid_price
+            self.micro_spread_history.append(0.0)
             return
 
         current_bids = bids[:self.mlofi_levels]
@@ -127,24 +123,19 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # Institutional Amihud Thresholds (Scaled by Asset Tier)
-        if "BTC" in symbol:
-            amihud_threshold = 2_500_000.0  
-        elif "ETH" in symbol or "SOL" in symbol:
-            amihud_threshold = 1_000_000.0   
-        else:
-            amihud_threshold = 250_000.0   
-
-        notional_vol = self.rolling_volume * mid_price
-        
-        if notional_vol >= amihud_threshold:
-            if self.amihud_anchor_price > 0:
-                price_change = abs(math.log(mid_price / (self.amihud_anchor_price + 1e-9)))
-                illiquidity = price_change / notional_vol
-                self.amihud_history.append(illiquidity)
+        # 🚀 V55.2 FIX: Compute True Micro-Price Effective Spread (replaces 100-tick Amihud)
+        try:
+            best_bid_p, best_bid_s = float(current_bids[0][0]), float(current_bids[0][1])
+            best_ask_p, best_ask_s = float(current_asks[0][0]), float(current_asks[0][1])
             
-            self.rolling_volume = 0.0
-            self.amihud_anchor_price = mid_price
+            # The True Micro-Price reflects the balance of L1 liquidity depth
+            micro_price = (best_bid_p * best_ask_s + best_ask_p * best_bid_s) / (best_bid_s + best_ask_s + 1e-9)
+            
+            # The divergence of Micro-Price from Mid-Price in Basis Points
+            micro_spread_bps = (abs(micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
+            self.micro_spread_history.append(micro_spread_bps)
+        except Exception:
+            self.micro_spread_history.append(0.0)
 
         if len(self.prices) >= 20 and len(self.prices) % 10 == 0:
             lmbda = self._calculate_instantaneous_lambda()
@@ -192,7 +183,7 @@ class MicrostructureEdgeGate:
         """
         🚀 V55.2 STRUCTURAL EDGE EVALUATOR
         Evaluates confluence between statistical prediction, Order Flow Imbalance, Dark Pool Iceberg
-        absorption, and Amihud liquidity vacuums. Emits X-Ray diagnostics.
+        absorption, and Micro-Price Liquidity Vacuums. Emits X-Ray diagnostics.
         """
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
@@ -212,19 +203,21 @@ class MicrostructureEdgeGate:
         raw_baseline = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         baseline_lambda = max(1e-6, float(raw_baseline))
         
-        # 1. PREDATORY MAKER MODE: Amihud Liquidity Vacuum Detection
-        if len(self.amihud_history) >= 10:
-            current_amihud = self.amihud_history[-1]
-            amihud_mean = np.mean(list(self.amihud_history)[-10:])
-            if amihud_mean > 0 and current_amihud > (amihud_mean * 4.0):
+        # 1. PREDATORY MAKER MODE: Micro-Price Effective Spread Vacuum Detection
+        if len(self.micro_spread_history) >= 20:
+            current_micro_spread = self.micro_spread_history[-1]
+            spread_mean = np.mean(list(self.micro_spread_history)[-20:])
+            
+            # If the micro-price aggressively diverges from the mid-price, one side of the book has been vacuumed
+            if spread_mean > 0 and current_micro_spread > (spread_mean * 4.0) and current_micro_spread > 1.0:
                 self._throttled_warn(
                     f"vacuum_{symbol}", 
-                    f"[X-RAY] 🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum (Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x)."
+                    f"[X-RAY] 🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum (Micro-Spread Spike: {current_micro_spread/spread_mean:.1f}x)."
                 )
                 return {
                     "action": intended_direction if intended_direction else direction, 
                     "confidence": 0.75, 
-                    "reasoning": f"PREDATORY_MAKER_VACUUM | Spike: {current_amihud/max(1e-9, amihud_mean):.1f}x",
+                    "reasoning": f"PREDATORY_MAKER_VACUUM | Micro-Spread: {current_micro_spread:.2f} bps",
                     "routing": "MAKER_ONLY"
                 }
 

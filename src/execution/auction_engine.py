@@ -4,7 +4,7 @@
 Features Leverage-Bridge Auto-Sizing and Asymmetric House Money Compounding.
 Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
 margin constraints and bridging Bybit exchange minimums dynamically.
-Patched with Strict 15% Exposure Caps and 2.0% Risk Limits.
+Patched with Strict 15% Exposure Caps, 1.5% Risk Limits, Atomic Locks, and L2-Aware Paper Fills.
 """
 
 import time
@@ -80,6 +80,13 @@ class CapitalAuctionEngine:
             top_neg_sharpe, _, top_symbol, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
+            # Fetch balance BEFORE the lock to prevent Async Race Conditions
+            try:
+                current_bal = await self.core.executor.get_wallet_balance_usdt()
+            except Exception:
+                current_bal = 10.0
+
+            # Atomic Lock. The entire sequence (check, evaluate, and assign) is unbroken.
             async with self.core.portfolio_state_lock:
                 if top_symbol in self.core.active_positions_map or len(self.core.active_positions_map) >= 5:
                     continue
@@ -94,7 +101,18 @@ class CapitalAuctionEngine:
                         logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Too late to strike.")
                         continue
 
-                # Lock the asset to prevent duplicate concurrent triggers
+                # Evaluate Portfolio Heat & Correlation Limits
+                is_safe, risk_reason = self.core.risk_vault.evaluate_portfolio_safety(
+                    current_balance=current_bal,
+                    new_position_notional=current_bal * 0.15, # Provisional check assuming max 15% allocation
+                    symbol=top_symbol
+                )
+
+                if not is_safe:
+                    logger.warning(f"[X-RAY] 🛡️ PORTFOLIO RISK GATE REJECTED // {top_symbol}: {risk_reason}")
+                    continue
+
+                # Lock the asset to prevent duplicate concurrent triggers ATOMICALLY
                 self.core.active_positions_map[top_symbol] = top_payload["action"]
             
             logger.critical(
@@ -115,7 +133,7 @@ class CapitalAuctionEngine:
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
         V55.2 Execution Engine. 
-        Patched with strict 15% equity exposure limits and 2.0% Risk-of-Ruin floor.
+        Patched with strict 15% equity exposure limits, correct Leverage math, and Risk-of-Ruin floor.
         """
         try:
             # Duplicate Daemon Check
@@ -157,16 +175,19 @@ class CapitalAuctionEngine:
             # Calculate pure fractional Kelly based on model confidence
             base_optimal_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
             
-            # V55.2 FIX: Enforce a strict 15% maximum notional exposure regardless of account size
+            # Enforce a strict 15% maximum notional exposure regardless of account size
             max_allowed_notional = max(5.00, available_balance * 0.15)
             
+            # 🚀 V55.2 FIX: Enforce Vault Risk Limits across all accounts (Corrected Attribute Name)
+            vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
+            
             if available_balance < 10.0:
-                # SURVIVAL MODE: Extreme defense. Strict 1.5% to 2.0% risk limit.
-                fractional_risk = max(0.015, min(0.020, base_optimal_risk))
+                # SURVIVAL MODE: Extreme defense.
+                fractional_risk = max(0.010, min(vault_max_risk, base_optimal_risk))
             else:
-                # HOUSE MONEY MODE: Scale risk up safely using accumulated profits
+                # HOUSE MONEY MODE: Scale risk up safely, but strictly capped by Vault Limits
                 profit_buffer = available_balance - 7.00
-                fractional_risk = max(0.015, min(0.04, base_optimal_risk + (profit_buffer * 0.0005)))
+                fractional_risk = max(0.010, min(vault_max_risk, base_optimal_risk + (profit_buffer * 0.0001)))
 
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
@@ -178,15 +199,15 @@ class CapitalAuctionEngine:
             # Clamp the notional back down to our 15% equity limit
             target_notional = min(bridged_notional, max_allowed_notional)
             
-            # V55.2 FIX: Calculate exact dollar loss if SL hits
+            # Calculate exact dollar loss if SL hits
             actual_dollar_risk = target_notional * sl_distance_pct
 
-            # Ultimate Account Protection: Never risk >2.0% of total equity on a single trade's Stop-Loss hit
-            max_tolerable_risk = available_balance * 0.02 
+            # Ultimate Account Protection: Never risk > 1.5x Vault Limit of total equity on a single trade
+            max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
             if actual_dollar_risk > max_tolerable_risk:
                 logger.warning(
                     f"[X-RAY] 🚫 LEVERAGE-BRIDGE ABORT // {symbol} Bybit Min Notional ${exchange_min_notional:.2f} "
-                    f"forces an actual risk of ${actual_dollar_risk:.2f}. Exceeds 2.0% vault defense (${max_tolerable_risk:.2f}). Bypassing."
+                    f"forces an actual risk of ${actual_dollar_risk:.2f}. Exceeds vault defense (${max_tolerable_risk:.2f}). Bypassing."
                 )
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
@@ -199,10 +220,12 @@ class CapitalAuctionEngine:
                 
             target_notional = target_position_size * current_price
 
-            # Calculate required leverage to isolate cash margin
-            margin_target_usdt = target_notional / 5.0 # Target 5x leverage utilization
-            required_leverage = math.ceil(target_notional / margin_target_usdt)
-            target_leverage = int(max(3, min(10, required_leverage))) # Cap leverage at 10x for altcoin safety
+            # Target allocating max 10% of cash balance as margin per trade
+            target_margin_fraction = 0.10  
+            margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
+            
+            raw_leverage = target_notional / margin_allocation_usdt
+            target_leverage = int(max(1, min(10, math.ceil(raw_leverage))))
 
             # 6. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
@@ -221,9 +244,23 @@ class CapitalAuctionEngine:
 
             logger.info(f"[X-RAY] 🌉 LEVERAGE-BRIDGE ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Isolated Risk: ${actual_dollar_risk:.2f}")
 
-            # Paper Trading Bypass
+            feature_engine = self.core.feature_engines.get(symbol)
+            current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
+
             if self.core.test_mode:
-                execution_success = random.random() < 0.85
+                tob_bid_vol = float(current_depth["bids"][0][1]) if current_depth["bids"] else 1.0
+                tob_ask_vol = float(current_depth["asks"][0][1]) if current_depth["asks"] else 1.0
+                
+                # Check if the simulated block fits inside the top of the orderbook
+                is_buy = direction == "BUY"
+                liquidity_pool = tob_ask_vol if is_buy else tob_bid_vol
+                
+                if target_position_size > (liquidity_pool * 2.5):
+                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // Simulated {target_position_size} exceeds {symbol} TOB liquidity ({liquidity_pool}).")
+                    execution_success = False
+                else:
+                    execution_success = random.random() < 0.95
+                    
                 actual_filled_notional = target_notional
             else:
                 try:
@@ -232,11 +269,8 @@ class CapitalAuctionEngine:
                 except Exception as e: 
                     logger.debug(f"[X-RAY] Leverage adjust note for {symbol}: {e}")
 
-                feature_engine = self.core.feature_engines.get(symbol)
-                current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
-
                 try:
-                    # 🚀 SOR DISPATCH: STRICT MAKER-ONLY LIMIT ORDERS
+                    # SOR DISPATCH: STRICT MAKER-ONLY LIMIT ORDERS
                     # Ban Aggressive Taker blocks to eliminate entry slippage.
                     res = await self.core.sor.execute_mean_reversion_bracket(
                         symbol=symbol, direction=direction, total_qty=target_position_size, 

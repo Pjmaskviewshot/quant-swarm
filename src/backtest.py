@@ -2,8 +2,8 @@
 🌌 V55.2 OMNI-STATE BACKTESTER: QUANTUM MICRO-CORE
 --------------------------------------------------
 Synchronized strictly with Quant Swarm live node V55.2.
-Implements Verified POFE, Look-Ahead Bias Eradication, 
-and Rolling CVaR (Expected Shortfall) Risk Penalties.
+Implements Verified POFE, Look-Ahead Bias Eradication, Elastic VPIN,
+Dynamic RLS Forgetting, CVaR Variance Penalties, and Block Bootstrap Monte Carlo.
 """
 
 import argparse
@@ -171,13 +171,19 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     er = float(directional_change / (absolute_changes + 1e-9))
     
     avg_vol = float(np.mean(volumes_arr))
+    vol_baseline = float(np.median(volumes_arr)) + 1e-9
     
+    if len(log_returns) >= 5:
+        base_vol = max(0.001, float(np.median([np.std(log_returns[max(0, j-5):j]) for j in range(5, len(log_returns)+1, 5)])))
+    else:
+        base_vol = 0.005
+        
     archetypes = {
-        "TRENDING_BULL":    {"ret": (0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-        "TRENDING_BEAR":    {"ret": (-0.001, 0.0005), "vol": (0.002, 0.001), "er": (0.8, 0.15)},
-        "HIGH_VOL_CHOP":    {"ret": (0.0, 0.002), "vol": (0.008, 0.002), "er": (0.3, 0.15)},
-        "MEAN_REVERTING":   {"ret": (0.0, 0.0005), "vol": (0.0015, 0.0005), "er": (0.2, 0.1)},
-        "LIQUIDITY_VACUUM": {"ret": (0.0, 0.001), "vol": (0.004, 0.002), "er": (0.5, 0.2)}
+        "TRENDING_BULL":    {"ret": (base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
+        "TRENDING_BEAR":    {"ret": (-base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
+        "HIGH_VOL_CHOP":    {"ret": (0.0, base_vol * 2.5), "vol": (base_vol * 3.0, base_vol * 1.5), "er": (0.2, 0.15)},
+        "MEAN_REVERTING":   {"ret": (0.0, base_vol * 0.8), "vol": (base_vol * 1.0, base_vol * 0.5), "er": (0.3, 0.15)},
+        "LIQUIDITY_VACUUM": {"ret": (0.0, base_vol * 0.5), "vol": (base_vol * 0.5, base_vol * 0.3), "er": (0.5, 0.2)}
     }
     
     regimes = list(archetypes.keys())
@@ -197,7 +203,7 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
         log_p_er  = log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
         
         log_emission = log_p_ret + log_p_vol + log_p_er
-        if regime == "LIQUIDITY_VACUUM" and avg_vol < np.percentile(volumes_arr, 25):
+        if regime == "LIQUIDITY_VACUUM" and avg_vol < vol_baseline * 0.5:
             log_emission += math.log(2.0) 
             
         log_emissions[i] = log_emission
@@ -216,44 +222,34 @@ def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_s
     binary_regime = "TRENDING" if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"] else "RANGING"
     return binary_regime, new_state_probs, er
 
-def calculate_rolling_cvar(returns_history: deque, percentile: float = 5.0) -> float:
-    """
-    V55.2 FIX: Replaces the unstable EVT estimator. 
-    Calculates Conditional Value at Risk (Expected Shortfall) to suppress sizing during tail events.
-    """
-    if len(returns_history) < 50: return 1.0
+def calculate_rolling_cvar(variance_history: deque, percentile: float = 95.0) -> float:
+    if len(variance_history) < 50: return 1.0
     
-    ret_arr = np.array(returns_history)
-    var_threshold = np.percentile(ret_arr, percentile)
+    var_arr = np.array(variance_history)
+    var_threshold = np.percentile(var_arr, percentile)
     
-    tail_returns = ret_arr[ret_arr <= var_threshold]
-    if len(tail_returns) == 0: return 1.0
+    tail_variances = var_arr[var_arr >= var_threshold]
+    if len(tail_variances) == 0: return 1.0
         
-    cvar = np.mean(tail_returns)
+    cvar = np.mean(tail_variances)
     
-    if cvar < -0.015:
-        penalty = min(0.65, (abs(cvar) - 0.015) * 10.0)
+    if cvar > 0.0001:
+        penalty = min(0.65, (cvar - 0.0001) * 5000.0)
         return max(0.35, 1.0 - penalty)
         
     return 1.0
 
 def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
-    floor = 0.50
-    ceiling = 0.85
-
+    floor, ceiling = 0.48, 0.85
     if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
-        ceiling = min(0.92, ceiling + 0.07)
-        floor = max(0.48, floor - 0.02)
+        ceiling, floor = min(0.92, ceiling + 0.07), max(0.45, floor - 0.02)
     elif regime == "LIQUIDITY_VACUUM":
-        ceiling = min(0.90, ceiling + 0.05)
-        floor = max(0.52, floor + 0.03)
-    else:  
-        ceiling = min(0.80, ceiling - 0.05)
-        floor = max(0.52, floor + 0.03)
-
-    mse_penalty = min(0.10, mse * 0.4)
-    ceiling = max(floor, ceiling - mse_penalty)
-    return max(floor, min(ceiling, prob))
+        ceiling, floor = min(0.90, ceiling + 0.05), max(0.50, floor + 0.02)
+    else:
+        ceiling, floor = min(0.80, ceiling - 0.05), max(0.50, floor + 0.02)
+        
+    mse_penalty = min(0.08, mse * 0.3)
+    return max(floor, min(ceiling - mse_penalty, prob))
 
 def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
@@ -273,12 +269,14 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     alt_1m_history = deque(maxlen=300)
     entropy_history = deque(maxlen=200) 
     log_returns = deque(maxlen=500)
+    variance_history = deque(maxlen=300)
     inst_variance = 1e-6
     
-    vpin_bucket_size = get_vpin_bucket_size(symbol)
+    base_vpin_bucket_size = get_vpin_bucket_size(symbol)
     current_bucket_vol = 0.0
     current_bucket_buy_vol = 0.0
     vpin_history = deque(maxlen=200)
+    vol_history = deque(maxlen=1000)
     synthetic_vpin_z = 0.0
     
     w_t, w_r, P_init = get_cluster_priors(symbol)
@@ -286,7 +284,6 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     weights_ranging  = w_r.copy()
     P_trending = P_init.copy()
     P_ranging = P_init.copy()
-    forgetting_factor = 0.998      
     
     rls_updates = 100 
     hmm_state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
@@ -322,16 +319,25 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         shannon_entropy = 1.0
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
+            variance_history.append(inst_variance)
             shannon_entropy = compute_permutation_entropy(list(log_returns)[-20:])
             entropy_history.append(shannon_entropy) 
 
         vol_notional = c_prev['volume'] * c_prev['close']
+        vol_history.append(vol_notional)
+        
         current_bucket_vol += vol_notional
         if c_prev['close'] >= c_prev['open']: current_bucket_buy_vol += vol_notional
             
-        if current_bucket_vol >= vpin_bucket_size:
+        if len(vol_history) >= 100:
+            avg_tick_vol = float(np.mean(list(vol_history)))
+            dynamic_bucket_size = max(base_vpin_bucket_size * 0.1, min(base_vpin_bucket_size * 3.0, avg_tick_vol * 75.0))
+        else:
+            dynamic_bucket_size = base_vpin_bucket_size
+
+        if current_bucket_vol >= dynamic_bucket_size:
             sell_vol = current_bucket_vol - current_bucket_buy_vol
-            vpin_score = abs(current_bucket_buy_vol - sell_vol) / current_bucket_vol
+            vpin_score = abs(current_bucket_buy_vol - sell_vol) / (current_bucket_vol + 1e-9)
             vpin_history.append(vpin_score)
             
             if len(vpin_history) > 20:
@@ -434,48 +440,48 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
             
             if sim_price != old_price and old_price > 0:
-                y_true = 0.5
-                if old_action_dir == "BUY":
-                    if sim_price >= virt_tp: y_true = 1.0
-                    elif sim_price <= virt_sl: y_true = 0.0
-                else:
-                    if sim_price <= virt_tp: y_true = 1.0
-                    elif sim_price >= virt_sl: y_true = 0.0
-                    
-                if y_true == 0.5:
-                    y_true = 1.0 if ((sim_price > old_price) == (old_action_dir == "BUY")) else 0.0
-                    
-                error = y_true - old_p_up
+                
+                y_target = 0.5 
+                if sim_price >= virt_tp: 
+                    y_target = 1.0 if old_action_dir == "BUY" else 0.0
+                elif sim_price <= virt_sl: 
+                    y_target = 0.0 if old_action_dir == "BUY" else 1.0
+                
+                if y_target == 0.5:
+                    y_target = 1.0 if sim_price > old_price else 0.0
+
+                old_p_up_prob = old_p_up if old_action_dir == "BUY" else (1.0 - old_p_up)
+                error = y_target - old_p_up_prob 
+                
                 ewma_mse = (0.98 * ewma_mse) + (0.02 * (error ** 2))
                 
                 validation_buffer.append(error ** 2)
                 if len(validation_buffer) == 100:
                     rolling_mse = np.mean(validation_buffer)
-                    if rolling_mse > 0.35 or np.trace(P_trending) > 5000.0:
+                    if rolling_mse > 0.35 or np.trace(P_trending) > 1000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        if trace_t > 5000: P_trending = P_trending / (trace_t / 1000.0) + np.eye(9) * 1e-3
-                        if trace_r > 5000: P_ranging = P_ranging / (trace_r / 1000.0) + np.eye(9) * 1e-3
+                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(9) * 1e-3
+                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(9) * 1e-3
                         validation_buffer.clear()
                         break
 
                 x_feat = old_features.reshape(-1, 1)
-                var_pi = max(1e-4, old_p_up * (1.0 - old_p_up))
                 
-                if old_r_blend > 0.1:
+                dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))
+                
+                if old_r_blend > 0.5:
                     P_x_t = P_trending @ x_feat
-                    den_t = forgetting_factor + var_pi * float(x_feat.T @ P_x_t)
+                    den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
                     K_t = P_x_t / den_t
-                    weights_trending = weights_trending + (K_t.flatten() * error * old_r_blend)
-                    P_trending = (P_trending - var_pi * (K_t @ (x_feat.T @ P_trending))) / forgetting_factor
-
-                r_range = 1.0 - old_r_blend
-                if r_range > 0.1:
+                    weights_trending = weights_trending + (K_t.flatten() * error)
+                    P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
+                else:
                     P_x_r = P_ranging @ x_feat
-                    den_r = forgetting_factor + var_pi * float(x_feat.T @ P_x_r)
+                    den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
                     K_r = P_x_r / den_r
-                    weights_ranging = weights_ranging + (K_r.flatten() * error * r_range)
-                    P_ranging = (P_ranging - var_pi * (K_r @ (x_feat.T @ P_ranging))) / forgetting_factor
+                    weights_ranging = weights_ranging + (K_r.flatten() * error)
+                    P_ranging = (P_ranging - (K_r @ (x_feat.T @ P_ranging))) / dynamic_lambda
                     
                 P_trending = (P_trending + P_trending.T) / 2.0
                 P_ranging = (P_ranging + P_ranging.T) / 2.0
@@ -490,11 +496,12 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             prob_success = max(prob_success, 0.65)
         
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
-        elasticity_scalar = max(0.8, min(2.5, orderbook_elasticity))
+        atr_proxy = vol_sigma * sim_price
         
-        sl_dist_pct = max(0.025, min(0.050, vol_sigma * 1.5 * elasticity_scalar))
+        sl_distance = max(atr_proxy * p.sl_atr_mult, sim_price * 0.025)
+        sl_dist_pct = sl_distance / sim_price
         
-        dynamic_rr_ratio = np.clip(1.2 + (2.0 * (er ** 2)), 1.2, 3.2)
+        dynamic_rr_ratio = np.clip(p.rr_ratio + (1.5 * (er ** 2)), 1.2, 4.0)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
 
         virt_sl = sim_price - (sl_dist_pct * sim_price) if action_dir == "BUY" else sim_price + (sl_dist_pct * sim_price)
@@ -663,7 +670,7 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     net_edge_bps = net_ev_pct * 10000.0 
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
-                    cvar_penalty = calculate_rolling_cvar(log_returns)
+                    cvar_penalty = calculate_rolling_cvar(variance_history)
                     fractional_risk = raw_fractional_risk * cvar_penalty * edge_factor
                     
                     net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
@@ -698,9 +705,22 @@ def summarize(trades: List[Dict]) -> Dict:
     max_dd = float(np.max(peak - equity)) if len(equity) else 0.0
     
     mc_results = []
-    for _ in range(1000):
-        sim_nets = np.random.choice(nets, size=len(nets), replace=True)
-        mc_results.append(np.sum(sim_nets))
+    block_size = 5
+    if len(nets) > 0:
+        num_blocks = len(nets) // block_size + 1
+        
+        for _ in range(1000):
+            sim_nets = []
+            for _ in range(num_blocks):
+                # Sample random continuous blocks of 5 trades
+                start_idx = np.random.randint(0, max(1, len(nets) - block_size + 1))
+                sim_nets.extend(nets[start_idx : start_idx + block_size])
+            
+            # Trim to exact length and sum
+            sim_nets = np.array(sim_nets[:len(nets)])
+            mc_results.append(np.sum(sim_nets))
+    else:
+        mc_results = [0]
     
     mean_return = np.mean(nets)
     std_return = np.std(nets) + 1e-9
@@ -732,8 +752,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
     atr_mults = [2.0, 2.5, 3.0] 
     
     total_len = len(t_cand)
-    fold_size = int(total_len / 6) 
-    train_size = fold_size * 2 
+    fold_size = int(total_len / 5) 
     
     for rr in rr_ratios:
         for atr_m in atr_mults:
@@ -744,8 +763,9 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
             total_trades = 0
             
             for fold in range(4):
-                train_start = fold * fold_size
-                test_start = train_start + train_size
+                # 🚀 V55.2 FIX: Strict Non-Overlapping Walk-Forward Folds (No Data Leakage)
+                train_start = 0
+                test_start = (fold + 1) * fold_size
                 test_end = test_start + fold_size
                 
                 if test_end > total_len: break

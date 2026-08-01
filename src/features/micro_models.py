@@ -3,8 +3,8 @@
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Features fully data-driven, parameter-free Symmetrical Entropy Gating 
-and mathematically stationary Permutation Entropy via log-returns.
+Features fully data-driven, parameter-free Symmetrical Entropy Gating, 
+mathematically stationary Permutation Entropy, and Pure Mixture-of-Experts RLS.
 """
 
 import math
@@ -62,7 +62,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
     """
     Calculates Shannon Permutation Entropy to detect market chaos.
     1.0 = Pure random noise. Lower = Highly predictable/structured.
-    MUST be fed stationary data (e.g., returns), not raw prices.
+    MUST be fed stationary data (e.g., log-returns), not raw prices.
     """
     if len(series) < (order * delay): return 1.0
     sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
@@ -152,7 +152,6 @@ class ContinuousMicrostructureEngine:
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
             if len(self.prices) > 2:
-                # V55.2 Math Guard: Prevent Division by Zero
                 safe_curr = max(1e-9, self.prices[-1])
                 safe_prev = max(1e-9, self.prices[-2])
                 ret = math.log(safe_curr / safe_prev)
@@ -190,30 +189,34 @@ class ContinuousMicrostructureEngine:
                 old_time, old_price, features_array, old_pred_prob, virt_sl, virt_tp, action_dir, r_blend = self.prediction_buffer.popleft()
                 
                 if price != old_price and old_price > 0:
-                    y_true = 0.5 
-                    if action_dir == "BUY":
-                        if price >= virt_tp: y_true = 1.0
-                        elif price <= virt_sl: y_true = 0.0
-                    else: 
-                        if price <= virt_tp: y_true = 1.0
-                        elif price >= virt_sl: y_true = 0.0
                     
-                    if y_true == 0.5:
-                        y_true = 1.0 if ((price > old_price) == (action_dir == "BUY")) else 0.0
+                    # 🚀 V55.2 FIX: Corrected RLS Target Mapping (Predicting Market Direction, not Trade Success)
+                    y_target = 0.5 
+                    if price >= virt_tp: 
+                        y_target = 1.0 if action_dir == "BUY" else 0.0
+                    elif price <= virt_sl: 
+                        y_target = 0.0 if action_dir == "BUY" else 1.0
+                    
+                    if y_target == 0.5:
+                        y_target = 1.0 if price > old_price else 0.0
 
-                    error = y_true - old_pred_prob 
+                    # Reconstruct the original p_up probability
+                    old_p_up = old_pred_prob if action_dir == "BUY" else (1.0 - old_pred_prob)
+                    error = y_target - old_p_up 
+                    
                     self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
                     x = features_array.reshape(-1, 1)
                     
-                    # Math Guard: Clamp probability bounds
-                    var_pi = max(1e-6, old_pred_prob * (1.0 - old_pred_prob))  
+                    # 🚀 V55.2 FIX: Pure Mixture-of-Experts RLS (Hard Gating, No var_pi Denominator Hacks)
                     dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
                     
-                    if r_blend > 0.1:
+                    if r_blend > 0.5:
+                        # Train Trending Expert exclusively
                         P_x_t = self.P_trending @ x
-                        K_t = P_x_t / (dynamic_lambda + var_pi * float((x.T @ P_x_t)[0][0]))
-                        self.weights_trending += (K_t.flatten() * error * r_blend)
-                        self.P_trending = (self.P_trending - var_pi * (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
+                        den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
+                        K_t = P_x_t / den_t
+                        self.weights_trending += (K_t.flatten() * error)
+                        self.P_trending = (self.P_trending - (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
                         
                         trace_t = np.trace(self.P_trending)
                         if trace_t > 1000.0: 
@@ -222,12 +225,13 @@ class ContinuousMicrostructureEngine:
                         else: 
                             self.P_trending += np.eye(9) * 1e-3
 
-                    r_range = 1.0 - r_blend
-                    if r_range > 0.1:
+                    else:
+                        # Train Ranging Expert exclusively
                         P_x_r = self.P_ranging @ x
-                        K_r = P_x_r / (dynamic_lambda + var_pi * float((x.T @ P_x_r)[0][0]))
-                        self.weights_ranging += (K_r.flatten() * error * r_range)
-                        self.P_ranging = (self.P_ranging - var_pi * (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
+                        den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
+                        K_r = P_x_r / den_r
+                        self.weights_ranging += (K_r.flatten() * error)
+                        self.P_ranging = (self.P_ranging - (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
                         
                         trace_r = np.trace(self.P_ranging)
                         if trace_r > 1000.0: 
@@ -241,6 +245,7 @@ class ContinuousMicrostructureEngine:
                     self.rls_updates += 1
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
+        # 🚀 V55.2 FIX: Synchronized Calibration Constants across backtest & live
         floor, ceiling = 0.48, 0.85
         if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
             ceiling, floor = min(0.92, ceiling + 0.07), max(0.45, floor - 0.02)
@@ -248,7 +253,9 @@ class ContinuousMicrostructureEngine:
             ceiling, floor = min(0.90, ceiling + 0.05), max(0.50, floor + 0.02)
         else:
             ceiling, floor = min(0.80, ceiling - 0.05), max(0.50, floor + 0.02)
-        return max(floor, min(ceiling - min(0.08, mse * 0.3), prob))
+            
+        mse_penalty = min(0.08, mse * 0.3)
+        return max(floor, min(ceiling - mse_penalty, prob))
 
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
         # Calculate Permutation Entropy using stationary log_returns, NOT prices
