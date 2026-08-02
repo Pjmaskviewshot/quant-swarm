@@ -864,6 +864,11 @@ class DistributedQuantEngine:
                 pofe_consecutive_ticks = 0 
                 last_sent_sl_str = self._align_price(symbol, current_sl)
                 last_sent_tp_str = self._align_price(symbol, current_tp)
+                
+                try: 
+                    available_balance = await self.executor.get_wallet_balance_usdt()
+                except Exception: 
+                    available_balance = 7.00
 
                 while True: 
                     # 🚀 V55.2 FIX: Pure L2 Fallback to prevent Blind Daemon
@@ -964,7 +969,9 @@ class DistributedQuantEngine:
                                         
                                         remaining_qty = current_qty - aligned_qty_close
                                         remaining_notional = remaining_qty * safe_c_price
-                                        if 0 < remaining_notional < 6.0:
+                                        
+                                        # 🚀 V55.2 FIX: Disable dust sweeping for micro-accounts
+                                        if 0 < remaining_notional < 6.0 and available_balance > 50.0:
                                             aligned_qty_close = current_qty 
                                             logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
 
@@ -980,7 +987,8 @@ class DistributedQuantEngine:
                                                 timeInForce="IOC", reduceOnly=True
                                             )
                                             scaled_levels[target_r] = True
-                                            if 0 < remaining_notional < 6.0:
+                                            # Also bypass the break constraint if we're a small account holding dust
+                                            if 0 < remaining_notional < 6.0 and available_balance > 50.0:
                                                 break
                                             break
                                         else:

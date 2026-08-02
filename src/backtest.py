@@ -93,19 +93,20 @@ class Params:
     leverage: float = 3.0            
 
 def get_cluster_priors(symbol: str):
+    # 🚀 V55.2 FIX: Adjusted matrix dimensions from 9 to 7 to match orthogonal features
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-        w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05, 0.05, 0.05])
-        w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12, 0.08, 0.07])
+        w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05])
+        w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12])
         p_scale = 1.0
     elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-        w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08, 0.06, 0.06])
-        w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11, 0.09, 0.09])
+        w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08])
+        w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11])
         p_scale = 2.0
     else:
-        w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10, 0.10, 0.10])
-        w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12, 0.10, 0.10])
+        w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10])
+        w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12])
         p_scale = 0.5 
-    return w_trend, w_range, np.eye(9) * p_scale
+    return w_trend, w_range, np.eye(7) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
@@ -135,7 +136,6 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     return 0.0
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
-    # Series must be stationary log returns, NOT raw prices
     if len(series) < (order * delay): return 1.0
     sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
     perm_counts = {perm: 0 for perm in permutations(range(order))}
@@ -300,7 +300,7 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     elif "ETH" in symbol or "SOL" in symbol: amihud_threshold = 1_000_000.0   
     else: amihud_threshold = 250_000.0   
 
-    for i in range(76, len(target_candles)):
+    for i in range(101, len(target_candles)):
         c_prev = target_candles[i-1]
         c_prev_prev = target_candles[i-2]
         
@@ -347,8 +347,8 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             current_bucket_vol = 0.0
             current_bucket_buy_vol = 0.0
 
-        closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-21):i]])
-        vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-21):i]])
+        closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
+        vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
         regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
 
         vol_scalar = min(1.0, max(0.0, inst_variance * 5000.0))
@@ -387,17 +387,16 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
         liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
         
+        # 🚀 V55.2 FIX: Removed collinear cross-terms to prevent RLS matrix explosion.
         base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
-        cross_momentum = (ofi_fast_z / 3.0) * (hawkes_z / 3.0)
-        cross_skew_abs = (skew / 10.0) * (ofi_delta_z / 6.0)
-        
-        features = np.concatenate([base_features, [cross_momentum, cross_skew_abs, liquidation_div, tensor_alpha]])
+        features = np.concatenate([base_features, [liquidation_div, tensor_alpha]])
         features = np.clip(features, -1.0, 1.0)
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
         feature_magnitudes = np.abs(features)
         exp_f = np.exp(feature_magnitudes / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 9
+        # 🚀 Changed multiplier from 9 to 7 to match orthogonal feature length
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 7
         
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (er - 0.35)))
 
@@ -441,14 +440,17 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
             if sim_price != old_price and old_price > 0:
                 
-                y_target = 0.5 
-                if sim_price >= virt_tp: 
-                    y_target = 1.0 if old_action_dir == "BUY" else 0.0
-                elif sim_price <= virt_sl: 
-                    y_target = 0.0 if old_action_dir == "BUY" else 1.0
+                # 🚀 V55.2 FIX: Regress against Realized R-Multiple instead of binary direction.
+                # This teaches the bot to hunt for asymmetrical payoff setups, not just coin flips.
+                price_delta = sim_price - old_price
+                risk_distance = abs(old_price - virt_sl) + 1e-9
+                realized_r = price_delta / risk_distance
                 
-                if y_target == 0.5:
-                    y_target = 1.0 if sim_price > old_price else 0.0
+                # Normalize the R-multiple into a 0.0 to 1.0 probability space for the logistic function
+                if old_action_dir == "BUY":
+                    y_target = np.clip(0.5 + (realized_r / 4.0), 0.0, 1.0)
+                else:
+                    y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
 
                 old_p_up_prob = old_p_up if old_action_dir == "BUY" else (1.0 - old_p_up)
                 error = y_target - old_p_up_prob 
@@ -461,27 +463,30 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     if rolling_mse > 0.35 or np.trace(P_trending) > 1000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(9) * 1e-3
-                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(9) * 1e-3
+                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(7) * 1e-3
+                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(7) * 1e-3
                         validation_buffer.clear()
                         break
 
                 x_feat = old_features.reshape(-1, 1)
-                
                 dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))
                 
-                if old_r_blend > 0.5:
-                    P_x_t = P_trending @ x_feat
-                    den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
-                    K_t = P_x_t / den_t
-                    weights_trending = weights_trending + (K_t.flatten() * error)
-                    P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
-                else:
-                    P_x_r = P_ranging @ x_feat
-                    den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
-                    K_r = P_x_r / den_r
-                    weights_ranging = weights_ranging + (K_r.flatten() * error)
-                    P_ranging = (P_ranging - (K_r @ (x_feat.T @ P_ranging))) / dynamic_lambda
+                # 🚀 V55.2 FIX: Soft-Gating the Mixture-of-Experts.
+                # Both experts learn from every trade, weighted proportionally by the regime probability.
+                
+                # Update Trending Expert (Weighted by old_r_blend)
+                P_x_t = P_trending @ x_feat
+                den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
+                K_t = P_x_t / den_t
+                weights_trending = weights_trending + (K_t.flatten() * error * old_r_blend)
+                P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
+                
+                # Update Ranging Expert (Weighted by 1.0 - old_r_blend)
+                P_x_r = P_ranging @ x_feat
+                den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
+                K_r = P_x_r / den_r
+                weights_ranging = weights_ranging + (K_r.flatten() * error * (1.0 - old_r_blend))
+                P_ranging = (P_ranging - (K_r @ (x_feat.T @ P_ranging))) / dynamic_lambda
                     
                 P_trending = (P_trending + P_trending.T) / 2.0
                 P_ranging = (P_ranging + P_ranging.T) / 2.0

@@ -43,19 +43,20 @@ class AdaptiveSessionClock:
 class ClusterWarmStartRLS:
     @staticmethod
     def get_cluster_priors(symbol: str):
+        # 🚀 V55.2 FIX: Adjusted matrix dimensions from 9 to 7 to match orthogonal features
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-            w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05, 0.05, 0.05])
-            w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12, 0.08, 0.07])
+            w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05])
+            w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12])
             p_scale = 1.0
         elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-            w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08, 0.06, 0.06])
-            w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11, 0.09, 0.09])
+            w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08])
+            w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11])
             p_scale = 2.0
         else:
-            w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10, 0.10, 0.10])
-            w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12, 0.10, 0.10])
+            w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10])
+            w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12])
             p_scale = 0.5 
-        return w_trend, w_range, np.eye(9) * p_scale
+        return w_trend, w_range, np.eye(7) * p_scale
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
@@ -190,15 +191,18 @@ class ContinuousMicrostructureEngine:
                 
                 if price != old_price and old_price > 0:
                     
-                    # 🚀 V55.2 FIX: Corrected RLS Target Mapping (Predicting Market Direction, not Trade Success)
-                    y_target = 0.5 
-                    if price >= virt_tp: 
-                        y_target = 1.0 if action_dir == "BUY" else 0.0
-                    elif price <= virt_sl: 
-                        y_target = 0.0 if action_dir == "BUY" else 1.0
+                    # 🚀 V55.2 FIX: Regress against Realized R-Multiple instead of binary direction.
+                    # This teaches the bot to hunt for asymmetrical payoff setups, not just coin flips.
+                    price_delta = price - old_price
+                    risk_distance = abs(old_price - virt_sl) + 1e-9
+                    realized_r = price_delta / risk_distance
                     
-                    if y_target == 0.5:
-                        y_target = 1.0 if price > old_price else 0.0
+                    # Normalize the R-multiple into a 0.0 to 1.0 probability space for the logistic function
+                    # A +2R win maps to ~1.0, a -2R loss maps to ~0.0. 0R maps to 0.5.
+                    if action_dir == "BUY":
+                        y_target = np.clip(0.5 + (realized_r / 4.0), 0.0, 1.0)
+                    else:
+                        y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
 
                     # Reconstruct the original p_up probability
                     old_p_up = old_pred_prob if action_dir == "BUY" else (1.0 - old_pred_prob)
@@ -210,38 +214,40 @@ class ContinuousMicrostructureEngine:
                     # 🚀 V55.2 FIX: Pure Mixture-of-Experts RLS (Hard Gating, No var_pi Denominator Hacks)
                     dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
                     
-                    if r_blend > 0.5:
-                        # Train Trending Expert exclusively
-                        P_x_t = self.P_trending @ x
-                        den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
-                        K_t = P_x_t / den_t
-                        self.weights_trending += (K_t.flatten() * error)
-                        self.P_trending = (self.P_trending - (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
-                        
-                        trace_t = np.trace(self.P_trending)
-                        if trace_t > 1000.0: 
-                            self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(9) * 1e-3)
-                            self._throttled_log(f"kalman_{self.symbol}", f"[X-RAY] 🔄 KALMAN RESET // {self.symbol} Trending matrix normalized.", 120.0)
-                        else: 
-                            self.P_trending += np.eye(9) * 1e-3
-
-                    else:
-                        # Train Ranging Expert exclusively
-                        P_x_r = self.P_ranging @ x
-                        den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
-                        K_r = P_x_r / den_r
-                        self.weights_ranging += (K_r.flatten() * error)
-                        self.P_ranging = (self.P_ranging - (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
-                        
-                        trace_r = np.trace(self.P_ranging)
-                        if trace_r > 1000.0: 
-                            self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(9) * 1e-3)
-                            self._throttled_log(f"kalman_r_{self.symbol}", f"[X-RAY] 🔄 KALMAN RESET // {self.symbol} Ranging matrix normalized.", 120.0)
-                        else: 
-                            self.P_ranging += np.eye(9) * 1e-3
+                    # 🚀 V55.2 AUDIT FIX: Soft-Gating the Mixture-of-Experts.
+                    # Both experts learn from every trade, weighted proportionally by the regime probability.
+                    # This eliminates catastrophic forgetting during choppy transitions.
                     
-                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(9) * 1e-6)
-                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(9) * 1e-6)
+                    # Update Trending Expert (Weighted by old_r_blend)
+                    P_x_t = self.P_trending @ x
+                    den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
+                    K_t = P_x_t / den_t
+                    self.weights_trending = self.weights_trending + (K_t.flatten() * error * r_blend)
+                    self.P_trending = (self.P_trending - (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
+                    
+                    trace_t = np.trace(self.P_trending)
+                    if trace_t > 1000.0: 
+                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(7) * 1e-3)
+                        self._throttled_log(f"kalman_{self.symbol}", f"[X-RAY] 🔄 KALMAN RESET // {self.symbol} Trending matrix normalized.", 120.0)
+                    else: 
+                        self.P_trending += np.eye(7) * 1e-3
+                    
+                    # Update Ranging Expert (Weighted by 1.0 - old_r_blend)
+                    P_x_r = self.P_ranging @ x
+                    den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
+                    K_r = P_x_r / den_r
+                    self.weights_ranging = self.weights_ranging + (K_r.flatten() * error * (1.0 - r_blend))
+                    self.P_ranging = (self.P_ranging - (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
+                    
+                    trace_r = np.trace(self.P_ranging)
+                    if trace_r > 1000.0: 
+                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(7) * 1e-3)
+                        self._throttled_log(f"kalman_r_{self.symbol}", f"[X-RAY] 🔄 KALMAN RESET // {self.symbol} Ranging matrix normalized.", 120.0)
+                    else: 
+                        self.P_ranging += np.eye(7) * 1e-3
+                    
+                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(7) * 1e-6)
+                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(7) * 1e-6)
                     self.rls_updates += 1
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
@@ -269,15 +275,17 @@ class ContinuousMicrostructureEngine:
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
         ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
+        
+        # 🚀 V55.2 AUDIT FIX: Removed collinear cross-terms to prevent RLS matrix explosion.
+        # Now strictly using 7 orthogonal base features.
         base_features = np.array([self.ofi_fast_z / 3.0, ofi_delta_z / 6.0, self.hawkes_z / 3.0, self.micro_price_skew / 10.0, vpin_z / 4.0])
-        cross_momentum = (self.ofi_fast_z / 3.0) * (self.hawkes_z / 3.0)            
-        cross_skew_abs = (self.micro_price_skew / 10.0) * (ofi_delta_z / 6.0)       
         liquidation_div = (self.hawkes_acceleration / 3.0) * (self.micro_price_skew / 10.0) * -1.0
         
-        features = np.clip(np.concatenate([base_features, [cross_momentum, cross_skew_abs, liquidation_div, tensor_alpha]]), -1.0, 1.0)
+        features = np.clip(np.concatenate([base_features, [liquidation_div, tensor_alpha]]), -1.0, 1.0)
+        
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * len(features)
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 7  # 🚀 Changed multiplier from 9 to 7 to match feature length
 
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (self.kaufman_er - 0.35)))
         logit_fused = (r_blend * np.dot(self.weights_trending, attended_features)) + ((1.0 - r_blend) * np.dot(self.weights_ranging, attended_features))

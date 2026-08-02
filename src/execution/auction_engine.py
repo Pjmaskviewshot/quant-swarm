@@ -178,7 +178,7 @@ class CapitalAuctionEngine:
             # Enforce a strict 15% maximum notional exposure regardless of account size
             max_allowed_notional = max(5.00, available_balance * 0.15)
             
-            # 🚀 V55.2 FIX: Enforce Vault Risk Limits across all accounts (Corrected Attribute Name)
+            # 🚀 V55.2 FIX: Enforce Vault Risk Limits across all accounts
             vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
             
             if available_balance < 10.0:
@@ -193,11 +193,18 @@ class CapitalAuctionEngine:
             raw_notional = target_dollar_risk / sl_distance_pct
 
             # 5. 🌉 LEVERAGE-BRIDGE AUTO-SIZING
-            # Force notional to Bybit's physical minimum if we are under it
-            bridged_notional = max(raw_notional, exchange_min_notional)
+            # 🚀 FIX: If our safe Kelly risk dictates a notional smaller than the exchange minimum,
+            # we MUST SKIP THE TRADE instead of artificially jacking up the leverage.
+            if raw_notional < exchange_min_notional:
+                logger.warning(
+                    f"[X-RAY] 🚫 LEVERAGE-BRIDGE ABORT // {symbol} Safe notional (${raw_notional:.2f}) "
+                    f"is below Bybit minimum (${exchange_min_notional:.2f}). Skipping trade to protect account."
+                )
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
             
             # Clamp the notional back down to our 15% equity limit
-            target_notional = min(bridged_notional, max_allowed_notional)
+            target_notional = min(raw_notional, max_allowed_notional)
             
             # Calculate exact dollar loss if SL hits
             actual_dollar_risk = target_notional * sl_distance_pct
@@ -225,7 +232,8 @@ class CapitalAuctionEngine:
             margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
             
             raw_leverage = target_notional / margin_allocation_usdt
-            target_leverage = int(max(1, min(10, math.ceil(raw_leverage))))
+            # 🚀 V55.2 AUDIT FIX: Hard clamp target leverage to 5x to align with the Risk Vault absolute maximum
+            target_leverage = int(max(1, min(5, math.ceil(raw_leverage))))
 
             # 6. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 

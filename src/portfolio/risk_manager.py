@@ -110,16 +110,19 @@ class InstitutionalRiskVault:
                 
         self.correlation_groups["DYNAMIC_BTC_COVARIANCE"] = restricted_group
 
-    def update_kelly_metrics(self, is_win: bool, pnl_pct: float):
+    # 🚀 V55.2 AUDIT FIX: Kelly Criterion now tracks R-Multiples, not raw percentages.
+    def update_kelly_metrics(self, is_win: bool, realized_r_multiple: float):
         """
-        🚀 V55.2 FIX: Dynamic sliding window for win-rate to prevent Kelly saturation.
+        Tracks win/loss magnitude relative to the initial risk taken (R-Multiple).
+        This guarantees the Kelly fraction is scale-invariant and immune to leverage distortions.
         """
         self.outcomes_history.append(1.0 if is_win else 0.0)
         
+        # We continue to use the variables avg_win_pct/avg_loss_pct, but they now store R-values
         if is_win:
-            self.avg_win_pct = (self.avg_win_pct * 0.9) + (abs(pnl_pct) * 0.1)
+            self.avg_win_pct = (self.avg_win_pct * 0.9) + (abs(realized_r_multiple) * 0.1)
         else:
-            self.avg_loss_pct = (self.avg_loss_pct * 0.9) + (abs(pnl_pct) * 0.1)
+            self.avg_loss_pct = (self.avg_loss_pct * 0.9) + (abs(realized_r_multiple) * 0.1)
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0) -> float:
         """
@@ -180,11 +183,9 @@ class InstitutionalRiskVault:
         # Calculate Total Portfolio Exposure Heat
         total_exposure = sum(self.active_positions.values()) + new_position_notional
         
-        # Nano-Core Micro-Account Heat Bypass (< $50 USDT)
-        if current_balance < 50.0:
-            max_heat = current_balance * 3.5  # Allow up to 3.5x portfolio heat for micro balances
-        else:
-            max_heat = current_balance * 2.5  # Standard institutional 2.5x cap
+        # 🚀 FIX: Removed the 3.5x micro-account exception. 
+        # Strict 2.5x institutional heat cap enforced universally across all account balances.
+        max_heat = current_balance * 2.5  
 
         if total_exposure > max_heat:
             return False, f"PORTFOLIO_HEAT_EXCEEDED_MAX_{max_heat:.2f}_REQ_{total_exposure:.2f}"

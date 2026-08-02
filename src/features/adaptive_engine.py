@@ -27,7 +27,7 @@ class AdaptiveFeatureEngine:
         self.tfi_history = deque(maxlen=memory_window_short)
         
         self.timeframes = {
-            "1": deque(maxlen=100), 
+            "1": deque(maxlen=200), 
             "5": deque(maxlen=300), 
             "15": deque(maxlen=900),
             "60": deque(maxlen=200),  # 1 Hour
@@ -77,11 +77,15 @@ class AdaptiveFeatureEngine:
     def detect_market_regime(self) -> str:
         """
         🚀 V55.2 FIX: Dynamically Calibrated HMM (Look-ahead bias eliminated, pure adaptive percentiles)
+        Expanded observation window to 100 bars for statistical significance.
         """
-        if len(self.timeframes["5"]) >= 20:
+        # 🚀 FIX: Require at least 100 bars for a stable variance envelope (or fall back to Mean Reverting)
+        if len(self.timeframes["5"]) >= 100:
+            candles = list(self.timeframes["5"])[-100:]
+        elif len(self.timeframes["1"]) >= 100:
+            candles = list(self.timeframes["1"])[-100:]
+        elif len(self.timeframes["5"]) >= 20: # Fallback if we just booted
             candles = list(self.timeframes["5"])[-20:]
-        elif len(self.timeframes["1"]) >= 20:
-            candles = list(self.timeframes["1"])[-20:]
         else:
             return "MEAN_REVERTING" 
 
