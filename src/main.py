@@ -1,9 +1,10 @@
 """
-🌌 V55.2 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
+🌌 V55.3 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
 Limit-Only Escapes, 3-Minute Immunity Windows, LastPrice Trigger overrides,
 Dust-Sweep Position Closures, Rate-Limit Protection, and GIL-Protected Process Pools.
+Refactored into a Formal Finite State Machine Architecture.
 """
 
 import os
@@ -48,7 +49,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V55.2_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V55.3_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -57,7 +58,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V55.2 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
+        else: logger.critical("🌌 LIVE MODE: V55.3 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -159,6 +160,19 @@ class DistributedQuantEngine:
                     self.symbol_locks.pop(key, None)
                     self.eval_semaphores.pop(key, None)
                     self.orderbook_snapshots.pop(key, None)
+                    
+                    # 🚀 V55.3 FIX: Plugg memory leak by pruning all auxiliary dictionaries
+                    self.ram_dna_cache.pop(key, None)
+                    self.screener_memory.pop(key, None)
+                    self.screener_metrics.pop(key, None)
+                    self.volatility_baseline.pop(key, None)
+                    self.last_eval_time.pop(key, None)
+                    self.tick_sizes.pop(key, None)
+                    self.hardware_min_qty.pop(key, None)
+                    self.funding_rates.pop(key, None)
+                    self.open_interests.pop(key, None)
+                    self.circuit_breakers.pop(key, None)
+                    self.tick_error_counts.pop(key, None)
 
     async def _save_sgd_state(self):
         state_snapshot = {}
@@ -239,12 +253,10 @@ class DistributedQuantEngine:
         return max(5.00, available_balance * logistic_exp)
 
     def _align_price(self, symbol: str, price: float) -> str:
-        """🚀 V55.2 Helper to format prices exactly to exchange tick requirements."""
         tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
         return str(Decimal(str(price)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
-        """🚀 V55.2 Helper to cleanly amend stops without duplicating code."""
         try:
             await self.executor.safe_call(
                 self.executor.client.set_trading_stop, 
@@ -259,7 +271,6 @@ class DistributedQuantEngine:
             return False
             
     async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_buy: bool):
-        """🚀 V55.2 Helper to execute Limit-IOC escapes securely."""
         escape_price = current_price * 0.99 if is_buy else current_price * 1.01
         try:
             await self.executor.safe_call(
@@ -427,7 +438,7 @@ class DistributedQuantEngine:
                 hist = np.array(list(clock.vpin_history)[-200:])
                 if len(hist) >= 20 and np.std(hist) > 0:
                     vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
-                    vol_z = vpin_z 
+                    # 🚀 V55.3 FIX: Removed the buggy overwrite line: vol_z = vpin_z
                     stat_engine.vpin_z = vpin_z
                 else: vpin_z = 0.0
             else: vpin_z = 0.0
@@ -495,7 +506,8 @@ class DistributedQuantEngine:
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
                     }
-                    async with self.auction_lock: heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, payload))
+                    # 🚀 V55.3 FIX: Add `id(payload)` to prevent dictionary comparison crash in the queue.
+                    async with self.auction_lock: heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, id(payload), payload))
                 except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
                 
         except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -610,6 +622,7 @@ class DistributedQuantEngine:
                 
                 if best_bid > 0 and best_ask > best_bid:
                     self.orderbook_snapshots[symbol] = {"best_bid": best_bid, "bid_size": top_bid_size, "best_ask": best_ask, "ask_size": top_ask_size, "bids": bids, "asks": asks}
+                    
                     stat_engine = self.stat_engines.get(symbol)
                     now, spread_val = time.time(), (best_ask - best_bid) / (best_bid + 1e-9)
                     
@@ -692,7 +705,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V55.2 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
+            logger.info("🌌 V55.3 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             max_notional = await self._get_max_affordable_notional()
             
@@ -793,321 +806,383 @@ class DistributedQuantEngine:
                                 self.risk_vault.update_position_ledger(symbol, 0.0)
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
+
+    # ==============================================================================
+    # 🚀 V55.3 STATE MACHINE REFACTOR: The Position Lifecycle FSM
+    # Breaking down the monolithic daemon into discrete, testable state handlers.
+    # ==============================================================================
+
+    async def _state_verify_entry(self, ctx: dict) -> str:
+        """State 1: Ensure the position was successfully opened on the exchange."""
+        for _ in range(5):  
+            await asyncio.sleep(3)
+            try:
+                pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=ctx["symbol"])
+                pos_data = pos_res.get("result", {}).get("list", [])
+                if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
+                    ctx["actual_entry"] = float(pos_data[0].get("avgPrice", ctx["current_price"]))
+                    ctx["actual_qty_filled"] = float(pos_data[0].get("size", ctx["actual_qty_filled"]))
+                    
+                    # Initialize tracking variables for the loop
+                    ctx["highest_since_entry"] = ctx["actual_entry"] if ctx["is_buy"] else None
+                    ctx["lowest_since_entry"] = ctx["actual_entry"] if not ctx["is_buy"] else None
+                    ctx["max_favorable_price"] = ctx["actual_entry"]
+                    
+                    return "INITIALIZE_STOPS"
+            except Exception as e: 
+                logger.debug(f"[X-RAY] Position fill check failed for {ctx['symbol']}: {e}")
+
+        # If we failed to verify 5 times, attempt to cancel and abort
+        try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=ctx["symbol"])
+        except Exception: pass
+        return "ABORT"
+
+    async def _state_initialize_stops(self, ctx: dict) -> str:
+        """State 2: Calculate and register the initial protective boundaries."""
+        actual_sl_distance = abs(ctx["actual_entry"] - ctx["realigned_sl"]) if ctx["realigned_sl"] else max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.5), ctx["actual_entry"] * 0.025)
+        
+        ctx["initial_risk"] = actual_sl_distance
+        
+        current_sl = ctx["realigned_sl"] if ctx["realigned_sl"] else (ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance)
+        current_tp = ctx["realigned_tp"] if ctx["realigned_tp"] else (ctx["actual_entry"] + (actual_sl_distance * ctx["dynamic_rr_ratio"]) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * ctx["dynamic_rr_ratio"]))
+        
+        # Format constraints
+        if ctx["is_buy"]:
+            current_tp = max(current_tp, ctx["current_price"] * 1.001)
+            current_sl = min(current_sl, ctx["current_price"] * 0.999)
+            if current_tp <= current_sl: current_tp = current_sl * 1.01
+        else:
+            current_tp = min(current_tp, ctx["current_price"] * 0.999)
+            current_sl = max(current_sl, ctx["current_price"] * 1.001)
+            if current_tp >= current_sl: current_tp = current_sl * 0.99
+            
+        await self._amend_trailing_stop(ctx["symbol"], current_sl, current_tp)
+        
+        ctx["current_sl"] = current_sl
+        ctx["current_tp"] = current_tp
+        ctx["last_sent_sl_str"] = self._align_price(ctx["symbol"], current_sl)
+        ctx["last_sent_tp_str"] = self._align_price(ctx["symbol"], current_tp)
+        
+        return "ACTIVE_MONITORING"
+
+    async def _state_monitor_escapes(self, ctx: dict) -> str:
+        """Sub-State 3A: Checks for Predatory/Exhaustion escape conditions."""
+        if ctx["time_in_mins"] < 3.0: return "CONTINUE"
+
+        is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
+        cvd_z = getattr(ctx["stat_engine"], 'ofi_fast_z', 0.0) if ctx["stat_engine"] else 0.0
+        
+        # 1. POFE (Point Of Failure Ejection)
+        if (is_buy and ctx["imbalance"] < -0.85 and cvd_z < -2.0) or (not is_buy and ctx["imbalance"] > 0.85 and cvd_z > 2.0):
+            ctx["pofe_consecutive_ticks"] += 1
+            if ctx["pofe_consecutive_ticks"] >= 5:
+                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift. Escaping via Limit-IOC.")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+        else:
+            ctx["pofe_consecutive_ticks"] = 0
+
+        # 2. Volume Death (Trade bleeding while volatility drops)
+        inst_var = getattr(ctx["stat_engine"], 'inst_variance', 0.01) if ctx["stat_engine"] else 0.01
+        if inst_var >= 0.0001 and ctx["current_r"] < -0.35 and ctx["hawkes_z"] < -1.5 and ctx["time_in_mins"] > 15.0:
+            logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC.")
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
+
+        # 3. Parabolic Liquidation Cascade
+        if ctx["r_multiple"] >= 1.5 and (ctx["hawkes_z"] > 3.0 and abs(cvd_z) > 2.5):
+            logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength via Limit-IOC.")
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
+
+        return "CONTINUE"
+
+    async def _state_execute_scale_outs(self, ctx: dict) -> str:
+        """Sub-State 3B: Manages harmonic partial take-profits."""
+        if self.test_mode or ctx["r_multiple"] < 1.0: return "CONTINUE"
+
+        symbol, safe_c_price = ctx["symbol"], ctx["safe_c_price"]
+
+        try:
+            current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+            p_list = current_pos_res.get("result", {}).get("list", [])
+            
+            if not p_list or float(p_list[0].get("size", 0.0)) <= 0: 
+                return "CONTINUE"
+                
+            current_qty = float(p_list[0]["size"])
+            limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
+            
+            for target_r, flag in ctx["scaled_levels"].items():
+                if ctx["r_multiple"] >= target_r and not flag:
+                    portion = 0.25 if target_r == ctx["r_t1"] else (0.35 if target_r == ctx["r_t2"] else 0.40)
+                    qty_close = current_qty * portion
+                    aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
+                    
+                    remaining_qty = current_qty - aligned_qty_close
+                    remaining_notional = remaining_qty * safe_c_price
+                    
+                    if 0 < remaining_notional < 6.0 and ctx["available_balance"] > 50.0:
+                        aligned_qty_close = current_qty 
+                        logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
+
+                    if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
+                        logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units.")
+                        await self.executor.safe_call(
+                            self.executor.client.place_order, 
+                            category="linear", symbol=symbol, 
+                            side="Sell" if ctx["is_buy"] else "Buy", 
+                            orderType="Limit", 
+                            price=self._align_price(symbol, safe_c_price),
+                            qty=str(aligned_qty_close), 
+                            timeInForce="IOC", reduceOnly=True
+                        )
+                        ctx["scaled_levels"][target_r] = True
+                        if 0 < remaining_notional < 6.0 and ctx["available_balance"] > 50.0:
+                            return "FULLY_CLOSED" # Break entire loop if dust swept the rest
+                        break
+                    else:
+                        if not flag: ctx["scaled_levels"][target_r] = True
+                        break
+        except Exception as e: 
+            logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}")
+            
+        return "CONTINUE"
+
+    async def _state_manage_trailing_stops(self, ctx: dict):
+        """Sub-State 3C: Dynamic Trailing Stop Calculus and API Amendments."""
+        symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
+        
+        # Sub-1R Ratchet Check
+        baseline_sl = ctx["realigned_sl"] if ctx["realigned_sl"] else (ctx["actual_entry"] - ctx["initial_risk"] if is_buy else ctx["actual_entry"] + ctx["initial_risk"])
+        if ctx["time_in_mins"] >= 3.0 and ctx["r_multiple"] >= 0.8 and abs(ctx["current_sl"] - baseline_sl) < (ctx["actual_entry"] * 0.0001):
+            sub_1r_sl = (ctx["max_favorable_price"] - (ctx["initial_risk"] * 0.5)) if is_buy else (ctx["max_favorable_price"] + (ctx["initial_risk"] * 0.5))
+            if (is_buy and sub_1r_sl > ctx["current_sl"]) or (not is_buy and sub_1r_sl < ctx["current_sl"]):
+                ctx["current_sl"] = sub_1r_sl
+                ctx["requires_sl_update"] = True
+                logger.info(f"[X-RAY] 🛡️ SUB-1R RATCHET // {symbol} Excursion hit +{ctx['r_multiple']:.2f}R. Tightened risk floor.")
+
+        # Main Sigmoid Trail
+        live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
+        live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
+        
+        base_mult = 2.5 if ctx["regime"] in ["TRENDING", "VOLATILE"] else 1.8
+        min_mult = 0.4 
+        
+        x = 5.0 * (ctx["r_multiple"] - 1.0) 
+        x = max(-700, min(700, x))
+        sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
+
+        vol_ratio = live_atr / max(safe_c_price, 1e-9)
+        dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
+
+        if ctx["r_multiple"] < 0.5 and ctx["time_in_mins"] > dynamic_grace_period:
+            theta_decay = max(0.4, 1.0 - ((ctx["time_in_mins"] - dynamic_grace_period) * 0.010)) 
+        else:
+            theta_decay = 1.0 
+
+        tox_mod = 0.6 if (is_buy and ctx["imbalance"] < -0.5) or (not is_buy and ctx["imbalance"] > 0.5) else 1.0
+        raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
+        
+        if ctx["r_multiple"] >= 1.0:
+            raw_sl = (ctx["max_favorable_price"] - raw_trail_dist) if is_buy else (ctx["max_favorable_price"] + raw_trail_dist)
+            be_plus = (ctx["actual_entry"] + ctx["actual_entry"] * 0.002) if is_buy else (ctx["actual_entry"] - ctx["actual_entry"] * 0.002)
+            new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
+            
+            if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
+                ctx["current_sl"] = new_sl_val
+                ctx["requires_sl_update"] = True
+
+        momentum_stretch = max(0.0, ctx["hawkes_z"] * 0.6) if ctx["regime"] == "TRENDING" else 0.0
+        if ctx["hawkes_z"] < -1.5 and ctx["r_multiple"] > 1.0:
+            momentum_stretch -= 0.5 
+        
+        target_rr = min(6.0, ctx["dynamic_rr_ratio"] + momentum_stretch + (max(0.0, ctx["r_multiple"] - 1.0) * 0.3)) 
+        calc_tp = ctx["actual_entry"] + (ctx["initial_risk"] * target_rr) if is_buy else ctx["actual_entry"] - (ctx["initial_risk"] * target_rr)
+        
+        if (is_buy and calc_tp > ctx["current_tp"]) or (not is_buy and calc_tp < ctx["current_tp"]):
+            if abs(calc_tp - ctx["current_tp"]) / ctx["actual_entry"] > 0.0025:
+                ctx["current_tp"] = calc_tp
+                ctx["requires_tp_update"] = True
+
+        # API Amendment Dispatch
+        if (ctx["requires_sl_update"] or ctx["requires_tp_update"]) and (ctx["now"] - ctx["last_api_update_time"] >= 5.0):
+            ob = self.orderbook_snapshots.get(symbol, {})
+            spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
+            min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
+            
+            if is_buy:
+                ctx["current_sl"] = min(ctx["current_sl"], safe_c_price - min_distance)
+                ctx["current_tp"] = max(ctx["current_tp"], safe_c_price + min_distance)
+                if ctx["current_tp"] <= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 1.01
+            else:
+                ctx["current_sl"] = max(ctx["current_sl"], safe_c_price + min_distance)
+                ctx["current_tp"] = min(ctx["current_tp"], safe_c_price - min_distance)
+                if ctx["current_tp"] >= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 0.99
+
+            new_sl_str = self._align_price(symbol, ctx["current_sl"])
+            new_tp_str = self._align_price(symbol, ctx["current_tp"])
+
+            if new_sl_str != ctx["last_sent_sl_str"] or new_tp_str != ctx["last_sent_tp_str"]:
+                if await self._amend_trailing_stop(symbol, ctx["current_sl"], ctx["current_tp"]):
+                    ctx["last_api_update_time"] = ctx["now"]
+                    ctx["last_sent_sl_str"] = new_sl_str
+                    ctx["last_sent_tp_str"] = new_tp_str
+                    
+                    if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
+                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
+
+
+    async def _state_settle_trade(self, ctx: dict):
+        """State 4: Post-Trade Forensics and Vault Ledger updating."""
+        symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
+        
+        await asyncio.sleep(2.0) 
+        try: 
+            closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
+            closed_list = closed_data.get("result", {}).get("list", [])
+            if closed_list:
+                net_pnl = float(closed_list[0].get("closedPnl", 0.0))
+                real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
+                capital_risked = (actual_entry * float(closed_list[0].get("qty", 1))) / target_leverage
+                self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (capital_risked + 1e-9))
+                
+                fees = float(closed_list[0].get("execFee", 0.0))
+                exit_price = float(closed_list[0].get("avgExitPrice", actual_entry))
+                
+                raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if ctx["is_buy"] else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
+                slip_cost = raw_pnl - net_pnl - fees
+                
+                slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
+                ctx["exec_details"]["fees_usdt"] = fees
+                
+                if net_pnl < 0:
+                    async with self.circuit_breaker_lock:
+                        prev_loss = [t for t in self.tick_error_counts.get(symbol, []) if time.time() - t < 7200]
+                        prev_loss.append(time.time())
+                        self.tick_error_counts[symbol] = prev_loss
+                        if len(prev_loss) >= 2:
+                            stat_engine = self.stat_engines.get(symbol)
+                            dynamic_lockout = 1800 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if stat_engine else 0.0) * 2.0)
+                            self.circuit_breakers[symbol] = time.time() + dynamic_lockout
+                            logger.warning(f"[X-RAY] ⏸️ VOLATILITY LOCKOUT: {symbol} paused for {dynamic_lockout/60:.1f} mins after 2 consecutive losses.")
+            else: 
+                net_pnl, real_outcome, slippage_bps, fees = 0.0, "RECONCILED", 0.0, 0.0
+        except Exception as e: 
+            logger.error(f"[X-RAY] Failed to fetch closed PnL for {symbol}: {e}")
+            net_pnl, real_outcome, slippage_bps, fees = 0.0, "RECONCILED", 0.0, 0.0
+        
+        duration_mins = (time.time() - ctx["daemon_start_time"]) / 60.0
+        self.log_to_wal_sync("settlement", [ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"]])
+        self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)))
+
+        async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+        self.risk_vault.update_position_ledger(symbol, 0.0)
+
+    # ------------------------------------------------------------------------------
+    # THE REFACTORED DAEMON EXECUTOR
+    # ------------------------------------------------------------------------------
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
         """
-        V55.2 TITANIUM SHIELD EXIT DAEMON:
-        Enforces LastPrice triggers to defeat Mark Price traps.
+        V55.3 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
         """
         async with self.execution_semaphore:
-            exec_details = {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")}
-            daemon_start_time = time.time()
-            is_buy = direction == "BUY"
+            # 1. Initialize Global Context for the FSM
+            ctx = {
+                "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
+                "current_price": current_price, "atr": atr, "target_leverage": target_leverage, 
+                "regime": market_regime, "dynamic_rr_ratio": dynamic_rr_ratio, "realigned_sl": realigned_sl, 
+                "realigned_tp": realigned_tp, "daemon_start_time": time.time(),
+                "actual_qty_filled": risk_matrix.get("size", 1.0),
+                "pofe_consecutive_ticks": 0, "api_check_counter": 0, "last_api_update_time": time.time(),
+                "r_t1": round(max(1.0, dynamic_rr_ratio * 0.6), 2),
+                "r_t2": round(max(1.5, dynamic_rr_ratio * 1.0), 2),
+                "r_t3": round(max(2.0, dynamic_rr_ratio * 1.5), 2),
+                "exec_details": {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")},
+                "stat_engine": self.stat_engines.get(symbol),
+                "feature_engine": self.feature_engines.get(symbol)
+            }
             
+            ctx["scaled_levels"] = {ctx["r_t1"]: False, ctx["r_t2"]: False, ctx["r_t3"]: False}
+
             if self.test_mode:
                 await asyncio.sleep(60)
-                self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", exec_details])
+                self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", ctx["exec_details"]])
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 return
 
             try:
-                # [STATE: VERIFY ENTRY]
-                order_filled, actual_entry, actual_qty_filled = False, current_price, risk_matrix.get("size", 1.0)
-                for _ in range(5):  
-                    await asyncio.sleep(3)
-                    try:
-                        pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        pos_data = pos_res.get("result", {}).get("list", [])
-                        if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
-                            order_filled, actual_entry, actual_qty_filled = True, float(pos_data[0].get("avgPrice", current_price)), float(pos_data[0].get("size", actual_qty_filled))
-                            break
-                    except Exception as e: logger.debug(f"[X-RAY] Position fill check failed for {symbol}: {e}"); continue
-
-                if not order_filled:
-                    try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=symbol)
-                    except Exception: pass
+                # 2. Execute FSM Flow
+                state = await self._state_verify_entry(ctx)
+                if state == "ABORT":
                     self.risk_vault.update_position_ledger(symbol, -risk_matrix['allocated_value_usdt'])
                     async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                     return
-
-                # [STATE: INITIALIZE STOPS]
-                actual_sl_distance = abs(actual_entry - realigned_sl) if realigned_sl else max(atr * self.live_params.get("sl_atr_mult", 2.5), actual_entry * 0.025)
-                current_sl = realigned_sl if realigned_sl else (actual_entry - actual_sl_distance if is_buy else actual_entry + actual_sl_distance)
-                current_tp = realigned_tp if realigned_tp else (actual_entry + (actual_sl_distance * dynamic_rr_ratio) if is_buy else actual_entry - (actual_sl_distance * dynamic_rr_ratio))
                 
-                if is_buy:
-                    current_tp = max(current_tp, current_price * 1.001)
-                    current_sl = min(current_sl, current_price * 0.999)
-                    if current_tp <= current_sl: current_tp = current_sl * 1.01
-                else:
-                    current_tp = min(current_tp, current_price * 0.999)
-                    current_sl = max(current_sl, current_price * 1.001)
-                    if current_tp >= current_sl: current_tp = current_sl * 0.99
-                    
-                await self._amend_trailing_stop(symbol, current_sl, current_tp)
-
-                # [STATE: TRAILING & SCALE-OUT LOOP]
-                stat_engine = self.stat_engines.get(symbol)
-                feature_engine = self.feature_engines.get(symbol)
-                
-                highest_since_entry = actual_entry if is_buy else None
-                lowest_since_entry = actual_entry if not is_buy else None
-                
-                r_t1 = round(max(1.0, dynamic_rr_ratio * 0.6), 2)
-                r_t2 = round(max(1.5, dynamic_rr_ratio * 1.0), 2)
-                r_t3 = round(max(2.0, dynamic_rr_ratio * 1.5), 2)
-                scaled_levels = {r_t1: False, r_t2: False, r_t3: False}
-                
-                regime = market_regime 
-                max_favorable_price, initial_risk = actual_entry, actual_sl_distance
-                last_api_update_time, api_check_counter = time.time(), 0
-                
-                pofe_consecutive_ticks = 0 
-                last_sent_sl_str = self._align_price(symbol, current_sl)
-                last_sent_tp_str = self._align_price(symbol, current_tp)
+                state = await self._state_initialize_stops(ctx)
                 
                 try: 
-                    available_balance = await self.executor.get_wallet_balance_usdt()
+                    ctx["available_balance"] = await self.executor.get_wallet_balance_usdt()
                 except Exception: 
-                    available_balance = 7.00
-
-                while True: 
-                    # 🚀 V55.2 FIX: Pure L2 Fallback to prevent Blind Daemon
-                    ob = self.orderbook_snapshots.get(symbol, {})
-                    safe_c_price = ob.get("best_bid" if is_buy else "best_ask", current_price)
+                    ctx["available_balance"] = 7.00
                     
-                    if stat_engine and stat_engine.true_micro_price > 0: 
-                        safe_c_price = stat_engine.true_micro_price
+                # 3. Active Monitoring Loop
+                while state == "ACTIVE_MONITORING":
+                    
+                    ob = self.orderbook_snapshots.get(symbol, {})
+                    ctx["safe_c_price"] = ob.get("best_bid" if ctx["is_buy"] else "best_ask", current_price)
+                    
+                    if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0: 
+                        ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
                         
-                    sl_proximity = abs(safe_c_price - current_sl) / (safe_c_price + 1e-9)
+                    sl_proximity = abs(ctx["safe_c_price"] - ctx["current_sl"]) / (ctx["safe_c_price"] + 1e-9)
                     loop_sleep = 0.2 if sl_proximity < 0.005 else 1.0
                     await asyncio.sleep(loop_sleep) 
                     
-                    now = time.time()
-                    api_check_counter += 1
-                    time_in_mins = (now - daemon_start_time) / 60.0
+                    ctx["now"] = time.time()
+                    ctx["api_check_counter"] += 1
+                    ctx["time_in_mins"] = (ctx["now"] - ctx["daemon_start_time"]) / 60.0
                     
-                    requires_sl_update = False
-                    requires_tp_update = False
+                    ctx["requires_sl_update"] = False
+                    ctx["requires_tp_update"] = False
                     
-                    if api_check_counter % (60 if loop_sleep == 1.0 else 300) == 0:
-                        regime = feature_engine.detect_market_regime() if feature_engine else regime
-                    
-                    if api_check_counter >= (15 if loop_sleep == 1.0 else 75):
-                        api_check_counter = 0
+                    if ctx["api_check_counter"] >= (15 if loop_sleep == 1.0 else 75):
+                        ctx["api_check_counter"] = 0
                         try:
                             pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                             pos_list = pos_res.get("result", {}).get("list", [])
                             if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0: break 
                         except Exception: pass
 
-                    if safe_c_price != current_price:
-                        if is_buy and safe_c_price > max_favorable_price: 
-                            max_favorable_price = safe_c_price
-                            if safe_c_price > highest_since_entry: highest_since_entry = safe_c_price
-                        elif not is_buy and safe_c_price < max_favorable_price: 
-                            max_favorable_price = safe_c_price
-                            if safe_c_price < lowest_since_entry: lowest_since_entry = safe_c_price
+                    if ctx["safe_c_price"] != current_price:
+                        if ctx["is_buy"] and ctx["safe_c_price"] > ctx["max_favorable_price"]: 
+                            ctx["max_favorable_price"] = ctx["safe_c_price"]
+                            if ctx["safe_c_price"] > ctx["highest_since_entry"]: ctx["highest_since_entry"] = ctx["safe_c_price"]
+                        elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx["max_favorable_price"]: 
+                            ctx["max_favorable_price"] = ctx["safe_c_price"]
+                            if ctx["safe_c_price"] < ctx["lowest_since_entry"]: ctx["lowest_since_entry"] = ctx["safe_c_price"]
                         
-                    r_multiple = (max_favorable_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - max_favorable_price) / (initial_risk + 1e-9)
-                    current_r = (safe_c_price - actual_entry) / (initial_risk + 1e-9) if is_buy else (actual_entry - safe_c_price) / (initial_risk + 1e-9)
+                    ctx["r_multiple"] = (ctx["max_favorable_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["max_favorable_price"]) / (ctx["initial_risk"] + 1e-9)
+                    ctx["current_r"] = (ctx["safe_c_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["safe_c_price"]) / (ctx["initial_risk"] + 1e-9)
 
-                    hawkes_z = getattr(stat_engine, 'hawkes_z', getattr(stat_engine, 'vpin_z', 0.0))
-                    cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) 
+                    ctx["hawkes_z"] = getattr(ctx["stat_engine"], 'hawkes_z', getattr(ctx["stat_engine"], 'vpin_z', 0.0))
                     
                     b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
-                    imbalance = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
+                    ctx["imbalance"] = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                     
-                    # Escape Check 1: POFE
-                    if time_in_mins >= 3.0:
-                        if (is_buy and imbalance < -0.85 and cvd_z < -2.0) or (not is_buy and imbalance > 0.85 and cvd_z > 2.0):
-                            pofe_consecutive_ticks += 1
-                            if pofe_consecutive_ticks >= 5:
-                                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift. Escaping via Limit-IOC.")
-                                await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
-                                await asyncio.sleep(1.0)
-                                continue 
-                        else:
-                            pofe_consecutive_ticks = 0 
-
-                    # Escape Check 2: Volume Death
-                    inst_var = getattr(stat_engine, 'inst_variance', 0.01)
-                    if inst_var >= 0.0001 and current_r < -0.35 and hawkes_z < -1.5 and time_in_mins > 15.0:
-                        logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC.")
-                        await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
-                        await asyncio.sleep(1.0)
-                        continue
-
-                    # Escape Check 3: Parabolic Liquidation Cascade
-                    if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(cvd_z) > 2.5):
-                        logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength via Limit-IOC.")
-                        await self._execute_emergency_escape(symbol, safe_c_price, actual_qty_filled, is_buy)
-                        await asyncio.sleep(1.0)
-                        continue 
-
-                    # 🚀 V55.2 AUDIT FIX: Eliminated Float Equality Trap. Using absolute tolerance to trigger the ratchet.
-                    baseline_sl = realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)
-                    
-                    # Sub-1R Ratchet
-                    if time_in_mins >= 3.0 and r_multiple >= 0.8 and abs(current_sl - baseline_sl) < (actual_entry * 0.0001):
-                        sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
-                        if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
-                            current_sl = sub_1r_sl
-                            requires_sl_update = True
-                            logger.info(f"[X-RAY] 🛡️ SUB-1R RATCHET // {symbol} Excursion hit +{r_multiple:.2f}R. Tightened risk floor.")
-
-                    # Harmonic Scale-Outs & Dust Sweeps
-                    if not self.test_mode and r_multiple >= 1.0:
-                        try:
-                            current_pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                            p_list = current_pos_res.get("result", {}).get("list", [])
-                            if p_list and float(p_list[0].get("size", 0.0)) > 0:
-                                current_qty = float(p_list[0]["size"])
-                                limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
-                                
-                                for target_r, flag in scaled_levels.items():
-                                    if r_multiple >= target_r and not flag:
-                                        portion = 0.25 if target_r == r_t1 else (0.35 if target_r == r_t2 else 0.40)
-                                        qty_close = current_qty * portion
-                                        aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
-                                        
-                                        remaining_qty = current_qty - aligned_qty_close
-                                        remaining_notional = remaining_qty * safe_c_price
-                                        
-                                        if 0 < remaining_notional < 6.0 and available_balance > 50.0:
-                                            aligned_qty_close = current_qty 
-                                            logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
-
-                                        if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
-                                            logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units.")
-                                            await self.executor.safe_call(
-                                                self.executor.client.place_order, 
-                                                category="linear", symbol=symbol, 
-                                                side="Sell" if is_buy else "Buy", 
-                                                orderType="Limit", 
-                                                price=self._align_price(symbol, safe_c_price),
-                                                qty=str(aligned_qty_close), 
-                                                timeInForce="IOC", reduceOnly=True
-                                            )
-                                            scaled_levels[target_r] = True
-                                            if 0 < remaining_notional < 6.0 and available_balance > 50.0:
-                                                break
-                                            break
-                                        else:
-                                            if not flag: scaled_levels[target_r] = True
-                                            break
-                        except Exception as e: logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}")
-
-                    # Dynamic Trailing Stop Calculus
-                    live_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else (safe_c_price * 0.005)
-                    live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
-                    
-                    base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
-                    min_mult = 0.4 
-                    
-                    # 🚀 V55.2 AUDIT FIX: Adjusted sigmoid steepness so the trailing stop tightens aggressively as we cross 1.0R.
-                    x = 5.0 * (r_multiple - 1.0) 
-                    x = max(-700, min(700, x))
-                    sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
-
-                    vol_ratio = live_atr / max(safe_c_price, 1e-9)
-                    dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
-
-                    if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
-                        theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010)) 
-                    else:
-                        theta_decay = 1.0 
-
-                    tox_mod = 0.6 if (is_buy and imbalance < -0.5) or (not is_buy and imbalance > 0.5) else 1.0
-                    
-                    raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
-                    
-                    if r_multiple >= 1.0:
-                        raw_sl = (max_favorable_price - raw_trail_dist) if is_buy else (max_favorable_price + raw_trail_dist)
-                        be_plus = (actual_entry + actual_entry * 0.002) if is_buy else (actual_entry - actual_entry * 0.002)
-                        new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
+                    if await self._state_monitor_escapes(ctx) == "ESCAPED":
+                        break
                         
-                        if (is_buy and new_sl_val > current_sl) or (not is_buy and new_sl_val < current_sl):
-                            current_sl = new_sl_val
-                            requires_sl_update = True
-
-                    momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                    if hawkes_z < -1.5 and r_multiple > 1.0:
-                        momentum_stretch -= 0.5 
+                    if await self._state_execute_scale_outs(ctx) == "FULLY_CLOSED":
+                        break
+                        
+                    await self._state_manage_trailing_stops(ctx)
                     
-                    target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3)) 
-                    calc_tp = actual_entry + (initial_risk * target_rr) if is_buy else actual_entry - (initial_risk * target_rr)
-                    
-                    if (is_buy and calc_tp > current_tp) or (not is_buy and calc_tp < current_tp):
-                        if abs(calc_tp - current_tp) / actual_entry > 0.0025:
-                            current_tp = calc_tp
-                            requires_tp_update = True
-
-                    if (requires_sl_update or requires_tp_update) and (now - last_api_update_time >= 5.0):
-                        spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
-                        min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
-                        
-                        if is_buy:
-                            current_sl = min(current_sl, safe_c_price - min_distance)
-                            current_tp = max(current_tp, safe_c_price + min_distance)
-                            if current_tp <= current_sl: current_tp = current_sl * 1.01
-                        else:
-                            current_sl = max(current_sl, safe_c_price + min_distance)
-                            current_tp = min(current_tp, safe_c_price - min_distance)
-                            if current_tp >= current_sl: current_tp = current_sl * 0.99
-
-                        new_sl_str = self._align_price(symbol, current_sl)
-                        new_tp_str = self._align_price(symbol, current_tp)
-
-                        if new_sl_str != last_sent_sl_str or new_tp_str != last_sent_tp_str:
-                            if await self._amend_trailing_stop(symbol, current_sl, current_tp):
-                                last_api_update_time = now
-                                last_sent_sl_str = new_sl_str
-                                last_sent_tp_str = new_tp_str
-                                
-                                if requires_tp_update: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
-                                if requires_sl_update: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
-
-                # [STATE: SETTLEMENT]
-                await asyncio.sleep(2.0) 
-                try: 
-                    closed_data = await self.executor.safe_call(self.executor.client.get_closed_pnl, category="linear", symbol=symbol, limit=1)
-                    closed_list = closed_data.get("result", {}).get("list", [])
-                    if closed_list:
-                        net_pnl = float(closed_list[0].get("closedPnl", 0.0))
-                        real_outcome = "PROFIT" if net_pnl > 0 else "LOSS"
-                        capital_risked = (actual_entry * float(closed_list[0].get("qty", 1))) / target_leverage
-                        self.risk_vault.update_kelly_metrics(net_pnl > 0, net_pnl / (capital_risked + 1e-9))
-                        
-                        fees = float(closed_list[0].get("execFee", 0.0))
-                        exit_price = float(closed_list[0].get("avgExitPrice", actual_entry))
-                        
-                        raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if direction == "BUY" else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
-                        slip_cost = raw_pnl - net_pnl - fees
-                        
-                        slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
-                        duration_mins = (time.time() - daemon_start_time) / 60.0
-                        exec_details["fees_usdt"] = fees
-                        
-                        if net_pnl < 0:
-                            async with self.circuit_breaker_lock:
-                                prev_loss = [t for t in self.tick_error_counts.get(symbol, []) if time.time() - t < 7200]
-                                prev_loss.append(time.time())
-                                self.tick_error_counts[symbol] = prev_loss
-                                if len(prev_loss) >= 2:
-                                    dynamic_lockout = 1800 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if stat_engine else 0.0) * 2.0)
-                                    self.circuit_breakers[symbol] = time.time() + dynamic_lockout
-                                    logger.warning(f"[X-RAY] ⏸️ VOLATILITY LOCKOUT: {symbol} paused for {dynamic_lockout/60:.1f} mins after 2 consecutive losses.")
-                    else: 
-                        net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
-                except Exception as e: 
-                    logger.error(f"[X-RAY] Failed to fetch closed PnL for {symbol}: {e}")
-                    net_pnl, real_outcome, slippage_bps, fees, duration_mins = 0.0, "RECONCILED", 0.0, 0.0, 0.0
-                
-                self.log_to_wal_sync("settlement", [signal_id, net_pnl, slippage_bps, real_outcome, exec_details])
-                self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)))
+                # 4. Finalize
+                await self._state_settle_trade(ctx)
 
             except Exception as e:
-                logger.error(f"[X-RAY] Position daemon critical fault for {symbol}: {e}", exc_info=True)
+                logger.error(f"[X-RAY] FSM Position daemon critical fault for {symbol}: {e}", exc_info=True)
                 try:
                     pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
                     pos_list = pos_res.get("result", {}).get("list", [])
@@ -1116,8 +1191,7 @@ class DistributedQuantEngine:
                         side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
                         current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
                         await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
-                except Exception as e2: logger.error(f"[X-RAY] Emergency daemon flatten failed for {symbol}: {e2}", exc_info=True)
-            finally:
+                except Exception as e2: logger.error(f"[X-RAY] Emergency FSM flatten failed for {symbol}: {e2}", exc_info=True)
                 async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 self.risk_vault.update_position_ledger(symbol, 0.0)
 

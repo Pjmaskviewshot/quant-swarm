@@ -58,7 +58,8 @@ class CapitalAuctionEngine:
                 # Filter out stale signals (older than 3 seconds)
                 while self.core.auction_queue:
                     item = heapq.heappop(self.core.auction_queue)
-                    _, _, sym, payload = item
+                    # 🚀 V55.3 FIX: Unpack the 5-item tuple which now includes the tie-breaker ID
+                    _, _, sym, _, payload = item
                     if now - payload["timestamp"] < 3.0: 
                         valid_candidates.append(item)
                     else:
@@ -77,7 +78,8 @@ class CapitalAuctionEngine:
             if not best_candidate: 
                 continue
             
-            top_neg_sharpe, _, top_symbol, top_payload = best_candidate
+            # 🚀 V55.3 FIX: Unpack the 5-item tuple which now includes the tie-breaker ID
+            top_neg_sharpe, _, top_symbol, _, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
             # Fetch balance BEFORE the lock to prevent Async Race Conditions
@@ -133,7 +135,8 @@ class CapitalAuctionEngine:
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
         V55.2 Execution Engine. 
-        Patched with strict 15% equity exposure limits, correct Leverage math, and Risk-of-Ruin floor.
+        Patched with strict 15% equity exposure limits, correct Leverage math, Risk-of-Ruin floor,
+        and L2-Aware simulated paper fills.
         """
         try:
             # Duplicate Daemon Check
@@ -178,7 +181,7 @@ class CapitalAuctionEngine:
             # Enforce a strict 15% maximum notional exposure regardless of account size
             max_allowed_notional = max(5.00, available_balance * 0.15)
             
-            # 🚀 V55.2 FIX: Enforce Vault Risk Limits across all accounts
+            # Enforce Vault Risk Limits across all accounts
             vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
             
             if available_balance < 10.0:
@@ -193,7 +196,7 @@ class CapitalAuctionEngine:
             raw_notional = target_dollar_risk / sl_distance_pct
 
             # 5. 🌉 LEVERAGE-BRIDGE AUTO-SIZING
-            # 🚀 FIX: If our safe Kelly risk dictates a notional smaller than the exchange minimum,
+            # If our safe Kelly risk dictates a notional smaller than the exchange minimum,
             # we MUST SKIP THE TRADE instead of artificially jacking up the leverage.
             if raw_notional < exchange_min_notional:
                 logger.warning(
@@ -232,7 +235,7 @@ class CapitalAuctionEngine:
             margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
             
             raw_leverage = target_notional / margin_allocation_usdt
-            # 🚀 V55.2 AUDIT FIX: Hard clamp target leverage to 5x to align with the Risk Vault absolute maximum
+            # Hard clamp target leverage to 5x to align with the Risk Vault absolute maximum
             target_leverage = int(max(1, min(5, math.ceil(raw_leverage))))
 
             # 6. Target Price Calculus & Formatting
@@ -256,20 +259,49 @@ class CapitalAuctionEngine:
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
 
             if self.core.test_mode:
-                tob_bid_vol = float(current_depth["bids"][0][1]) if current_depth["bids"] else 1.0
-                tob_ask_vol = float(current_depth["asks"][0][1]) if current_depth["asks"] else 1.0
-                
-                # Check if the simulated block fits inside the top of the orderbook
+                # 🚀 V55.2 AUDIT FIX: True L2-Aware Paper Trading Simulator
                 is_buy = direction == "BUY"
-                liquidity_pool = tob_ask_vol if is_buy else tob_bid_vol
+                levels = current_depth.get("asks" if is_buy else "bids", [])
                 
-                if target_position_size > (liquidity_pool * 2.5):
-                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // Simulated {target_position_size} exceeds {symbol} TOB liquidity ({liquidity_pool}).")
-                    execution_success = False
+                remaining_qty_to_fill = target_position_size
+                weighted_notional_spent = 0.0
+                simulated_avg_entry_price = current_price
+                execution_success = False
+                
+                if not levels:
+                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Orderbook is completely empty. No liquidity to simulate fill.")
                 else:
-                    execution_success = random.random() < 0.95
-                    
-                actual_filled_notional = target_notional
+                    # Sweep through orderbook levels to calculate true slippage
+                    for price_str, vol_str in levels:
+                        level_price = float(price_str)
+                        level_vol = float(vol_str)
+                        
+                        if level_vol <= 0: continue
+                        
+                        take_vol = min(remaining_qty_to_fill, level_vol)
+                        weighted_notional_spent += (take_vol * level_price)
+                        remaining_qty_to_fill -= take_vol
+                        
+                        if remaining_qty_to_fill <= 0:
+                            simulated_avg_entry_price = weighted_notional_spent / target_position_size
+                            execution_success = True
+                            break
+                            
+                    if remaining_qty_to_fill > 0:
+                        logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Simulated {target_position_size} exhausted entire visible L2 depth. Order rejected to prevent massive slippage.")
+                        execution_success = False
+                        
+                    elif execution_success:
+                        # Reject if the simulated slippage crossed the 12bps maximum bound
+                        slippage_bps = abs(simulated_avg_entry_price - current_price) / current_price * 10000.0
+                        if slippage_bps > 12.0:
+                            logger.warning(f"[X-RAY] 🚫 PAPER SLIPPAGE REJECT // {symbol} Order swept book causing {slippage_bps:.1f} bps slippage. Aborting.")
+                            execution_success = False
+                        else:
+                            current_price = simulated_avg_entry_price # Set entry to the actual slipped price
+                            logger.info(f"[X-RAY] 📝 PAPER FILL // {symbol} simulated execution at {current_price:.5f} ({slippage_bps:.1f} bps slippage).")
+                            
+                actual_filled_notional = target_position_size * current_price
             else:
                 try:
                     await self.core.executor.adjust_leverage(symbol, target_leverage)
@@ -327,18 +359,18 @@ class CapitalAuctionEngine:
                     actual_qty_filled = target_position_size
                     actual_filled_notional = target_notional
                     
-                safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
-                
-                # Write to Memory DB Async
-                self.core.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
-                
-                # Telemetry Ticket
-                ticket_msg = self.core.telegram.format_entry_ticket(
-                    symbol, direction, current_price, actual_qty_filled, 
-                    edge_bps, fractional_risk, regime, safe_features
-                )
-                self.core.track_task(self.core._safe_telegram_dispatch(ticket_msg, is_html=True))
-                
+            safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
+            
+            # Write to Memory DB Async
+            self.core.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+            
+            # Telemetry Ticket
+            ticket_msg = self.core.telegram.format_entry_ticket(
+                symbol, direction, current_price, actual_qty_filled if not self.core.test_mode else target_position_size, 
+                edge_bps, fractional_risk, regime, safe_features
+            )
+            self.core.track_task(self.core._safe_telegram_dispatch(ticket_msg, is_html=True))
+            
             # Finalize the Lock and Hand off to the Lifecycle Daemon
             self.core.risk_vault.update_position_ledger(symbol, actual_filled_notional)
             
