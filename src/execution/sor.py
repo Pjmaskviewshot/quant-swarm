@@ -248,11 +248,14 @@ class SmartOrderRouter:
                     depth_metrics = feature_engine.get_book_depth_metrics()
                     imbalance = depth_metrics.get("depth_imbalance", 0.0)
                     
-                    if side == "Buy" and imbalance < -0.80:
-                        logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} book toxic (sell wall detected: {imbalance:.2f}). Aborting peg to prevent getting dumped on.")
+                    # 🚀 V55.2 AUDIT FIX: Corrected Adverse Selection Guard.
+                    # Abort BUYs if the bid side is collapsing (imbalance > +0.80).
+                    # Abort SELLs if the ask side is collapsing (imbalance < -0.80).
+                    if direction.upper() == "BUY" and imbalance > 0.80:
+                        logger.warning(f"[X-RAY] 🚫 ADVERSE SELECTION // {symbol} Bid wall collapsing. Aborting peg to prevent bad entry.")
                         break
-                    elif side == "Sell" and imbalance > 0.80:
-                        logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} book toxic (buy wall detected: {imbalance:.2f}). Aborting peg to prevent getting squeezed.")
+                    elif direction.upper() == "SELL" and imbalance < -0.80:
+                        logger.warning(f"[X-RAY] 🚫 ADVERSE SELECTION // {symbol} Ask wall collapsing. Aborting peg to prevent bad entry.")
                         break
 
                 # 2. Fetch LIVE Orderbook Snapshot

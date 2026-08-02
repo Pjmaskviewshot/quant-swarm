@@ -466,7 +466,8 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(7) * 1e-3
                         if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(7) * 1e-3
                         validation_buffer.clear()
-                        break
+                        # 🚀 V55.2 AUDIT FIX: Changed 'break' to 'continue' to prevent discarding pending predictions.
+                        continue
 
                 x_feat = old_features.reshape(-1, 1)
                 dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))

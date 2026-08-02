@@ -944,8 +944,11 @@ class DistributedQuantEngine:
                         await asyncio.sleep(1.0)
                         continue 
 
+                    # 🚀 V55.2 AUDIT FIX: Eliminated Float Equality Trap. Using absolute tolerance to trigger the ratchet.
+                    baseline_sl = realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)
+                    
                     # Sub-1R Ratchet
-                    if time_in_mins >= 3.0 and r_multiple >= 0.8 and current_sl == (realigned_sl if realigned_sl else (actual_entry - initial_risk if is_buy else actual_entry + initial_risk)):
+                    if time_in_mins >= 3.0 and r_multiple >= 0.8 and abs(current_sl - baseline_sl) < (actual_entry * 0.0001):
                         sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if is_buy else (max_favorable_price + (initial_risk * 0.5))
                         if (is_buy and sub_1r_sl > current_sl) or (not is_buy and sub_1r_sl < current_sl):
                             current_sl = sub_1r_sl
@@ -970,7 +973,6 @@ class DistributedQuantEngine:
                                         remaining_qty = current_qty - aligned_qty_close
                                         remaining_notional = remaining_qty * safe_c_price
                                         
-                                        # 🚀 V55.2 FIX: Disable dust sweeping for micro-accounts
                                         if 0 < remaining_notional < 6.0 and available_balance > 50.0:
                                             aligned_qty_close = current_qty 
                                             logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
@@ -987,7 +989,6 @@ class DistributedQuantEngine:
                                                 timeInForce="IOC", reduceOnly=True
                                             )
                                             scaled_levels[target_r] = True
-                                            # Also bypass the break constraint if we're a small account holding dust
                                             if 0 < remaining_notional < 6.0 and available_balance > 50.0:
                                                 break
                                             break
@@ -1003,7 +1004,8 @@ class DistributedQuantEngine:
                     base_mult = 2.5 if regime in ["TRENDING", "VOLATILE"] else 1.8
                     min_mult = 0.4 
                     
-                    x = 2.5 * (r_multiple - 2.0)
+                    # 🚀 V55.2 AUDIT FIX: Adjusted sigmoid steepness so the trailing stop tightens aggressively as we cross 1.0R.
+                    x = 5.0 * (r_multiple - 1.0) 
                     x = max(-700, min(700, x))
                     sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
 
@@ -1040,7 +1042,6 @@ class DistributedQuantEngine:
                             current_tp = calc_tp
                             requires_tp_update = True
 
-                    # 🚀 V55.2 FIX: Strict 5-Second Cooldown on API updates
                     if (requires_sl_update or requires_tp_update) and (now - last_api_update_time >= 5.0):
                         spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
                         min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
