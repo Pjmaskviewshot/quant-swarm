@@ -276,10 +276,10 @@ class ContinuousMicrostructureEngine:
 
         ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
         
-        # 🚀 V55.2 AUDIT FIX: Removed collinear cross-terms to prevent RLS matrix explosion.
-        # Now strictly using 7 orthogonal base features.
+        # 🚀 FIX: Replaced multiplicative cross-term with bounded relative acceleration
+        # This prevents RLS Covariance (P) Matrix instability during hyper-volatility.
         base_features = np.array([self.ofi_fast_z / 3.0, ofi_delta_z / 6.0, self.hawkes_z / 3.0, self.micro_price_skew / 10.0, vpin_z / 4.0])
-        liquidation_div = (self.hawkes_acceleration / 3.0) * (self.micro_price_skew / 10.0) * -1.0
+        liquidation_div = np.clip((self.hawkes_acceleration - self.micro_price_skew) / 5.0, -2.0, 2.0)
         
         features = np.clip(np.concatenate([base_features, [liquidation_div, tensor_alpha]]), -1.0, 1.0)
         

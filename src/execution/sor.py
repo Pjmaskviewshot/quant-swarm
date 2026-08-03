@@ -1,9 +1,9 @@
 """
-💎 V55.2 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
+💎 V55.3 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
-Null-Guard Parity, Reduced Exposure Timeouts, and IOC Partial-Fill Handlers.
+Null-Guard Parity, Dynamic Asset-Aware Timeouts, and IOC Partial-Fill Handlers.
 """
 
 import os
@@ -196,8 +196,6 @@ class SmartOrderRouter:
                         cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
                         avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
 
-                        # 🚀 V55.2 FIX: IOC Partial Fill Handler
-                        # If we get ANY fill, we consider it a success and stop escalating.
                         if cum_exec > 0:
                             logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
                             return True, avg_price, cum_exec
@@ -217,18 +215,18 @@ class SmartOrderRouter:
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 12) -> Tuple[bool, float, float]:
         """
-        🚀 V55.2 MAKER-GRID SPREAD CAPTURE:
-        Tighter chasing rules. Drops timeout to 12s and max rejections to 3.
-        If the market breaks away, it gracefully surrenders the peg to avoid taking a late, poor entry.
+        🚀 V55.3 MAKER-GRID SPREAD CAPTURE:
+        Utilizes dynamically scaled timeouts to accommodate Altcoin liquidity behavior without
+        surrendering perfectly viable mathematical setups.
         """
-        logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners.")
+        logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners. (Timeout: {timeout}s)")
         
         start_time = time.time()
         current_order_id = None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
         
         anchor_price = None
-        max_chase_deviation = 0.005  # 🚀 V55.2: Tighter chase abort (0.5% max drift from anchor)
+        max_chase_deviation = 0.005  
         rejection_count = 0  
 
         tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
@@ -248,9 +246,6 @@ class SmartOrderRouter:
                     depth_metrics = feature_engine.get_book_depth_metrics()
                     imbalance = depth_metrics.get("depth_imbalance", 0.0)
                     
-                    # 🚀 V55.2 AUDIT FIX: Corrected Adverse Selection Guard.
-                    # Abort BUYs if the bid side is collapsing (imbalance > +0.80).
-                    # Abort SELLs if the ask side is collapsing (imbalance < -0.80).
                     if direction.upper() == "BUY" and imbalance > 0.80:
                         logger.warning(f"[X-RAY] 🚫 ADVERSE SELECTION // {symbol} Bid wall collapsing. Aborting peg to prevent bad entry.")
                         break
@@ -312,7 +307,6 @@ class SmartOrderRouter:
                     else:
                         rejection_count += 1
                         logger.warning(f"[X-RAY] PostOnly placement rejected: {place_response.get('retMsg')}")
-                        # 🚀 V55.2: Trip circuit breaker after 3 rejections instead of 5
                         if rejection_count >= 3:
                             logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} PostOnly rejected 3 times. Market is likely running away.")
                             break
@@ -366,7 +360,6 @@ class SmartOrderRouter:
                             logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
                             return True, avg_price, cum_exec_qty
                             
-                        # 🚀 V55.2: Trip circuit breaker after 3 rejections
                         if rejection_count >= 3:
                             logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 3 times. Aborting.")
                             break
@@ -416,18 +409,20 @@ class SmartOrderRouter:
         total_executed_qty = 0.0
         weighted_notional_sum = 0.0
         
+        # 🚀 FIX: Dynamic Maker Timeouts for Iceberg Chunks
+        is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        chunk_timeout = 8.0 if is_major_asset else 15.0
+        
         for i in range(slices):
             logger.info(f"[X-RAY] 🧊 TWAP SLICE [{i+1}/{slices}] // Routing {slice_qty:.4f} {symbol}")
             
-            # 🚀 V55.2: Iceberg peg chunks use even tighter 8-second timeouts to avoid staggering
             success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
-                symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=8
+                symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=chunk_timeout
             )
             
             if not success or fill_qty == 0:
                 logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike with valid SL/TP floats.")
                 success, fill_price, fill_qty = await self._execute_flash_strike(
-                    # 🚀 V55.2 FIX: Correctly pass slice_qty, not total_qty, to avoid massive dump slippage
                     symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=sl, tp=tp
                 )
                 
@@ -488,7 +483,10 @@ class SmartOrderRouter:
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
-            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=12)
+            # 🚀 FIX: Dynamic Maker Timeouts (12s for Majors, 25s for Altcoins)
+            is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+            dynamic_timeout = 12.0 if is_major_asset else 25.0
+            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout)
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
@@ -505,6 +503,9 @@ class SmartOrderRouter:
             logger.info(f"[X-RAY] 🐋 WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
             return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
 
-        logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Forcing Maker-Grid Peg on {symbol} to capture spread edge.")
-        # 🚀 V55.2 FIX: Strict 12s timeout for Maker Grids. No bad chases.
-        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=12)
+        # 🚀 FIX: Dynamic Maker Timeouts (12s for Majors, 25s for Altcoins)
+        is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        dynamic_timeout = 12.0 if is_major_asset else 25.0
+        
+        logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Forcing Maker-Grid Peg on {symbol} to capture spread edge ({dynamic_timeout}s timeout).")
+        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout)

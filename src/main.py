@@ -26,6 +26,11 @@ from typing import Dict, List, Any
 from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
 
+# 🚀 FIX: Custom Exception for clean, async-aware process termination
+class EmergencyShutdown(Exception):
+    """Custom exception to trigger safe, async-aware system shutdown."""
+    pass
+
 # Core & Feature Modules
 from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
@@ -161,7 +166,6 @@ class DistributedQuantEngine:
                     self.eval_semaphores.pop(key, None)
                     self.orderbook_snapshots.pop(key, None)
                     
-                    # 🚀 V55.3 FIX: Plugg memory leak by pruning all auxiliary dictionaries
                     self.ram_dna_cache.pop(key, None)
                     self.screener_memory.pop(key, None)
                     self.screener_metrics.pop(key, None)
@@ -374,12 +378,11 @@ class DistributedQuantEngine:
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
+                # 🚀 FIX 1: Safely trigger custom exception rather than sys.exit(0)
                 if drawdown_pct >= 0.25:
                     self.fsm.trigger_global_emergency_lock()
                     await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
-                    await asyncio.sleep(2) 
-                    await self.graceful_shutdown()
-                    sys.exit(0)
+                    raise EmergencyShutdown("Drawdown limit exceeded. Triggering safe exit.")
                 
                 filled_blocks = min(10, int(drawdown_pct * 10))
                 dd_bar = "🟢" * (10 - filled_blocks) + "🔴" * filled_blocks
@@ -438,7 +441,6 @@ class DistributedQuantEngine:
                 hist = np.array(list(clock.vpin_history)[-200:])
                 if len(hist) >= 20 and np.std(hist) > 0:
                     vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
-                    # 🚀 V55.3 FIX: Removed the buggy overwrite line: vol_z = vpin_z
                     stat_engine.vpin_z = vpin_z
                 else: vpin_z = 0.0
             else: vpin_z = 0.0
@@ -506,7 +508,6 @@ class DistributedQuantEngine:
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
                     }
-                    # 🚀 V55.3 FIX: Add `id(payload)` to prevent dictionary comparison crash in the queue.
                     async with self.auction_lock: heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, id(payload), payload))
                 except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
                 
@@ -922,11 +923,11 @@ class DistributedQuantEngine:
                     remaining_qty = current_qty - aligned_qty_close
                     remaining_notional = remaining_qty * safe_c_price
                     
-                    if 0 < remaining_notional < 6.0 and ctx["available_balance"] > 50.0:
+                    if 0 < remaining_notional < 6.0:
                         aligned_qty_close = current_qty 
                         logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
 
-                    if aligned_qty_close >= limits["min_qty"] and (aligned_qty_close * safe_c_price) >= 6.0:
+                    if aligned_qty_close >= limits["min_qty"] and ((aligned_qty_close * safe_c_price) >= 5.0 or aligned_qty_close == current_qty):
                         logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units.")
                         await self.executor.safe_call(
                             self.executor.client.place_order, 
@@ -938,8 +939,8 @@ class DistributedQuantEngine:
                             timeInForce="IOC", reduceOnly=True
                         )
                         ctx["scaled_levels"][target_r] = True
-                        if 0 < remaining_notional < 6.0 and ctx["available_balance"] > 50.0:
-                            return "FULLY_CLOSED" # Break entire loop if dust swept the rest
+                        if 0 < remaining_notional < 6.0:
+                            return "FULLY_CLOSED" 
                         break
                     else:
                         if not flag: ctx["scaled_levels"][target_r] = True
@@ -1261,6 +1262,9 @@ class DistributedQuantEngine:
                 await coro_func()
                 consecutive_crashes = 0  
             except asyncio.CancelledError: break
+            except EmergencyShutdown as e:
+                logger.critical(f"[X-RAY] Emergency Shutdown Initiated: {e}")
+                raise  # Bubble this up to trigger graceful_shutdown
             except Exception as e:
                 consecutive_crashes += 1
                 sleep_time = min(300, 5 * (2 ** (consecutive_crashes - 1)))
@@ -1345,9 +1349,14 @@ class DistributedQuantEngine:
 
 async def main():
     engine = DistributedQuantEngine()
-    try: await engine.run_engine_forever()
-    except asyncio.CancelledError: pass
-    finally: await engine.graceful_shutdown()
+    try: 
+        await engine.run_engine_forever()
+    except EmergencyShutdown: 
+        logger.critical("🛑 Engine halted via Emergency Breaker. Handing off to Graceful Shutdown.")
+    except asyncio.CancelledError: 
+        pass
+    finally: 
+        await engine.graceful_shutdown()
 
 if __name__ == "__main__":
     from keep_alive import keep_alive

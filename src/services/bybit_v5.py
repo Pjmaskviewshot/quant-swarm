@@ -17,6 +17,24 @@ from pybit.unified_trading import HTTP
 
 logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
+class BybitRetCode:
+    """
+    🚀 V50.0 BYBIT RETURN CODES
+    Structured integer mapping to eliminate fragile string-matching on API errors.
+    """
+    SUCCESS = 0
+    PARAMETER_ERROR = 10002          # Invalid request parameter
+    SYSTEM_MAINTENANCE = 10004       # Server maintenance window
+    RATE_LIMIT_REACHED = 10006       # Too many requests
+    QTY_OUT_OF_BOUNDS = 10001        # Invalid parameter / quantity step error
+    SERVICE_UNAVAILABLE = 10016      # Service temporary error
+    ORDER_NOT_EXISTS = 110001        # Order does not exist or too late to cancel
+    INSUFFICIENT_BALANCE = 110007    # Abundant/insufficient balance
+    RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
+    LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
+    LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
+
+
 class TokenBucketRateLimiter:
     """
     🚀 TOKEN-BUCKET RATE LIMITER
@@ -82,14 +100,14 @@ class BybitUnifiedExecutor:
                 response = await loop.run_in_executor(self._api_thread_pool, bound_func)
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
                 
-                # Fail Fast on Parameter Error (10002)
-                if ret_code == 10002:
+                # Fail Fast on Parameter Error
+                if ret_code == BybitRetCode.PARAMETER_ERROR:
                     error_msg = f"[X-RAY] ❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 # Backoff on server load or rate limits
-                if ret_code in [10006, 10016]: 
+                if ret_code in [BybitRetCode.RATE_LIMIT_REACHED, BybitRetCode.SERVICE_UNAVAILABLE]: 
                     logger.warning(f"[X-RAY] ⚠️ Bybit System Load/Rate Limit (Code: {ret_code}). Backing off...")
                     await asyncio.sleep(2.0)
                     continue
@@ -150,8 +168,9 @@ class BybitUnifiedExecutor:
 
     async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:
         """
-        🚀 Smart Leverage Caching with Error 110043 & 110013 Guards.
+        🚀 Smart Leverage Caching with Error Guards.
         Only sends API updates when leverage differs from current exchange state.
+        Uses structured integer return codes.
         """
         try:
             if self._leverage_cache.get(symbol) == target_leverage:
@@ -185,14 +204,15 @@ class BybitUnifiedExecutor:
             
         except Exception as e:
             error_msg = str(e)
+            ret_code = getattr(e, "ret_code", None) or getattr(e, "code", None)
             
-            # Code 110043: Leverage not modified (already at target value)
-            if "110043" in error_msg or "not modified" in error_msg.lower():
+            # Leverage not modified (already at target value)
+            if ret_code == BybitRetCode.LEVERAGE_NOT_MODIFIED_2 or ret_code == BybitRetCode.LEVERAGE_NOT_MODIFIED or "110043" in error_msg or "not modified" in error_msg.lower():
                 self._leverage_cache[symbol] = target_leverage
                 return True
                 
-            # Code 110013: Requested leverage exceeds symbol's max risk tier limit
-            if "110013" in error_msg:
+            # Requested leverage exceeds symbol's max risk tier limit
+            if ret_code == BybitRetCode.RISK_LIMIT_EXCEEDED or "110013" in error_msg:
                 try:
                     info = await self._safe_api_call(
                         self.client.get_instruments_info,

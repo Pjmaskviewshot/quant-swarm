@@ -1,5 +1,5 @@
 """
-🌌 V55.2 QUANTUM MICRO-CORE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
+🌌 V55.3 QUANTUM MICRO-CORE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
 ----------------------------------------------------------------------
 Features Leverage-Bridge Auto-Sizing and Asymmetric House Money Compounding.
 Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
@@ -18,6 +18,21 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.AUCTION_ENGINE")
+
+# 🚀 SYNCHRONIZED: Structured Bybit Error Codes (Aligned globally with bybit_v5.py)
+class BybitRetCode:
+    SUCCESS = 0
+    PARAMETER_ERROR = 10002          # Invalid request parameter
+    SYSTEM_MAINTENANCE = 10004       # Server maintenance window
+    RATE_LIMIT_REACHED = 10006       # Too many requests
+    QTY_OUT_OF_BOUNDS = 10001        # Invalid parameter / quantity step error
+    SERVICE_UNAVAILABLE = 10016      # Service temporary error
+    ORDER_NOT_EXISTS = 110001        # Order does not exist or too late to cancel
+    INSUFFICIENT_BALANCE = 110007    # Abundant/insufficient balance
+    RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
+    LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
+    LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
+
 
 class CapitalAuctionEngine:
     def __init__(self, core_engine):
@@ -58,7 +73,7 @@ class CapitalAuctionEngine:
                 # Filter out stale signals (older than 3 seconds)
                 while self.core.auction_queue:
                     item = heapq.heappop(self.core.auction_queue)
-                    # 🚀 V55.3 FIX: Unpack the 5-item tuple which now includes the tie-breaker ID
+                    # Unpack the 5-item tuple which includes the tie-breaker ID
                     _, _, sym, _, payload = item
                     if now - payload["timestamp"] < 3.0: 
                         valid_candidates.append(item)
@@ -78,7 +93,7 @@ class CapitalAuctionEngine:
             if not best_candidate: 
                 continue
             
-            # 🚀 V55.3 FIX: Unpack the 5-item tuple which now includes the tie-breaker ID
+            # Unpack the 5-item tuple which includes the tie-breaker ID
             top_neg_sharpe, _, top_symbol, _, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
@@ -134,7 +149,7 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V55.2 Execution Engine. 
+        V55.3 Execution Engine. 
         Patched with strict 15% equity exposure limits, correct Leverage math, Risk-of-Ruin floor,
         and L2-Aware simulated paper fills.
         """
@@ -174,7 +189,7 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = min_qty * current_price
 
-            # 4. 🌌 V55.2 RISK & EXPOSURE CLAMPS
+            # 4. 🌌 RISK & EXPOSURE CLAMPS
             # Calculate pure fractional Kelly based on model confidence
             base_optimal_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
             
@@ -259,7 +274,7 @@ class CapitalAuctionEngine:
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
 
             if self.core.test_mode:
-                # 🚀 V55.2 AUDIT FIX: True L2-Aware Paper Trading Simulator
+                # 🚀 V55.3 AUDIT FIX: True L2-Aware Paper Trading Simulator
                 is_buy = direction == "BUY"
                 levels = current_depth.get("asks" if is_buy else "bids", [])
                 
@@ -323,13 +338,18 @@ class CapitalAuctionEngine:
                     execution_success = res[0] if isinstance(res, tuple) else bool(res)
                 
                 except Exception as ex:
+                    # 🚀 ALIGNED: Structured Bybit Error Code Evaluation
                     err_str = str(ex)
-                    if any(code in err_str for code in ["10004", "10016", "10002", "500"]):
+                    ret_code = getattr(ex, "ret_code", None) or getattr(ex, "code", None)
+
+                    if ret_code in [BybitRetCode.SYSTEM_MAINTENANCE, BybitRetCode.SERVICE_UNAVAILABLE] or any(code in err_str for code in ["10004", "10016", "10002", "500"]):
                         logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.core.circuit_breaker_lock:
                             self.core.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
-                    elif "110007" in err_str or "not enough" in err_str or "10001" in err_str:
+                    
+                    elif ret_code in [BybitRetCode.INSUFFICIENT_BALANCE, BybitRetCode.QTY_OUT_OF_BOUNDS] or any(code in err_str for code in ["110007", "not enough", "10001"]):
                         logger.warning(f"[X-RAY] ⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                    
                     else:
                         logger.error(f"[X-RAY] Execution error for {symbol}: {err_str}", exc_info=True)
                     
