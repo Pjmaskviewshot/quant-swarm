@@ -1,8 +1,8 @@
 """
-💎 V50.0 QUANTUM SWARM: PARALLELIZED UNIFIED API EXECUTOR
+💎 V56.1 QUANTUM SWARM: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
-Titanium Ticker Filtering, Multi-Field Wallet Parsing, and X-Ray Telemetry.
+Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
 """
 
 import os
@@ -19,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V50.0 BYBIT RETURN CODES
+    🚀 V56.1 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -64,7 +64,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V50.0 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V56.1 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, and titanium ticker filtering.
     """
@@ -136,34 +136,30 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 V50.0 MULTI-FIELD WALLET BALANCE PARSER
-        Fetches available margin balance from Unified Trading Account with multi-field
-        fallbacks (`walletBalance`, `totalAvailableBalance`, `equity`) and 95% buffer.
+        🚀 V56.1 FIX: Pulls true Total Equity & Purchasing Power directly from Bybit V5 Unified Account.
+        Eliminates the inaccurate 5% hard-tax and multi-currency blindspots.
         """
         try:
             response = await self._safe_api_call(
-                self.client.get_wallet_balance,
-                accountType="UNIFIED",
-                coin="USDT"
+                self.client.get_wallet_balance, 
+                accountType="UNIFIED"
             )
             
-            account_data = response["result"]["list"][0]
-            for coin_info in account_data.get("coin", []):
-                if coin_info.get("coin") == "USDT":
-                    # Multi-field fallback parsing for Unified Account formats
-                    raw_balance_str = (
-                        coin_info.get("walletBalance") or 
-                        coin_info.get("availableToWithdraw") or 
-                        coin_info.get("equity") or "0.0"
-                    )
-                    raw_balance = float(raw_balance_str)
+            if response.get("retCode") == 0:
+                accounts = response.get("result", {}).get("list", [])
+                if accounts:
+                    # totalAvailableBalance automatically accounts for all collateral & open positions
+                    available_bal = accounts[0].get("totalAvailableBalance") 
+                    if available_bal is not None:
+                        return float(available_bal)
                     
-                    # 95% Buffer leaves 5% margin to absorb limit-order fee holds
-                    return raw_balance * 0.95
-                    
+                    # Fallback to USDT specifically if global balance is unavailable
+                    for coin_info in accounts[0].get("coin", []):
+                        if coin_info.get("coin") == "USDT":
+                            return float(coin_info.get("availableToWithdraw", 0.0))
             return 0.0
         except Exception as e:
-            logger.error(f"[X-RAY] Failed to fetch Bybit wallet balance metrics: {e}")
+            logger.error(f"[X-RAY] Failed to fetch true wallet balance: {e}")
             return 0.0
 
     async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:

@@ -1,10 +1,11 @@
 """
-🌌 V55.3 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
+🌌 V56.2 OMNI-STATE: QUANTUM MICRO-CORE ORCHESTRATOR
 ------------------------------------------------------
 The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
-Limit-Only Escapes, 3-Minute Immunity Windows, LastPrice Trigger overrides,
-Dust-Sweep Position Closures, Rate-Limit Protection, and GIL-Protected Process Pools.
-Refactored into a Formal Finite State Machine Architecture.
+Dynamic Margin Sweeping (Smart Scavenger), Limit-Only Escapes, 
+Dust-Sweep Position Closures, and Rate-Limit Protection.
+Patched for Institutional Thread Safety, True TCA Slippage Tracking,
+100% Capital Optimization, and SEV-1 Auditor Safety Protocols.
 """
 
 import os
@@ -37,7 +38,7 @@ from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
 from features.adaptive_engine import AdaptiveFeatureEngine
-from features.vpin_clock import VolumeSynchronizedClock
+from features.vpin_clock import VolumeSynchronizedClock # V56.2 Alias mapped to TradeSignToxicityMonitor
 from features.omni_scanner import GlobalOmniScanner  
 from features.micro_models import ContinuousMicrostructureEngine, AdaptiveSessionClock
 
@@ -45,6 +46,7 @@ from features.micro_models import ContinuousMicrostructureEngine, AdaptiveSessio
 from execution.sor import SmartOrderRouter
 from execution.auction_engine import CapitalAuctionEngine
 from portfolio.risk_manager import InstitutionalRiskVault  
+from execution.delta_neutral import DeltaNeutralYieldEngine # 🚀 ADDED YIELD ENGINE
 
 # External Connectors
 from ingestion.multi_feed import HighVelocityMultiFeed
@@ -54,7 +56,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V55.3_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V56.2_OMNI_STATE")
 
 
 class DistributedQuantEngine:
@@ -63,7 +65,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("🌌 LIVE MODE: V55.3 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
+        else: logger.critical("🌌 LIVE MODE: V56.2 OMNI-STATE ACTIVE (QUANTUM MICRO-CORE).")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -93,6 +95,7 @@ class DistributedQuantEngine:
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.25, max_single_position_risk_pct=0.015)
         self.tensor_oracle = CrossAssetTensorOracle()
         self.auction_engine = CapitalAuctionEngine(self)
+        self.yield_engine = DeltaNeutralYieldEngine(self)  # 🚀 INITIALIZED YIELD HARVESTER
         
         self.stat_engines: Dict[str, ContinuousMicrostructureEngine] = {} 
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {}
@@ -136,8 +139,10 @@ class DistributedQuantEngine:
 
     def track_task(self, coro: Any):
         if len(self._active_tasks) > 500:
-            logger.warning("[X-RAY] ⚠️ TASK LIMIT EXCEEDED. Dropping non-critical task to prevent memory leak.")
-            return None
+            # 🚀 V56.1 FIX: Never silently drop tasks. Force an abort so the trade is liquidated.
+            logger.critical("[X-RAY] 🛑 FATAL: TASK LIMIT EXCEEDED. Cannot safely spawn Guardian Daemon.")
+            raise RuntimeError("CRITICAL: Task Limit Exceeded. Aborting position to prevent ghost trades.")
+            
         task = asyncio.create_task(coro)
         self._active_tasks.add(task)
         task.add_done_callback(self._on_task_done)
@@ -246,9 +251,12 @@ class DistributedQuantEngine:
 
     async def _get_max_affordable_notional(self):
         try: 
-            available_balance = await self.executor.get_wallet_balance_usdt()
+            # 🚀 V56.2 FULL POWER: 100% Capital Access
+            raw_balance = await self.executor.get_wallet_balance_usdt()
+            available_balance = raw_balance * 1.00 
         except Exception: 
             available_balance = 7.00
+            
         min_exposure_ratio = 0.40 
         max_exposure_ratio = 0.10
         k_slope = 0.05
@@ -358,7 +366,7 @@ class DistributedQuantEngine:
                 if self.global_state_cache.get("current_day") != current_day:
                     self.global_state_cache["current_day"] = current_day
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
-                    self.fsm.release_global_emergency_lock()
+                    # 🚀 AUDIT FIX: Removed midnight auto-rearm. Drawdown lock requires manual reboot.
 
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 try:
@@ -378,7 +386,6 @@ class DistributedQuantEngine:
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
-                # 🚀 FIX 1: Safely trigger custom exception rather than sys.exit(0)
                 if drawdown_pct >= 0.25:
                     self.fsm.trigger_global_emergency_lock()
                     await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
@@ -488,10 +495,8 @@ class DistributedQuantEngine:
                 async with self.portfolio_state_lock: dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))): 
                     return
-
-                funding_rate = self.funding_rates.get(symbol, 0.0)
-                if funding_rate > 0.00025: prob_success += 0.05 if action == "SELL" else -0.05
-                elif funding_rate < -0.00025: prob_success += 0.05 if action == "BUY" else -0.05
+                    
+                # 🚀 AUDIT FIX: Removed Funding Rate Poisoning. Letting RLS AI operate purely on L2 metrics.
                     
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
                     prob_success += (feature_engine.get_htf_trend_bias(price) * 0.04) if action == "BUY" else -(feature_engine.get_htf_trend_bias(price) * 0.04)
@@ -706,7 +711,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V55.3 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
+            logger.info("🌌 V56.0 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             max_notional = await self._get_max_affordable_notional()
             
@@ -809,7 +814,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V55.3 STATE MACHINE REFACTOR: The Position Lifecycle FSM
+    # 🚀 V56.0 STATE MACHINE REFACTOR: The Position Lifecycle FSM
     # Breaking down the monolithic daemon into discrete, testable state handlers.
     # ==============================================================================
 
@@ -1051,10 +1056,15 @@ class DistributedQuantEngine:
                 fees = float(closed_list[0].get("execFee", 0.0))
                 exit_price = float(closed_list[0].get("avgExitPrice", actual_entry))
                 
-                raw_pnl = (exit_price - actual_entry) * float(closed_list[0].get("qty", 1)) if ctx["is_buy"] else (actual_entry - exit_price) * float(closed_list[0].get("qty", 1))
-                slip_cost = raw_pnl - net_pnl - fees
-                
-                slippage_bps = min(500.0, max(-500.0, (slip_cost / (capital_risked + 1e-9)) * 10000)) if capital_risked > 0 else 0.0
+                # 🚀 V56.2 TCA: Calculate Implementation Shortfall (Slippage vs Arrival)
+                arrival_price = ctx.get("arrival_price", actual_entry)
+                if ctx["is_buy"]:
+                    entry_slippage_bps = ((actual_entry - arrival_price) / arrival_price) * 10000
+                else:
+                    entry_slippage_bps = ((arrival_price - actual_entry) / arrival_price) * 10000
+                    
+                ctx["exec_details"]["tca_entry_slippage_bps"] = entry_slippage_bps
+                slippage_bps = entry_slippage_bps
                 ctx["exec_details"]["fees_usdt"] = fees
                 
                 if net_pnl < 0:
@@ -1085,13 +1095,14 @@ class DistributedQuantEngine:
     # ------------------------------------------------------------------------------
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
         """
-        V55.3 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
+        V56.0 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
         """
         async with self.execution_semaphore:
             # 1. Initialize Global Context for the FSM
             ctx = {
                 "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
                 "current_price": current_price, "atr": atr, "target_leverage": target_leverage, 
+                "arrival_price": current_price, # 🚀 V56.2 TCA: Lock Arrival Price
                 "regime": market_regime, "dynamic_rr_ratio": dynamic_rr_ratio, "realigned_sl": realigned_sl, 
                 "realigned_tp": realigned_tp, "daemon_start_time": time.time(),
                 "actual_qty_filled": risk_matrix.get("size", 1.0),
@@ -1137,7 +1148,8 @@ class DistributedQuantEngine:
                         ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
                         
                     sl_proximity = abs(ctx["safe_c_price"] - ctx["current_sl"]) / (ctx["safe_c_price"] + 1e-9)
-                    loop_sleep = 0.2 if sl_proximity < 0.005 else 1.0
+                    # 🚀 AUDIT FIX: Ultra-low latency polling. Never sleep 1.0s.
+                    loop_sleep = 0.1 if sl_proximity < 0.01 else 0.5 
                     await asyncio.sleep(loop_sleep) 
                     
                     ctx["now"] = time.time()
@@ -1343,7 +1355,8 @@ class DistributedQuantEngine:
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
             self.auction_engine.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon,
-            self.run_crowded_trade_oracle 
+            self.run_crowded_trade_oracle,
+            self.yield_engine.run_yield_scanner_daemon  # 🚀 YIELD HARVESTER ACTIVE
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
 

@@ -1,9 +1,9 @@
 """
-🌌 V55.2 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
+🌌 V56.1 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,
 Subscription Chunking (10-arg limit compliance), Pure JSON Pings,
-Fast Float Pre-Parsing, and X-Ray Diagnostic Telemetry.
+Fast Float Pre-Parsing, Institutional Load Shedding, and X-Ray Diagnostic Telemetry.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V55.2 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    🚀 V56.1 OMNI-SWARM: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
     from downstream processing via a high-capacity asynchronous FIFO queue.
     """
@@ -87,7 +87,7 @@ class HighVelocityMultiFeed:
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V55.2 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        🚀 V56.1 OMNI-SWARM DYNAMIC HOT-SWAPPING
         Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
         without needing to tear down the entire 24-coin connection multiplexer.
         """
@@ -122,7 +122,7 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V55.2 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
+        🚀 V56.1 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
         Instead of going blind for 100ms+ during an unsub/sub cycle, we immediately 
         fetch a REST snapshot and inject it into the high-speed queue. This prevents 
         MLOFI and toxicity metrics from processing corrupted gap deltas.
@@ -146,12 +146,16 @@ class HighVelocityMultiFeed:
                         parsed_bids = self._fast_float_parse_book(data.get("b", []))
                         parsed_asks = self._fast_float_parse_book(data.get("a", []))
                         
-                        # Inject REST snapshot directly into the fast-queue
-                        self.ingestion_queue.put_nowait(("orderbook", {
-                            "s": symbol, "b": parsed_bids, "a": parsed_asks, 
-                            "u": int(data.get("u", 0)), "type": "snapshot", 
-                            "ts": int(data.get("ts", time.time() * 1000))
-                        }))
+                        # Inject REST snapshot directly into the fast-queue safely
+                        try:
+                            self.ingestion_queue.put_nowait(("orderbook", {
+                                "s": symbol, "b": parsed_bids, "a": parsed_asks, 
+                                "u": int(data.get("u", 0)), "type": "snapshot", 
+                                "ts": int(data.get("ts", time.time() * 1000))
+                            }))
+                        except asyncio.QueueFull:
+                            logger.debug("[X-RAY] ⚠️ Ingestion queue full during REST resync. Load shedding snapshot.")
+
                         # Re-anchor sequence state to the fresh REST snapshot
                         self.orderbook_sequences[symbol] = int(data.get("u", 0))
                 except Exception as e:
@@ -248,8 +252,11 @@ class HighVelocityMultiFeed:
                                 try:
                                     # Route incoming bytes to FIFO queue in O(1) time
                                     if topic.startswith("tickers"):
-                                        self.ingestion_queue.put_nowait(("tickers", data))
-                                        
+                                        try:
+                                            self.ingestion_queue.put_nowait(("tickers", data))
+                                        except asyncio.QueueFull:
+                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding tickers tick.")
+                                            
                                     elif topic.startswith("orderbook"):
                                         symbol = data.get("s")
                                         u_sequence = data.get("u")
@@ -273,15 +280,21 @@ class HighVelocityMultiFeed:
                                         parsed_bids = self._fast_float_parse_book(data.get("b", []))
                                         parsed_asks = self._fast_float_parse_book(data.get("a", []))
 
-                                        self.ingestion_queue.put_nowait(("orderbook", {
-                                            "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
-                                        }))
-                                        
+                                        try:
+                                            self.ingestion_queue.put_nowait(("orderbook", {
+                                                "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
+                                            }))
+                                        except asyncio.QueueFull:
+                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding orderbook tick.")
+                                            
                                     elif topic.startswith("kline"):
-                                        self.ingestion_queue.put_nowait(("kline", {
-                                            "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
-                                        }))
-                                        
+                                        try:
+                                            self.ingestion_queue.put_nowait(("kline", {
+                                                "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
+                                            }))
+                                        except asyncio.QueueFull:
+                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding kline tick.")
+                                            
                                     elif topic.startswith("publicTrade"):
                                         symbol = topic.split(".")[-1]
                                         for tick in data:
@@ -292,10 +305,13 @@ class HighVelocityMultiFeed:
                                                 "side": tick.get("S", "Buy"),
                                                 "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
-                                            self.ingestion_queue.put_nowait(("trade", tick_payload))
+                                            try:
+                                                self.ingestion_queue.put_nowait(("trade", tick_payload))
+                                            except asyncio.QueueFull:
+                                                logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding trade tick.")
 
-                                except asyncio.QueueFull:
-                                    logger.critical("[X-RAY] 🚨 OVERLOAD: Ingestion Queue is FULL. Load shedding enabled (packet dropped)!")
+                                except Exception as e:
+                                    logger.error(f"[X-RAY] 🚨 OVERLOAD OR ROUTING ERROR: {e}")
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break

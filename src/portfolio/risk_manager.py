@@ -1,8 +1,9 @@
 """
-💎 V55.2 QUANTUM SWARM: INSTITUTIONAL RISK VAULT (NANO-CORE ENABLED)
+💎 V56.2 QUANTUM SWARM: INSTITUTIONAL RISK VAULT (RISK PARITY ENABLED)
 ------------------------------------------------------------
 Conservative Kelly sizing with Volatility-Adjusted CVaR Protection,
-Dynamic Win-Rate Queues, Micro-Account Nano-Sizing, and X-Ray Diagnostic Telemetry.
+Dynamic Win-Rate Queues, Full Pairwise Correlation Matrices, 
+and X-Ray Diagnostic Telemetry.
 """
 
 import math
@@ -10,6 +11,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from collections import deque
 import numpy as np
+import pandas as pd  # 🚀 V56.2 UPGRADE: Required for True Risk Parity Matrix
 
 logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
@@ -24,7 +26,7 @@ class InstitutionalRiskVault:
         self.max_drawdown_pct = max_drawdown_pct
         self.max_single_risk = max_single_position_risk_pct
         
-        # 🚀 V55.2 FIX: Two-way attribute parity alias to guarantee compliance across all modules
+        # 🚀 V56.2 FIX: Two-way attribute parity alias to guarantee compliance across all modules
         self.max_single_position_risk_pct = max_single_position_risk_pct
         
         self.exchange_min_notional = exchange_min_notional
@@ -37,9 +39,8 @@ class InstitutionalRiskVault:
         
         self.active_positions: Dict[str, float] = {}
 
-        self.correlation_groups = {
-            "DYNAMIC_BTC_COVARIANCE": ["BTCUSDT"] 
-        }
+        # 🚀 V56.2 TRUE RISK PARITY: Initialized empty correlation matrix
+        self.correlation_matrix: Optional[pd.DataFrame] = None
 
         # 🚀 V55.2 FIX: Replaced saturating integer counters with a sliding boolean deque
         self.outcomes_history = deque(maxlen=100) 
@@ -84,31 +85,28 @@ class InstitutionalRiskVault:
             logger.debug(f"[X-RAY] CVaR calculation fallback engaged: {e}")
             return 1.05
 
-    def update_correlation_matrix(self, price_histories: Dict[str, List[float]], base_asset: str = "BTCUSDT", threshold: float = 0.75):
-        """Dynamically clusters assets correlated with BTC to enforce portfolio exposure limits."""
-        if base_asset not in price_histories or len(price_histories[base_asset]) < 30:
-            return
+    def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
+        """
+        🚀 V56.2 TRUE RISK PARITY: Computes full O(N^2) pairwise correlation matrix
+        using pandas to prevent concentrated risk exposure.
+        """
+        try:
+            # Ensure all histories are the same length by trimming to the shortest array
+            min_len = min([len(prices) for prices in price_histories.values()])
+            if min_len < 30: 
+                return
             
-        base_prices = np.array(price_histories[base_asset][-1440:]) 
-        base_returns = np.diff(base_prices) / (base_prices[:-1] + 1e-9)
-        
-        restricted_group = [base_asset]
-        
-        for symbol, prices in price_histories.items():
-            if symbol == base_asset or len(prices) < len(base_prices):
-                continue
-                
-            sym_prices = np.array(prices[-len(base_prices):])
-            sym_returns = np.diff(sym_prices) / (sym_prices[:-1] + 1e-9)
+            trimmed_histories = {sym: prices[-min_len:] for sym, prices in price_histories.items()}
+            df = pd.DataFrame(trimmed_histories)
             
-            if np.std(sym_returns) < 1e-9 or np.std(base_returns) < 1e-9:
-                continue
-                
-            correlation = np.corrcoef(base_returns, sym_returns)[0, 1]
-            if correlation >= threshold:
-                restricted_group.append(symbol)
-                
-        self.correlation_groups["DYNAMIC_BTC_COVARIANCE"] = restricted_group
+            # Calculate log returns for statistical stationarity
+            returns_df = np.log(df / df.shift(1)).dropna()
+            
+            # Compute full O(N^2) Pearson correlation matrix
+            self.correlation_matrix = returns_df.corr()
+            logger.info("[X-RAY] 🧠 Risk Parity Matrix Updated: Full pairwise correlation computed.")
+        except Exception as e:
+            logger.debug(f"[X-RAY] Failed to compute correlation matrix: {e}")
 
     # 🚀 V55.2 AUDIT FIX: Kelly Criterion now tracks R-Multiples, not raw percentages.
     def update_kelly_metrics(self, is_win: bool, realized_r_multiple: float):
@@ -154,8 +152,8 @@ class InstitutionalRiskVault:
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> tuple[bool, str]:
         """
-        🚀 V55.2 X-RAY PORTFOLIO SAFETY GUARD:
-        Verifies drawdown limits, correlation group caps, and total portfolio heat limits.
+        🚀 V56.2 X-RAY PORTFOLIO SAFETY GUARD:
+        Verifies drawdown limits, O(N^2) correlation matrices, and total portfolio heat limits.
         Returns: (is_safe: bool, reason_string: str)
         """
         if self.emergency_circuit_breaker:
@@ -172,18 +170,19 @@ class InstitutionalRiskVault:
                     self.emergency_circuit_breaker = True
                 return False, f"MAX_DRAWDOWN_BREACHED_{current_drawdown:.2%}"
         
-        # Check Correlation Cluster Caps
+        # 🚀 V56.2 RISK PARITY: Enforce Correlation Limits
         if symbol and new_position_notional > 0:
-            for group_name, asset_list in self.correlation_groups.items():
-                if symbol in asset_list:
-                    active_correlated_nodes = [active_sym for active_sym in self.active_positions.keys() if active_sym in asset_list and active_sym != symbol]
-                    if len(active_correlated_nodes) >= 2:
-                        return False, f"CORRELATION_CAP_REACHED_GROUP_{group_name}"
+            if hasattr(self, 'correlation_matrix') and self.correlation_matrix is not None:
+                for active_sym in self.active_positions.keys():
+                    if active_sym in self.correlation_matrix.index and symbol in self.correlation_matrix.columns:
+                        corr_value = self.correlation_matrix.loc[active_sym, symbol]
+                        # Block trade if correlation with an open position is > 0.75 (75%)
+                        if corr_value > 0.75:
+                            return False, f"RISK_PARITY_BLOCK_CORRELATED_{corr_value:.2f}_WITH_{active_sym}"
 
         # Calculate Total Portfolio Exposure Heat
         total_exposure = sum(self.active_positions.values()) + new_position_notional
         
-        # 🚀 FIX: Removed the 3.5x micro-account exception. 
         # Strict 2.5x institutional heat cap enforced universally across all account balances.
         max_heat = current_balance * 2.5  
 

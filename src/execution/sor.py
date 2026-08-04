@@ -1,9 +1,9 @@
 """
-💎 V55.3 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
+💎 V56.1 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
-Null-Guard Parity, Dynamic Asset-Aware Timeouts, and IOC Partial-Fill Handlers.
+Null-Guard Parity, Dynamic Asset-Aware Timeouts, and IOC Post-Fill Stop Attachments.
 """
 
 import os
@@ -170,12 +170,11 @@ class SmartOrderRouter:
             logger.info(f"[X-RAY] ⚡ Flash Strike Attempt {attempt+1}/3 // {side} {cleaned_qty} {symbol} at {final_price}")
 
             try:
+                # 🚀 V56.1 FIX: Remove TP/SL from IOC placement. Bybit ignores them here.
                 response = await self.executor.safe_call(
                     self.executor.client.place_order,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
                     qty=str(cleaned_qty), price=str(final_price), timeInForce="IOC", 
-                    stopLoss=str(final_sl) if final_sl else None,
-                    takeProfit=str(final_tp) if final_tp else None,
                     positionIdx=self.position_idx
                 )
                 
@@ -198,6 +197,18 @@ class SmartOrderRouter:
 
                         if cum_exec > 0:
                             logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
+                            
+                            # 🚀 V56.1 FIX: Explicitly attach TP/SL after confirmed fill
+                            if final_sl or final_tp:
+                                try:
+                                    await self.executor.safe_call(
+                                        self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=self.position_idx, 
+                                        stopLoss=str(final_sl) if final_sl else None, takeProfit=str(final_tp) if final_tp else None
+                                    )
+                                    logger.info(f"[X-RAY] 🛡️ Stops successfully attached to Flash Strike: SL {final_sl} | TP {final_tp}")
+                                except Exception as e:
+                                    logger.error(f"[X-RAY] 🛑 FATAL: Failed to attach stops to Flash Strike for {symbol}: {e}")
+                                    
                             return True, avg_price, cum_exec
                         else:
                             logger.warning(f"[X-RAY] ⚠️ Flash Strike IOC missed (Liquidity vanished before execution). Escalating...")
