@@ -1,9 +1,9 @@
 """
-🌌 V55.2 OMNI-STATE BACKTESTER: QUANTUM MICRO-CORE
+🌌 V56.2 OMNI-STATE BACKTESTER: QUANTUM MICRO-CORE
 --------------------------------------------------
-Synchronized strictly with Quant Swarm live node V55.2.
-Implements Verified POFE, Look-Ahead Bias Eradication, Elastic VPIN,
-Dynamic RLS Forgetting, CVaR Variance Penalties, and Block Bootstrap Monte Carlo.
+WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
+of the live V56.2 L2-tick engine and cannot simulate true Order Flow Imbalance.
+Patched for 3-Feature Orthogonal RLS Matrix Alignment and HMM Warmup Exclusion.
 """
 
 import argparse
@@ -93,20 +93,20 @@ class Params:
     leverage: float = 3.0            
 
 def get_cluster_priors(symbol: str):
-    # 🚀 V55.2 FIX: Adjusted matrix dimensions from 9 to 7 to match orthogonal features
+    # 🚀 AUDIT FIX: Aligned matrix dimensions to 3 orthogonal features
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-        w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05])
-        w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12])
+        w_trend = np.array([0.45, 0.35, 0.20])
+        w_range = np.array([0.20, 0.35, 0.45])
         p_scale = 1.0
     elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-        w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08])
-        w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11])
+        w_trend = np.array([0.40, 0.40, 0.20])
+        w_range = np.array([0.20, 0.40, 0.40])
         p_scale = 2.0
     else:
-        w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10])
-        w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12])
+        w_trend = np.array([0.35, 0.35, 0.30])
+        w_range = np.array([0.30, 0.35, 0.35])
         p_scale = 0.5 
-    return w_trend, w_range, np.eye(7) * p_scale
+    return w_trend, w_range, np.eye(3) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
@@ -251,7 +251,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     mse_penalty = min(0.08, mse * 0.3)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -372,31 +372,22 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         hawkes_var = (1 - alpha_slow) * hawkes_var + alpha_slow * (volume_signed - hawkes_mean)**2
         hawkes_z = (volume_signed - hawkes_mean) / (math.sqrt(hawkes_var) + 1e-9)
         
-        hawkes_velocity = hawkes_z - hawkes_z_prev
-        hawkes_acceleration = hawkes_velocity - hawkes_v_prev
-        hawkes_z_prev, hawkes_v_prev = hawkes_z, hawkes_velocity
-        
-        skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
         tensor_alpha = compute_tensor_alpha(btc_1m_history, alt_1m_history)
-        ofi_delta_z = ofi_fast_z - ofi_slow_z
         
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        price_delta_bps = abs(skew)
-        orderbook_elasticity = price_delta_bps / (abs(ofi_fast_z) + 1.0)
-        liquidation_div = (hawkes_acceleration / 3.0) * (skew / 10.0) * -1.0 
-        
-        # 🚀 V55.2 FIX: Removed collinear cross-terms to prevent RLS matrix explosion.
-        base_features = np.array([ofi_fast_z / 3.0, ofi_delta_z / 6.0, hawkes_z / 3.0, skew / 10.0, synthetic_vpin_z / 4.0]) 
-        features = np.concatenate([base_features, [liquidation_div, tensor_alpha]])
-        features = np.clip(features, -1.0, 1.0)
+        # 🚀 ORTHOGONAL FEATURE REDUCTION (3 Independent Alpha Drivers)
+        features = np.clip(np.array([
+            ofi_fast_z / 3.0,
+            hawkes_z / 3.0,
+            tensor_alpha
+        ]), -1.0, 1.0)
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
         feature_magnitudes = np.abs(features)
         exp_f = np.exp(feature_magnitudes / attention_temp)
-        # 🚀 Changed multiplier from 9 to 7 to match orthogonal feature length
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 7
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 3
         
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (er - 0.35)))
 
@@ -435,18 +426,14 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
         dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
 
-        while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 300000:  
+        while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
             
             if sim_price != old_price and old_price > 0:
-                
-                # 🚀 V55.2 FIX: Regress against Realized R-Multiple instead of binary direction.
-                # This teaches the bot to hunt for asymmetrical payoff setups, not just coin flips.
                 price_delta = sim_price - old_price
                 risk_distance = abs(old_price - virt_sl) + 1e-9
                 realized_r = price_delta / risk_distance
                 
-                # Normalize the R-multiple into a 0.0 to 1.0 probability space for the logistic function
                 if old_action_dir == "BUY":
                     y_target = np.clip(0.5 + (realized_r / 4.0), 0.0, 1.0)
                 else:
@@ -463,26 +450,20 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     if rolling_mse > 0.35 or np.trace(P_trending) > 1000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(7) * 1e-3
-                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(7) * 1e-3
+                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(3) * 1e-3
+                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(3) * 1e-3
                         validation_buffer.clear()
-                        # 🚀 V55.2 AUDIT FIX: Changed 'break' to 'continue' to prevent discarding pending predictions.
                         continue
 
                 x_feat = old_features.reshape(-1, 1)
                 dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))
                 
-                # 🚀 V55.2 FIX: Soft-Gating the Mixture-of-Experts.
-                # Both experts learn from every trade, weighted proportionally by the regime probability.
-                
-                # Update Trending Expert (Weighted by old_r_blend)
                 P_x_t = P_trending @ x_feat
                 den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
                 K_t = P_x_t / den_t
                 weights_trending = weights_trending + (K_t.flatten() * error * old_r_blend)
                 P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
                 
-                # Update Ranging Expert (Weighted by 1.0 - old_r_blend)
                 P_x_r = P_ranging @ x_feat
                 den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
                 K_r = P_x_r / den_r
@@ -494,6 +475,7 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 rls_updates += 1
 
         t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
+        skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
         if t_imb_z < -2.5 and abs(skew) < 1.0: 
             action_dir = "BUY"
             prob_success = max(prob_success, 0.65)
@@ -523,7 +505,7 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             amihud_history.append(abs(math.log(c_prev['close'] / (amihud_anchor_price + 1e-9))) / rolling_notional_volume)
             rolling_notional_volume, amihud_anchor_price = 0.0, c_prev['close']
 
-        if i > cooldown_until:
+        if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
                 
@@ -569,7 +551,6 @@ def run_v55_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         bars_held = j - i
                         h, l = target_candles[j]["high"], target_candles[j]["low"]
                         c_j = target_candles[j]["close"]
-                        vol_j = target_candles[j]["volume"]
                         
                         if action_dir == "BUY" and h > max_favorable_price: max_favorable_price = h
                         elif action_dir == "SELL" and l < max_favorable_price: max_favorable_price = l
@@ -718,11 +699,9 @@ def summarize(trades: List[Dict]) -> Dict:
         for _ in range(1000):
             sim_nets = []
             for _ in range(num_blocks):
-                # Sample random continuous blocks of 5 trades
                 start_idx = np.random.randint(0, max(1, len(nets) - block_size + 1))
                 sim_nets.extend(nets[start_idx : start_idx + block_size])
             
-            # Trim to exact length and sum
             sim_nets = np.array(sim_nets[:len(nets)])
             mc_results.append(np.sum(sim_nets))
     else:
@@ -752,7 +731,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V55.2 QUANTUM MICRO-CORE Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V56.2 QUANTUM MICRO-CORE Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -769,14 +748,13 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
             total_trades = 0
             
             for fold in range(4):
-                # 🚀 V55.2 FIX: Strict Non-Overlapping Walk-Forward Folds (No Data Leakage)
                 train_start = 0
                 test_start = (fold + 1) * fold_size
                 test_end = test_start + fold_size
                 
                 if test_end > total_len: break
                 
-                test_result = run_v55_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v56_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -829,9 +807,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v55_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v56_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V55.2 OMNI-STATE OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V56.2 OMNI-STATE OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

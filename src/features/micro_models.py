@@ -5,7 +5,7 @@ Houses the Adaptive Session Clock, Permutation Entropy calculators,
 and the Recursive Least Squares (RLS) Online Learning Engine.
 Features fully data-driven, parameter-free Symmetrical Entropy Gating, 
 mathematically stationary Permutation Entropy, and Pure Mixture-of-Experts RLS.
-Patched with SEV-2 "Doom Loop" AI Covariance Reset protocols.
+Patched with Radical Alpha Amputation (3-Feature Orthogonal RLS Matrix) and Doom Loop Prevention.
 """
 
 import math
@@ -44,20 +44,20 @@ class AdaptiveSessionClock:
 class ClusterWarmStartRLS:
     @staticmethod
     def get_cluster_priors(symbol: str):
-        # 🚀 V55.2 FIX: Adjusted matrix dimensions from 9 to 7 to match orthogonal features
+        # 🚀 AUDIT FIX: Reduced from 7 to 3 orthogonal dimensions to eliminate multicollinearity and covariance explosion
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-            w_trend = np.array([0.22, 0.18, 0.15, 0.08, 0.12, 0.10, 0.05])
-            w_range = np.array([0.08, 0.15, 0.05, 0.22, 0.18, 0.05, 0.12])
+            w_trend = np.array([0.45, 0.35, 0.20])
+            w_range = np.array([0.20, 0.35, 0.45])
             p_scale = 1.0
         elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-            w_trend = np.array([0.20, 0.16, 0.14, 0.10, 0.10, 0.10, 0.08])
-            w_range = np.array([0.09, 0.14, 0.06, 0.20, 0.16, 0.06, 0.11])
+            w_trend = np.array([0.40, 0.40, 0.20])
+            w_range = np.array([0.20, 0.40, 0.40])
             p_scale = 2.0
         else:
-            w_trend = np.array([0.15, 0.12, 0.10, 0.15, 0.08, 0.10, 0.10])
-            w_range = np.array([0.10, 0.10, 0.08, 0.18, 0.14, 0.08, 0.12])
+            w_trend = np.array([0.35, 0.35, 0.30])
+            w_range = np.array([0.30, 0.35, 0.35])
             p_scale = 0.5 
-        return w_trend, w_range, np.eye(7) * p_scale
+        return w_trend, w_range, np.eye(3) * p_scale
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
@@ -188,24 +188,21 @@ class ContinuousMicrostructureEngine:
         self.hawkes_acceleration = self.hawkes_velocity - self.hawkes_v_prev
         self.hawkes_z_prev, self.hawkes_v_prev = self.hawkes_z, self.hawkes_velocity
 
-        # RLS Online Machine Learning Update
+        # RLS Online Machine Learning Update (3-Dimensional Matrix)
         if len(self.prediction_buffer) > 0:
-            while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 300.0:
+            while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 60.0:
                 old_time, old_price, features_array, old_pred_prob, virt_sl, virt_tp, action_dir, r_blend = self.prediction_buffer.popleft()
                 
                 if price != old_price and old_price > 0:
-                    
                     price_delta = price - old_price
                     risk_distance = abs(old_price - virt_sl) + 1e-9
                     realized_r = price_delta / risk_distance
                     
-                    # Normalize the R-multiple into a 0.0 to 1.0 probability space for the logistic function
                     if action_dir == "BUY":
                         y_target = np.clip(0.5 + (realized_r / 4.0), 0.0, 1.0)
                     else:
                         y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
 
-                    # Reconstruct the original p_up probability
                     old_p_up = old_pred_prob if action_dir == "BUY" else (1.0 - old_pred_prob)
                     error = y_target - old_p_up 
                     
@@ -214,7 +211,7 @@ class ContinuousMicrostructureEngine:
                     
                     dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
                     
-                    # Update Trending Expert (Weighted by old_r_blend)
+                    # Update Trending Expert (3x3 Matrix)
                     P_x_t = self.P_trending @ x
                     den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
                     K_t = P_x_t / den_t
@@ -223,12 +220,11 @@ class ContinuousMicrostructureEngine:
                     
                     trace_t = np.trace(self.P_trending)
                     if trace_t > 1000.0: 
-                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(7) * 1e-3)
-                        self._throttled_log(f"kalman_{self.symbol}", f"[X-RAY] 🔄 KALMAN TRACE RESET // {self.symbol} Trending matrix normalized.", 120.0)
+                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(3) * 1e-3)
                     else: 
-                        self.P_trending += np.eye(7) * 1e-3
+                        self.P_trending += np.eye(3) * 1e-3
                     
-                    # Update Ranging Expert (Weighted by 1.0 - old_r_blend)
+                    # Update Ranging Expert (3x3 Matrix)
                     P_x_r = self.P_ranging @ x
                     den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
                     K_r = P_x_r / den_r
@@ -237,25 +233,20 @@ class ContinuousMicrostructureEngine:
                     
                     trace_r = np.trace(self.P_ranging)
                     if trace_r > 1000.0: 
-                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(7) * 1e-3)
-                        self._throttled_log(f"kalman_r_{self.symbol}", f"[X-RAY] 🔄 KALMAN TRACE RESET // {self.symbol} Ranging matrix normalized.", 120.0)
+                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(3) * 1e-3)
                     else: 
-                        self.P_ranging += np.eye(7) * 1e-3
+                        self.P_ranging += np.eye(3) * 1e-3
                     
-                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(7) * 1e-6)
-                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(7) * 1e-6)
+                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(3) * 1e-6)
+                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(3) * 1e-6)
                     self.rls_updates += 1
 
-                    # 🚀 V56.2 SEV-2 AUDIT FIX: The RLS Doom Loop Reset Protocol
-                    # If MSE spikes (terrible predictions) AND the P-Matrix trace collapses (learning rate frozen),
-                    # the AI is stuck. We apply a defibrillator shock to reset the learning rate.
+                    # Doom Loop Reset Protocol (3x3)
                     if self.ewma_mse > 0.40:
                         if trace_t < (self.p_scale_init * 1.5):
-                            self.P_trending += np.eye(7) * (self.p_scale_init * 0.5)
-                            self._throttled_log(f"kalman_doom_t_{self.symbol}", f"[X-RAY] ⚡ DOOM LOOP RESET // {self.symbol} Trending AI unstuck.", 300.0)
+                            self.P_trending += np.eye(3) * (self.p_scale_init * 0.5)
                         if trace_r < (self.p_scale_init * 1.5):
-                            self.P_ranging += np.eye(7) * (self.p_scale_init * 0.5)
-                            self._throttled_log(f"kalman_doom_r_{self.symbol}", f"[X-RAY] ⚡ DOOM LOOP RESET // {self.symbol} Ranging AI unstuck.", 300.0)
+                            self.P_ranging += np.eye(3) * (self.p_scale_init * 0.5)
 
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
@@ -281,16 +272,16 @@ class ContinuousMicrostructureEngine:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
-        ofi_delta_z = self.ofi_fast_z - self.ofi_slow_z
-        
-        base_features = np.array([self.ofi_fast_z / 3.0, ofi_delta_z / 6.0, self.hawkes_z / 3.0, self.micro_price_skew / 10.0, vpin_z / 4.0])
-        liquidation_div = np.clip((self.hawkes_acceleration - self.micro_price_skew) / 5.0, -2.0, 2.0)
-        
-        features = np.clip(np.concatenate([base_features, [liquidation_div, tensor_alpha]]), -1.0, 1.0)
+        # 🚀 ORTHOGONAL FEATURE REDUCTION (3 Independent Alpha Drivers)
+        features = np.clip(np.array([
+            self.ofi_fast_z / 3.0,     # Driver 1: Passive Order Flow Pressure
+            self.hawkes_z / 3.0,       # Driver 2: Aggressive Trade Cascades
+            tensor_alpha               # Driver 3: Cross-Asset Macro Lead-Lag
+        ]), -1.0, 1.0)
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 7 
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 3 
 
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (self.kaufman_er - 0.35)))
         logit_fused = (r_blend * np.dot(self.weights_trending, attended_features)) + ((1.0 - r_blend) * np.dot(self.weights_ranging, attended_features))
@@ -302,7 +293,6 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # True Institutional Quantile & Symmetrical Damped Gate
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
@@ -311,7 +301,6 @@ class ContinuousMicrostructureEngine:
             baseline_gate = 0.55
             dynamic_ceiling = 0.90
 
-        # Symmetrical Entropy Adjustment
         if len(self.entropy_history) > 10:
             ent_arr = np.fromiter(self.entropy_history, dtype=float, count=len(self.entropy_history))
             ent_mean = float(np.mean(ent_arr))

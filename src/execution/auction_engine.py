@@ -6,7 +6,7 @@ and Dynamic Margin Sweeping.
 Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
 margin constraints and bridging Bybit exchange minimums dynamically.
 Patched with Strict 15% Exposure Caps, True Risk Parity, 100% Capital Unlock,
-Institutional TCA Preparation, and SEV-1 Orphan Trade Guards.
+Institutional TCA Preparation, SEV-1 Orphan Trade Guards, and Heap Determinism.
 """
 
 import time
@@ -43,6 +43,12 @@ class CapitalAuctionEngine:
         locks, API executors, and risk vaults.
         """
         self.core = core_engine
+        # 🚀 AUDIT FIX #7: Deterministic Heap Tie-Breaker
+        self._heap_counter = 0
+
+    def get_next_heap_id(self) -> int:
+        self._heap_counter += 1
+        return self._heap_counter
 
     async def run_global_capital_auction_worker(self):
         """
@@ -257,8 +263,8 @@ class CapitalAuctionEngine:
             margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
             
             raw_leverage = target_notional / margin_allocation_usdt
-            # 🚀 AUDIT FIX: Replaced math.ceil with round() to prevent forced over-leveraging
-            target_leverage = int(max(1, min(5, round(raw_leverage))))
+            # 🚀 AUDIT FIX #2: Replaced round() with math.floor() to strictly cap maximum risk
+            target_leverage = int(max(1, min(5, math.floor(raw_leverage * 0.95))))
 
             # 6. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
@@ -348,7 +354,8 @@ class CapitalAuctionEngine:
                     err_str = str(ex)
                     ret_code = getattr(ex, "ret_code", None) or getattr(ex, "code", None)
 
-                    if ret_code in [BybitRetCode.SYSTEM_MAINTENANCE, BybitRetCode.SERVICE_UNAVAILABLE] or any(code in err_str for code in ["10004", "10016", "10002", "500"]):
+                    # 🚀 AUDIT FIX: Removed 10002 from global maintenance to prevent isolated coin errors from freezing the swarm
+                    if ret_code in [BybitRetCode.SYSTEM_MAINTENANCE, BybitRetCode.SERVICE_UNAVAILABLE] or any(code in err_str for code in ["10004", "10016", "500"]):
                         logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.core.circuit_breaker_lock:
                             self.core.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0

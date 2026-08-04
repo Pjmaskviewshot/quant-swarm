@@ -5,7 +5,7 @@ The Apex Execution Engine. Features Dynamic Micro-Universe Filtering,
 Dynamic Margin Sweeping (Smart Scavenger), Limit-Only Escapes, 
 Dust-Sweep Position Closures, and Rate-Limit Protection.
 Patched for Institutional Thread Safety, True TCA Slippage Tracking,
-100% Capital Optimization, and SEV-1 Auditor Safety Protocols.
+100% Capital Optimization, SEV-1 Auditor Safety Protocols, and Non-Disruptive Hot-Swapping.
 """
 
 import os
@@ -139,7 +139,6 @@ class DistributedQuantEngine:
 
     def track_task(self, coro: Any):
         if len(self._active_tasks) > 500:
-            # 🚀 V56.1 FIX: Never silently drop tasks. Force an abort so the trade is liquidated.
             logger.critical("[X-RAY] 🛑 FATAL: TASK LIMIT EXCEEDED. Cannot safely spawn Guardian Daemon.")
             raise RuntimeError("CRITICAL: Task Limit Exceeded. Aborting position to prevent ghost trades.")
             
@@ -233,10 +232,7 @@ class DistributedQuantEngine:
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
         if not os.getenv("TELEGRAM_BOT_TOKEN") or len(os.getenv("TELEGRAM_BOT_TOKEN", "")) < 5: return
         try:
-            if is_html:
-                await self.telegram.send_html_report(message)
-            else:
-                await self.telegram.log_message(message, message_type)
+            await self.telegram.log_message(message, message_type)
         except Exception as e:
             logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
 
@@ -251,7 +247,6 @@ class DistributedQuantEngine:
 
     async def _get_max_affordable_notional(self):
         try: 
-            # 🚀 V56.2 FULL POWER: 100% Capital Access
             raw_balance = await self.executor.get_wallet_balance_usdt()
             available_balance = raw_balance * 1.00 
         except Exception: 
@@ -283,15 +278,15 @@ class DistributedQuantEngine:
             return False
             
     async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_buy: bool):
-        escape_price = current_price * 0.99 if is_buy else current_price * 1.01
         try:
             await self.executor.safe_call(
                 self.executor.client.place_order, 
                 category="linear", symbol=symbol, 
                 side="Sell" if is_buy else "Buy", 
-                orderType="Limit", price=self._align_price(symbol, escape_price),
+                orderType="Market", 
                 qty=str(qty), timeInForce="IOC", reduceOnly=True
             )
+            logger.critical(f"🚀 EMERGENCY EJECTION COMPLETE // Market Sold {qty} {symbol}.")
         except Exception as e:
             logger.error(f"[X-RAY] Emergency escape failed for {symbol}: {e}")
 
@@ -366,7 +361,6 @@ class DistributedQuantEngine:
                 if self.global_state_cache.get("current_day") != current_day:
                     self.global_state_cache["current_day"] = current_day
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
-                    # 🚀 AUDIT FIX: Removed midnight auto-rearm. Drawdown lock requires manual reboot.
 
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                 try:
@@ -388,7 +382,7 @@ class DistributedQuantEngine:
                 
                 if drawdown_pct >= 0.25:
                     self.fsm.trigger_global_emergency_lock()
-                    await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
+                    await self._safe_telegram_dispatch(f"🚨 EMERGENCY DRAWDOWN BREAKER TRIPPED\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=False)
                     raise EmergencyShutdown("Drawdown limit exceeded. Triggering safe exit.")
                 
                 filled_blocks = min(10, int(drawdown_pct * 10))
@@ -407,7 +401,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                self.track_task(self._safe_telegram_dispatch(report))
+                self.track_task(self._safe_telegram_dispatch(report, is_html=False))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
         symbol = trade_data.get("symbol")
@@ -496,8 +490,6 @@ class DistributedQuantEngine:
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))): 
                     return
                     
-                # 🚀 AUDIT FIX: Removed Funding Rate Poisoning. Letting RLS AI operate purely on L2 metrics.
-                    
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
                     prob_success += (feature_engine.get_htf_trend_bias(price) * 0.04) if action == "BUY" else -(feature_engine.get_htf_trend_bias(price) * 0.04)
                     
@@ -513,7 +505,9 @@ class DistributedQuantEngine:
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
                     }
-                    async with self.auction_lock: heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, id(payload), payload))
+                    # 🚀 AUDIT FIX #7: Use deterministic counter instead of unsafe memory id()
+                    heap_id = self.auction_engine.get_next_heap_id()
+                    async with self.auction_lock: heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
                 except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
                 
         except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -760,12 +754,13 @@ class DistributedQuantEngine:
                 if len(historical_data) >= 2: self.risk_vault.update_correlation_matrix(historical_data)
         except Exception as e: logger.error(f"[X-RAY] Correlation matrix update failed: {e}", exc_info=True)
 
-        self.stream_restart_event.set()
+        # 🚀 AUDIT FIX #3: Non-Disruptive Hot-Swap. Removed self.stream_restart_event.set() to prevent WebSocket disconnects.
         self.force_dna_refresh.set() 
 
     async def _universe_refresher_loop(self):
         while True:
-            await asyncio.sleep(14400)
+            # 🚀 AUDIT FIX #3: Increase correlation check frequency to 15 minutes (900s) via background REST hot-swap.
+            await asyncio.sleep(900)
             await self.run_universe_refresher()
 
     async def stream_manager_loop(self):
@@ -1085,7 +1080,7 @@ class DistributedQuantEngine:
         
         duration_mins = (time.time() - ctx["daemon_start_time"]) / 60.0
         self.log_to_wal_sync("settlement", [ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"]])
-        self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0)))
+        self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=False))
 
         async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
         self.risk_vault.update_position_ledger(symbol, 0.0)
@@ -1148,8 +1143,9 @@ class DistributedQuantEngine:
                         ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
                         
                     sl_proximity = abs(ctx["safe_c_price"] - ctx["current_sl"]) / (ctx["safe_c_price"] + 1e-9)
-                    # 🚀 AUDIT FIX: Ultra-low latency polling. Never sleep 1.0s.
-                    loop_sleep = 0.1 if sl_proximity < 0.01 else 0.5 
+                    
+                    # 🚀 REVERSION: Restored V55 breathing room. Altcoins need 0.5s+ to absorb noise without panic-selling.
+                    loop_sleep = 0.5 if sl_proximity < 0.005 else 1.5 
                     await asyncio.sleep(loop_sleep) 
                     
                     ctx["now"] = time.time()
@@ -1159,7 +1155,7 @@ class DistributedQuantEngine:
                     ctx["requires_sl_update"] = False
                     ctx["requires_tp_update"] = False
                     
-                    if ctx["api_check_counter"] >= (15 if loop_sleep == 1.0 else 75):
+                    if ctx["api_check_counter"] >= (15 if loop_sleep == 1.5 else 75):
                         ctx["api_check_counter"] = 0
                         try:
                             pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
@@ -1205,7 +1201,7 @@ class DistributedQuantEngine:
                         current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
                         await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
                 except Exception as e2: logger.error(f"[X-RAY] Emergency FSM flatten failed for {symbol}: {e2}", exc_info=True)
-                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def graceful_shutdown(self):
@@ -1261,10 +1257,12 @@ class DistributedQuantEngine:
         except Exception: pass
             
         if hasattr(self, 'telegram'): await self.telegram.close()
+        
+        # 🚀 AUDIT FIX #4: Safe Render Shutdown. Changed cancel_futures to False and wait to True.
         if hasattr(self, 'process_pool'):
-            self.process_pool.shutdown(wait=False, cancel_futures=True)
+            self.process_pool.shutdown(wait=True, cancel_futures=False)
             logger.info("🔌 ProcessPoolExecutor gracefully shut down.")
-        if hasattr(self.executor, "_api_thread_pool"): self.executor._api_thread_pool.shutdown(wait=False, cancel_futures=True)
+        if hasattr(self.executor, "_api_thread_pool"): self.executor._api_thread_pool.shutdown(wait=True, cancel_futures=False)
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def _safe_daemon_run(self, coro_func):

@@ -1,8 +1,9 @@
 """
-💎 V56.1 QUANTUM SWARM: PARALLELIZED UNIFIED API EXECUTOR
+💎 V56.2 QUANTUM SWARM: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
+Patched with SEV-1 Strict API Segmentation to guarantee execution priority.
 """
 
 import os
@@ -64,9 +65,9 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V56.1 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V56.2 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
-    secrets scrubbing, and titanium ticker filtering.
+    secrets scrubbing, titanium ticker filtering, and Priority Execution Lanes.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 8):
         self.api_key = api_key or ""
@@ -78,7 +79,11 @@ class BybitUnifiedExecutor:
             api_secret=api_secret
         )
         
-        self.rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
+        # 🚀 AUDIT FIX #4: Segmented Rate Limiting. 
+        # Separated read requests from write requests to guarantee execution orders are never stuck behind data polling.
+        self.data_rate_limiter = TokenBucketRateLimiter(capacity=20, fill_rate=10.0)
+        self.execution_rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
+        
         self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers, 
             thread_name_prefix="BybitIsolator"
@@ -91,7 +96,15 @@ class BybitUnifiedExecutor:
         Enforces rate-limiting, thread isolation, automatic retries on server load,
         fail-fast on parameter faults (10002), and token/secret scrubbing.
         """
-        await self.rate_limiter.acquire()
+        # Segment traffic: If it's an execution command (place, cancel, amend), use the Express Lane.
+        func_name = getattr(func, '__name__', '').lower()
+        is_execution = any(word in func_name for word in ["place", "cancel", "amend", "set_trading_stop", "set_leverage"])
+        
+        if is_execution:
+            await self.execution_rate_limiter.acquire()
+        else:
+            await self.data_rate_limiter.acquire()
+
         loop = asyncio.get_running_loop()
         bound_func = functools.partial(func, *args, **kwargs)
         
