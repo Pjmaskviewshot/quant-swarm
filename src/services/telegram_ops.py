@@ -1,8 +1,9 @@
 """
-🚀 V55.2 QUANTUM SWARM: TELEGRAM MISSION CONTROL
+💎 V56.2 QUANTUM SWARM: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
-and institutional-grade Forensic X-Ray HTML formatters.
+and institutional-grade Forensic X-Ray HTML formatters. Fully standardized
+to HTML parsing mode to eliminate formatting collisions.
 """
 
 import os
@@ -21,7 +22,7 @@ class AsyncTelegramReporter:
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self._session: Optional[aiohttp.ClientSession] = None
         
-        # 🚀 V55.2 Decoupled Message Queue
+        # 🚀 Decoupled Message Queue
         self._message_queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
 
@@ -103,7 +104,7 @@ class AsyncTelegramReporter:
 
                     # Fallback for parse errors (HTTP 400 Bad Request)
                     if response.status == 400 and "parse" in raw_err.lower():
-                        logger.warning("Telegram rejected formatting. Falling back to plain text.")
+                        logger.warning("Telegram rejected HTML formatting. Falling back to plain text.")
                         payload["text"] = self._strip_html(payload.get("text", ""))
                         payload["parse_mode"] = ""
                         continue
@@ -121,19 +122,18 @@ class AsyncTelegramReporter:
         return False
 
     async def log_message(self, text: str, alert_level: str = "INFO", max_retries: int = 3):
-        """Places markdown-formatted alert into the dispatch queue."""
+        """Places unified HTML-formatted alert into the dispatch queue."""
         emojis = {"INFO": "ℹ️", "SUCCESS": "🟢", "WARNING": "⚠️", "CRITICAL": "🚨"}
         prefix = emojis.get(str(alert_level).upper(), "🤖")
 
+        html_body = f"<b>{prefix} [SYSTEM ALERT]</b>\n\n{text}"
         payload = {
             "chat_id": self.chat_id,
-            "text": f"{prefix} *[SYSTEM ALERT]*\n\n{text}",
-            "parse_mode": "Markdown"
+            "text": html_body,
+            "parse_mode": "HTML"
         }
         
-        # Ensure worker is running
         self.start_worker()
-        # Fire-and-forget: Put payload into the queue non-blockingly
         await self._message_queue.put((payload, max_retries))
 
     async def send_html_report(self, html_text: str, max_retries: int = 3):
@@ -144,19 +144,15 @@ class AsyncTelegramReporter:
             "parse_mode": "HTML"
         }
         
-        # Ensure worker is running
         self.start_worker()
-        # Fire-and-forget
         await self._message_queue.put((payload, max_retries))
 
     # ====================================================================
-    # 🚀 V55.2 APEX: X-RAY FORENSIC FORMATTERS
+    # 🚀 V56.2 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
         """Formats the Deep-Dive Entry Ticket with X-Ray Diagnostics."""
-        
-        # Extract X-Ray Metrics
         notional_value = price * size
         sl_price = features.get("virtual_sl", price)
         sl_pct = (abs(price - sl_price) / price) if price > 0 else 0.0
@@ -202,7 +198,7 @@ class AsyncTelegramReporter:
         )
 
     def format_mission_control_dashboard(self, uptime: float, live_count: int, shadow_count: int, balance: float, session_pnl: float, drawdown: float, dd_bar: str, execution_stats: Dict[str, Any]) -> str:
-        """Formats the 10-Minute Mission Control Heartbeat for V55.2."""
+        """Formats the 10-Minute Mission Control Heartbeat."""
         win_rate = execution_stats.get('win_rate', 0.0)
         trades = execution_stats.get('trade_count', 0)
         avg_slip = execution_stats.get('avg_slippage_bps', 0.0)
@@ -212,7 +208,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V55.2 APEX)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V56.2 APEX)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
@@ -223,7 +219,7 @@ class AsyncTelegramReporter:
             f"• Risk Buffer:     <code>[{dd_bar}]</code>\n\n"
             f"🔬 <b>TODAY's EXECUTION METRICS</b>\n"
             f"• Trades Settled: <code>{trades}</code>\n"
-            f"• Live Win Rate: <code>{win_rate:.1%}</code>\n"
-            f"• Avg Slippage: <code>{avg_slip:.1f} bps</code>\n"
+            f"• Live Win Rate:  <code>{win_rate:.1%}</code>\n"
+            f"• Avg Slippage:   <code>{avg_slip:.1f} bps</code>\n"
             f"• Toxicity Radar: <code>{tox_radar}</code>"
         )
