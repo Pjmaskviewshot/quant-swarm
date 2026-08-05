@@ -4,13 +4,14 @@
 The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
 Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
 Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
-Patched for Institutional Thread Safety, True TCA Slippage Tracking,
-100% Capital Optimization, Micro-Account ($10-$50) Deadlock Resolution,
-Non-Disruptive Hot-Swapping, and True Equity FSM Monitoring.
 """
 
 import os
 import sys
+
+# 🚀 DEPLOYMENT FIX: Ensure `src/` directory is prepended to sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import time
 import math
 import asyncio
@@ -45,7 +46,13 @@ from features.micro_models import ContinuousMicrostructureEngine, AdaptiveSessio
 # Execution & Risk
 from execution.sor import SmartOrderRouter
 from execution.auction_engine import CapitalAuctionEngine
-from portfolio.risk_vault import InstitutionalRiskVault  
+
+# 🚀 DEPLOYMENT FIX: Fallback import for risk module filename compatibility
+try:
+    from portfolio.risk_vault import InstitutionalRiskVault
+except ModuleNotFoundError:
+    from portfolio.risk_manager import InstitutionalRiskVault
+
 from execution.delta_neutral import DeltaNeutralYieldEngine 
 
 # External Connectors
@@ -241,11 +248,6 @@ class DistributedQuantEngine:
             logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
 
     async def _get_true_equity_usdt(self) -> float:
-        """
-        Fetches True Account Equity (Available + Locked Margin + Unrealized PnL).
-        Eliminates the 'Margin-Lock Illusion' where the bot panics because Available Balance 
-        drops when multiple positions are opened.
-        """
         try:
             acc_info = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="UNIFIED", coin="USDT")
             if acc_info and acc_info.get("retCode") == 0 and acc_info.get("result", {}).get("list"):
