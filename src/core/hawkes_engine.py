@@ -1,9 +1,10 @@
 """
-💎 V55.2 QUANTUM SWARM: SELF-CALIBRATING HAWKES PROCESS
+💎 V56.2 QUANTUM SWARM: SELF-CALIBRATING HAWKES PROCESS
 -------------------------------------------------------
 Models the arrival intensity of algorithmic trade cascades.
 Features Dynamic Branching Ratio (ρ) calibration, Spectral Radius Stationarity 
 Clamping, and X-Ray Diagnostic Telemetry.
+Patched for correct Cold-Start Initialization.
 """
 
 import time
@@ -18,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.HAWKES")
 class BivariateHawkesEngine:
     def __init__(self, symbol: str = "GENERIC", calibration_window: int = 1000):
         """
-        🚀 V55.2 APEX: Self-Calibrating Bivariate Hawkes Process
+        🚀 V56.2 APEX: Self-Calibrating Bivariate Hawkes Process
         Node 0: Aggressive BUY trades
         Node 1: Aggressive SELL trades
         """
@@ -42,7 +43,9 @@ class BivariateHawkesEngine:
         
         # Recursive state matrix
         self.I = np.zeros((2, 2))
-        self.last_update_time = time.time()
+        
+        # 🚀 AUDIT P0 FIX: Initialize to 0.0 so the first tick gets a clean dt=0.001
+        self.last_update_time = 0.0
         
         # ONLINE ESTIMATION BUFFER
         self.calibration_window = calibration_window
@@ -116,9 +119,13 @@ class BivariateHawkesEngine:
         """
         Processes a single websocket trade tick in O(1) constant time.
         """
-        raw_dt = timestamp - self.last_update_time
-        # Clamp dt to prevent exponential underflow/overflow during initial ticks or gaps
-        dt = max(0.0, min(60.0, raw_dt)) if self.last_update_time > 0 else 0.001
+        # 🚀 AUDIT P0 FIX: Handle the cold-start initialization correctly
+        if self.last_update_time == 0.0:
+            dt = 0.001
+        else:
+            raw_dt = timestamp - self.last_update_time
+            # Clamp dt to prevent exponential underflow/overflow during gaps
+            dt = max(0.001, min(60.0, raw_dt))
         
         # Add to rolling buffer for Online Parameter Estimation
         self.dt_buffer.append(dt)

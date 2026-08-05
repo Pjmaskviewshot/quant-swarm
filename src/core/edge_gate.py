@@ -1,9 +1,10 @@
 """
-💎 V55.2 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
+💎 V56.2 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
 -------------------------------------------------------------------------
 Evaluates L2 Multi-Level Order Flow Imbalance (MLOFI), Dark Pool Iceberg Absorption,
 Micro-Price Effective Spreads (Liquidity Vacuums), and Roll Implicit Spreads. 
 Features X-Ray Diagnostic Telemetry.
+Patched for Directional Micro-Spread Logic and Strict Confluence Gating.
 """
 
 import math
@@ -18,9 +19,9 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V55.2 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    🚀 V56.2 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
     Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
-    Upgraded with Micro-Price Effective Spreads to eradicate false Amihud spikes.
+    Upgraded with Directional Micro-Price Effective Spreads.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -37,7 +38,7 @@ class MicrostructureEdgeGate:
         
         self.lambda_history = deque(maxlen=window_size)
         
-        # 🚀 V55.2 FIX: Replaced low-timeframe Amihud with Micro-Price Effective Spread
+        # 🚀 V56.2 FIX: Signed array for directional micro-price logic
         self.micro_spread_history = deque(maxlen=window_size)
         
         self.prev_bids = []
@@ -123,7 +124,7 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # 🚀 V55.2 FIX: Compute True Micro-Price Effective Spread (replaces 100-tick Amihud)
+        # 🚀 AUDIT P0 FIX: True Directional Micro-Price Effective Spread (removed abs)
         try:
             best_bid_p, best_bid_s = float(current_bids[0][0]), float(current_bids[0][1])
             best_ask_p, best_ask_s = float(current_asks[0][0]), float(current_asks[0][1])
@@ -131,8 +132,9 @@ class MicrostructureEdgeGate:
             # The True Micro-Price reflects the balance of L1 liquidity depth
             micro_price = (best_bid_p * best_ask_s + best_ask_p * best_bid_s) / (best_bid_s + best_ask_s + 1e-9)
             
-            # The divergence of Micro-Price from Mid-Price in Basis Points
-            micro_spread_bps = (abs(micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
+            # The DIRECTIONAL divergence of Micro-Price from Mid-Price in Basis Points
+            # Positive = Upward pressure, Negative = Downward pressure
+            micro_spread_bps = ((micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
             self.micro_spread_history.append(micro_spread_bps)
         except Exception:
             self.micro_spread_history.append(0.0)
@@ -181,7 +183,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 V55.2 STRUCTURAL EDGE EVALUATOR
+        🚀 V56.2 STRUCTURAL EDGE EVALUATOR
         Evaluates confluence between statistical prediction, Order Flow Imbalance, Dark Pool Iceberg
         absorption, and Micro-Price Liquidity Vacuums. Emits X-Ray diagnostics.
         """
@@ -194,37 +196,50 @@ class MicrostructureEdgeGate:
         current_t_imb = np.mean(list(self._trade_imbalances)[-5:])
         t_imb_std = np.std(self._trade_imbalances)
         
-        if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 0.5):
+        # 🚀 AUDIT FIX: Raised the MLOFI flat gate from 0.5 to 1.0 standard deviations to reduce noise
+        if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 1.0):
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "MLOFI_FLAT", "routing": "STANDARD"}
 
         direction = "BUY" if current_mlofi > 0 else "SELL"
+        
+        # 🚀 AUDIT P0 FIX: CONFLUENCE GUARD MUST BE CHECKED FIRST
+        if intended_direction and direction != intended_direction:
+            return {
+                "action": "HOLD", 
+                "confidence": 0.0, 
+                "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, MLOFI wants {direction}",
+                "routing": "STANDARD"
+            }
         
         current_lambda = self._calculate_instantaneous_lambda()
         raw_baseline = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         baseline_lambda = max(1e-6, float(raw_baseline))
         
-        # 1. PREDATORY MAKER MODE: Micro-Price Effective Spread Vacuum Detection
+        # 1. PREDATORY MAKER MODE: Directional Micro-Price Effective Spread Vacuum Detection
         if len(self.micro_spread_history) >= 20:
             current_micro_spread = self.micro_spread_history[-1]
-            spread_mean = np.mean(list(self.micro_spread_history)[-20:])
+            abs_spread_mean = np.mean(np.abs(list(self.micro_spread_history)[-20:]))
             
-            # If the micro-price aggressively diverges from the mid-price, one side of the book has been vacuumed
-            if spread_mean > 0 and current_micro_spread > (spread_mean * 4.0) and current_micro_spread > 1.0:
-                self._throttled_warn(
-                    f"vacuum_{symbol}", 
-                    f"[X-RAY] 🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting Liquidity Vacuum (Micro-Spread Spike: {current_micro_spread/spread_mean:.1f}x)."
-                )
-                return {
-                    "action": intended_direction if intended_direction else direction, 
-                    "confidence": 0.75, 
-                    "reasoning": f"PREDATORY_MAKER_VACUUM | Micro-Spread: {current_micro_spread:.2f} bps",
-                    "routing": "MAKER_ONLY"
-                }
+            if abs_spread_mean > 0 and abs(current_micro_spread) > (abs_spread_mean * 4.0) and abs(current_micro_spread) > 1.0:
+                vacuum_dir = "BUY" if current_micro_spread > 0 else "SELL"
+                
+                # Double-verify the vacuum direction matches the AI and MLOFI direction
+                if vacuum_dir == direction:
+                    self._throttled_warn(
+                        f"vacuum_{symbol}", 
+                        f"[X-RAY] 🎯 PREDATORY MAKER ENGAGED // {symbol} | Exploiting {vacuum_dir} Liquidity Vacuum (Spike: {abs(current_micro_spread)/abs_spread_mean:.1f}x)."
+                    )
+                    return {
+                        "action": direction, 
+                        "confidence": 0.75, 
+                        "reasoning": f"PREDATORY_MAKER_VACUUM | Micro-Spread: {current_micro_spread:.2f} bps",
+                        "routing": "MAKER_ONLY"
+                    }
 
         # 2. DARK POOL ICEBERG ABSORPTION DETECTION
         if t_imb_std > 0 and current_lambda < (baseline_lambda * 0.1):
             t_imb_z = current_t_imb / t_imb_std
-            if t_imb_z < -2.5: 
+            if t_imb_z < -2.5 and direction == "BUY": 
                 self._throttled_warn(f"darkpool_buy_{symbol}", f"[X-RAY] 🧊 DARK POOL ABSORPTION // {symbol} | Heavy selling absorbed. Reversing to BUY.")
                 return {
                     "action": "BUY", 
@@ -232,7 +247,7 @@ class MicrostructureEdgeGate:
                     "reasoning": f"DARK_POOL_ICEBERG_SUPPORT | T_IMB_Z: {t_imb_z:.2f}",
                     "routing": "STANDARD"
                 }
-            elif t_imb_z > 2.5: 
+            elif t_imb_z > 2.5 and direction == "SELL": 
                 self._throttled_warn(f"darkpool_sell_{symbol}", f"[X-RAY] 🧊 DARK POOL ABSORPTION // {symbol} | Heavy buying absorbed. Reversing to SELL.")
                 return {
                     "action": "SELL", 
@@ -241,16 +256,7 @@ class MicrostructureEdgeGate:
                     "routing": "STANDARD"
                 }
 
-        # 3. CONFLUENCE GUARD: Model Direction vs. Microstructure OFI
-        if intended_direction and direction != intended_direction:
-            return {
-                "action": "HOLD", 
-                "confidence": 0.0, 
-                "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, MLOFI wants {direction}",
-                "routing": "STANDARD"
-            }
-
-        # 4. DEEP BOOK BREAKOUT: High VPIN & Expanding Price Impact
+        # 3. DEEP BOOK BREAKOUT: High VPIN & Expanding Price Impact
         if abs(vpin_z) >= 1.5 and current_lambda >= (baseline_lambda * 0.8):
             lambda_expansion = min(1.5, current_lambda / max(baseline_lambda, 1e-9))
             confidence = min(0.95, 0.50 + (lambda_expansion * 0.20) + (abs(vpin_z) * 0.05))

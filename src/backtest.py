@@ -4,7 +4,7 @@
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
 of the live V56.2 L2-tick engine and cannot simulate true Order Flow Imbalance.
 Patched for 3-Feature Orthogonal RLS Matrix Alignment, HMM Warmup Exclusion,
-and True Fractional Kelly Sizing.
+True Fractional Kelly Sizing, and Evaluative Edge Definition.
 """
 
 import argparse
@@ -296,7 +296,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
     
-    # 🚀 V56.3 AUDIT FIX: Track independent Win/Loss R-Multiples for True Kelly calculation
     avg_win_r = 1.5
     avg_loss_r = 1.0
     
@@ -515,7 +514,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             
-            # 🚀 V56.3 AUDIT FIX: True Fractional Kelly integration
             if len(rolling_outcomes) >= 10:
                 p_win = np.mean(rolling_outcomes)
                 q_loss = 1.0 - p_win
@@ -543,7 +541,10 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 
             if prob_success >= max(dynamic_gate, p_win) and not vacuum_blocked:
                 taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0005
+                
+                # 🚀 AUDIT P0 FIX: Define net_ev_pct and net_edge_bps before using them
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
+                net_edge_bps = net_ev_pct * 10000.0
                 
                 if net_ev_pct > ev_floor:  
                     entry = c['open'] 
@@ -655,7 +656,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
-                    # 🚀 AUDIT FIX #9: Simulate the new Limit-IOC 1% slippage collar for emergency escapes
                     if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
                         slippage_penalty = 0.0050 # Caps out around 50bps to 100bps simulated limit
                         applied_fee = TAKER_FEE * 2 
@@ -667,7 +667,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
                         applied_fee = TAKER_FEE * 2
                     
-                    # 🚀 V56.3 AUDIT FIX: True Fractional Kelly Application
                     base_fraction = max(0.002, kelly_f / 2.0)
                     cvar_penalty = calculate_rolling_cvar(variance_history)
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
@@ -685,7 +684,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     is_win = net_leveraged > 0
                     rolling_outcomes.append(1.0 if is_win else 0.0)
                     
-                    # Update true R-multiples for next Kelly calculation
                     actual_r = gross / sl_dist_pct
                     if is_win:
                         avg_win_r = (avg_win_r * 0.95) + (min(5.0, abs(actual_r)) * 0.05)

@@ -6,7 +6,8 @@ Dynamic Margin Sweeping (Smart Scavenger), Limit-Only Escapes,
 Dust-Sweep Position Closures, and Rate-Limit Protection.
 Patched for Institutional Thread Safety, True TCA Slippage Tracking,
 100% Capital Optimization, SEV-1 Auditor Safety Protocols, Non-Disruptive Hot-Swapping,
-Correlation Matrix Pre-Seeding, Limit-IOC Emergency Escapes, and True Equity FSM Monitoring.
+Correlation Matrix Pre-Seeding, Limit-IOC Emergency Escapes, True Equity FSM Monitoring,
+and Strict 65% Confidence Gating.
 """
 
 import os
@@ -557,16 +558,19 @@ class DistributedQuantEngine:
                     if prob_success >= 0.55: logger.info(f"[X-RAY] ℹ️ NEAR-MISS // {symbol} | Prob: {prob_success:.1%} | Routing: {routing_mode} | Net EV: {net_ev_pct*10000:.1f} bps < Floor {ev_floor*10000:.1f} bps (Spread: {spread_cost*10000:.1f} bps)")
                     return
                     
-                dynamic_gate = sgd_state.get("dynamic_gate", 0.50) - (0.08 if routing_mode == "MAKER_ONLY" else 0.0)
+                prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
+                # 🚀 AUDIT P1 FIX: Tightened the baseline confidence gate from 0.55 to 0.65 to survive high-toxicity markets
                 async with self.portfolio_state_lock: dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+                
+                # Check against the tighter dynamic gate, which we will force to have a minimum of 0.65
+                dynamic_gate = max(0.65, sgd_state.get("dynamic_gate", 0.65) - (0.08 if routing_mode == "MAKER_ONLY" else 0.0))
+
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))): 
                     return
                     
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
                     prob_success += (feature_engine.get_htf_trend_bias(price) * 0.04) if action == "BUY" else -(feature_engine.get_htf_trend_bias(price) * 0.04)
-                    
-                prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
                 try:
                     payload = {
