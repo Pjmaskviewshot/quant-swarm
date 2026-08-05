@@ -1,13 +1,11 @@
 """
 🌌 V56.2 QUANTUM MICRO-CORE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
 ----------------------------------------------------------------------
-Features Direct Risk Sizing, Asymmetric House Money Compounding,
+Features Adaptive Micro-Account Notional Bridging, Direct Risk Sizing,
 and Dynamic Margin Sweeping.
-Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
-margin constraints and bridging Bybit exchange minimums dynamically.
-Patched with Strict 15% Exposure Caps, True Risk Parity, 100% Capital Unlock,
-Institutional TCA Preparation, SEV-1 Orphan Trade Guards, Heap Determinism,
-and Strict Zero-Edge Kelly Rejection.
+Patched for Micro-Account Deadlock Resolution ($15 Balance Support),
+True Risk Parity, TCA Preparation, SEV-1 Orphan Trade Guards,
+Heap Determinism, and Strict Zero-Edge Kelly Rejection.
 """
 
 import time
@@ -129,10 +127,11 @@ class CapitalAuctionEngine:
                         logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Too late to strike.")
                         continue
 
-                # Evaluate Portfolio Heat & Correlation Limits
+                # Provisional notional check adapted for micro accounts
+                provisional_notional = max(6.50, current_bal * 0.15)
                 is_safe, risk_reason = self.core.risk_vault.evaluate_portfolio_safety(
                     current_balance=current_bal,
-                    new_position_notional=current_bal * 0.15, # Provisional check assuming max 15% allocation
+                    new_position_notional=provisional_notional,
                     symbol=top_symbol
                 )
 
@@ -161,8 +160,8 @@ class CapitalAuctionEngine:
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
         V56.2 Execution Engine. 
-        Patched with strict 15% equity exposure limits, Direct Risk Sizing, Risk-of-Ruin floor,
-        and L2-Aware simulated paper fills.
+        Patched with Adaptive Micro-Account Notional Bridging, Direct Risk Sizing,
+        Risk-of-Ruin floor, and L2-Aware simulated paper fills.
         """
         try:
             # Duplicate Daemon Check
@@ -198,12 +197,12 @@ class CapitalAuctionEngine:
             min_qty = limits["min_qty"]
             qty_step = limits["qty_step"]
             
-            exchange_min_notional = min_qty * current_price
+            exchange_min_notional = max(6.00, min_qty * current_price)
 
             # 4. 🌌 RISK & EXPOSURE CLAMPS (ZERO-EDGE AVOIDANCE)
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
             
-            # 🚀 AUDIT P0 FIX: Strictly reject execution if Kelly fraction is zero or negative
+            # Strictly reject execution if Kelly fraction is zero or negative
             if fractional_risk <= 0.0:
                 logger.info(f"[X-RAY] 🚫 KELLY REJECT // {symbol} Non-positive edge (f* <= 0). Aborting execution.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
@@ -213,53 +212,44 @@ class CapitalAuctionEngine:
             vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
             fractional_risk = min(vault_max_risk, fractional_risk)
 
-            # 🚀 AUDIT P0 FIX: True Risk Sizing (Removed Margin Indirection)
-            # 1. Size directly by risk
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
-            # 2. Cap notional to strict 15% max exposure
-            max_allowed_notional = available_balance * 0.15
+            # 🚀 MICRO-ACCOUNT DEADLOCK RESOLUTION:
+            # For micro accounts (< $50 balance), allow bridging to the exchange minimum ($6.00-$6.50)
+            # provided the dollar risk at SL does not exceed 2.5% of total account balance.
+            standard_max_notional = available_balance * 0.25 if available_balance < 50.0 else available_balance * 0.15
+            max_allowed_notional = max(exchange_min_notional * 1.05, standard_max_notional)
             
-            if raw_notional > max_allowed_notional:
-                target_notional = max_allowed_notional
-            else:
-                target_notional = raw_notional
+            target_notional = min(raw_notional, max_allowed_notional)
                 
-            # 3. Handle Exchange Minimums (Do not illegally lever up)
             if target_notional < exchange_min_notional:
-                implied_risk_at_min = exchange_min_notional * sl_distance_pct
-                max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
-                
-                if implied_risk_at_min <= max_tolerable_risk:
-                    target_notional = exchange_min_notional * 1.05 # Safely clear the minimum
-                else:
-                    logger.warning(
-                        f"[X-RAY] 🚫 DANGER ABORT // {symbol} Exchange min notional (${exchange_min_notional:.2f}) "
-                        f"forces actual risk to ${implied_risk_at_min:.2f} > vault defense ${max_tolerable_risk:.2f}. Bypassing."
-                    )
-                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                    return
+                target_notional = exchange_min_notional * 1.05
 
-            # Recalculate true risk after capping and flooring
             actual_dollar_risk = target_notional * sl_distance_pct
+            max_tolerable_risk = available_balance * 0.025  # Max 2.5% account loss on SL for micro-balances
 
-            # Calculate exact quantity strictly using the capped target_notional
+            if actual_dollar_risk > max_tolerable_risk:
+                logger.warning(
+                    f"[X-RAY] 🚫 RISK OVERFLOW ABORT // {symbol} Exchange min notional (${exchange_min_notional:.2f}) "
+                    f"forces risk of ${actual_dollar_risk:.2f} > max allowed (${max_tolerable_risk:.2f}). Skipping."
+                )
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
+
             safe_qty = target_notional / current_price
-            target_position_size = math.floor(safe_qty / qty_step) * qty_step
+            target_position_size = math.ceil(safe_qty / qty_step) * qty_step
             
             if target_position_size < min_qty:
                 target_position_size = min_qty
                 
             target_notional = target_position_size * current_price
 
-            # 4. Calculate Implied Leverage
-            # Leverage is strictly a function of margin efficiency, NOT position sizing.
-            margin_target = available_balance * 0.10
-            implied_leverage = target_notional / max(1.0, margin_target)
-            target_leverage = int(max(1, min(5, math.ceil(implied_leverage))))
+            margin_target = max(1.0, target_notional / 3.0)
+            implied_leverage = target_notional / margin_target
+            target_leverage = int(max(2, min(5, math.ceil(implied_leverage))))
 
-            # 6. Target Price Calculus & Formatting
+            # 5. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
@@ -274,7 +264,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 LEVERAGE-BRIDGE ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Isolated Risk: ${actual_dollar_risk:.2f}")
+            logger.info(f"[X-RAY] 🌉 LEVERAGE-BRIDGE ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${actual_dollar_risk:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
@@ -289,12 +279,11 @@ class CapitalAuctionEngine:
                 execution_success = False
                 
                 if not levels:
-                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Orderbook is completely empty. No liquidity to simulate fill.")
+                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Orderbook empty.")
                 else:
                     for price_str, vol_str in levels:
                         level_price = float(price_str)
                         level_vol = float(vol_str)
-                        
                         if level_vol <= 0: continue
                         
                         take_vol = min(remaining_qty_to_fill, level_vol)
@@ -307,17 +296,13 @@ class CapitalAuctionEngine:
                             break
                             
                     if remaining_qty_to_fill > 0:
-                        logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Simulated {target_position_size} exhausted entire visible L2 depth. Order rejected to prevent massive slippage.")
                         execution_success = False
-                        
                     elif execution_success:
                         slippage_bps = abs(simulated_avg_entry_price - current_price) / current_price * 10000.0
-                        if slippage_bps > 12.0:
-                            logger.warning(f"[X-RAY] 🚫 PAPER SLIPPAGE REJECT // {symbol} Order swept book causing {slippage_bps:.1f} bps slippage. Aborting.")
+                        if slippage_bps > 20.0:  # Relaxed paper slippage threshold for altcoins
                             execution_success = False
                         else:
                             current_price = simulated_avg_entry_price
-                            logger.info(f"[X-RAY] 📝 PAPER FILL // {symbol} simulated execution at {current_price:.5f} ({slippage_bps:.1f} bps slippage).")
                             
                 actual_filled_notional = target_position_size * current_price
             else:
@@ -346,10 +331,8 @@ class CapitalAuctionEngine:
                         logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.core.circuit_breaker_lock:
                             self.core.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
-                    
                     elif ret_code in [BybitRetCode.INSUFFICIENT_BALANCE, BybitRetCode.QTY_OUT_OF_BOUNDS] or any(code in err_str for code in ["110007", "not enough", "10001"]):
                         logger.warning(f"[X-RAY] ⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
-                    
                     else:
                         logger.error(f"[X-RAY] Execution error for {symbol}: {err_str}", exc_info=True)
                     
@@ -357,7 +340,7 @@ class CapitalAuctionEngine:
                     return
 
             if not execution_success: 
-                logger.warning(f"[X-RAY] 🚫 SOR ABORT // Smart Order Router failed to fill {symbol} at acceptable slippage.")
+                logger.warning(f"[X-RAY] 🚫 SOR ABORT // Smart Order Router failed to fill {symbol}.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return 
                 
@@ -369,11 +352,11 @@ class CapitalAuctionEngine:
                     actual_filled_notional = actual_qty_filled * current_price
                     
                     if actual_filled_notional <= 0:
-                        logger.warning(f"[X-RAY] 👻 PHANTOM FILL // SOR reported success but Bybit ledger shows 0 position for {symbol}.")
+                        logger.warning(f"[X-RAY] 👻 PHANTOM FILL // SOR reported success but Bybit shows 0 position for {symbol}.")
                         async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                         return
                 except Exception as e:
-                    logger.warning(f"[X-RAY] Position verification failed after execute for {symbol}: {e}", exc_info=True)
+                    logger.warning(f"[X-RAY] Position verification failed for {symbol}: {e}", exc_info=True)
                     actual_qty_filled = target_position_size
                     actual_filled_notional = target_notional
                     
@@ -406,7 +389,7 @@ class CapitalAuctionEngine:
                 if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
                     qty = float(pos_list[0]["size"])
                     side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
-                    logger.critical(f"🛑 ORPHAN GUARD ACTIVATED // Liquidating {symbol} due to daemon spawn failure.")
+                    logger.critical(f"🛑 ORPHAN GUARD ACTIVATED // Liquidating {symbol}.")
                     await self.core.executor.safe_call(
                         self.core.executor.client.place_order, category="linear", symbol=symbol, side=side, 
                         orderType="Market", qty=str(qty), timeInForce="IOC", reduceOnly=True
