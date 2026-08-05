@@ -4,6 +4,7 @@
 Scale-Invariant Kelly Sizing with Volatility-Adjusted CVaR Protection,
 Micro-Account Notional Adaptation ($5 to $1,000,000+),
 Full Pairwise Correlation Matrices, and Dynamic Drawdown Circuit Breakers.
+Patched for Max 3 Concurrent Micro-Account Trades.
 """
 
 import math
@@ -11,7 +12,7 @@ import logging
 from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import numpy as np
-import pandas as pd  
+import pandas as pd
 
 logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
@@ -147,8 +148,8 @@ class InstitutionalRiskVault:
         # Bypasses percentage caps for micro-accounts (< $50) so $6.00-$6.50 minimum orders can clear.
         if current_balance < 50.0:
             active_count = len(self.active_positions)
-            if active_count >= 2:  # Cap micro-accounts to max 2 concurrent positions
-                return False, f"MICRO_ACCOUNT_MAX_POSITIONS_REACHED ({active_count}/2)"
+            if active_count >= 3:  # 🚀 UNLEASH PATCH: Raised from 2 to 3 concurrent trades
+                return False, f"MICRO_ACCOUNT_MAX_POSITIONS_REACHED ({active_count}/3)"
             
             if symbol in self.active_positions:
                 return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
