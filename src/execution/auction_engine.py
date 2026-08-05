@@ -120,8 +120,8 @@ class CapitalAuctionEngine:
                     live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
                     drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
                     
-                    # Prevent execution if price has run away before we could strike
-                    if drift_pct > 0.0030: 
+                    # 🚀 UNLEASH PATCH: Widen drift tolerance from 0.3% to 0.8% to catch fast breakouts
+                    if drift_pct > 0.0080: 
                         logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting.")
                         continue
 

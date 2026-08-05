@@ -1,5 +1,5 @@
 """
-💎 V50.0 QUANTUM SWARM: OPTIMISTIC DECOUPLED MEMORY LEDGER
+💎 V57.0 QUANTUM SWARM: OPTIMISTIC DECOUPLED MEMORY LEDGER
 ----------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
@@ -41,7 +41,7 @@ class MemoryBank:
 
     def _safe_execute(self, query_builder, max_retries: int = 2):
         """
-        🚀 V50.0 FIX: Stripped out blocking time.sleep()
+        🚀 V57.0 FIX: Stripped out blocking time.sleep()
         Cloud faults instantly fail over without freezing the event loop.
         """
         for attempt in range(max_retries):
@@ -108,7 +108,6 @@ class MemoryBank:
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"[X-RAY] {label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
-            # Explicitly do NOT log noisy stack traces for transient drops
             raise Exception(f"Database insert failed: {e}")
 
     def log_live_execution_result(
@@ -171,7 +170,7 @@ class MemoryBank:
         interval_mins: float = 15.0
     ) -> int:
         """
-        🚀 V50.0 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
+        🚀 V57.0 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
         """
         resolved_count = 0
 
@@ -232,7 +231,7 @@ class MemoryBank:
                 candles_to_check = max(1, int(elapsed_minutes) + 2) 
                 start_index = max(0, len(closes) - candles_to_check)
 
-                # ⚡ VECTORIZED INTRA-BAR HIT DETECTION
+                # VECTORIZED INTRA-BAR HIT DETECTION
                 highs_arr = np.array(highs[start_index:])
                 lows_arr = np.array(lows[start_index:])
 
@@ -306,10 +305,10 @@ class MemoryBank:
         except Exception as e:
             raise Exception(f"Batch resolution fault: {e}")
 
-    def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 15) -> Dict[str, Any]:
+    def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
         """
-        🚀 V50.0 Evaluates if a shadow coin has proven sufficient statistical edge 
-        to be promoted into the live capital allocation matrix.
+        🚀 V57.0 Evaluates if a shadow coin has proven sufficient statistical edge 
+        to be promoted into the live capital allocation matrix (Minimum 35 trades).
         """
         try:
             query = (
@@ -323,14 +322,14 @@ class MemoryBank:
             response = self._safe_execute(query)
             data = response.data if response else []
 
-            if len(data) < 5:
+            if len(data) < 35:
                 return {
                     "should_promote": False,
                     "should_demote": False,
                     "shadow_sharpe": 0.0,
                     "shadow_win_rate": 0.50,
                     "sample_count": len(data),
-                    "reason": f"Insufficient shadow samples ({len(data)}/5 min)"
+                    "reason": f"Insufficient shadow samples ({len(data)}/35 min)"
                 }
 
             pnls = np.array([float(r.get("net_pnl", 0.0)) for r in data])
@@ -342,7 +341,7 @@ class MemoryBank:
             std_pnl = np.std(pnls) + 1e-9
             shadow_sharpe = float((mean_pnl / std_pnl) * math.sqrt(252.0)) if std_pnl > 1e-6 else 0.0
 
-            should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.2)
+            should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.5)
             should_demote = (win_rate < 0.45) or (shadow_sharpe < -0.5)
 
             reason = "STABLE"
@@ -368,7 +367,7 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V50.0 BAYESIAN DNA MATRIX
+        🚀 V57.0 BAYESIAN DNA MATRIX
         Uses K-Nearest Neighbors matching on historical market regimes to determine 
         if the current setup is statistically viable.
         """

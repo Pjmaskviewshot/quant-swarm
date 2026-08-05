@@ -4,12 +4,14 @@
 The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
 Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
 Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
+Patched with Unleash Settings: Lowered 55% Confidence Gate, Relaxed EV Floors, 
+and 0.8% Price Drift Tolerance for Active Micro-Account Execution.
 """
 
 import os
 import sys
 
-# 🚀 DEPLOYMENT FIX: Ensure `src/` directory is prepended to sys.path
+# DEPLOYMENT FIX: Ensure `src/` directory is prepended to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import time
@@ -47,7 +49,7 @@ from features.micro_models import ContinuousMicrostructureEngine, AdaptiveSessio
 from execution.sor import SmartOrderRouter
 from execution.auction_engine import CapitalAuctionEngine
 
-# 🚀 DEPLOYMENT FIX: Fallback import for risk module filename compatibility
+# Fallback import for risk module filename compatibility
 try:
     from portfolio.risk_vault import InstitutionalRiskVault
 except ModuleNotFoundError:
@@ -62,7 +64,7 @@ from services.telegram_ops import AsyncTelegramReporter
 from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger("QUANT_CORE.V57.0_OMNI_STATE")
 
 
@@ -561,9 +563,10 @@ class DistributedQuantEngine:
 
                 async with self.portfolio_state_lock: dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
                 
-                dynamic_gate = max(0.65, sgd_state.get("dynamic_gate", 0.65) - (0.08 if routing_mode == "MAKER_ONLY" else 0.0))
+                # UNLEASH PATCH: Lowered baseline confidence gate from 0.65 to 0.55 for micro-accounts
+                dynamic_gate = max(0.55, sgd_state.get("dynamic_gate", 0.55) - (0.05 if routing_mode == "MAKER_ONLY" else 0.0))
 
-                if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.50))): 
+                if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.48))): 
                     return
                     
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):

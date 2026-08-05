@@ -40,8 +40,8 @@ class AdaptiveSessionClock:
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
         if routing_mode == "MAKER_ONLY":
-            return 0.00005  # +0.5 bps EV for maker limit orders
-        return 0.00010      # +1.0 bps EV for taker/iceberg orders
+            return 0.00001  # Relaxed EV floor for backtesting
+        return 0.00002      # Relaxed EV floor for taker orders
 
 
 def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
@@ -461,7 +461,8 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         error_scaler = 1.0 + max(0.0, (ewma_mse - 0.25) * 0.5)
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-        dynamic_gate = max(0.65, min(dynamic_ceiling, raw_gate))
+        # 🚀 UNLEASH PATCH: Lowered baseline confidence gate floor from 0.65 to 0.55 in backtest
+        dynamic_gate = max(0.55, min(dynamic_ceiling, raw_gate))
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
@@ -515,10 +516,10 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
         if t_imb_z < -2.5 and abs(skew) < 1.0: 
             action_dir = "BUY"
-            prob_success = max(prob_success, 0.65)
+            prob_success = max(prob_success, 0.55)
         elif t_imb_z > 2.5 and abs(skew) < 1.0: 
             action_dir = "SELL"
-            prob_success = max(prob_success, 0.65)
+            prob_success = max(prob_success, 0.55)
         
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         atr_proxy = vol_sigma * sim_price
@@ -555,7 +556,7 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 kelly_f = 0.010
                 
             routing_mode = "STANDARD"
-            if vacuum_blocked and prob_success > 0.65:
+            if vacuum_blocked and prob_success > 0.55:
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
                 vacuum_blocked = False 
@@ -566,7 +567,7 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 regime = "MEAN_REVERTING"
                 
             if routing_mode == "MAKER_ONLY":
-                dynamic_gate -= 0.08
+                dynamic_gate -= 0.05
                 
             ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
                 
@@ -687,7 +688,6 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
                     if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
-                        # Adaptive simulated slippage: 15 bps majors / 35 bps altcoins
                         max_slippage = 0.0015 if any(m in symbol for m in ["BTC", "ETH", "SOL"]) else 0.0035
                         slippage_penalty = max_slippage
                         applied_fee = TAKER_FEE * 2 

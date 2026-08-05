@@ -3,8 +3,7 @@
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Features Gram-Schmidt Orthogonal Feature Extraction, Symmetrical
-Entropy Gating, and Pure Mixture-of-Experts RLS.
+Patched with Relaxed Micro-Account EV Floors and Symmetrical Entropy Gating.
 """
 
 import math
@@ -35,9 +34,10 @@ class AdaptiveSessionClock:
 
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
+        # 🚀 UNLEASH PATCH: Relaxed EV floors to prevent micro-account signal starvation
         if routing_mode == "MAKER_ONLY":
-            return 0.00005  # +0.5 bps EV for maker limit orders
-        return 0.00010       # +1.0 bps EV for taker/iceberg orders
+            return 0.00001  # Near-zero EV floor for maker limit orders
+        return 0.00002       # 0.2 bps EV floor for taker/iceberg orders
 
 
 class ClusterWarmStartRLS:

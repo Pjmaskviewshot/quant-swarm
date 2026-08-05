@@ -1,3 +1,11 @@
+"""
+⚡ V57.0 QUANTUM SWARM: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
+--------------------------------------------------------------
+Serves as the O(1) in-memory cache for macro regime analysis 
+and the single source of truth for Swarm-level circuit breakers.
+Patched with clean standard indentation and unified lock properties.
+"""
+
 import logging
 import time
 from enum import Enum
@@ -11,31 +19,26 @@ class TradingState(Enum):
     ACTIVE_TRADING = "DECENTRALIZED_ACTIVE"
     ACTIVE_MEAN_REVERSION = "DECENTRALIZED_MEAN_REV"
     EMERGENCY_LOCK = "EMERGENCY_LOCK"
-    # New Swarm States for Off-Path LLM Integration
     AI_MACRO_BULL = "AI_MACRO_BULL"
     AI_MACRO_BEAR = "AI_MACRO_BEAR"
 
 class SystemStateMachine:
     """
-    🚀 V35 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
+    ⚡ V57.0 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
     Serves as the O(1) in-memory cache for the Off-Path AI LLM Debate Matrix 
     and the single-source-of-truth Swarm-level Circuit Breaker.
     """
     def __init__(self, accuracy_threshold: float = 0.60, warmup_epochs: int = 150):
         self.current_state = TradingState.BOOTSTRAPPING
         
-        # ⚡ O(1) Cache for off-path LLM predictions (Eliminates execution latency)
+        # O(1) Cache for off-path LLM predictions (Eliminates execution latency)
         self.ai_macro_cache: Dict[str, Dict[str, Any]] = {}
         
-        # 🛑 Single Source of Truth for Swarm-level hardware locks
+        # Single Source of Truth for Swarm-level hardware locks
         self.global_emergency_lock = False
         
         logger.info("⚡ FSM Shell Upgraded: Now serving as O(1) Macro Regime & Circuit Breaker Cache.")
 
-    # ====================================================================
-    # 🚀 V26 APEX METHODS: OFF-PATH INTELLIGENCE & SAFETY
-    # ====================================================================
-    
     def update_ai_macro_state(self, symbol: str, action: str, confidence_multiplier: float):
         """
         Called exclusively by the background LLM worker loop.
@@ -56,7 +59,7 @@ class SystemStateMachine:
         """
         state = self.ai_macro_cache.get(symbol)
         
-        # If no state exists or the LLM data is older than 15 minutes, revert to safe defaults
+        # If no state exists or data is older than 15 minutes, revert to safe defaults
         if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
             return {"action": "HOLD", "confidence_multiplier": 1.0}
             
@@ -75,15 +78,13 @@ class SystemStateMachine:
         logger.warning("🔓 FSM GLOBAL EMERGENCY LOCK LIFTED. SWARM RE-ARMED.")
 
     def is_emergency_locked(self) -> bool:
-        """
-        🚀 FIX P1: Explicit boolean check used by main.py to stop executions.
-        Unifies the global lock to this FSM singleton.
-        """
+        """Explicit boolean check used by main.py to stop executions."""
         return self.global_emergency_lock
 
-    # ====================================================================
-    # 🛡️ LEGACY METHODS (PRESERVED FOR BACKWARD COMPATIBILITY)
-    # ====================================================================
+    @property
+    def emergency_locked(self) -> bool:
+        """Property wrapper for centralized circuit-breaker verification."""
+        return self.global_emergency_lock
 
     def process_state_transition(self, rolling_accuracy: float, total_resolved: int, market_regime: str = "TRENDING") -> TradingState:
         """
@@ -96,8 +97,5 @@ class SystemStateMachine:
 
     @property
     def can_execute_trades(self) -> bool:
-        """
-        Legacy property preserved. Intercepts the gatekeeper boolean to halt 
-        the swarm entirely during a systemic failure.
-        """
+        """Intercepts the gatekeeper boolean to halt the swarm during systemic failure."""
         return not self.global_emergency_lock
