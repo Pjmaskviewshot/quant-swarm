@@ -6,7 +6,7 @@ Dynamic Margin Sweeping (Smart Scavenger), Limit-Only Escapes,
 Dust-Sweep Position Closures, and Rate-Limit Protection.
 Patched for Institutional Thread Safety, True TCA Slippage Tracking,
 100% Capital Optimization, SEV-1 Auditor Safety Protocols, Non-Disruptive Hot-Swapping,
-Correlation Matrix Pre-Seeding, and Limit-IOC Emergency Escapes.
+Correlation Matrix Pre-Seeding, Limit-IOC Emergency Escapes, and True Equity FSM Monitoring.
 """
 
 import os
@@ -240,6 +240,34 @@ class DistributedQuantEngine:
         except Exception as e:
             logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
 
+    # 🚀 AUDIT FIX #10: True Equity Helper Function
+    async def _get_true_equity_usdt(self) -> float:
+        """
+        Fetches the True Account Equity (Available + Locked Margin + Unrealized PnL).
+        Eliminates the "Margin-Lock Illusion" where the bot panics because Available Balance 
+        drops when multiple positions are opened.
+        """
+        try:
+            acc_info = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="UNIFIED", coin="USDT")
+            if acc_info and acc_info.get("retCode") == 0 and acc_info.get("result", {}).get("list"):
+                coins = acc_info["result"]["list"][0].get("coin", [])
+                usdt_data = next((c for c in coins if c.get("coin") == "USDT"), None)
+                if usdt_data and "equity" in usdt_data:
+                    return float(usdt_data["equity"])
+            
+            # Fallback to CONTRACT account type if UNIFIED is not active
+            acc_info_contract = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="CONTRACT", coin="USDT")
+            if acc_info_contract and acc_info_contract.get("retCode") == 0 and acc_info_contract.get("result", {}).get("list"):
+                coins = acc_info_contract["result"]["list"][0].get("coin", [])
+                usdt_data = next((c for c in coins if c.get("coin") == "USDT"), None)
+                if usdt_data and "equity" in usdt_data:
+                    return float(usdt_data["equity"])
+        except Exception as e:
+            logger.debug(f"[X-RAY] True equity fetch fallback engaged: {e}")
+            
+        # Absolute fallback if direct API parsing fails
+        return await self.executor.get_wallet_balance_usdt()
+
     async def _fetch_exchange_tick_sizes(self):
         try:
             info = await self.executor.safe_call(self.executor.client.get_instruments_info, category="linear")
@@ -250,6 +278,7 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
     async def _get_max_affordable_notional(self):
+        # We explicitly use available balance here to prevent over-leveraging into liquidation.
         try: 
             raw_balance = await self.executor.get_wallet_balance_usdt()
             available_balance = raw_balance * 1.00 
@@ -282,12 +311,8 @@ class DistributedQuantEngine:
             return False
             
     async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_buy: bool) -> bool:
-        """
-        🚀 AUDIT P0 FIX: Escalating Limit-IOC Escape Ladder with Fill Verification.
-        Eliminates ghost/orphan positions by verifying fill status and escalating collars before a final Market fallback.
-        """
         current_qty = qty
-        collars = [0.010, 0.025, 0.050]  # 1.0%, 2.5%, and 5.0% slippage collars
+        collars = [0.010, 0.025, 0.050]
 
         for attempt, aggression in enumerate(collars):
             escape_price = current_price * (1.0 - aggression) if is_buy else current_price * (1.0 + aggression)
@@ -300,7 +325,7 @@ class DistributedQuantEngine:
                     price=self._align_price(symbol, escape_price),
                     qty=str(current_qty), timeInForce="IOC", reduceOnly=True
                 )
-                await asyncio.sleep(0.4)  # Settlement window for matching engine
+                await asyncio.sleep(0.4)
 
                 pos_res = await self.executor.safe_call(
                     self.executor.client.get_positions, category="linear", symbol=symbol
@@ -317,7 +342,6 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"[X-RAY] Escape attempt {attempt + 1} failed for {symbol}: {e}")
 
-        # Final Fallback: Market Order to guarantee position flatting and eliminate ghost trades
         logger.critical(f"🚨 FINAL FALLBACK MARKET DUMP // Liquidating remaining {current_qty} units for {symbol}.")
         try:
             await self.executor.safe_call(
@@ -395,10 +419,12 @@ class DistributedQuantEngine:
             if loop_counter % 5 == 0:
                 self.global_state_cache["last_updated"] = time.time()
                 await self._save_sgd_state()
+                
                 try: 
-                    current_vault_balance = await self.executor.get_wallet_balance_usdt()
+                    # 🚀 AUDIT FIX #10: Fetch True Equity to bypass the "Margin-Lock Illusion"
+                    current_vault_balance = await self._get_true_equity_usdt()
                 except Exception as e: 
-                    logger.debug(f"[X-RAY] Heartbeat balance fetch failed: {e}", exc_info=True)
+                    logger.debug(f"[X-RAY] Heartbeat true equity fetch failed: {e}", exc_info=True)
                     continue
 
                 if "wallet_baseline" not in self.global_state_cache: self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
@@ -1363,7 +1389,8 @@ class DistributedQuantEngine:
         except Exception: pass
             
         try:
-            boot_bal = await self.executor.get_wallet_balance_usdt()
+            # 🚀 AUDIT FIX #10: Synchronize Boot Baseline with True Equity
+            boot_bal = await self._get_true_equity_usdt()
             self.global_state_cache["start_of_day_balance"] = boot_bal
             self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
             self.global_state_cache["last_updated"] = time.time()
