@@ -3,7 +3,7 @@
 ------------------------------------------------------------
 Conservative Kelly sizing with Volatility-Adjusted CVaR Protection,
 Dynamic Win-Rate Queues, Full Pairwise Correlation Matrices, 
-and X-Ray Diagnostic Telemetry.
+and True Fractional Kelly Integration.
 """
 
 import math
@@ -44,8 +44,8 @@ class InstitutionalRiskVault:
 
         # 🚀 V55.2 FIX: Replaced saturating integer counters with a sliding boolean deque
         self.outcomes_history = deque(maxlen=100) 
-        self.avg_win_pct = 0.02
-        self.avg_loss_pct = 0.01
+        self.avg_win_r = 1.5   # 🚀 AUDIT FIX: Initialized to 1.5R expected win
+        self.avg_loss_r = 1.0  # 🚀 AUDIT FIX: Initialized to 1.0R expected loss
         
         self.volatility_surface: deque = deque(maxlen=300)
 
@@ -108,47 +108,66 @@ class InstitutionalRiskVault:
         except Exception as e:
             logger.debug(f"[X-RAY] Failed to compute correlation matrix: {e}")
 
-    # 🚀 V55.2 AUDIT FIX: Kelly Criterion now tracks R-Multiples, not raw percentages.
+    # 🚀 V56.3 AUDIT FIX: True Mathematical Kelly Scaling based on disparate R-Multiples
     def update_kelly_metrics(self, is_win: bool, realized_r_multiple: float):
         """
-        Tracks win/loss magnitude relative to the initial risk taken (R-Multiple).
-        This guarantees the Kelly fraction is scale-invariant and immune to leverage distortions.
+        Tracks true win/loss magnitude relative to initial risk (R-Multiple).
+        Correctly segregates wins from losses to compute actual Payoff Ratio.
         """
         self.outcomes_history.append(1.0 if is_win else 0.0)
         
-        # We continue to use the variables avg_win_pct/avg_loss_pct, but they now store R-values
+        # Segregate and update purely based on outcome
         if is_win:
-            self.avg_win_pct = (self.avg_win_pct * 0.9) + (abs(realized_r_multiple) * 0.1)
+            # Dampen outliers by capping single-trade impact to 5R
+            capped_r = min(5.0, max(0.1, abs(realized_r_multiple)))
+            self.avg_win_r = (self.avg_win_r * 0.95) + (capped_r * 0.05)
         else:
-            self.avg_loss_pct = (self.avg_loss_pct * 0.9) + (abs(realized_r_multiple) * 0.1)
+            # Losses are typically around 1.0R. Cap to prevent extreme skew.
+            capped_r = min(2.5, max(0.1, abs(realized_r_multiple)))
+            self.avg_loss_r = (self.avg_loss_r * 0.95) + (capped_r * 0.05)
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 Edge-Weighted Kelly Allocation with Adaptive CVaR Tail-Risk.
-        Scales capital allocation based on signal confidence, tail-risk state, and expected net edge.
+        🚀 TRUE FRACTIONAL KELLY CRITERION (PURE ZERO-BET GUARD)
+        f* = (p*b - q) / b 
+        If f* <= 0, returns 0.0 (strictly NO BET on negative or zero EV).
         """
         total_trades = len(self.outcomes_history)
+        
+        # Cold start safety
         if total_trades < 10:
             base_fraction = 0.010 # Cold start 1.0%
         else:
-            win_rate = float(np.mean(self.outcomes_history))
-            safe_prob = min(0.70, max(0.51, base_confidence))
-            blended_w = (win_rate * 0.7) + (safe_prob * 0.3) 
+            p = min(0.75, max(0.40, base_confidence))
+            q = 1.0 - p
             
-            payoff_ratio = self.avg_win_pct / (self.avg_loss_pct + 1e-9)
-            if payoff_ratio <= 0 or blended_w <= 0:
-                base_fraction = 0.005 
-            else:
-                kelly_fraction = blended_w - ((1.0 - blended_w) / payoff_ratio)
-                base_fraction = max(0.005, kelly_fraction / 2.0)
+            # 'b' is the amount gained on a winning bet for every $1 wagered (Payoff Ratio)
+            b = self.avg_win_r / (self.avg_loss_r + 1e-9)
+            
+            # Failsafe: If b is somehow negative or 0, revert to safe fraction
+            if b <= 0:
+                return 0.0 
+            
+            # True Kelly Formula
+            kelly_fraction = (p * b - q) / b
+            
+            # 🚀 AUDIT P0 FIX: Strict zero-bet on non-positive Kelly fraction
+            if kelly_fraction <= 0:
+                return 0.0
+                
+            # Fractional Kelly (Half-Kelly) for survival
+            base_fraction = max(0.002, kelly_fraction / 2.0)
         
         evt_multiplier = self.calculate_evt_tail_risk()
         edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
         
         risk_adjusted_kelly = base_fraction * evt_multiplier * edge_factor
         
-        # Hard bounds: Min 0.5%, Max 1.5% equity risk per trade
-        return max(0.005, min(0.015, risk_adjusted_kelly))
+        if risk_adjusted_kelly <= 0:
+            return 0.0
+            
+        # Hard bounds: Min 0.2%, Max 1.5% equity risk per trade
+        return max(0.002, min(0.015, risk_adjusted_kelly))
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> tuple[bool, str]:
         """

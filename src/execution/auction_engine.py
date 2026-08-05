@@ -6,7 +6,8 @@ and Dynamic Margin Sweeping.
 Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
 margin constraints and bridging Bybit exchange minimums dynamically.
 Patched with Strict 15% Exposure Caps, True Risk Parity, 100% Capital Unlock,
-Institutional TCA Preparation, SEV-1 Orphan Trade Guards, and Heap Determinism.
+Institutional TCA Preparation, SEV-1 Orphan Trade Guards, Heap Determinism,
+and Strict Zero-Edge Kelly Rejection.
 """
 
 import time
@@ -174,7 +175,6 @@ class CapitalAuctionEngine:
             
             # 1. Fetch Accurate Balance
             try: 
-                # 🚀 V56.2 ABSOLUTE PLUS: 100% Capital Access for Alpha Swarm
                 raw_balance = await self.core.executor.get_wallet_balance_usdt()
                 available_balance = raw_balance * 1.00
             except Exception as e: 
@@ -188,7 +188,6 @@ class CapitalAuctionEngine:
                 return
 
             # 2. Base Volatility Parameters
-            # Forced widened stop-loss (2.5x ATR or 2.5%) to survive altcoin market noise without panic
             sl_atr_mult = max(2.5, self.core.live_params.get("sl_atr_mult", 2.5))
             sl_distance = max(atr * sl_atr_mult, current_price * 0.025) 
             sl_distance_pct = sl_distance / current_price
@@ -201,30 +200,26 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = min_qty * current_price
 
-            # 4. 🌌 RISK & EXPOSURE CLAMPS
-            # Calculate pure fractional Kelly based on model confidence
-            base_optimal_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+            # 4. 🌌 RISK & EXPOSURE CLAMPS (ZERO-EDGE AVOIDANCE)
+            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
             
-            # Enforce a strict 15% maximum notional exposure regardless of account size
-            max_allowed_notional = max(5.00, available_balance * 0.15)
-            
+            # 🚀 AUDIT P0 FIX: Strictly reject execution if Kelly fraction is zero or negative
+            if fractional_risk <= 0.0:
+                logger.info(f"[X-RAY] 🚫 KELLY REJECT // {symbol} Non-positive edge (f* <= 0). Aborting execution.")
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
+
             # Enforce Vault Risk Limits across all accounts
             vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
-            
-            if available_balance < 10.0:
-                # SURVIVAL MODE: Extreme defense.
-                fractional_risk = max(0.010, min(vault_max_risk, base_optimal_risk))
-            else:
-                # HOUSE MONEY MODE: Scale risk up safely, but strictly capped by Vault Limits
-                profit_buffer = available_balance - 7.00
-                fractional_risk = max(0.010, min(vault_max_risk, base_optimal_risk + (profit_buffer * 0.0001)))
+            fractional_risk = min(vault_max_risk, fractional_risk)
 
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
+            # Enforce a strict 15% maximum notional exposure regardless of account size
+            max_allowed_notional = max(5.00, available_balance * 0.15)
+
             # 5. 🌉 LEVERAGE-BRIDGE AUTO-SIZING
-            # If our safe Kelly risk dictates a notional smaller than the exchange minimum,
-            # we MUST SKIP THE TRADE instead of artificially jacking up the leverage.
             if raw_notional < exchange_min_notional:
                 logger.warning(
                     f"[X-RAY] 🚫 LEVERAGE-BRIDGE ABORT // {symbol} Safe notional (${raw_notional:.2f}) "
@@ -249,7 +244,7 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 🚀 V56.1 FIX: Calculate exact quantity strictly using the capped target_notional
+            # Calculate exact quantity strictly using the capped target_notional
             safe_qty = target_notional / current_price
             target_position_size = math.floor(safe_qty / qty_step) * qty_step
             
@@ -263,7 +258,6 @@ class CapitalAuctionEngine:
             margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
             
             raw_leverage = target_notional / margin_allocation_usdt
-            # 🚀 AUDIT FIX #2: Replaced round() with math.floor() to strictly cap maximum risk
             target_leverage = int(max(1, min(5, math.floor(raw_leverage * 0.95))))
 
             # 6. Target Price Calculus & Formatting
@@ -287,7 +281,6 @@ class CapitalAuctionEngine:
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
 
             if self.core.test_mode:
-                # 🚀 L2-Aware Paper Trading Simulator
                 is_buy = direction == "BUY"
                 levels = current_depth.get("asks" if is_buy else "bids", [])
                 
@@ -299,7 +292,6 @@ class CapitalAuctionEngine:
                 if not levels:
                     logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Orderbook is completely empty. No liquidity to simulate fill.")
                 else:
-                    # Sweep through orderbook levels to calculate true slippage
                     for price_str, vol_str in levels:
                         level_price = float(price_str)
                         level_vol = float(vol_str)
@@ -320,13 +312,12 @@ class CapitalAuctionEngine:
                         execution_success = False
                         
                     elif execution_success:
-                        # Reject if the simulated slippage crossed the 12bps maximum bound
                         slippage_bps = abs(simulated_avg_entry_price - current_price) / current_price * 10000.0
                         if slippage_bps > 12.0:
                             logger.warning(f"[X-RAY] 🚫 PAPER SLIPPAGE REJECT // {symbol} Order swept book causing {slippage_bps:.1f} bps slippage. Aborting.")
                             execution_success = False
                         else:
-                            current_price = simulated_avg_entry_price # Set entry to the actual slipped price
+                            current_price = simulated_avg_entry_price
                             logger.info(f"[X-RAY] 📝 PAPER FILL // {symbol} simulated execution at {current_price:.5f} ({slippage_bps:.1f} bps slippage).")
                             
                 actual_filled_notional = target_position_size * current_price
@@ -338,8 +329,6 @@ class CapitalAuctionEngine:
                     logger.debug(f"[X-RAY] Leverage adjust note for {symbol}: {e}")
 
                 try:
-                    # SOR DISPATCH: STRICT MAKER-ONLY LIMIT ORDERS
-                    # Ban Aggressive Taker blocks to eliminate entry slippage.
                     res = await self.core.sor.execute_mean_reversion_bracket(
                         symbol=symbol, direction=direction, total_qty=target_position_size, 
                         current_mid_price=current_price, stop_loss=initial_sl_price, 
@@ -354,7 +343,6 @@ class CapitalAuctionEngine:
                     err_str = str(ex)
                     ret_code = getattr(ex, "ret_code", None) or getattr(ex, "code", None)
 
-                    # 🚀 AUDIT FIX: Removed 10002 from global maintenance to prevent isolated coin errors from freezing the swarm
                     if ret_code in [BybitRetCode.SYSTEM_MAINTENANCE, BybitRetCode.SERVICE_UNAVAILABLE] or any(code in err_str for code in ["10004", "10016", "500"]):
                         logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.core.circuit_breaker_lock:
@@ -369,13 +357,11 @@ class CapitalAuctionEngine:
                     async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                     return
 
-            # X-RAY: SOR Failures
             if not execution_success: 
                 logger.warning(f"[X-RAY] 🚫 SOR ABORT // Smart Order Router failed to fill {symbol} at acceptable slippage.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return 
                 
-            # Verify the Execution with Bybit Position Ledger
             if not self.core.test_mode:
                 try:
                     pos_response = await self.core.executor.safe_call(self.core.executor.client.get_positions, category="linear", symbol=symbol)
@@ -394,20 +380,16 @@ class CapitalAuctionEngine:
                     
             safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime, "virtual_sl": initial_sl_price, "virtual_tp": target_tp_price}
             
-            # Write to Memory DB Async
             self.core.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
             
-            # Telemetry Ticket
             ticket_msg = self.core.telegram.format_entry_ticket(
                 symbol, direction, current_price, actual_qty_filled if not self.core.test_mode else target_position_size, 
                 edge_bps, fractional_risk, regime, safe_features
             )
             self.core.track_task(self.core._safe_telegram_dispatch(ticket_msg, is_html=True))
             
-            # Finalize the Lock and Hand off to the Lifecycle Daemon
             self.core.risk_vault.update_position_ledger(symbol, actual_filled_notional)
             
-            # Spawn the Guardian Daemon
             self.core.daemon_tasks[symbol] = self.core.track_task(
                 self.core._position_lifecycle_daemon(
                     symbol, signal_id, direction, current_price, atr, 
@@ -419,7 +401,6 @@ class CapitalAuctionEngine:
             
         except Exception as e:
             logger.error(f"[X-RAY] Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
-            # 🚀 AUDIT FIX: Orphan Trade Prevention. Flatten immediately if Daemon fails to spawn.
             try:
                 pos_res = await self.core.executor.safe_call(self.core.executor.client.get_positions, category="linear", symbol=symbol)
                 pos_list = pos_res.get("result", {}).get("list", [])

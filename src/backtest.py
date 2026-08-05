@@ -3,7 +3,8 @@
 --------------------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
 of the live V56.2 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Patched for 3-Feature Orthogonal RLS Matrix Alignment and HMM Warmup Exclusion.
+Patched for 3-Feature Orthogonal RLS Matrix Alignment, HMM Warmup Exclusion,
+and True Fractional Kelly Sizing.
 """
 
 import argparse
@@ -88,12 +89,11 @@ def fetch_aligned_data(symbol: str, days: int) -> Tuple[List[Dict], List[Dict]]:
 @dataclass
 class Params:
     rr_ratio: float = 2.0            
-    sl_atr_mult: float = 2.5         # V55.2 Survival Armor Baseline
+    sl_atr_mult: float = 2.5         
     atr_period: int = 14
     leverage: float = 3.0            
 
 def get_cluster_priors(symbol: str):
-    # 🚀 AUDIT FIX: Aligned matrix dimensions to 3 orthogonal features
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
         w_trend = np.array([0.45, 0.35, 0.20])
         w_range = np.array([0.20, 0.35, 0.45])
@@ -296,6 +296,10 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
     
+    # 🚀 V56.3 AUDIT FIX: Track independent Win/Loss R-Multiples for True Kelly calculation
+    avg_win_r = 1.5
+    avg_loss_r = 1.0
+    
     if "BTC" in symbol: amihud_threshold = 2_500_000.0  
     elif "ETH" in symbol or "SOL" in symbol: amihud_threshold = 1_000_000.0   
     else: amihud_threshold = 250_000.0   
@@ -372,12 +376,15 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         hawkes_var = (1 - alpha_slow) * hawkes_var + alpha_slow * (volume_signed - hawkes_mean)**2
         hawkes_z = (volume_signed - hawkes_mean) / (math.sqrt(hawkes_var) + 1e-9)
         
+        hawkes_velocity = hawkes_z - hawkes_z_prev
+        hawkes_acceleration = hawkes_velocity - hawkes_v_prev
+        hawkes_z_prev, hawkes_v_prev = hawkes_z, hawkes_velocity
+        
         tensor_alpha = compute_tensor_alpha(btc_1m_history, alt_1m_history)
         
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # 🚀 ORTHOGONAL FEATURE REDUCTION (3 Independent Alpha Drivers)
         features = np.clip(np.array([
             ofi_fast_z / 3.0,
             hawkes_z / 3.0,
@@ -507,7 +514,16 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
         if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
-            dna_win_rate = np.mean(rolling_outcomes) if len(rolling_outcomes) > 10 else 0.50
+            
+            # 🚀 V56.3 AUDIT FIX: True Fractional Kelly integration
+            if len(rolling_outcomes) >= 10:
+                p_win = np.mean(rolling_outcomes)
+                q_loss = 1.0 - p_win
+                b_payoff = avg_win_r / (avg_loss_r + 1e-9)
+                kelly_f = (p_win * b_payoff - q_loss) / b_payoff if b_payoff > 0 else 0.0
+            else:
+                p_win = 0.50
+                kelly_f = 0.010
                 
             routing_mode = "STANDARD"
             if vacuum_blocked and prob_success > 0.65:
@@ -525,7 +541,7 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 
             ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
                 
-            if prob_success >= max(dynamic_gate, dna_win_rate) and not vacuum_blocked:
+            if prob_success >= max(dynamic_gate, p_win) and not vacuum_blocked:
                 taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0005
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 
@@ -639,8 +655,9 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
+                    # 🚀 AUDIT FIX #9: Simulate the new Limit-IOC 1% slippage collar for emergency escapes
                     if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
-                        slippage_penalty = 0.0 
+                        slippage_penalty = 0.0050 # Caps out around 50bps to 100bps simulated limit
                         applied_fee = TAKER_FEE * 2 
                     elif regime == "RANGING" or routing_mode == "MAKER_ONLY":
                         slippage_penalty = 0.0
@@ -650,15 +667,12 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
                         applied_fee = TAKER_FEE * 2
                     
-                    edge = prob_success - 0.50
-                    risk_multiplier = edge / 0.10
-                    raw_fractional_risk = max(0.015, min(0.030, 0.015 * risk_multiplier))
-                    
-                    net_edge_bps = net_ev_pct * 10000.0 
+                    # 🚀 V56.3 AUDIT FIX: True Fractional Kelly Application
+                    base_fraction = max(0.002, kelly_f / 2.0)
+                    cvar_penalty = calculate_rolling_cvar(variance_history)
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
-                    cvar_penalty = calculate_rolling_cvar(variance_history)
-                    fractional_risk = raw_fractional_risk * cvar_penalty * edge_factor
+                    fractional_risk = max(0.002, min(0.015, base_fraction * cvar_penalty * edge_factor))
                     
                     net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
                     net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.015)
@@ -668,7 +682,15 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         "outcome": outcome, "net": net_leveraged, "bars": bars_held
                     })
                     
-                    rolling_outcomes.append(1.0 if net_leveraged > 0 else 0.0)
+                    is_win = net_leveraged > 0
+                    rolling_outcomes.append(1.0 if is_win else 0.0)
+                    
+                    # Update true R-multiples for next Kelly calculation
+                    actual_r = gross / sl_dist_pct
+                    if is_win:
+                        avg_win_r = (avg_win_r * 0.95) + (min(5.0, abs(actual_r)) * 0.05)
+                    else:
+                        avg_loss_r = (avg_loss_r * 0.95) + (min(2.5, abs(actual_r)) * 0.05)
                     
                     if net_leveraged < 0:
                         recent_losses = sum(1 for out in list(rolling_outcomes)[-2:] if out == 0.0)
