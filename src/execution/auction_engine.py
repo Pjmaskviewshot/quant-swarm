@@ -1,11 +1,10 @@
 """
-🌌 V56.2 QUANTUM MICRO-CORE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
-----------------------------------------------------------------------
-Features Adaptive Micro-Account Notional Bridging, Direct Risk Sizing,
-and Dynamic Margin Sweeping.
-Patched for Micro-Account Deadlock Resolution ($15 Balance Support),
-True Risk Parity, TCA Preparation, SEV-1 Orphan Trade Guards,
-Heap Determinism, and Strict Zero-Edge Kelly Rejection.
+🏛️ V57.0 OMNI-QUANTUM APEX: UNIVERSAL CONTINUOUS AUCTION ENGINE
+-----------------------------------------------------------------
+Features Scale-Invariant Dynamic Notional Adaptation (SIDNA),
+Adaptive Micro-Account Bridging, Direct Risk-to-Quantity Mapping,
+SEV-1 Orphan Trade Guards, Deterministic Heap Tie-Breaking,
+and Multi-Tier Microstructure SOR Bracket Execution.
 """
 
 import time
@@ -42,7 +41,7 @@ class CapitalAuctionEngine:
         locks, API executors, and risk vaults.
         """
         self.core = core_engine
-        # 🚀 AUDIT FIX #7: Deterministic Heap Tie-Breaker
+        # Deterministic Heap Tie-Breaker
         self._heap_counter = 0
 
     def get_next_heap_id(self) -> int:
@@ -54,7 +53,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated.
         """
-        logger.info("🏛️ GLOBAL CAPITAL AUCTION ENGINE ONLINE: Quantum Micro-Core Active.")
+        logger.info("🏛️ V57.0 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -106,15 +105,14 @@ class CapitalAuctionEngine:
 
             # Fetch balance BEFORE the lock to prevent Async Race Conditions
             try:
-                # 🚀 V56.2 ABSOLUTE PLUS: 100% Capital Access for Alpha Swarm
                 raw_bal = await self.core.executor.get_wallet_balance_usdt()
-                current_bal = raw_bal * 1.00
+                current_bal = max(1.0, raw_bal)
             except Exception:
                 current_bal = 10.0
 
             # Atomic Lock. The entire sequence (check, evaluate, and assign) is unbroken.
             async with self.core.portfolio_state_lock:
-                if top_symbol in self.core.active_positions_map or len(self.core.active_positions_map) >= 5:
+                if top_symbol in self.core.active_positions_map:
                     continue
                     
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
@@ -124,10 +122,10 @@ class CapitalAuctionEngine:
                     
                     # Prevent execution if price has run away before we could strike
                     if drift_pct > 0.0030: 
-                        logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Too late to strike.")
+                        logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting.")
                         continue
 
-                # Provisional notional check adapted for micro accounts
+                # Provisional Scale-Aware Check
                 provisional_notional = max(6.50, current_bal * 0.15)
                 is_safe, risk_reason = self.core.risk_vault.evaluate_portfolio_safety(
                     current_balance=current_bal,
@@ -159,9 +157,9 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V56.2 Execution Engine. 
-        Patched with Adaptive Micro-Account Notional Bridging, Direct Risk Sizing,
-        Risk-of-Ruin floor, and L2-Aware simulated paper fills.
+        V57.0 Universal Execution Engine. 
+        Patched with Scale-Invariant Dynamic Notional Adaptation (SIDNA),
+        Risk-of-Ruin Floor, Direct Risk-to-Quantity Mapping, and L2-Aware Paper Fills.
         """
         try:
             # Duplicate Daemon Check
@@ -175,14 +173,14 @@ class CapitalAuctionEngine:
             # 1. Fetch Accurate Balance
             try: 
                 raw_balance = await self.core.executor.get_wallet_balance_usdt()
-                available_balance = raw_balance * 1.00
+                available_balance = max(1.0, raw_balance)
             except Exception as e: 
                 logger.debug(f"[X-RAY] Wallet fetch failed before execution: {e}", exc_info=True)
                 available_balance = 0.0
 
             # Hard stop if balance physically cannot cover fees
             if available_balance < 3.0: 
-                logger.warning(f"[X-RAY] 🚫 MARGIN EXHAUSTED // {symbol}: Balance (${available_balance:.2f}) too low for execution.")
+                logger.warning(f"[X-RAY] 🚫 MARGIN EXHAUSTED // {symbol}: Balance (${available_balance:.2f}) below operational threshold.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
@@ -215,24 +213,28 @@ class CapitalAuctionEngine:
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
-            # 🚀 MICRO-ACCOUNT DEADLOCK RESOLUTION:
-            # For micro accounts (< $50 balance), allow bridging to the exchange minimum ($6.00-$6.50)
-            # provided the dollar risk at SL does not exceed 2.5% of total account balance.
-            standard_max_notional = available_balance * 0.25 if available_balance < 50.0 else available_balance * 0.15
-            max_allowed_notional = max(exchange_min_notional * 1.05, standard_max_notional)
-            
+            # 🚀 V57.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+            if available_balance < 50.0:
+                # Micro-balance mode: scale to exchange min ($6.00-$6.50) while holding absolute loss <= $0.45
+                standard_max_notional = available_balance * 0.35
+                max_allowed_notional = max(exchange_min_notional * 1.05, standard_max_notional)
+                max_tolerable_risk = max(0.45, available_balance * 0.03)  # Max $0.45 loss or 3% account risk
+            else:
+                # Institutional mode: 15% notional exposure cap
+                max_allowed_notional = available_balance * 0.15
+                max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
+
             target_notional = min(raw_notional, max_allowed_notional)
                 
             if target_notional < exchange_min_notional:
                 target_notional = exchange_min_notional * 1.05
 
             actual_dollar_risk = target_notional * sl_distance_pct
-            max_tolerable_risk = available_balance * 0.025  # Max 2.5% account loss on SL for micro-balances
 
             if actual_dollar_risk > max_tolerable_risk:
                 logger.warning(
-                    f"[X-RAY] 🚫 RISK OVERFLOW ABORT // {symbol} Exchange min notional (${exchange_min_notional:.2f}) "
-                    f"forces risk of ${actual_dollar_risk:.2f} > max allowed (${max_tolerable_risk:.2f}). Skipping."
+                    f"[X-RAY] 🚫 RISK OVERFLOW ABORT // {symbol} Min notional (${exchange_min_notional:.2f}) "
+                    f"forces risk of ${actual_dollar_risk:.2f} > ceiling (${max_tolerable_risk:.2f}). Skipping."
                 )
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
@@ -264,7 +266,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 LEVERAGE-BRIDGE ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${actual_dollar_risk:.2f}")
+            logger.info(f"[X-RAY] 🌉 SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${actual_dollar_risk:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
@@ -279,7 +281,7 @@ class CapitalAuctionEngine:
                 execution_success = False
                 
                 if not levels:
-                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Orderbook empty.")
+                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Empty orderbook.")
                 else:
                     for price_str, vol_str in levels:
                         level_price = float(price_str)
@@ -299,7 +301,9 @@ class CapitalAuctionEngine:
                         execution_success = False
                     elif execution_success:
                         slippage_bps = abs(simulated_avg_entry_price - current_price) / current_price * 10000.0
-                        if slippage_bps > 20.0:  # Relaxed paper slippage threshold for altcoins
+                        # Adaptive paper-fill threshold: 15 bps for majors, 35 bps for altcoins
+                        max_paper_slippage = 15.0 if any(m in symbol for m in ["BTC", "ETH", "SOL"]) else 35.0
+                        if slippage_bps > max_paper_slippage:
                             execution_success = False
                         else:
                             current_price = simulated_avg_entry_price

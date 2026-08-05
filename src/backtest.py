@@ -1,10 +1,11 @@
 """
-🌌 V56.2 OMNI-STATE BACKTESTER: QUANTUM MICRO-CORE
---------------------------------------------------
+🌌 V57.0 OMNI-QUANTUM APEX BACKTESTER
+-------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V56.2 L2-tick engine and cannot simulate true Order Flow Imbalance.
+of the live V57.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
 Patched for Online Gram-Schmidt Orthogonal Feature Alignment, HMM Warmup Exclusion,
-True Fractional Kelly Sizing, Evaluative Edge Definition, and Look-Ahead Bias Removal.
+True Fractional Kelly Sizing, Adaptive Slippage Caps (15 bps majors / 35 bps alts),
+and Look-Ahead Bias Removal.
 """
 
 import argparse
@@ -34,7 +35,7 @@ class AdaptiveSessionClock:
 
     @classmethod
     def get_turnover_threshold(cls, ts_ms: int) -> float:
-        return 15_000_000.0 if cls.is_weekend(ts_ms) else 30_000_000.0
+        return 3_000_000.0 if cls.is_weekend(ts_ms) else 5_000_000.0
 
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
@@ -251,7 +252,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     mse_penalty = min(0.08, mse * 0.3)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -355,8 +356,7 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             current_bucket_vol = 0.0
             current_bucket_buy_vol = 0.0
 
-        # 🚀 AUDIT FIX: Eliminate Look-Ahead Bias. 
-        # The slice strictly ends at `i-1`, ensuring the current bar `c` is entirely unseen during HMM evaluation.
+        # Look-Ahead Bias Elimination: slice strictly ends at `i-1`
         closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
         vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
         regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
@@ -391,9 +391,7 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # =====================================================================
-        # 🚀 ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        # =====================================================================
+        # ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
         f1 = ofi_fast_z
         f2 = hawkes_z
         f3 = tensor_alpha
@@ -422,7 +420,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             f2_norm / 3.0,
             f3_norm / 3.0
         ]), -1.0, 1.0)
-        # =====================================================================
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
         feature_magnitudes = np.abs(features)
@@ -464,7 +461,7 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         error_scaler = 1.0 + max(0.0, (ewma_mse - 0.25) * 0.5)
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-        dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
+        dynamic_gate = max(0.65, min(dynamic_ceiling, raw_gate))
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
@@ -690,7 +687,9 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
                     if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
-                        slippage_penalty = 0.0050 # Caps out around 50bps to 100bps simulated limit
+                        # Adaptive simulated slippage: 15 bps majors / 35 bps altcoins
+                        max_slippage = 0.0015 if any(m in symbol for m in ["BTC", "ETH", "SOL"]) else 0.0035
+                        slippage_penalty = max_slippage
                         applied_fee = TAKER_FEE * 2 
                     elif regime == "RANGING" or routing_mode == "MAKER_ONLY":
                         slippage_penalty = 0.0
@@ -784,7 +783,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V56.2 QUANTUM MICRO-CORE Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V57.0 OMNI-QUANTUM APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -801,13 +800,12 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
             total_trades = 0
             
             for fold in range(4):
-                train_start = 0
                 test_start = (fold + 1) * fold_size
                 test_end = test_start + fold_size
                 
                 if test_end > total_len: break
                 
-                test_result = run_v56_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v57_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -860,9 +858,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v56_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v57_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V56.2 OMNI-STATE OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V57.0 OMNI-QUANTUM APEX OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

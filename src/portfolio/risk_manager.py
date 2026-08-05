@@ -1,14 +1,14 @@
 """
-💎 V56.2 QUANTUM SWARM: INSTITUTIONAL RISK VAULT (RISK PARITY ENABLED)
+💎 V57.0 QUANTUM SWARM: UNIVERSAL INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
-Conservative Kelly sizing with Volatility-Adjusted CVaR Protection,
-Dynamic Win-Rate Queues, Full Pairwise Correlation Matrices, 
-and True Fractional Kelly Integration using Empirical Win Rates.
+Scale-Invariant Kelly Sizing with Volatility-Adjusted CVaR Protection,
+Micro-Account Notional Adaptation ($5 to $1,000,000+),
+Full Pairwise Correlation Matrices, and Dynamic Drawdown Circuit Breakers.
 """
 
 import math
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import numpy as np
 import pandas as pd  
@@ -103,7 +103,6 @@ class InstitutionalRiskVault:
             base_fraction = 0.010 
         else:
             p = float(np.mean(self.outcomes_history))
-            # 🚀 AUDIT P0 FIX: Removed the 0.40 floor. If win rate drops, let Kelly zero out the sizing.
             p = min(0.75, p)
             q = 1.0 - p
             
@@ -129,7 +128,7 @@ class InstitutionalRiskVault:
             
         return max(0.002, min(0.015, risk_adjusted_kelly))
 
-    def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> tuple[bool, str]:
+    def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> Tuple[bool, str]:
         if self.emergency_circuit_breaker:
             return False, "EMERGENCY_CIRCUIT_BREAKER_ACTIVE"
 
@@ -143,7 +142,20 @@ class InstitutionalRiskVault:
                     logger.critical(f"🚨 ABSOLUTE MAX DRAWDOWN BREACHED ({current_drawdown:.2%}). LOCKING DOWN SYSTEMS.")
                     self.emergency_circuit_breaker = True
                 return False, f"MAX_DRAWDOWN_BREACHED_{current_drawdown:.2%}"
-        
+
+        # 🚀 V57.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+        # Bypasses percentage caps for micro-accounts (< $50) so $6.00-$6.50 minimum orders can clear.
+        if current_balance < 50.0:
+            active_count = len(self.active_positions)
+            if active_count >= 2:  # Cap micro-accounts to max 2 concurrent positions
+                return False, f"MICRO_ACCOUNT_MAX_POSITIONS_REACHED ({active_count}/2)"
+            
+            if symbol in self.active_positions:
+                return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
+                
+            return True, "SAFE_MICRO_ACCOUNT"
+
+        # INSTITUTIONAL PORTFOLIO CHECKS ($50+ Balance)
         if symbol and new_position_notional > 0:
             if hasattr(self, 'correlation_matrix') and self.correlation_matrix is not None:
                 for active_sym in self.active_positions.keys():
@@ -153,7 +165,7 @@ class InstitutionalRiskVault:
                             return False, f"RISK_PARITY_BLOCK_CORRELATED_{corr_value:.2f}_WITH_{active_sym}"
 
         total_exposure = sum(self.active_positions.values()) + new_position_notional
-        max_heat = current_balance * 2.5  
+        max_heat = current_balance * 0.60  # Max 60% total portfolio heat
 
         if total_exposure > max_heat:
             return False, f"PORTFOLIO_HEAT_EXCEEDED_MAX_{max_heat:.2f}_REQ_{total_exposure:.2f}"

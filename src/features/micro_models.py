@@ -1,11 +1,10 @@
 """
-💎 V56.2 QUANTUM SWARM: MICROSTRUCTURE MACHINE LEARNING MODELS
+💎 V57.0 QUANTUM SWARM: MICROSTRUCTURE MACHINE LEARNING MODELS
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Features fully data-driven, parameter-free Symmetrical Entropy Gating, 
-mathematically stationary Permutation Entropy, and Pure Mixture-of-Experts RLS.
-Patched with Online Gram-Schmidt Orthogonalization and Doom Loop Prevention.
+Features Gram-Schmidt Orthogonal Feature Extraction, Symmetrical
+Entropy Gating, and Pure Mixture-of-Experts RLS.
 """
 
 import math
@@ -31,8 +30,8 @@ class AdaptiveSessionClock:
 
     @classmethod
     def get_turnover_threshold(cls) -> float:
-        # Lower volume requirements on weekends to prevent asset starvation
-        return 15_000_000.0 if cls.is_weekend() else 30_000_000.0
+        # Lower volume requirements ($3M weekend, $5M weekday) to expand micro-cap coverage
+        return 3_000_000.0 if cls.is_weekend() else 5_000_000.0
 
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
@@ -100,7 +99,7 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
-        # 🚀 V56.2 GRAM-SCHMIDT COVARIANCE STATE INITIALIZATION
+        # Gram-Schmidt Covariance State Initialization
         self.gs_cov_11, self.gs_cov_22, self.gs_cov_33 = 1.0, 1.0, 1.0
         self.gs_cov_21, self.gs_cov_31, self.gs_cov_32 = 0.0, 0.0, 0.0
         self.gs_alpha = 0.02
@@ -267,9 +266,7 @@ class ContinuousMicrostructureEngine:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
-        # =====================================================================
-        # 🚀 V56.2 ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        # =====================================================================
+        # ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
         f1 = self.ofi_fast_z
         f2 = self.hawkes_z
         f3 = tensor_alpha
@@ -298,7 +295,6 @@ class ContinuousMicrostructureEngine:
             f2_norm / 3.0,
             f3_norm / 3.0
         ]), -1.0, 1.0)
-        # =====================================================================
 
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
