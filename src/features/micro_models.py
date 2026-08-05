@@ -5,7 +5,7 @@ Houses the Adaptive Session Clock, Permutation Entropy calculators,
 and the Recursive Least Squares (RLS) Online Learning Engine.
 Features fully data-driven, parameter-free Symmetrical Entropy Gating, 
 mathematically stationary Permutation Entropy, and Pure Mixture-of-Experts RLS.
-Patched with Radical Alpha Amputation (3-Feature Orthogonal RLS Matrix) and Doom Loop Prevention.
+Patched with Online Gram-Schmidt Orthogonalization and Doom Loop Prevention.
 """
 
 import math
@@ -44,7 +44,6 @@ class AdaptiveSessionClock:
 class ClusterWarmStartRLS:
     @staticmethod
     def get_cluster_priors(symbol: str):
-        # 🚀 AUDIT FIX: Reduced from 7 to 3 orthogonal dimensions to eliminate multicollinearity and covariance explosion
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
             w_trend = np.array([0.45, 0.35, 0.20])
             w_range = np.array([0.20, 0.35, 0.45])
@@ -101,11 +100,15 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
+        # 🚀 V56.2 GRAM-SCHMIDT COVARIANCE STATE INITIALIZATION
+        self.gs_cov_11, self.gs_cov_22, self.gs_cov_33 = 1.0, 1.0, 1.0
+        self.gs_cov_21, self.gs_cov_31, self.gs_cov_32 = 0.0, 0.0, 0.0
+        self.gs_alpha = 0.02
+        
         w_t, w_r, P_init = ClusterWarmStartRLS.get_cluster_priors(symbol)
         self.weights_trending, self.weights_ranging = w_t, w_r
         self.P_trending, self.P_ranging = P_init.copy(), P_init.copy()
         
-        # Keep a reference to the initial P matrix scale for the Doom Loop Reset
         self.p_scale_init = P_init[0][0]
         
         self.prediction_buffer = deque(maxlen=50000)
@@ -153,7 +156,6 @@ class ContinuousMicrostructureEngine:
             self.micro_price_skew = ((self.true_micro_price - current_mid) / (current_mid + 1e-9)) * 10000.0 
 
     def update_trades(self, price: float, volume: float, is_buy: bool, current_time: float):
-        # 1-Minute Price Sampling for Real-Time Variance
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
             if len(self.prices) > 2:
@@ -188,7 +190,6 @@ class ContinuousMicrostructureEngine:
         self.hawkes_acceleration = self.hawkes_velocity - self.hawkes_v_prev
         self.hawkes_z_prev, self.hawkes_v_prev = self.hawkes_z, self.hawkes_velocity
 
-        # RLS Online Machine Learning Update (3-Dimensional Matrix)
         if len(self.prediction_buffer) > 0:
             while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 60.0:
                 old_time, old_price, features_array, old_pred_prob, virt_sl, virt_tp, action_dir, r_blend = self.prediction_buffer.popleft()
@@ -211,7 +212,6 @@ class ContinuousMicrostructureEngine:
                     
                     dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
                     
-                    # Update Trending Expert (3x3 Matrix)
                     P_x_t = self.P_trending @ x
                     den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
                     K_t = P_x_t / den_t
@@ -224,7 +224,6 @@ class ContinuousMicrostructureEngine:
                     else: 
                         self.P_trending += np.eye(3) * 1e-3
                     
-                    # Update Ranging Expert (3x3 Matrix)
                     P_x_r = self.P_ranging @ x
                     den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
                     K_r = P_x_r / den_r
@@ -241,13 +240,11 @@ class ContinuousMicrostructureEngine:
                     self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(3) * 1e-6)
                     self.rls_updates += 1
 
-                    # Doom Loop Reset Protocol (3x3)
                     if self.ewma_mse > 0.40:
                         if trace_t < (self.p_scale_init * 1.5):
                             self.P_trending += np.eye(3) * (self.p_scale_init * 0.5)
                         if trace_r < (self.p_scale_init * 1.5):
                             self.P_ranging += np.eye(3) * (self.p_scale_init * 0.5)
-
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
         floor, ceiling = 0.48, 0.85
@@ -262,23 +259,47 @@ class ContinuousMicrostructureEngine:
         return max(floor, min(ceiling - mse_penalty, prob))
 
     def extract_statistical_state(self, current_price: float, vpin_z: float, tensor_alpha: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> dict:
-        # Calculate Permutation Entropy using stationary log_returns, NOT prices
         if len(self.log_returns) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.log_returns)[-20:])
             self.entropy_history.append(self.shannon_entropy) 
         
-        # Kaufman ER still correctly uses absolute prices
         if len(self.prices) >= 20:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
-        # 🚀 ORTHOGONAL FEATURE REDUCTION (3 Independent Alpha Drivers)
-        features = np.clip(np.array([
-            self.ofi_fast_z / 3.0,     # Driver 1: Passive Order Flow Pressure
-            self.hawkes_z / 3.0,       # Driver 2: Aggressive Trade Cascades
-            tensor_alpha               # Driver 3: Cross-Asset Macro Lead-Lag
-        ]), -1.0, 1.0)
+        # =====================================================================
+        # 🚀 V56.2 ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
+        # =====================================================================
+        f1 = self.ofi_fast_z
+        f2 = self.hawkes_z
+        f3 = tensor_alpha
         
+        self.gs_cov_11 = (1 - self.gs_alpha) * self.gs_cov_11 + self.gs_alpha * (f1 * f1)
+        self.gs_cov_21 = (1 - self.gs_alpha) * self.gs_cov_21 + self.gs_alpha * (f2 * f1)
+        
+        beta_21 = self.gs_cov_21 / (self.gs_cov_11 + 1e-9)
+        f2_ortho = f2 - (beta_21 * f1)
+        self.gs_cov_22 = (1 - self.gs_alpha) * self.gs_cov_22 + self.gs_alpha * (f2_ortho * f2_ortho)
+        
+        self.gs_cov_31 = (1 - self.gs_alpha) * self.gs_cov_31 + self.gs_alpha * (f3 * f1)
+        self.gs_cov_32 = (1 - self.gs_alpha) * self.gs_cov_32 + self.gs_alpha * (f3 * f2_ortho)
+        
+        beta_31 = self.gs_cov_31 / (self.gs_cov_11 + 1e-9)
+        beta_32 = self.gs_cov_32 / (self.gs_cov_22 + 1e-9)
+        f3_ortho = f3 - (beta_31 * f1) - (beta_32 * f2_ortho)
+        self.gs_cov_33 = (1 - self.gs_alpha) * self.gs_cov_33 + self.gs_alpha * (f3_ortho * f3_ortho)
+        
+        f1_norm = f1 / (math.sqrt(self.gs_cov_11) + 1e-9)
+        f2_norm = f2_ortho / (math.sqrt(self.gs_cov_22) + 1e-9)
+        f3_norm = f3_ortho / (math.sqrt(self.gs_cov_33) + 1e-9)
+
+        features = np.clip(np.array([
+            f1_norm / 3.0,
+            f2_norm / 3.0,
+            f3_norm / 3.0
+        ]), -1.0, 1.0)
+        # =====================================================================
+
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
         attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 3 

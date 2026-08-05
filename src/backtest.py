@@ -3,8 +3,8 @@
 --------------------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
 of the live V56.2 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Patched for 3-Feature Orthogonal RLS Matrix Alignment, HMM Warmup Exclusion,
-True Fractional Kelly Sizing, and Evaluative Edge Definition.
+Patched for Online Gram-Schmidt Orthogonal Feature Alignment, HMM Warmup Exclusion,
+True Fractional Kelly Sizing, Evaluative Edge Definition, and Look-Ahead Bias Removal.
 """
 
 import argparse
@@ -279,6 +279,11 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     vol_history = deque(maxlen=1000)
     synthetic_vpin_z = 0.0
     
+    # Gram-Schmidt Covariance State Initialization
+    gs_cov_11, gs_cov_22, gs_cov_33 = 1.0, 1.0, 1.0
+    gs_cov_21, gs_cov_31, gs_cov_32 = 0.0, 0.0, 0.0
+    gs_alpha = 0.02
+
     w_t, w_r, P_init = get_cluster_priors(symbol)
     weights_trending = w_t.copy()
     weights_ranging  = w_r.copy()
@@ -350,6 +355,8 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             current_bucket_vol = 0.0
             current_bucket_buy_vol = 0.0
 
+        # 🚀 AUDIT FIX: Eliminate Look-Ahead Bias. 
+        # The slice strictly ends at `i-1`, ensuring the current bar `c` is entirely unseen during HMM evaluation.
         closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
         vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
         regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
@@ -384,11 +391,38 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
+        # =====================================================================
+        # 🚀 ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
+        # =====================================================================
+        f1 = ofi_fast_z
+        f2 = hawkes_z
+        f3 = tensor_alpha
+        
+        gs_cov_11 = (1 - gs_alpha) * gs_cov_11 + gs_alpha * (f1 * f1)
+        gs_cov_21 = (1 - gs_alpha) * gs_cov_21 + gs_alpha * (f2 * f1)
+        
+        beta_21 = gs_cov_21 / (gs_cov_11 + 1e-9)
+        f2_ortho = f2 - (beta_21 * f1)
+        gs_cov_22 = (1 - gs_alpha) * gs_cov_22 + gs_alpha * (f2_ortho * f2_ortho)
+        
+        gs_cov_31 = (1 - gs_alpha) * gs_cov_31 + gs_alpha * (f3 * f1)
+        gs_cov_32 = (1 - gs_alpha) * gs_cov_32 + gs_alpha * (f3 * f2_ortho)
+        
+        beta_31 = gs_cov_31 / (gs_cov_11 + 1e-9)
+        beta_32 = gs_cov_32 / (gs_cov_22 + 1e-9)
+        f3_ortho = f3 - (beta_31 * f1) - (beta_32 * f2_ortho)
+        gs_cov_33 = (1 - gs_alpha) * gs_cov_33 + gs_alpha * (f3_ortho * f3_ortho)
+        
+        f1_norm = f1 / (math.sqrt(gs_cov_11) + 1e-9)
+        f2_norm = f2_ortho / (math.sqrt(gs_cov_22) + 1e-9)
+        f3_norm = f3_ortho / (math.sqrt(gs_cov_33) + 1e-9)
+
         features = np.clip(np.array([
-            ofi_fast_z / 3.0,
-            hawkes_z / 3.0,
-            tensor_alpha
+            f1_norm / 3.0,
+            f2_norm / 3.0,
+            f3_norm / 3.0
         ]), -1.0, 1.0)
+        # =====================================================================
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
         feature_magnitudes = np.abs(features)
@@ -542,7 +576,6 @@ def run_v56_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             if prob_success >= max(dynamic_gate, p_win) and not vacuum_blocked:
                 taker_fee_pct = 0.0002 if routing_mode == "MAKER_ONLY" else 0.0005
                 
-                # 🚀 AUDIT P0 FIX: Define net_ev_pct and net_edge_bps before using them
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 net_edge_bps = net_ev_pct * 10000.0
                 

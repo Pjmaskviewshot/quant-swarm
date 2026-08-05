@@ -1,7 +1,7 @@
 """
 🌌 V56.2 QUANTUM MICRO-CORE: CONTINUOUS SCALE-INVARIANT AUCTION ENGINE
 ----------------------------------------------------------------------
-Features Leverage-Bridge Auto-Sizing, Asymmetric House Money Compounding,
+Features Direct Risk Sizing, Asymmetric House Money Compounding,
 and Dynamic Margin Sweeping.
 Handles any deposit amount ($7 to $1,000,000+) flawlessly by isolating
 margin constraints and bridging Bybit exchange minimums dynamically.
@@ -161,7 +161,7 @@ class CapitalAuctionEngine:
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
         V56.2 Execution Engine. 
-        Patched with strict 15% equity exposure limits, correct Leverage math, Risk-of-Ruin floor,
+        Patched with strict 15% equity exposure limits, Direct Risk Sizing, Risk-of-Ruin floor,
         and L2-Aware simulated paper fills.
         """
         try:
@@ -213,36 +213,36 @@ class CapitalAuctionEngine:
             vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
             fractional_risk = min(vault_max_risk, fractional_risk)
 
+            # 🚀 AUDIT P0 FIX: True Risk Sizing (Removed Margin Indirection)
+            # 1. Size directly by risk
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
-            # Enforce a strict 15% maximum notional exposure regardless of account size
-            max_allowed_notional = max(5.00, available_balance * 0.15)
+            # 2. Cap notional to strict 15% max exposure
+            max_allowed_notional = available_balance * 0.15
+            
+            if raw_notional > max_allowed_notional:
+                target_notional = max_allowed_notional
+            else:
+                target_notional = raw_notional
+                
+            # 3. Handle Exchange Minimums (Do not illegally lever up)
+            if target_notional < exchange_min_notional:
+                implied_risk_at_min = exchange_min_notional * sl_distance_pct
+                max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
+                
+                if implied_risk_at_min <= max_tolerable_risk:
+                    target_notional = exchange_min_notional * 1.05 # Safely clear the minimum
+                else:
+                    logger.warning(
+                        f"[X-RAY] 🚫 DANGER ABORT // {symbol} Exchange min notional (${exchange_min_notional:.2f}) "
+                        f"forces actual risk to ${implied_risk_at_min:.2f} > vault defense ${max_tolerable_risk:.2f}. Bypassing."
+                    )
+                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                    return
 
-            # 5. 🌉 LEVERAGE-BRIDGE AUTO-SIZING
-            if raw_notional < exchange_min_notional:
-                logger.warning(
-                    f"[X-RAY] 🚫 LEVERAGE-BRIDGE ABORT // {symbol} Safe notional (${raw_notional:.2f}) "
-                    f"is below Bybit minimum (${exchange_min_notional:.2f}). Skipping trade to protect account."
-                )
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
-            
-            # Clamp the notional back down to our 15% equity limit
-            target_notional = min(raw_notional, max_allowed_notional)
-            
-            # Calculate exact dollar loss if SL hits
+            # Recalculate true risk after capping and flooring
             actual_dollar_risk = target_notional * sl_distance_pct
-
-            # Ultimate Account Protection: Never risk > 1.5x Vault Limit of total equity on a single trade
-            max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
-            if actual_dollar_risk > max_tolerable_risk:
-                logger.warning(
-                    f"[X-RAY] 🚫 LEVERAGE-BRIDGE ABORT // {symbol} Bybit Min Notional ${exchange_min_notional:.2f} "
-                    f"forces an actual risk of ${actual_dollar_risk:.2f}. Exceeds vault defense (${max_tolerable_risk:.2f}). Bypassing."
-                )
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
 
             # Calculate exact quantity strictly using the capped target_notional
             safe_qty = target_notional / current_price
@@ -253,12 +253,11 @@ class CapitalAuctionEngine:
                 
             target_notional = target_position_size * current_price
 
-            # Target allocating max 10% of cash balance as margin per trade
-            target_margin_fraction = 0.10  
-            margin_allocation_usdt = max(1.0, available_balance * target_margin_fraction)
-            
-            raw_leverage = target_notional / margin_allocation_usdt
-            target_leverage = int(max(1, min(5, math.floor(raw_leverage * 0.95))))
+            # 4. Calculate Implied Leverage
+            # Leverage is strictly a function of margin efficiency, NOT position sizing.
+            margin_target = available_balance * 0.10
+            implied_leverage = target_notional / max(1.0, margin_target)
+            target_leverage = int(max(1, min(5, math.ceil(implied_leverage))))
 
             # 6. Target Price Calculus & Formatting
             tp_distance = sl_distance * dynamic_rr_ratio 
