@@ -3,8 +3,7 @@
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
-Upgraded with Stationarized Log-MLOFI & Sector Eigenvector Integration,
-Gram-Schmidt Orthogonalization, and Strict Anti-Starvation Gate Clamping.
+Fully backward and forward compatible with main.py state handlers.
 """
 
 import math
@@ -35,7 +34,6 @@ class AdaptiveSessionClock:
 
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
-        # 🚀 UNLEASH PATCH: Relaxed EV floors to prevent micro-account signal starvation
         if routing_mode == "MAKER_ONLY":
             return 0.00001  # Near-zero EV floor for maker limit orders
         return 0.00002       # 0.2 bps EV floor for taker/iceberg orders
@@ -81,9 +79,20 @@ class ContinuousMicrostructureEngine:
     def __init__(self, symbol: str = "GENERIC", memory_depth=500):
         self.symbol = symbol
         
-        # 🚀 V58.0 State Variables
-        self.last_trade_time = 0.0
+        # Orderbook State Tracking
+        self.prev_bid, self.prev_bid_size, self.prev_ask, self.prev_ask_size = 0.0, 0.0, 0.0, 0.0
+        self.ofi_fast_ewma, self.ofi_fast_ewmvar, self.ofi_fast_z = 0.0, 1.0, 0.0
+        self.ofi_slow_ewma, self.ofi_slow_ewmvar, self.ofi_slow_z = 0.0, 1.0, 0.0
+        self.micro_price_skew, self.true_micro_price = 0.0, 0.0
         
+        # Hawkes Trade Intensity State
+        self.last_trade_time, self.hawkes_pressure_state = 0.0, 0.0
+        self.hawkes_ewma, self.hawkes_ewmvar, self.hawkes_z = 0.0, 1.0, 0.0
+        self.hawkes_velocity, self.hawkes_acceleration = 0.0, 0.0
+        self.hawkes_z_prev, self.hawkes_v_prev = 0.0, 0.0
+        
+        # VPIN & Variance State
+        self.vpin_z = 0.0
         self.prices = deque(maxlen=memory_depth)
         self.log_returns = deque(maxlen=memory_depth)
         self.inst_variance, self.vol_ewma = 1e-6, 0.0 
@@ -110,15 +119,49 @@ class ContinuousMicrostructureEngine:
         
         self._last_log_time = {}
 
-    def _throttled_log(self, category: str, message: str, throttle_sec: float = 300.0):
-        now = time.time()
-        last = self._last_log_time.get(category, 0.0)
-        if now - last > throttle_sec:
-            self._last_log_time[category] = now
-            logger.debug(message)
+    def get_dynamic_decays(self):
+        vol_scalar = min(1.0, max(0.0, self.inst_variance * 5000.0))
+        alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (self.kaufman_er * 0.05), 0.05, 0.35)
+        return alpha_fast, alpha_fast / 5.0, np.clip(1.0 + (vol_scalar * 4.0), 1.0, 5.0)
 
-    def update_trades(self, price: float, current_time: float):
-        """Maintains the local return distribution and Kaufman ER metrics."""
+    def update_orderbook_pressure(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
+        """Processes Level 2 updates to calculate true micro-price and Order Flow Imbalance (OFI)."""
+        delta_W = 0.0
+        if best_bid > self.prev_bid: 
+            delta_W += bid_vol
+        elif best_bid == self.prev_bid: 
+            delta_W += (bid_vol - self.prev_bid_size)
+        else: 
+            delta_W -= self.prev_bid_size
+            
+        if best_ask < self.prev_ask: 
+            delta_W -= ask_vol
+        elif best_ask == self.prev_ask: 
+            delta_W -= (ask_vol - self.prev_ask_size)
+        else: 
+            delta_W += self.prev_ask_size
+            
+        self.prev_bid, self.prev_bid_size, self.prev_ask, self.prev_ask_size = best_bid, bid_vol, best_ask, ask_vol
+        alpha_fast, alpha_slow, _ = self.get_dynamic_decays()
+        
+        self.ofi_fast_ewma = (1 - alpha_fast) * self.ofi_fast_ewma + alpha_fast * delta_W
+        self.ofi_fast_ewmvar = (1 - alpha_fast) * self.ofi_fast_ewmvar + alpha_fast * (delta_W - self.ofi_fast_ewma)**2
+        self.ofi_fast_z = (delta_W - self.ofi_fast_ewma) / (math.sqrt(self.ofi_fast_ewmvar) + 1e-9)
+        
+        self.ofi_slow_ewma = (1 - alpha_slow) * self.ofi_slow_ewma + alpha_slow * delta_W
+        self.ofi_slow_ewmvar = (1 - alpha_slow) * self.ofi_slow_ewmvar + alpha_slow * (delta_W - self.ofi_slow_ewma)**2
+        self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
+        
+        current_mid = (best_bid + best_ask) / 2.0
+        self.true_micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
+        if current_mid > 0:
+            self.micro_price_skew = ((self.true_micro_price - current_mid) / (current_mid + 1e-9)) * 10000.0
+
+    def update_trades(self, price: float, volume: float = 0.0, is_buy: bool = True, current_time: float = 0.0):
+        """Processes executed market trades to update Hawkes pressure, volatility, and return history."""
+        if current_time == 0.0:
+            current_time = time.time()
+
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
             if len(self.prices) > 2:
@@ -135,6 +178,26 @@ class ContinuousMicrostructureEngine:
                 self.inst_variance = float(np.var(log_rets_arr[-10:]) + 1e-9)
                 
             self.last_price_time = current_time
+
+        # Hawkes Intensity Calculation
+        alpha_fast, alpha_slow, hawkes_decay = self.get_dynamic_decays()
+        volume_signed = volume if is_buy else -volume
+        
+        if self.last_trade_time > 0:
+            dt = current_time - self.last_trade_time
+            self.hawkes_pressure_state = self.hawkes_pressure_state * math.exp(-hawkes_decay * max(0.0, dt)) + volume_signed
+        else:
+            self.hawkes_pressure_state = volume_signed
+            
+        self.last_trade_time = current_time
+        
+        self.hawkes_ewma = (1 - alpha_fast) * self.hawkes_ewma + alpha_fast * self.hawkes_pressure_state
+        self.hawkes_ewmvar = (1 - alpha_slow) * self.hawkes_ewmvar + alpha_slow * (self.hawkes_pressure_state - self.hawkes_ewma)**2
+        self.hawkes_z = (self.hawkes_pressure_state - self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9)
+
+        self.hawkes_velocity = self.hawkes_z - self.hawkes_z_prev
+        self.hawkes_acceleration = self.hawkes_velocity - self.hawkes_v_prev
+        self.hawkes_z_prev, self.hawkes_v_prev = self.hawkes_z, self.hawkes_velocity
 
     def _process_rls_feedback_loop(self, current_time: float, price: float):
         """Processes historical predictions and computes online error correction (SGD)."""
@@ -214,8 +277,8 @@ class ContinuousMicrostructureEngine:
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         """
         🚀 V58.0 TITANIUM APEX: MACRO FEATURE EXTRACTION
-        Ingests the new Log-MLOFI and Sector SVD Eigenvector impulse, orthogonalizes 
-        them via Online Gram-Schmidt, and queries the dual-weight RLS matrices.
+        Ingests the Log-MLOFI, Hawkes intensity, and Sector SVD Eigenvector impulse,
+        orthogonalizes them via Online Gram-Schmidt, and queries the dual-weight RLS matrices.
         """
         # 1. Update rolling environment metrics
         if len(self.log_returns) > 10:
@@ -230,9 +293,6 @@ class ContinuousMicrostructureEngine:
         self._process_rls_feedback_loop(exchange_timestamp, current_price)
 
         # 2. ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        # f1 = Orderbook Aggression (Log-MLOFI)
-        # f2 = Cascade Intensity (Hawkes)
-        # f3 = Macro Sector Rotation (Sector SVD Impulse)
         f1 = log_mlofi_z
         f2 = hawkes_z
         f3 = sector_impulse
@@ -281,7 +341,6 @@ class ContinuousMicrostructureEngine:
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
-            # 🚀 FIX: Clamp dynamic_ceiling to 0.72 to prevent trade starvation
             dynamic_ceiling = min(0.72, float(np.percentile(prob_arr, 95)) + 0.05)
         else:
             baseline_gate = 0.55
