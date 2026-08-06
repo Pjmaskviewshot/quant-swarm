@@ -1,10 +1,11 @@
 """
-💎 V58.0 TITANIUM APEX: PARALLELIZED UNIFIED API EXECUTOR
+💎 V58.1 TITANIUM APEX: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
-Upgraded with Expanded Execution Lanes to support High-Frequency Chandelier 
-Trailing Stops and Sub-Millisecond Exhaustion Guard Limit-IOC escapes.
+Upgraded with True Intelligent Equity Parsing to eradicate "Margin Illusion" 
+false drawdowns, Expanded Execution Lanes to support High-Frequency Chandelier 
+Trailing Stops, and Sub-Millisecond Exhaustion Guard Limit-IOC escapes.
 """
 
 import os
@@ -66,7 +67,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V58.0 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V58.1 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, titanium ticker filtering, and Priority Execution Lanes.
     """
@@ -150,9 +151,9 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 V58.0 UPGRADE: True Unified Equity Parsing.
-        Pulls true Total Equity & Purchasing Power directly from Bybit, with an 
-        automatic fallback to standard CONTRACT accounts if UNIFIED is inactive.
+        🚀 V58.1 UPGRADE: True Intelligent Equity Parsing.
+        Calculates absolute Total Equity (Cash + Unrealized PnL), completely ignoring 
+        Initial Margin locks. Prevents the "Margin Illusion" from triggering false drawdowns.
         """
         try:
             # Primary: Try Unified Trading Account
@@ -164,15 +165,16 @@ class BybitUnifiedExecutor:
             if response.get("retCode") == 0:
                 accounts = response.get("result", {}).get("list", [])
                 if accounts:
-                    # totalAvailableBalance automatically accounts for all collateral & open positions
-                    available_bal = accounts[0].get("totalAvailableBalance") 
-                    if available_bal is not None:
-                        return float(available_bal)
+                    # 🚀 INTELLIGENT FIX: Use totalEquity, NOT totalAvailableBalance.
+                    # totalEquity = Wallet Balance + Floating PnL. (Margin is safely ignored).
+                    true_equity = accounts[0].get("totalEquity") 
+                    if true_equity is not None:
+                        return float(true_equity)
                     
-                    # Fallback to USDT specifically if global balance is unavailable
+                    # Fallback to USDT specifically if global equity is unavailable
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
-                            return float(coin_info.get("availableToWithdraw", 0.0))
+                            return float(coin_info.get("equity", 0.0))
 
             # Fallback: Try Standard Contract Account
             response_contract = await self._safe_api_call(
@@ -186,7 +188,8 @@ class BybitUnifiedExecutor:
                 if accounts:
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
-                            return float(coin_info.get("availableToWithdraw", 0.0))
+                            # Use "equity", fallback to "walletBalance" if absent
+                            return float(coin_info.get("equity", coin_info.get("walletBalance", 0.0)))
 
             return 0.0
         except Exception as e:
