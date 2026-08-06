@@ -1,10 +1,10 @@
 """
-💎 V58.0 TITANIUM APEX: INSTITUTIONAL SMART ORDER ROUTER
+💎 V59.0 APEX HYPERION: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
 Null-Guard Parity, Dynamic Asset-Aware Timeouts, and IOC Post-Fill Stop Attachments.
-Upgraded with Guaranteed Taker Fallbacks to eradicate trade starvation.
+Upgraded with V59.0 Pre-Trade L2 Slippage Firewalls and the $6.50 Hard Notional Clamp.
 """
 
 import os
@@ -26,7 +26,7 @@ class SmartOrderRouter:
     """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
-        self.max_slippage_pct = max_slippage_pct
+        self.max_slippage_pct = max_slippage_pct # 12 bps default max slippage limit
         self.instrument_cache: Dict[str, Dict[str, float]] = {}
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
 
@@ -51,18 +51,74 @@ class SmartOrderRouter:
             self.instrument_cache[symbol] = {"min_qty": 1.0, "qty_step": 1.0, "tick_size": 0.01}
 
     def _apply_dynamic_exchange_limits(self, qty: float, price: float, target_symbol: str) -> float:
+        """
+        🛡️ V59.0 HARD NOTIONAL FLOOR CLAMP ($6.50)
+        Guarantees no order ever reaches Bybit below $5.00 or as $0.03 dust positions.
+        """
         limits = self.instrument_cache.get(target_symbol, {"min_qty": 1.0, "qty_step": 1.0})
         required_min_qty, qty_step = limits["min_qty"], limits["qty_step"]
         
-        # Ensure we always meet Bybit's ~$5-6 minimum notional value constraint
-        if (qty * price) < 6.0: 
-            qty = 6.0 / (price + 1e-9)
+        # Enforce absolute $6.50 minimum notional floor
+        min_notional_target = 6.50
+        current_notional = qty * price
+        
+        if current_notional < min_notional_target:
+            qty = min_notional_target / (price + 1e-9)
             
         if qty < required_min_qty: 
             qty = required_min_qty
             
-        stepped_qty = math.floor(qty / qty_step) * qty_step
-        return round(stepped_qty, self._get_precision(qty_step))
+        stepped_qty = math.ceil(qty / qty_step) * qty_step
+        final_qty = round(stepped_qty, self._get_precision(qty_step))
+        
+        # Secondary Verification
+        if (final_qty * price) < 5.50:
+            final_qty += qty_step
+            final_qty = round(final_qty, self._get_precision(qty_step))
+
+        return final_qty
+
+    def estimate_orderbook_slippage_bps(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
+        """
+        🛡️ PRE-TRADE L2 SLIPPAGE FIREWALL
+        Simulates walking the orderbook for `qty` to calculate expected fill price.
+        Returns expected slippage in basis points.
+        """
+        if not depth_snapshot or "bids" not in depth_snapshot or "asks" not in depth_snapshot:
+            return 0.0
+
+        levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
+        if not levels: return 0.0
+
+        accumulated_qty = 0.0
+        accumulated_cost = 0.0
+
+        for level in levels:
+            try:
+                p = float(level[0])
+                v = float(level[1])
+                needed = qty - accumulated_qty
+                
+                if v >= needed:
+                    accumulated_cost += (needed * p)
+                    accumulated_qty += needed
+                    break
+                else:
+                    accumulated_cost += (v * p)
+                    accumulated_qty += v
+            except (IndexError, ValueError):
+                continue
+
+        if accumulated_qty < qty or accumulated_qty == 0:
+            return 999.0 # Depleted depth = infinite slippage
+
+        avg_expected_price = accumulated_cost / accumulated_qty
+        if side.upper() == "BUY":
+            slippage_bps = ((avg_expected_price - current_mid) / current_mid) * 10000.0
+        else:
+            slippage_bps = ((current_mid - avg_expected_price) / current_mid) * 10000.0
+
+        return max(0.0, slippage_bps)
 
     def _format_dynamic_price(self, price: float, target_symbol: str) -> float:
         tick_size = self.instrument_cache.get(target_symbol, {"tick_size": 0.01})["tick_size"]
@@ -230,7 +286,7 @@ class SmartOrderRouter:
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 12) -> Tuple[bool, float, float]:
         """
-        🛡️ V58.0 MAKER-GRID SPREAD CAPTURE:
+        🛡️ MAKER-GRID SPREAD CAPTURE:
         Tries to capture spread rebates with PostOnly limit orders. Drops execution if 
         adverse selection is detected (Micro-price absorbing against us).
         """
@@ -435,7 +491,7 @@ class SmartOrderRouter:
                 symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=chunk_timeout
             )
             
-            # 🚀 V58.0 GUARANTEED FALLBACK: If a slice misses its peg, flash strike it immediately.
+            # GUARANTEED FALLBACK: If a slice misses its peg, flash strike it immediately.
             if not success or fill_qty == 0:
                 logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
                 success, fill_price, fill_qty = await self._execute_flash_strike(
@@ -483,6 +539,12 @@ class SmartOrderRouter:
     async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         
+        # 🛡️ PRE-TRADE SLIPPAGE FIREWALL
+        est_slippage = self.estimate_orderbook_slippage_bps(depth_snapshot, direction, total_qty, current_mid_price)
+        if est_slippage > (self.max_slippage_pct * 10000.0):
+            logger.warning(f"[X-RAY] 🛑 SLIPPAGE FIREWALL REJECTION // {symbol} est. slippage {est_slippage:.1f} bps > Max {self.max_slippage_pct*10000:.1f} bps. Aborting.")
+            return False, 0.0, 0.0
+
         is_large_order = False
         if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
             top_bid_vol = sum(float(l[1]) for l in depth_snapshot["bids"][:3])
@@ -507,7 +569,7 @@ class SmartOrderRouter:
                 feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
             )
             
-            # 🚀 V58.0 GUARANTEED FALLBACK: No more trade starvation
+            # GUARANTEED FALLBACK: No more trade starvation
             if not success or qty == 0:
                 logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
                 return await self._execute_flash_strike(
@@ -520,6 +582,12 @@ class SmartOrderRouter:
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         
+        # 🛡️ PRE-TRADE SLIPPAGE FIREWALL
+        est_slippage = self.estimate_orderbook_slippage_bps(depth_snapshot, direction, total_qty, current_mid_price)
+        if est_slippage > (self.max_slippage_pct * 10000.0):
+            logger.warning(f"[X-RAY] 🛑 SLIPPAGE FIREWALL REJECTION // {symbol} est. slippage {est_slippage:.1f} bps > Max {self.max_slippage_pct*10000:.1f} bps. Aborting.")
+            return False, 0.0, 0.0
+
         is_large_order = False
         if depth_snapshot and "bids" in depth_snapshot and "asks" in depth_snapshot:
             top_bid_vol = sum(float(l[1]) for l in depth_snapshot["bids"][:3])
@@ -541,7 +609,7 @@ class SmartOrderRouter:
             feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
         )
 
-        # 🚀 V58.0 GUARANTEED FALLBACK: Resolves the Root Cause #2 Starvation Issue
+        # GUARANTEED FALLBACK: Resolves the Root Cause #2 Starvation Issue
         if not success or qty == 0:
             logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
             return await self._execute_flash_strike(

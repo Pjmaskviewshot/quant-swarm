@@ -1,9 +1,10 @@
 """
-🏛️ V58.0 TITANIUM APEX: UNIVERSAL CONTINUOUS AUCTION ENGINE
+🏛️ V59.2 APEX HYPERION: UNIVERSAL CONTINUOUS AUCTION ENGINE
 -----------------------------------------------------------------
 Features Scale-Invariant Dynamic Notional Adaptation (SIDNA),
 Asymmetric Micro-Price Drift Guards, O(1) Sector Eigenvector Vetoes,
 Granular Asset Micro-Lock Evaluation, and Direct Risk-to-Quantity Mapping.
+Upgraded with V59.2 Post-Upscaling Safety Bounds and Universal Hard Risk Caps.
 """
 
 import time
@@ -51,7 +52,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V58.0 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
+        logger.info("🏛️ V59.2 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -83,11 +84,11 @@ class CapitalAuctionEngine:
                         logger.debug(f"[X-RAY] 🗑️ Signal for {sym} expired in queue (Latency > 3.0s).")
                         continue
                         
-                    # 2. V58.0 Micro-Lock Guard (Absorption Wall Isolation)
+                    # 2. Micro-Lock Guard (Absorption Wall Isolation)
                     if self.core.fsm.is_asset_locked(sym):
                         continue
                         
-                    # 3. V58.0 Sector SVD Eigenvector Alignment Veto
+                    # 3. Sector SVD Eigenvector Alignment Veto
                     sector_state = self.core.fsm.get_sector_state(sym)
                     impulse = sector_state.get("impulse_score", 0.0)
                     
@@ -128,7 +129,7 @@ class CapitalAuctionEngine:
                 if top_symbol in self.core.active_positions_map:
                     continue
                     
-                # 🚀 V58.0 ASYMMETRIC MICRO-PRICE DRIFT GUARD
+                # 🚀 ASYMMETRIC MICRO-PRICE DRIFT GUARD
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
                 if current_ob and current_ob.get("best_bid", 0) > 0:
                     stat_engine = self.core.stat_engines.get(top_symbol)
@@ -182,9 +183,9 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V58.0 Universal Execution Engine. 
+        V59.2 Universal Execution Engine. 
         Patched with Scale-Invariant Dynamic Notional Adaptation (SIDNA),
-        Risk-of-Ruin Floor, Direct Risk-to-Quantity Mapping, and L2-Aware Paper Fills.
+        Risk-of-Ruin Floor, Direct Risk-to-Quantity Mapping, and Universal Risk Caps.
         """
         try:
             # Duplicate Daemon Check
@@ -220,7 +221,7 @@ class CapitalAuctionEngine:
             min_qty = limits["min_qty"]
             qty_step = limits["qty_step"]
             
-            exchange_min_notional = max(6.00, min_qty * current_price)
+            exchange_min_notional = max(6.50, min_qty * current_price)
 
             # 4. 🌌 RISK & EXPOSURE CLAMPS (ZERO-EDGE AVOIDANCE)
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
@@ -238,7 +239,7 @@ class CapitalAuctionEngine:
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
-            # 🚀 V58.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+            # 🚀 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
             if available_balance < 50.0:
                 # Micro-balance mode: scale to exchange min ($6.00-$6.50) while maintaining safe dollar stops
                 standard_max_notional = available_balance * 0.35
@@ -265,13 +266,34 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
+            # 🛡️ V59.2 AUDIT FIX: Safe Math.Floor Position Sizing Calculation
             safe_qty = target_notional / current_price
-            target_position_size = math.ceil(safe_qty / qty_step) * qty_step
-            
-            if target_position_size < min_qty:
-                target_position_size = min_qty
+            stepped_qty = math.floor(safe_qty / qty_step) * qty_step
+
+            # If floored quantity drops below Bybit minimums, upscale SAFELY
+            if (stepped_qty * current_price) < 6.50:
+                stepped_qty = math.ceil(6.50 / (current_price * qty_step)) * qty_step
                 
+            if stepped_qty < min_qty:
+                stepped_qty = min_qty
+                
+            target_position_size = stepped_qty
             target_notional = target_position_size * current_price
+
+            # 🛡️ V59.2 AUDIT FIX (N2): Post-Upscaling Notional Check
+            # Prevent pathological altcoin step-size explosions if price*qty_step is huge
+            if target_notional > max(15.0, max_allowed_notional * 1.5):
+                logger.warning(f"[X-RAY] 🚫 PATHOLOGICAL STEP SIZE ABORT // {symbol} upscaled notional (${target_notional:.2f}) exceeds safety bounds. Aborting.")
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
+            
+            # 🛡️ V59.2 AUDIT FIX (N1): Universal Hard Risk Cap Verification (Post-Rounding)
+            # Replaces the asymmetrical 'available_balance > 50.0' check. Applies to all account sizes.
+            trade_risk_dollars = target_notional * sl_distance_pct
+            if trade_risk_dollars > max_tolerable_risk:
+                logger.warning(f"[X-RAY] 🛡️ AUCTION RISK REJECTION // {symbol} post-rounding risk (${trade_risk_dollars:.2f}) exceeds macro ceiling (${max_tolerable_risk:.2f}). Aborting.")
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
 
             margin_target = max(1.0, target_notional / 3.0)
             implied_leverage = target_notional / margin_target
@@ -292,7 +314,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${actual_dollar_risk:.2f}")
+            logger.info(f"[X-RAY] 🌉 SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}

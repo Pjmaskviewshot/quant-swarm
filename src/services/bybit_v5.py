@@ -1,11 +1,10 @@
 """
-💎 V58.1 TITANIUM APEX: PARALLELIZED UNIFIED API EXECUTOR
+💎 V59.0 APEX HYPERION: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
-Upgraded with True Intelligent Equity Parsing to eradicate "Margin Illusion" 
-false drawdowns, Expanded Execution Lanes to support High-Frequency Chandelier 
-Trailing Stops, and Sub-Millisecond Exhaustion Guard Limit-IOC escapes.
+Upgraded with Strict Liquidity Radar (3.0 bps Spread Gate) and $50M+ Volume
+Thresholds to permanently eradicate micro-cap slippage drag.
 """
 
 import os
@@ -22,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V58.0 BYBIT RETURN CODES
+    🚀 V59.0 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -67,9 +66,9 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V58.1 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V59.0 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
-    secrets scrubbing, titanium ticker filtering, and Priority Execution Lanes.
+    secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 12):
         self.api_key = api_key or ""
@@ -81,8 +80,7 @@ class BybitUnifiedExecutor:
             api_secret=api_secret
         )
         
-        # 🚀 V58.0 UPGRADE: Expanded Execution Capacity. 
-        # The new Hawkes-Elastic Chandelier Stop requires significantly more `amend_order` throughput.
+        # Expanded Execution Capacity for High-Frequency Chandelier Stops
         self.data_rate_limiter = TokenBucketRateLimiter(capacity=20, fill_rate=10.0)
         self.execution_rate_limiter = TokenBucketRateLimiter(capacity=30, fill_rate=15.0)
         
@@ -151,7 +149,7 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 V58.1 UPGRADE: True Intelligent Equity Parsing.
+        🚀 V59.0 UPGRADE: True Intelligent Equity Parsing.
         Calculates absolute Total Equity (Cash + Unrealized PnL), completely ignoring 
         Initial Margin locks. Prevents the "Margin Illusion" from triggering false drawdowns.
         """
@@ -268,13 +266,14 @@ class BybitUnifiedExecutor:
             logger.error(f"[X-RAY] ❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
             return False
 
-    async def get_top_volatile_assets(self, limit: int = 18, min_turnover: float = 30_000_000.0) -> List[str]:
+    async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 50_000_000.0) -> List[str]:
         """
-        🚀 TITANIUM TICKER DISCOVERY RADAR
-        Scrapes exchange tickers, applies Titanium Blocklist (rejecting stock perps/leveraged ETFs),
-        filters for USDT perps with sufficient turnover, and ranks by volatility.
+        🚀 V59.0 STRICT LIQUIDITY RADAR
+        Filters exclusively for $50M+ 24h turnover and tight spreads (<= 3.0 bps).
+        Restricts universe to an ultra-liquid whitelist to eradicate slippage drag.
         """
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
+        whitelist = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT", "AVAXUSDT", "LINKUSDT", "AAVEUSDT", "XRPUSDT"]
         
         try:
             response = await self._safe_api_call(
@@ -287,32 +286,35 @@ class BybitUnifiedExecutor:
             
             for t in tickers:
                 symbol = t.get("symbol", "")
-                if not symbol.endswith("USDT"): continue
+                
+                # Strict Asset Gates
+                if symbol not in whitelist: continue
                 if any(b in symbol for b in banned_keywords): continue
                     
                 turnover = float(t.get("turnover24h", 0.0) or 0.0)
-                if turnover < min_turnover: continue
-                    
-                high = float(t.get("highPrice24h", 0.0) or 0.0)
-                low = float(t.get("lowPrice24h", 0.0) or 0.0)
-                last = float(t.get("lastPrice", 0.0) or 1.0)
+                bid = float(t.get("bid1Price", 0.0) or 0.0)
+                ask = float(t.get("ask1Price", 0.0) or 0.0)
                 
-                if last == 0 or low == 0: continue
-                volatility = (high - low) / (last + 1e-9)
+                if bid <= 0 or ask <= bid or turnover < min_turnover: continue
+                
+                # 🛡️ HARD SPREAD GATE: Must be <= 3.0 basis points
+                spread_bps = ((ask - bid) / bid) * 10000.0
+                if spread_bps > 3.0: continue 
                 
                 valid_assets.append({
                     "symbol": symbol,
-                    "volatility": volatility,
+                    "spread_bps": spread_bps,
                     "turnover": turnover
                 })
                 
-            valid_assets.sort(key=lambda x: x["volatility"], reverse=True)
+            # Rank strictly by highest liquidity turnover
+            valid_assets.sort(key=lambda x: x["turnover"], reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             
-            logger.info(f"[X-RAY] 📡 TITANIUM RADAR DISCOVERED {len(top_symbols)} VOLATILE ASSETS.")
-            return top_symbols
+            logger.info(f"[X-RAY] 📡 HYPERION RADAR DISCOVERED {len(top_symbols)} ULTRA-LIQUID ASSETS.")
+            return top_symbols if top_symbols else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             
         except Exception as e:
             logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
-            # Fallback to highly liquid majors
-            return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]
+            # Failsafe fallback guarantees core liquid assets
+            return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
