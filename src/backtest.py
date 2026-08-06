@@ -1,24 +1,22 @@
 """
-🌌 V57.0 OMNI-QUANTUM APEX BACKTESTER
+🌌 V58.0 TITANIUM APEX BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V57.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Patched for Online Gram-Schmidt Orthogonal Feature Alignment, HMM Warmup Exclusion,
-True Fractional Kelly Sizing, Adaptive Slippage Caps (15 bps majors / 35 bps alts),
-and Look-Ahead Bias Removal.
+of the live V58.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
+Upgraded with Stationarized Log-MLOFI approximations, 1D Kalman Filtered HMMs,
+Hawkes-Elastic Chandelier Exits, and Anti-Starvation Kelly Floors (0.3%).
 """
 
 import argparse
 import time
 import math
 import datetime
+import requests
+import numpy as np
 from collections import deque
 from itertools import permutations
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
-
-import numpy as np
-import requests
 
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 TAKER_FEE = 0.00055          
@@ -110,6 +108,7 @@ def get_cluster_priors(symbol: str):
     return w_trend, w_range, np.eye(3) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
+    """V58.0 UPGRADE: Bounded correlation damping and threshold tuning."""
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
     aligned_b, aligned_a = [], []
     
@@ -126,14 +125,14 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     
     try:
         with np.errstate(divide='ignore', invalid='ignore'):
-            correlation = np.corrcoef(aligned_b, aligned_a)[0, 1]
+            correlation = float(np.corrcoef(aligned_b, aligned_a)[0, 1])
         if np.isnan(correlation): return 0.0
     except Exception:
         return 0.0
     
-    btc_momentum = np.mean(aligned_b[-10:])
-    if abs(btc_momentum) > 0.0002 and correlation > 0.60:
-        return float(np.sign(btc_momentum) * min(1.0, abs(correlation)))
+    btc_momentum = float(np.mean(aligned_b[-10:]))
+    if abs(btc_momentum) > 0.00015 and correlation > 0.45:
+        return float(math.copysign(min(1.0, abs(correlation)), btc_momentum))
     return 0.0
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
@@ -159,9 +158,30 @@ def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
     variance = float(std)**2 + 1e-9
     return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
-def detect_hmm_regime(closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
-    if len(closes_arr) < 20:
+def _apply_kalman_smoothing(prices: np.ndarray) -> np.ndarray:
+    """V58.0 UPGRADE: 1D Kalman Filter for Regime Smoothing."""
+    if len(prices) < 2: return prices
+    n = len(prices)
+    filtered = np.zeros(n)
+    Q = 1e-5
+    R = np.var(prices) * 0.05 + 1e-9 
+    x_hat = prices[0]
+    P = 1.0
+    for i in range(n):
+        x_pred = x_hat
+        P_pred = P + Q
+        K = P_pred / (P_pred + R)
+        x_hat = x_pred + K * (prices[i] - x_pred)
+        P = (1 - K) * P_pred
+        filtered[i] = x_hat
+    return filtered
+
+def detect_hmm_regime(raw_closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
+    if len(raw_closes_arr) < 20:
         return "MEAN_REVERTING", current_state_probs, 0.5
+
+    # Apply V58.0 Kalman Smoothing
+    closes_arr = _apply_kalman_smoothing(raw_closes_arr)
 
     log_returns = np.diff(np.log(closes_arr + 1e-9))
     mu_ret = float(np.mean(log_returns))
@@ -252,7 +272,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     mse_penalty = min(0.08, mse * 0.3)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -262,6 +282,7 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     hawkes_velocity, hawkes_acceleration = 0.0, 0.0
     hawkes_z_prev, hawkes_v_prev = 0.0, 0.0
     
+    vol_ewma = 0.0
     amihud_history = deque(maxlen=100)
     rolling_outcomes = deque(maxlen=100)
     trade_imbalances = deque(maxlen=100)
@@ -356,7 +377,6 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             current_bucket_vol = 0.0
             current_bucket_buy_vol = 0.0
 
-        # Look-Ahead Bias Elimination: slice strictly ends at `i-1`
         closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
         vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
         regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
@@ -365,9 +385,11 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
+        # 🚀 V58.0: LOG-MLOFI PROXY
         vol_step = c_prev['volume']
+        log_vol_step = math.log1p(vol_step)
         price_step = (c_prev['close'] - c_prev_prev['close'])
-        mlofi_step = vol_step * np.sign(price_step) * 0.5 
+        mlofi_step = log_vol_step * np.sign(price_step) * 0.5 
         
         ofi_fast_mean = (1 - alpha_fast) * ofi_fast_mean + alpha_fast * mlofi_step
         ofi_fast_var = (1 - alpha_fast) * ofi_fast_var + alpha_fast * (mlofi_step - ofi_fast_mean)**2
@@ -377,7 +399,12 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (mlofi_step - ofi_slow_mean)**2
         ofi_slow_z = (mlofi_step - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
         
-        volume_signed = np.sign(price_step) * vol_step
+        # 🚀 V58.0: HAWKES NORMALIZED VOLUME
+        vol_ewma = (1 - 0.05) * vol_ewma + 0.05 * vol_step if vol_ewma > 0 else vol_step
+        normalized_volume = vol_step / (vol_ewma + 1e-9)
+        volume_mark = math.log1p(max(0.0, normalized_volume))
+        
+        volume_signed = np.sign(price_step) * volume_mark
         hawkes_mean = (1 - alpha_fast) * hawkes_mean + alpha_fast * volume_signed
         hawkes_var = (1 - alpha_slow) * hawkes_var + alpha_slow * (volume_signed - hawkes_mean)**2
         hawkes_z = (volume_signed - hawkes_mean) / (math.sqrt(hawkes_var) + 1e-9)
@@ -445,10 +472,11 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if len(historical_probs) >= 30:
             prob_arr = np.fromiter(historical_probs, dtype=float, count=len(historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
-            dynamic_ceiling = min(0.98, float(np.percentile(prob_arr, 95)) + 0.05)
+            # 🚀 V58.0 FIX: Strict 0.72 ceiling clamp
+            dynamic_ceiling = min(0.72, float(np.percentile(prob_arr, 95)) + 0.05)
         else:
             baseline_gate = 0.55
-            dynamic_ceiling = 0.90
+            dynamic_ceiling = 0.72
             
         if len(entropy_history) > 10:
             ent_arr = np.array(entropy_history)
@@ -461,8 +489,7 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         error_scaler = 1.0 + max(0.0, (ewma_mse - 0.25) * 0.5)
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-        # 🚀 UNLEASH PATCH: Lowered baseline confidence gate floor from 0.65 to 0.55 in backtest
-        dynamic_gate = max(0.55, min(dynamic_ceiling, raw_gate))
+        dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
@@ -546,11 +573,17 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             
+            # 🚀 V58.0: Anti-Starvation Kelly Sizing
             if len(rolling_outcomes) >= 10:
                 p_win = np.mean(rolling_outcomes)
                 q_loss = 1.0 - p_win
                 b_payoff = avg_win_r / (avg_loss_r + 1e-9)
-                kelly_f = (p_win * b_payoff - q_loss) / b_payoff if b_payoff > 0 else 0.0
+                
+                if b_payoff <= 0:
+                    kelly_f = 0.003
+                else:
+                    kf = (p_win * b_payoff - q_loss) / b_payoff
+                    kelly_f = max(0.003, kf / 2.0)
             else:
                 p_win = 0.50
                 kelly_f = 0.010
@@ -639,11 +672,7 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                                 position_size -= (position_size * portion)
                                 scaled_levels[target_r] = True
 
-                        base_mult = 3.0 if regime in ["TRENDING", "VOLATILE"] else 1.8
-                        min_mult = 1.0
-                        x_val = np.clip(2.5 * (r_multiple - 2.0), -700, 700)
-                        sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x_val))
-                        
+                        # 🚀 V58.0: Hawkes-Elastic Chandelier Proxy
                         time_in_mins = bars_held
                         vol_ratio = (initial_risk / p.sl_atr_mult) / entry
                         dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
@@ -653,7 +682,8 @@ def run_v57_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         else:
                             theta_decay = 1.0
                             
-                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * sigmoid_factor * theta_decay, entry * 0.015)
+                        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, hawkes_z)))
+                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * hawkes_scalar * theta_decay, entry * 0.003)
                         
                         if r_multiple < 1.0:
                             current_sl = max(current_sl, realigned_sl) if action_dir == "BUY" else min(current_sl, realigned_sl)
@@ -783,7 +813,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V57.0 OMNI-QUANTUM APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V58.0 TITANIUM APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -805,7 +835,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v57_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v58_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -858,9 +888,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v57_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v58_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V57.0 OMNI-QUANTUM APEX OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V58.0 TITANIUM APEX OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

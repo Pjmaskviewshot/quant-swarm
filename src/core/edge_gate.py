@@ -1,10 +1,9 @@
 """
-💎 V56.2 QUANTUM SWARM: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
+💎 V58.0 TITANIUM APEX: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
 -------------------------------------------------------------------------
-Evaluates L2 Multi-Level Order Flow Imbalance (MLOFI), Dark Pool Iceberg Absorption,
+Evaluates Stationarized Log-MLOFI (Spoof-Resistant), Dark Pool Iceberg Absorption,
 Micro-Price Effective Spreads (Liquidity Vacuums), and Roll Implicit Spreads. 
-Features X-Ray Diagnostic Telemetry.
-Patched for Directional Micro-Spread Logic and Strict Confluence Gating.
+Patched to eradicate trade starvation and allow Standard Confluence routing.
 """
 
 import math
@@ -19,9 +18,9 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V56.2 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    🚀 V58.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
     Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
-    Upgraded with Directional Micro-Price Effective Spreads.
+    Upgraded with Log-MLOFI spoofing immunity and Standard Confluence routing.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -37,8 +36,6 @@ class MicrostructureEdgeGate:
         self._current_trade_sell_vol = 0.0
         
         self.lambda_history = deque(maxlen=window_size)
-        
-        # 🚀 V56.2 FIX: Signed array for directional micro-price logic
         self.micro_spread_history = deque(maxlen=window_size)
         
         self.prev_bids = []
@@ -63,7 +60,7 @@ class MicrostructureEdgeGate:
 
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         """
-        Updates L2 Multi-Level Order Flow Imbalance (MLOFI) across book depth levels.
+        🚀 V58.0 UPGRADE: Updates Stationarized Log-MLOFI across book depth levels.
         Calculates rolling Kyle's Lambda (price impact) and Micro-Price Spread metrics.
         """
         if not self.prev_bids or not self.prev_asks:
@@ -89,18 +86,24 @@ class MicrostructureEdgeGate:
                 curr_bid_p, curr_bid_s = float(current_bids[i][0]), float(current_bids[i][1])
                 prev_bid_p, prev_bid_s = float(self.prev_bids[i][0]), float(self.prev_bids[i][1])
                 
-                delta_bid = 0.0
-                if curr_bid_p > prev_bid_p: delta_bid = curr_bid_s
-                elif curr_bid_p == prev_bid_p: delta_bid = curr_bid_s - prev_bid_s
-                else: delta_bid = -prev_bid_s
+                # 🚀 V58.0 LOG-OFI FIX: Damps spoofing walls using math.log1p
+                if curr_bid_p > prev_bid_p: 
+                    delta_bid = math.log1p(curr_bid_s)
+                elif curr_bid_p == prev_bid_p: 
+                    delta_bid = math.log1p(curr_bid_s) - math.log1p(prev_bid_s)
+                else: 
+                    delta_bid = -math.log1p(prev_bid_s)
 
                 curr_ask_p, curr_ask_s = float(current_asks[i][0]), float(current_asks[i][1])
                 prev_ask_p, prev_ask_s = float(self.prev_asks[i][0]), float(self.prev_asks[i][1])
                 
-                delta_ask = 0.0
-                if curr_ask_p < prev_ask_p: delta_ask = curr_ask_s
-                elif curr_ask_p == prev_ask_p: delta_ask = curr_ask_s - prev_ask_s
-                else: delta_ask = -prev_ask_s
+                # 🚀 V58.0 LOG-OFI FIX: Damps spoofing walls using math.log1p
+                if curr_ask_p < prev_ask_p: 
+                    delta_ask = math.log1p(curr_ask_s)
+                elif curr_ask_p == prev_ask_p: 
+                    delta_ask = math.log1p(curr_ask_s) - math.log1p(prev_ask_s)
+                else: 
+                    delta_ask = -math.log1p(prev_ask_s)
 
                 level_ofi = delta_bid - delta_ask
                 weight = math.exp(-self.decay_alpha * i)
@@ -124,16 +127,11 @@ class MicrostructureEdgeGate:
         self.prev_bids = current_bids
         self.prev_asks = current_asks
         
-        # 🚀 AUDIT P0 FIX: True Directional Micro-Price Effective Spread (removed abs)
         try:
             best_bid_p, best_bid_s = float(current_bids[0][0]), float(current_bids[0][1])
             best_ask_p, best_ask_s = float(current_asks[0][0]), float(current_asks[0][1])
             
-            # The True Micro-Price reflects the balance of L1 liquidity depth
             micro_price = (best_bid_p * best_ask_s + best_ask_p * best_bid_s) / (best_bid_s + best_ask_s + 1e-9)
-            
-            # The DIRECTIONAL divergence of Micro-Price from Mid-Price in Basis Points
-            # Positive = Upward pressure, Negative = Downward pressure
             micro_spread_bps = ((micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
             self.micro_spread_history.append(micro_spread_bps)
         except Exception:
@@ -183,9 +181,9 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 V56.2 STRUCTURAL EDGE EVALUATOR
-        Evaluates confluence between statistical prediction, Order Flow Imbalance, Dark Pool Iceberg
-        absorption, and Micro-Price Liquidity Vacuums. Emits X-Ray diagnostics.
+        🚀 V58.0 STRUCTURAL EDGE EVALUATOR
+        Evaluates confluence between statistical prediction, Log-MLOFI, Dark Pool Iceberg
+        absorption, and Micro-Price Liquidity Vacuums.
         """
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
@@ -196,18 +194,17 @@ class MicrostructureEdgeGate:
         current_t_imb = np.mean(list(self._trade_imbalances)[-5:])
         t_imb_std = np.std(self._trade_imbalances)
         
-        # 🚀 AUDIT FIX: Raised the MLOFI flat gate from 0.5 to 1.0 standard deviations to reduce noise
-        if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 1.0):
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "MLOFI_FLAT", "routing": "STANDARD"}
+        # 🚀 ANTI-STARVATION FIX: Lowered the Log-MLOFI flat gate from 1.0 to 0.5 standard deviations
+        if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 0.5):
+            return {"action": "HOLD", "confidence": 0.0, "reasoning": "LOG_MLOFI_FLAT", "routing": "STANDARD"}
 
         direction = "BUY" if current_mlofi > 0 else "SELL"
         
-        # 🚀 AUDIT P0 FIX: CONFLUENCE GUARD MUST BE CHECKED FIRST
         if intended_direction and direction != intended_direction:
             return {
                 "action": "HOLD", 
                 "confidence": 0.0, 
-                "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, MLOFI wants {direction}",
+                "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, Log-MLOFI wants {direction}",
                 "routing": "STANDARD"
             }
         
@@ -223,7 +220,6 @@ class MicrostructureEdgeGate:
             if abs_spread_mean > 0 and abs(current_micro_spread) > (abs_spread_mean * 4.0) and abs(current_micro_spread) > 1.0:
                 vacuum_dir = "BUY" if current_micro_spread > 0 else "SELL"
                 
-                # Double-verify the vacuum direction matches the AI and MLOFI direction
                 if vacuum_dir == direction:
                     self._throttled_warn(
                         f"vacuum_{symbol}", 
@@ -265,6 +261,17 @@ class MicrostructureEdgeGate:
                 "action": direction,
                 "confidence": confidence,
                 "reasoning": f"DEEP_BOOK_BREAKOUT | Elasticity: {lambda_expansion:.2f}x",
+                "routing": "STANDARD"
+            }
+
+        # 4. 🚀 ANTI-STARVATION FIX: ALLOW STANDARD CONFLUENCE TRADES
+        if intended_direction and direction == intended_direction:
+            mlofi_strength = abs(current_mlofi) / (mlofi_std + 1e-9)
+            confidence = min(0.75, 0.50 + (mlofi_strength * 0.05))
+            return {
+                "action": direction,
+                "confidence": confidence,
+                "reasoning": f"STANDARD_MLOFI_CONFLUENCE | Signal: {direction} (Strength: {mlofi_strength:.1f}x)",
                 "routing": "STANDARD"
             }
 

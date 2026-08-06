@@ -1,25 +1,35 @@
 """
-🌌 V56.1 QUANTUM SWARM: DECOUPLED L2 INGESTION LAYER
+🌌 V58.0 TITANIUM APEX: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,
 Subscription Chunking (10-arg limit compliance), Pure JSON Pings,
-Fast Float Pre-Parsing, Institutional Load Shedding, and X-Ray Diagnostic Telemetry.
+C-Optimized Float Pre-Parsing, Institutional Load Shedding, 
+and X-Ray Diagnostic Telemetry for High-Frequency Swarm execution.
 """
 
 import asyncio
 import aiohttp
-import json
 import time
 import logging
 from typing import Dict, Any, Callable, Coroutine, List
+
+# Attempt to load ultra-fast JSON parsers to reduce CPU deserialization drag, fallback to standard
+try:
+    import ujson as json
+except ImportError:
+    try:
+        import orjson as json
+    except ImportError:
+        import json
 
 logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V56.1 OMNI-SWARM: DECOUPLED INGESTION LAYER
+    🚀 V58.0 TITANIUM APEX: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
     from downstream processing via a high-capacity asynchronous FIFO queue.
+    Upgraded with C-level list comprehensions for Orderbook deserialization.
     """
     def __init__(
         self, 
@@ -64,19 +74,20 @@ class HighVelocityMultiFeed:
         Pulls from the high-speed FIFO queue and executes callbacks sequentially.
         Maintains strict chronological L2/L3 ordering without blocking network socket reading.
         """
-        logger.info("[X-RAY] ⚡ Decoupled Data Consumer Worker ONLINE.")
+        logger.info("[X-RAY] ⚡ V58.0 Decoupled Data Consumer Worker ONLINE.")
         while self.is_running:
             try:
                 payload_type, payload_data = await self.ingestion_queue.get()
                 
-                if payload_type == "trade" and self.trade_callback:
-                    await self.trade_callback(payload_data)
-                elif payload_type == "orderbook":
+                # Ordered by highest frequency to optimize branching
+                if payload_type == "orderbook":
                     await self.orderbook_callback(payload_data)
-                elif payload_type == "kline":
-                    await self.kline_callback(payload_data)
+                elif payload_type == "trade" and self.trade_callback:
+                    await self.trade_callback(payload_data)
                 elif payload_type == "tickers":
                     await self.screener_callback(payload_data)
+                elif payload_type == "kline":
+                    await self.kline_callback(payload_data)
                     
                 self.ingestion_queue.task_done()
                 
@@ -87,9 +98,9 @@ class HighVelocityMultiFeed:
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V56.1 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        🚀 V58.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
         Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
-        without needing to tear down the entire 24-coin connection multiplexer.
+        without needing to tear down the entire multiplexer connection.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -122,10 +133,9 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V56.1 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
-        Instead of going blind for 100ms+ during an unsub/sub cycle, we immediately 
-        fetch a REST snapshot and inject it into the high-speed queue. This prevents 
-        MLOFI and toxicity metrics from processing corrupted gap deltas.
+        🚀 V58.0 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
+        Immediately fetches a REST snapshot and injects it into the high-speed queue 
+        when sequence gaps occur, preventing downstream MLOFI corruption.
         """
         if not self.active_ws or self.active_ws.closed:
             return
@@ -168,14 +178,21 @@ class HighVelocityMultiFeed:
             logger.error(f"[X-RAY] ❌ Isolated resync request failed for {symbol}: {e}")
 
     def _fast_float_parse_book(self, levels: list) -> list:
-        """Pre-parses string lists into float arrays to save downstream CPU cycles."""
-        parsed = []
-        for lvl in levels:
-            try:
-                parsed.append([float(lvl[0]), float(lvl[1])])
-            except (IndexError, ValueError):
-                pass
-        return parsed
+        """
+        🚀 V58.0 UPGRADE: Pre-parses string lists into float arrays using 
+        C-optimized list comprehensions to save downstream CPU cycles.
+        """
+        try:
+            return [[float(lvl[0]), float(lvl[1])] for lvl in levels]
+        except (IndexError, ValueError):
+            # Fallback for malformed exchange payloads
+            parsed = []
+            for lvl in levels:
+                try:
+                    parsed.append([float(lvl[0]), float(lvl[1])])
+                except (IndexError, ValueError):
+                    pass
+            return parsed
 
     async def initialize_multiplexed_stream(self):
         """Spawns concurrent asynchronous subscription worker processes."""
@@ -251,13 +268,8 @@ class HighVelocityMultiFeed:
 
                                 try:
                                     # Route incoming bytes to FIFO queue in O(1) time
-                                    if topic.startswith("tickers"):
-                                        try:
-                                            self.ingestion_queue.put_nowait(("tickers", data))
-                                        except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding tickers tick.")
-                                            
-                                    elif topic.startswith("orderbook"):
+                                    # Ordered by highest frequency updates first
+                                    if topic.startswith("orderbook"):
                                         symbol = data.get("s")
                                         u_sequence = data.get("u")
                                         msg_type = payload.get("type", "delta")
@@ -287,14 +299,6 @@ class HighVelocityMultiFeed:
                                         except asyncio.QueueFull:
                                             logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding orderbook tick.")
                                             
-                                    elif topic.startswith("kline"):
-                                        try:
-                                            self.ingestion_queue.put_nowait(("kline", {
-                                                "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
-                                            }))
-                                        except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding kline tick.")
-                                            
                                     elif topic.startswith("publicTrade"):
                                         symbol = topic.split(".")[-1]
                                         for tick in data:
@@ -309,6 +313,20 @@ class HighVelocityMultiFeed:
                                                 self.ingestion_queue.put_nowait(("trade", tick_payload))
                                             except asyncio.QueueFull:
                                                 logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding trade tick.")
+                                                
+                                    elif topic.startswith("tickers"):
+                                        try:
+                                            self.ingestion_queue.put_nowait(("tickers", data))
+                                        except asyncio.QueueFull:
+                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding tickers tick.")
+                                            
+                                    elif topic.startswith("kline"):
+                                        try:
+                                            self.ingestion_queue.put_nowait(("kline", {
+                                                "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
+                                            }))
+                                        except asyncio.QueueFull:
+                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding kline tick.")
 
                                 except Exception as e:
                                     logger.error(f"[X-RAY] 🚨 OVERLOAD OR ROUTING ERROR: {e}")

@@ -1,9 +1,9 @@
 """
-⚡ V57.0 QUANTUM SWARM: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
+⚡ V58.0 TITANIUM APEX: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
 --------------------------------------------------------------
-Serves as the O(1) in-memory cache for macro regime analysis 
-and the single source of truth for Swarm-level circuit breakers.
-Patched with clean standard indentation and unified lock properties.
+Serves as the O(1) in-memory cache for macro regime analysis, Sector Eigenvector 
+momentum states, and the single source of truth for Swarm-level circuit breakers.
+Upgraded with Per-Asset Micro-Locks for localized Exhaustion/Absorption isolation.
 """
 
 import logging
@@ -21,50 +21,97 @@ class TradingState(Enum):
     EMERGENCY_LOCK = "EMERGENCY_LOCK"
     AI_MACRO_BULL = "AI_MACRO_BULL"
     AI_MACRO_BEAR = "AI_MACRO_BEAR"
+    # 🚀 V58.0 NEW STATES
+    ABSORPTION_COOLDOWN = "ABSORPTION_COOLDOWN"  
+    SECTOR_MISALIGNMENT = "SECTOR_MISALIGNMENT"
 
 class SystemStateMachine:
     """
-    ⚡ V57.0 APEX UPGRADE: ASYNCHRONOUS MACRO STATE MANAGER
-    Serves as the O(1) in-memory cache for the Off-Path AI LLM Debate Matrix 
-    and the single-source-of-truth Swarm-level Circuit Breaker.
+    ⚡ V58.0 APEX UPGRADE: DYNAMIC MACRO & SECTOR STATE MANAGER
+    Serves as the O(1) in-memory cache for Off-Path AI Debate, Sector SVD Eigenvectors,
+    and granular localized/global Circuit Breakers.
     """
     def __init__(self, accuracy_threshold: float = 0.60, warmup_epochs: int = 150):
         self.current_state = TradingState.BOOTSTRAPPING
         
-        # O(1) Cache for off-path LLM predictions (Eliminates execution latency)
+        # O(1) Caches for off-path predictions and sector SVDs (Eliminates execution latency)
         self.ai_macro_cache: Dict[str, Dict[str, Any]] = {}
+        self.sector_macro_cache: Dict[str, Dict[str, Any]] = {}
         
         # Single Source of Truth for Swarm-level hardware locks
         self.global_emergency_lock = False
         
-        logger.info("⚡ FSM Shell Upgraded: Now serving as O(1) Macro Regime & Circuit Breaker Cache.")
+        # 🚀 V58.0 NEW: Per-Asset Micro-Locks (Timestamp expiration)
+        self.asset_locks: Dict[str, float] = {}
+        
+        logger.info("⚡ FSM Core Upgraded to V58.0: Now serving Granular Asset Locks & Sector Eigenvector Cache.")
+
+    # =====================================================================
+    # MACRO & SECTOR STATE CACHING
+    # =====================================================================
 
     def update_ai_macro_state(self, symbol: str, action: str, confidence_multiplier: float):
-        """
-        Called exclusively by the background LLM worker loop.
-        Updates the asset's macro state without blocking the High-Frequency WebSocket feed.
-        """
+        """Updates the asset's macro state without blocking the HFT WebSocket feed."""
         self.ai_macro_cache[symbol] = {
             "action": action.upper(),
-            # Clamp the multiplier to prevent hallucinated extreme leverage sizing
             "confidence_multiplier": max(0.5, min(2.0, confidence_multiplier)), 
             "last_updated": time.time()
         }
-        logger.info(f"🧠 AI MACRO STATE CACHED // {symbol}: {action.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
+        logger.info(f"🧠 AI MACRO CACHED // {symbol}: {action.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
 
     def get_ai_macro_state(self, symbol: str, staleness_limit_seconds: float = 900.0) -> Dict[str, Any]:
-        """
-        O(1) lookup for the SOR / Execution pipeline. 
-        Instantly returns the AI verdict or falls back to a neutral safety state if the LLM is lagging.
-        """
+        """O(1) lookup for the SOR pipeline. Reverts to neutral safety if LLM is lagging."""
         state = self.ai_macro_cache.get(symbol)
-        
-        # If no state exists or data is older than 15 minutes, revert to safe defaults
         if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
             return {"action": "HOLD", "confidence_multiplier": 1.0}
-            
         return state
-        
+
+    def update_sector_state(self, target_symbol: str, impulse_score: float, correlation: float):
+        """
+        🚀 V58.0 UPGRADE: Caches the SVD Sector Eigenvector impulse.
+        Allows the execution router to verify sector tailwinds in O(1) time.
+        """
+        self.sector_macro_cache[target_symbol] = {
+            "impulse_score": impulse_score,
+            "correlation": correlation,
+            "last_updated": time.time()
+        }
+
+    def get_sector_state(self, target_symbol: str, staleness_limit_seconds: float = 300.0) -> Dict[str, Any]:
+        """O(1) lookup for Sector SVD alignments."""
+        state = self.sector_macro_cache.get(target_symbol)
+        if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
+            return {"impulse_score": 0.0, "correlation": 0.0}
+        return state
+
+    # =====================================================================
+    # GLOBAL & LOCAL CIRCUIT BREAKERS
+    # =====================================================================
+
+    def trigger_asset_lock(self, symbol: str, duration_seconds: float, reason: str = "ABSORPTION_WALL"):
+        """
+        🚀 V58.0 UPGRADE: Isolates specific assets that have hit an absorption wall 
+        or extreme slippage, freezing them without taking down the entire Swarm.
+        """
+        expiration = time.time() + duration_seconds
+        self.asset_locks[symbol] = expiration
+        logger.warning(f"⏸️ ASSET MICRO-LOCK ENGAGED // {symbol} isolated for {duration_seconds:.1f}s. Reason: {reason}")
+
+    def is_asset_locked(self, symbol: str) -> bool:
+        """O(1) check to see if an asset is currently in a micro-lock cooldown."""
+        if self.global_emergency_lock:
+            return True
+            
+        expiration = self.asset_locks.get(symbol, 0.0)
+        if time.time() < expiration:
+            return True
+            
+        # Clean up expired lock
+        if expiration > 0.0:
+            self.asset_locks.pop(symbol, None)
+            
+        return False
+
     def trigger_global_emergency_lock(self):
         """Instantly locks all swarm execution pathways across all nodes."""
         self.global_emergency_lock = True

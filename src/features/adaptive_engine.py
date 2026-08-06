@@ -1,9 +1,11 @@
 """
-💎 V55.2 QUANTUM SWARM: ADAPTIVE FEATURE ENGINE
+💎 V58.0 TITANIUM APEX: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
-Eradicates fixed-threshold Look-Ahead Bias by dynamically scaling
-archetypes to the asset's realized volatility envelope.
+Upgraded with 1D Kalman Filtering on the price stream to eradicate 
+micro-whipsaws and stabilize order routing decisions. Eradicates 
+fixed-threshold Look-Ahead Bias by dynamically scaling archetypes 
+to the asset's realized volatility envelope.
 """
 
 import math
@@ -37,7 +39,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V55.2 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 V58.0 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -74,23 +76,59 @@ class AdaptiveFeatureEngine:
         var = float(std)**2 + 1e-9
         return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
 
+    def _apply_kalman_smoothing(self, prices: np.ndarray) -> np.ndarray:
+        """
+        🚀 V58.0 UPGRADE: 1D Kalman Filter
+        Strips high-frequency microstructure noise from the raw price feed.
+        Ensures the HMM evaluates the true macro-trend rather than reacting to chop.
+        """
+        if len(prices) < 2:
+            return prices
+            
+        n = len(prices)
+        filtered = np.zeros(n)
+        
+        # Q: Process noise covariance (Flexibility of the true state)
+        # R: Measurement noise covariance (Adaptive to recent asset variance)
+        Q = 1e-5
+        R = np.var(prices) * 0.05 + 1e-9 
+        
+        x_hat = prices[0]
+        P = 1.0
+        
+        for i in range(n):
+            # Time Update (Predict)
+            x_pred = x_hat
+            P_pred = P + Q
+            
+            # Measurement Update (Correct)
+            K = P_pred / (P_pred + R)
+            x_hat = x_pred + K * (prices[i] - x_pred)
+            P = (1 - K) * P_pred
+            
+            filtered[i] = x_hat
+            
+        return filtered
+
     def detect_market_regime(self) -> str:
         """
-        🚀 V55.2 FIX: Dynamically Calibrated HMM (Look-ahead bias eliminated, pure adaptive percentiles)
-        Expanded observation window to 100 bars for statistical significance.
+        Dynamically Calibrated HMM (Look-ahead bias eliminated).
+        Now protected against flip-flopping via Kalman-smoothed price ingestion.
         """
-        # 🚀 FIX: Require at least 100 bars for a stable variance envelope (or fall back to Mean Reverting)
         if len(self.timeframes["5"]) >= 100:
             candles = list(self.timeframes["5"])[-100:]
         elif len(self.timeframes["1"]) >= 100:
             candles = list(self.timeframes["1"])[-100:]
-        elif len(self.timeframes["5"]) >= 20: # Fallback if we just booted
+        elif len(self.timeframes["5"]) >= 20: 
             candles = list(self.timeframes["5"])[-20:]
         else:
             return "MEAN_REVERTING" 
 
-        closes = np.array([float(c["close"]) for c in candles])
+        raw_closes = np.array([float(c["close"]) for c in candles])
         volumes = np.array([float(c["volume"]) for c in candles])
+        
+        # 🚀 V58.0: Filter raw prices to stabilize HMM transition state
+        closes = self._apply_kalman_smoothing(raw_closes)
         
         try:
             log_returns = np.diff(np.log(closes + 1e-9))
@@ -104,8 +142,6 @@ class AdaptiveFeatureEngine:
             avg_vol = float(np.mean(volumes))
             vol_baseline = float(np.median(volumes)) + 1e-9
             
-            # 🚀 V55.2 FIX: Archetypes scale dynamically with the asset's realized volatility
-            # We calculate a rolling variance envelope to construct the dynamic mean expectations
             base_vol = max(0.001, np.median([np.std(log_returns[max(0, i-5):i]) for i in range(5, len(log_returns)+1, 5)]))
             
             archetypes = {
@@ -140,7 +176,6 @@ class AdaptiveFeatureEngine:
             best_state_idx = int(np.argmax(self.state_probs))
             detected_regime = self.regimes[best_state_idx]
             
-            # X-Ray Telemetry for major regime shifts
             now = time.time()
             if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
                 logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
@@ -159,7 +194,6 @@ class AdaptiveFeatureEngine:
             return "MEAN_REVERTING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
-        """Ingests real-time market execution prints to calculate actual trade aggression."""
         if not trades:
             return
 
@@ -179,7 +213,6 @@ class AdaptiveFeatureEngine:
         self.tfi_history.append(tfi)
 
     def push_orderbook_tick(self, bids: List[List[str]], asks: List[List[str]], is_snapshot: bool = False) -> None:
-        """Consumes raw Level 2 updates and immediately builds an optimized top-of-book lookup."""
         if is_snapshot:
             self.local_bids.clear()
             self.local_asks.clear()
@@ -252,11 +285,6 @@ class AdaptiveFeatureEngine:
         return momentum_matrix
 
     def get_htf_trend_bias(self, current_price: float) -> float:
-        """
-        🚀 V50.0 APEX: Higher-Timeframe Trend Bias Factor (β_HTF).
-        Calculates distance from 4H and 1H Exponential Moving Averages to penalize
-        counter-trend microscopic signals. Returns float between -1.0 to 1.0.
-        """
         bias = 0.0
         
         # Calculate 4-Hour (240m) Trend Bias
@@ -292,11 +320,6 @@ class AdaptiveFeatureEngine:
         return np.clip(bias, -1.0, 1.0)
 
     def get_dynamic_rr_ratio(self) -> float:
-        """
-        🚀 Adaptive Parameter Scaling via Kaufman Efficiency Ratio (ER).
-        In smooth trends (ER approx 1.0), RR expands up to 3.2x.
-        In choppy markets (ER approx 0.0), RR tightens to 1.2x.
-        """
         if len(self.timeframes["5"]) >= 20:
             candles = list(self.timeframes["5"])[-20:]
             closes = np.array([float(c["close"]) for c in candles])

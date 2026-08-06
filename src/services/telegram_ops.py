@@ -1,5 +1,5 @@
 """
-💎 V56.2 QUANTUM SWARM: TELEGRAM MISSION CONTROL
+💎 V58.0 TITANIUM APEX: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
 and institutional-grade Forensic X-Ray HTML formatters. Fully standardized
@@ -148,7 +148,7 @@ class AsyncTelegramReporter:
         await self._message_queue.put((payload, max_retries))
 
     # ====================================================================
-    # 🚀 V56.2 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
+    # 🚀 V58.0 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
@@ -159,11 +159,15 @@ class AsyncTelegramReporter:
         spread_bps = features.get("bid_ask_spread", 0.0) * 10000.0
         
         micro_status = "STABLE"
-        mlofi_z = features.get('adaptive_obi_z', 0.0)
-        if mlofi_z > 2.0: micro_status = "TOXIC BUY PRESSURE"
-        elif mlofi_z < -2.0: micro_status = "TOXIC SELL PRESSURE"
-        elif "DARK_POOL" in features.get('reasoning', ''): micro_status = "ICEBERG ABSORPTION"
-        elif "MAKER_ONLY" in features.get('reasoning', ''): micro_status = "WIDE SPREAD (MAKER PEG)"
+        # 🚀 V58.0: Map to the new Log-MLOFI architecture
+        log_mlofi_z = features.get('log_mlofi_z', features.get('adaptive_obi_z', 0.0))
+        reasoning = features.get('reasoning', '')
+        
+        if log_mlofi_z > 2.0: micro_status = "TOXIC BUY PRESSURE"
+        elif log_mlofi_z < -2.0: micro_status = "TOXIC SELL PRESSURE"
+        elif "ABSORBED" in reasoning: micro_status = "PASSIVE ABSORPTION WALL"
+        elif "DARK_POOL" in reasoning: micro_status = "ICEBERG ABSORPTION"
+        elif "MAKER_ONLY" in reasoning: micro_status = "WIDE SPREAD (MAKER PEG)"
 
         return (
             f"🎯 <b>X-RAY DISPATCH // {symbol}</b>\n"
@@ -208,7 +212,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V56.2 APEX)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V58.0 APEX)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"

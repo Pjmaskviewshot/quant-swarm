@@ -1,10 +1,10 @@
 """
-💎 V57.0 QUANTUM SWARM: UNIVERSAL INSTITUTIONAL RISK VAULT
+💎 V58.0 TITANIUM APEX: UNIVERSAL INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Scale-Invariant Kelly Sizing with Volatility-Adjusted CVaR Protection,
 Micro-Account Notional Adaptation ($5 to $1,000,000+),
 Full Pairwise Correlation Matrices, and Dynamic Drawdown Circuit Breakers.
-Patched for Max 3 Concurrent Micro-Account Trades.
+Upgraded with Minimum Operational Risk Floors to eradicate Kelly Death Spirals.
 """
 
 import math
@@ -49,6 +49,10 @@ class InstitutionalRiskVault:
             self.volatility_surface.append(variance)
 
     def calculate_evt_tail_risk(self) -> float:
+        """
+        Calculates the Conditional Value at Risk (CVaR) of the volatility surface.
+        Penalizes position sizing during extreme volatility clustering.
+        """
         if len(self.volatility_surface) < 50:
             return 1.05 
             
@@ -73,6 +77,7 @@ class InstitutionalRiskVault:
             return 1.05
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
+        """Updates the pairwise correlation matrix to prevent over-exposure to a single sector."""
         try:
             min_len = min([len(prices) for prices in price_histories.values()])
             if min_len < 30: 
@@ -98,7 +103,14 @@ class InstitutionalRiskVault:
             self.avg_loss_r = (self.avg_loss_r * 0.95) + (capped_r * 0.05)
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0) -> float:
+        """
+        🚀 V58.0 UPGRADE: Scale-Invariant Kelly Sizing with Anti-Starvation Floor.
+        Calculates the optimal portfolio fraction to risk based on rolling performance.
+        """
         total_trades = len(self.outcomes_history)
+        
+        # 🚀 FIX: Minimum Operational Risk Floor (0.3% Account Risk)
+        min_operational_floor = 0.003
         
         if total_trades < 10:
             base_fraction = 0.010 
@@ -110,26 +122,25 @@ class InstitutionalRiskVault:
             b = self.avg_win_r / (self.avg_loss_r + 1e-9)
             
             if b <= 0:
-                return 0.0 
-            
-            kelly_fraction = (p * b - q) / b
-            
-            if kelly_fraction <= 0:
-                return 0.0
+                base_fraction = min_operational_floor
+            else:
+                kelly_fraction = (p * b - q) / b
                 
-            base_fraction = max(0.002, kelly_fraction / 2.0)
+                if kelly_fraction <= 0:
+                    base_fraction = min_operational_floor
+                else:
+                    base_fraction = max(min_operational_floor, kelly_fraction / 2.0) # Half-Kelly
         
         evt_multiplier = self.calculate_evt_tail_risk()
         edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
         
         risk_adjusted_kelly = base_fraction * evt_multiplier * edge_factor
         
-        if risk_adjusted_kelly <= 0:
-            return 0.0
-            
-        return max(0.002, min(0.015, risk_adjusted_kelly))
+        # Guarantee we never return 0.0 unless the edge is completely invalid upstream
+        return max(min_operational_floor, min(self.max_single_risk, risk_adjusted_kelly))
 
     def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> Tuple[bool, str]:
+        """Evaluates if a new position breaches systemic portfolio constraints."""
         if self.emergency_circuit_breaker:
             return False, "EMERGENCY_CIRCUIT_BREAKER_ACTIVE"
 
@@ -144,11 +155,11 @@ class InstitutionalRiskVault:
                     self.emergency_circuit_breaker = True
                 return False, f"MAX_DRAWDOWN_BREACHED_{current_drawdown:.2%}"
 
-        # 🚀 V57.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+        # 🚀 V58.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
         # Bypasses percentage caps for micro-accounts (< $50) so $6.00-$6.50 minimum orders can clear.
         if current_balance < 50.0:
             active_count = len(self.active_positions)
-            if active_count >= 3:  # 🚀 UNLEASH PATCH: Raised from 2 to 3 concurrent trades
+            if active_count >= 3:  # Max 3 concurrent micro-account trades
                 return False, f"MICRO_ACCOUNT_MAX_POSITIONS_REACHED ({active_count}/3)"
             
             if symbol in self.active_positions:
@@ -162,6 +173,7 @@ class InstitutionalRiskVault:
                 for active_sym in self.active_positions.keys():
                     if active_sym in self.correlation_matrix.index and symbol in self.correlation_matrix.columns:
                         corr_value = self.correlation_matrix.loc[active_sym, symbol]
+                        # Veto trades that are > 75% correlated with an active position
                         if corr_value > 0.75:
                             return False, f"RISK_PARITY_BLOCK_CORRELATED_{corr_value:.2f}_WITH_{active_sym}"
 

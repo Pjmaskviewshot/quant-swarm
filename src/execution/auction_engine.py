@@ -1,10 +1,9 @@
 """
-🏛️ V57.0 OMNI-QUANTUM APEX: UNIVERSAL CONTINUOUS AUCTION ENGINE
+🏛️ V58.0 TITANIUM APEX: UNIVERSAL CONTINUOUS AUCTION ENGINE
 -----------------------------------------------------------------
 Features Scale-Invariant Dynamic Notional Adaptation (SIDNA),
-Adaptive Micro-Account Bridging, Direct Risk-to-Quantity Mapping,
-SEV-1 Orphan Trade Guards, Deterministic Heap Tie-Breaking,
-and Multi-Tier Microstructure SOR Bracket Execution.
+Asymmetric Micro-Price Drift Guards, O(1) Sector Eigenvector Vetoes,
+Granular Asset Micro-Lock Evaluation, and Direct Risk-to-Quantity Mapping.
 """
 
 import time
@@ -19,7 +18,7 @@ from typing import Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.AUCTION_ENGINE")
 
-# 🚀 SYNCHRONIZED: Structured Bybit Error Codes (Aligned globally with bybit_v5.py)
+# 🚀 SYNCHRONIZED: Structured Bybit Error Codes
 class BybitRetCode:
     SUCCESS = 0
     PARAMETER_ERROR = 10002          # Invalid request parameter
@@ -41,7 +40,6 @@ class CapitalAuctionEngine:
         locks, API executors, and risk vaults.
         """
         self.core = core_engine
-        # Deterministic Heap Tie-Breaker
         self._heap_counter = 0
 
     def get_next_heap_id(self) -> int:
@@ -51,9 +49,9 @@ class CapitalAuctionEngine:
     async def run_global_capital_auction_worker(self):
         """
         The infinite polling loop that monitors the global priority heap.
-        Only the highest expected Sharpe signals are evaluated.
+        Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V57.0 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
+        logger.info("🏛️ V58.0 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -76,15 +74,31 @@ class CapitalAuctionEngine:
                 valid_candidates = []
                 now = time.time()
                 
-                # Filter out stale signals (older than 3 seconds)
                 while self.core.auction_queue:
                     item = heapq.heappop(self.core.auction_queue)
-                    # Unpack the 5-item tuple which includes the tie-breaker ID
                     _, _, sym, _, payload = item
-                    if now - payload["timestamp"] < 3.0: 
-                        valid_candidates.append(item)
-                    else:
+                    
+                    # 1. Latency/Staleness Check
+                    if now - payload["timestamp"] > 3.0: 
                         logger.debug(f"[X-RAY] 🗑️ Signal for {sym} expired in queue (Latency > 3.0s).")
+                        continue
+                        
+                    # 2. V58.0 Micro-Lock Guard (Absorption Wall Isolation)
+                    if self.core.fsm.is_asset_locked(sym):
+                        continue
+                        
+                    # 3. V58.0 Sector SVD Eigenvector Alignment Veto
+                    sector_state = self.core.fsm.get_sector_state(sym)
+                    impulse = sector_state.get("impulse_score", 0.0)
+                    
+                    if payload["action"] == "BUY" and impulse < -0.40:
+                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} BUY blocked by negative Sector Eigenvector ({impulse:.2f}).")
+                        continue
+                    if payload["action"] == "SELL" and impulse > 0.40:
+                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} SELL blocked by positive Sector Eigenvector ({impulse:.2f}).")
+                        continue
+
+                    valid_candidates.append(item)
                         
                 if not valid_candidates: 
                     continue
@@ -99,7 +113,6 @@ class CapitalAuctionEngine:
             if not best_candidate: 
                 continue
             
-            # Unpack the 5-item tuple which includes the tie-breaker ID
             top_neg_sharpe, _, top_symbol, _, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
@@ -115,14 +128,26 @@ class CapitalAuctionEngine:
                 if top_symbol in self.core.active_positions_map:
                     continue
                     
+                # 🚀 V58.0 ASYMMETRIC MICRO-PRICE DRIFT GUARD
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
                 if current_ob and current_ob.get("best_bid", 0) > 0:
-                    live_mid = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
-                    drift_pct = abs(live_mid - top_payload["price"]) / top_payload["price"]
+                    stat_engine = self.core.stat_engines.get(top_symbol)
+                    if stat_engine and getattr(stat_engine, 'true_micro_price', 0.0) > 0:
+                        live_price = stat_engine.true_micro_price
+                    else:
+                        live_price = (current_ob["best_bid"] + current_ob["best_ask"]) / 2.0
+                        
+                    signal_price = top_payload["price"]
+                    action = top_payload["action"]
                     
-                    # 🚀 UNLEASH PATCH: Widen drift tolerance from 0.3% to 0.8% to catch fast breakouts
-                    if drift_pct > 0.0080: 
-                        logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Signal drifted {drift_pct*10000:.1f} bps in queue. Aborting.")
+                    if action == "BUY":
+                        drift_pct = (live_price - signal_price) / signal_price
+                    else:
+                        drift_pct = (signal_price - live_price) / signal_price
+                    
+                    # Reject if it ran away by >40 bps, or dumped/spiked by >100 bps (potential cascade)
+                    if drift_pct > 0.0040 or drift_pct < -0.0100: 
+                        logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Micro-Price drifted {drift_pct*10000:.1f} bps. Aborting.")
                         continue
 
                 # Provisional Scale-Aware Check
@@ -157,7 +182,7 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V57.0 Universal Execution Engine. 
+        V58.0 Universal Execution Engine. 
         Patched with Scale-Invariant Dynamic Notional Adaptation (SIDNA),
         Risk-of-Ruin Floor, Direct Risk-to-Quantity Mapping, and L2-Aware Paper Fills.
         """
@@ -184,7 +209,7 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 2. Base Volatility Parameters
+            # 2. Base Volatility Parameters (Broad bounds, FSM manages precise trail)
             sl_atr_mult = max(2.5, self.core.live_params.get("sl_atr_mult", 2.5))
             sl_distance = max(atr * sl_atr_mult, current_price * 0.025) 
             sl_distance_pct = sl_distance / current_price
@@ -213,12 +238,13 @@ class CapitalAuctionEngine:
             target_dollar_risk = available_balance * fractional_risk
             raw_notional = target_dollar_risk / sl_distance_pct
 
-            # 🚀 V57.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+            # 🚀 V58.0 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
             if available_balance < 50.0:
-                # Micro-balance mode: scale to exchange min ($6.00-$6.50) while holding absolute loss <= $0.45
+                # Micro-balance mode: scale to exchange min ($6.00-$6.50) while maintaining safe dollar stops
                 standard_max_notional = available_balance * 0.35
                 max_allowed_notional = max(exchange_min_notional * 1.05, standard_max_notional)
-                max_tolerable_risk = max(0.45, available_balance * 0.03)  # Max $0.45 loss or 3% account risk
+                # Cap dollar risk at $1.20 or 6% of micro-balance to prevent rapid depletion
+                max_tolerable_risk = max(1.20, available_balance * 0.06)  
             else:
                 # Institutional mode: 15% notional exposure cap
                 max_allowed_notional = available_balance * 0.15
@@ -251,7 +277,7 @@ class CapitalAuctionEngine:
             implied_leverage = target_notional / margin_target
             target_leverage = int(max(2, min(5, math.ceil(implied_leverage))))
 
-            # 5. Target Price Calculus & Formatting
+            # 5. Target Price Calculus & Formatting (Wide Initial Brackets)
             tp_distance = sl_distance * dynamic_rr_ratio 
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))

@@ -1,9 +1,10 @@
 """
-💎 V56.1 QUANTUM SWARM: INSTITUTIONAL SMART ORDER ROUTER
+💎 V58.0 TITANIUM APEX: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Strict Slippage Clamps, PostOnly Pegging, Adverse Selection Protection, 
 Null-Guard Parity, Dynamic Asset-Aware Timeouts, and IOC Post-Fill Stop Attachments.
+Upgraded with Guaranteed Taker Fallbacks to eradicate trade starvation.
 """
 
 import os
@@ -19,6 +20,10 @@ from services.bybit_v5 import BybitUnifiedExecutor
 logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
+    """
+    Dynamically routes executions across Flash Strike (Taker), Maker Peg (PostOnly), 
+    and TWAP Iceberg slices to minimize execution drag and slippage.
+    """
     def __init__(self, executor: BybitUnifiedExecutor, max_slippage_pct: float = 0.0012):
         self.executor = executor
         self.max_slippage_pct = max_slippage_pct
@@ -118,8 +123,7 @@ class SmartOrderRouter:
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: Optional[float] = None, tp: Optional[float] = None) -> Tuple[bool, float, float]:
         """
         Aggressive IOC Execution with robust NoneType and empty-string guards for price/qty parameters.
-        Escalates price through orderbook depth to guarantee fill during extreme momentum, 
-        capped at a strict max slippage limit. Handles Partial Fills gracefully.
+        Escalates price through orderbook depth to guarantee fill during extreme momentum.
         """
         logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive momentum escalation.")
         
@@ -170,7 +174,7 @@ class SmartOrderRouter:
             logger.info(f"[X-RAY] ⚡ Flash Strike Attempt {attempt+1}/3 // {side} {cleaned_qty} {symbol} at {final_price}")
 
             try:
-                # 🚀 V56.1 FIX: Remove TP/SL from IOC placement. Bybit ignores them here.
+                # Place limit IOC order (Stops attached post-fill to avoid immediate rejection)
                 response = await self.executor.safe_call(
                     self.executor.client.place_order,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
@@ -198,7 +202,7 @@ class SmartOrderRouter:
                         if cum_exec > 0:
                             logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
                             
-                            # 🚀 V56.1 FIX: Explicitly attach TP/SL after confirmed fill
+                            # Attach TP/SL exactly to the average fill price
                             if final_sl or final_tp:
                                 try:
                                     await self.executor.safe_call(
@@ -226,9 +230,9 @@ class SmartOrderRouter:
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 12) -> Tuple[bool, float, float]:
         """
-        🚀 V55.3 MAKER-GRID SPREAD CAPTURE:
-        Utilizes dynamically scaled timeouts to accommodate Altcoin liquidity behavior without
-        surrendering perfectly viable mathematical setups.
+        🛡️ V58.0 MAKER-GRID SPREAD CAPTURE:
+        Tries to capture spread rebates with PostOnly limit orders. Drops execution if 
+        adverse selection is detected (Micro-price absorbing against us).
         """
         logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners. (Timeout: {timeout}s)")
         
@@ -420,7 +424,7 @@ class SmartOrderRouter:
         total_executed_qty = 0.0
         weighted_notional_sum = 0.0
         
-        # 🚀 FIX: Dynamic Maker Timeouts for Iceberg Chunks
+        # Dynamic Maker Timeouts for Iceberg Chunks
         is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         chunk_timeout = 8.0 if is_major_asset else 15.0
         
@@ -431,8 +435,9 @@ class SmartOrderRouter:
                 symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=chunk_timeout
             )
             
+            # 🚀 V58.0 GUARANTEED FALLBACK: If a slice misses its peg, flash strike it immediately.
             if not success or fill_qty == 0:
-                logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike with valid SL/TP floats.")
+                logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
                 success, fill_price, fill_qty = await self._execute_flash_strike(
                     symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=sl, tp=tp
                 )
@@ -494,10 +499,23 @@ class SmartOrderRouter:
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
-            # 🚀 FIX: Dynamic Maker Timeouts (12s for Majors, 25s for Altcoins)
             is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             dynamic_timeout = 12.0 if is_major_asset else 25.0
-            return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout)
+            
+            success, price, qty = await self._execute_dynamic_maker_peg(
+                symbol, direction, total_qty, stop_loss, take_profit, 
+                feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
+            )
+            
+            # 🚀 V58.0 GUARANTEED FALLBACK: No more trade starvation
+            if not success or qty == 0:
+                logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
+                return await self._execute_flash_strike(
+                    symbol=symbol, direction=direction, qty=total_qty, 
+                    current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit
+                )
+                
+            return success, price, qty
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
@@ -514,9 +532,21 @@ class SmartOrderRouter:
             logger.info(f"[X-RAY] 🐋 WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
             return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
 
-        # 🚀 FIX: Dynamic Maker Timeouts (12s for Majors, 25s for Altcoins)
         is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-        dynamic_timeout = 12.0 if is_major_asset else 25.0
+        dynamic_timeout = 8.0 if is_major_asset else 15.0  # Tightened timeout for faster fallback
         
-        logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Forcing Maker-Grid Peg on {symbol} to capture spread edge ({dynamic_timeout}s timeout).")
-        return await self._execute_dynamic_maker_peg(symbol, direction, total_qty, stop_loss, take_profit, feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout)
+        logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Attempting Maker-Grid Peg on {symbol} ({dynamic_timeout}s timeout).")
+        success, price, qty = await self._execute_dynamic_maker_peg(
+            symbol, direction, total_qty, stop_loss, take_profit, 
+            feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
+        )
+
+        # 🚀 V58.0 GUARANTEED FALLBACK: Resolves the Root Cause #2 Starvation Issue
+        if not success or qty == 0:
+            logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
+            return await self._execute_flash_strike(
+                symbol=symbol, direction=direction, qty=total_qty, 
+                current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit
+            )
+
+        return success, price, qty

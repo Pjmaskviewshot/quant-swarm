@@ -1,9 +1,10 @@
 """
-💎 V56.2 QUANTUM SWARM: PARALLELIZED UNIFIED API EXECUTOR
+💎 V58.0 TITANIUM APEX: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
-Patched with SEV-1 Strict API Segmentation to guarantee execution priority.
+Upgraded with Expanded Execution Lanes to support High-Frequency Chandelier 
+Trailing Stops and Sub-Millisecond Exhaustion Guard Limit-IOC escapes.
 """
 
 import os
@@ -20,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V56.1 BYBIT RETURN CODES
+    🚀 V58.0 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -60,16 +61,16 @@ class TokenBucketRateLimiter:
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)  # Tightened sleep for lower latency acquisition
 
 
 class BybitUnifiedExecutor:
     """
-    🚀 V56.2 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V58.0 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, titanium ticker filtering, and Priority Execution Lanes.
     """
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 8):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 12):
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
         
@@ -79,10 +80,10 @@ class BybitUnifiedExecutor:
             api_secret=api_secret
         )
         
-        # 🚀 AUDIT FIX #4: Segmented Rate Limiting. 
-        # Separated read requests from write requests to guarantee execution orders are never stuck behind data polling.
+        # 🚀 V58.0 UPGRADE: Expanded Execution Capacity. 
+        # The new Hawkes-Elastic Chandelier Stop requires significantly more `amend_order` throughput.
         self.data_rate_limiter = TokenBucketRateLimiter(capacity=20, fill_rate=10.0)
-        self.execution_rate_limiter = TokenBucketRateLimiter(capacity=10, fill_rate=5.0)
+        self.execution_rate_limiter = TokenBucketRateLimiter(capacity=30, fill_rate=15.0)
         
         self._api_thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers, 
@@ -96,7 +97,7 @@ class BybitUnifiedExecutor:
         Enforces rate-limiting, thread isolation, automatic retries on server load,
         fail-fast on parameter faults (10002), and token/secret scrubbing.
         """
-        # Segment traffic: If it's an execution command (place, cancel, amend), use the Express Lane.
+        # Segment traffic: Priority express lane for crucial position management commands
         func_name = getattr(func, '__name__', '').lower()
         is_execution = any(word in func_name for word in ["place", "cancel", "amend", "set_trading_stop", "set_leverage"])
         
@@ -149,10 +150,12 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 V56.1 FIX: Pulls true Total Equity & Purchasing Power directly from Bybit V5 Unified Account.
-        Eliminates the inaccurate 5% hard-tax and multi-currency blindspots.
+        🚀 V58.0 UPGRADE: True Unified Equity Parsing.
+        Pulls true Total Equity & Purchasing Power directly from Bybit, with an 
+        automatic fallback to standard CONTRACT accounts if UNIFIED is inactive.
         """
         try:
+            # Primary: Try Unified Trading Account
             response = await self._safe_api_call(
                 self.client.get_wallet_balance, 
                 accountType="UNIFIED"
@@ -170,6 +173,21 @@ class BybitUnifiedExecutor:
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
                             return float(coin_info.get("availableToWithdraw", 0.0))
+
+            # Fallback: Try Standard Contract Account
+            response_contract = await self._safe_api_call(
+                self.client.get_wallet_balance, 
+                accountType="CONTRACT",
+                coin="USDT"
+            )
+            
+            if response_contract.get("retCode") == 0:
+                accounts = response_contract.get("result", {}).get("list", [])
+                if accounts:
+                    for coin_info in accounts[0].get("coin", []):
+                        if coin_info.get("coin") == "USDT":
+                            return float(coin_info.get("availableToWithdraw", 0.0))
+
             return 0.0
         except Exception as e:
             logger.error(f"[X-RAY] Failed to fetch true wallet balance: {e}")
@@ -293,4 +311,5 @@ class BybitUnifiedExecutor:
             
         except Exception as e:
             logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
+            # Fallback to highly liquid majors
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT"]

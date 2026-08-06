@@ -1,11 +1,11 @@
 """
-🌌 V57.0 OMNI-QUANTUM APEX: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
+💎 V58.0 TITANIUM APEX: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
 ------------------------------------------------------------------------
 The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
 Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
 Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
-Patched with Unleash Settings: Lowered 55% Confidence Gate, Relaxed EV Floors, 
-and 0.8% Price Drift Tolerance for Active Micro-Account Execution.
+Upgraded with Stationarized Log-MLOFI Deep-Book tracking, 1D Kalman HMM 
+Regime Filtering, Hawkes-Elastic Chandelier Stops, and Yield Harvesting.
 """
 
 import os
@@ -65,7 +65,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V57.0_OMNI_STATE")
+logger = logging.getLogger("QUANT_CORE.V58.0_TITANIUM_APEX")
 
 
 class DistributedQuantEngine:
@@ -76,7 +76,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("🌌 LIVE MODE: V57.0 OMNI-QUANTUM APEX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V58.0 TITANIUM APEX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -131,7 +131,7 @@ class DistributedQuantEngine:
         self.funding_rates, self.open_interests, self.spread_history = {}, {}, {}
         
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
-        self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=self.test_mode, max_workers=8)
+        self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=self.test_mode, max_workers=12)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0035)
         self.omni_scanner = GlobalOmniScanner(self.executor)
         self.stream_feed_instance = None  
@@ -250,23 +250,6 @@ class DistributedQuantEngine:
             logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
 
     async def _get_true_equity_usdt(self) -> float:
-        try:
-            acc_info = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="UNIFIED", coin="USDT")
-            if acc_info and acc_info.get("retCode") == 0 and acc_info.get("result", {}).get("list"):
-                coins = acc_info["result"]["list"][0].get("coin", [])
-                usdt_data = next((c for c in coins if c.get("coin") == "USDT"), None)
-                if usdt_data and "equity" in usdt_data:
-                    return float(usdt_data["equity"])
-            
-            acc_info_contract = await self.executor.safe_call(self.executor.client.get_wallet_balance, accountType="CONTRACT", coin="USDT")
-            if acc_info_contract and acc_info_contract.get("retCode") == 0 and acc_info_contract.get("result", {}).get("list"):
-                coins = acc_info_contract["result"]["list"][0].get("coin", [])
-                usdt_data = next((c for c in coins if c.get("coin") == "USDT"), None)
-                if usdt_data and "equity" in usdt_data:
-                    return float(usdt_data["equity"])
-        except Exception as e:
-            logger.debug(f"[X-RAY] True equity fetch fallback engaged: {e}")
-            
         return await self.executor.get_wallet_balance_usdt()
 
     async def _fetch_exchange_tick_sizes(self):
@@ -503,7 +486,7 @@ class DistributedQuantEngine:
             clock = self.vpin_clocks.get(symbol)
             if not stat_engine or not clock: return
             
-            stat_engine.update_trades(price, volume, is_buy, exchange_timestamp)
+            stat_engine.update_trades(price, exchange_timestamp)
             self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
             
             manifests = clock.process_tick(price, volume, not is_buy)
@@ -538,7 +521,17 @@ class DistributedQuantEngine:
                 dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
                 tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                 
-                sgd_state = stat_engine.extract_statistical_state(price, vpin_z, self.tensor_oracle.compute_lead_lag_signal(symbol), sl_dist_pct, tp_dist_pct, exchange_timestamp)
+                # 🚀 V58.0 TITANIUM APEX: Pass new ML parameters (Log-MLOFI, Hawkes, Sector SVD)
+                sgd_state = stat_engine.extract_statistical_state(
+                    current_price=price, 
+                    log_mlofi_z=stat_engine.ofi_fast_z, 
+                    hawkes_z=stat_engine.hawkes_z, 
+                    sector_impulse=self.tensor_oracle.compute_lead_lag_signal(symbol), 
+                    sl_dist_pct=sl_dist_pct, 
+                    tp_dist_pct=tp_dist_pct, 
+                    exchange_timestamp=exchange_timestamp
+                )
+                
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
@@ -563,7 +556,7 @@ class DistributedQuantEngine:
 
                 async with self.portfolio_state_lock: dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
                 
-                # UNLEASH PATCH: Lowered baseline confidence gate from 0.65 to 0.55 for micro-accounts
+                # 🚀 V58.0: dynamic_gate clamped correctly via feature_engine.
                 dynamic_gate = max(0.55, sgd_state.get("dynamic_gate", 0.55) - (0.05 if routing_mode == "MAKER_ONLY" else 0.0))
 
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.48))): 
@@ -578,7 +571,17 @@ class DistributedQuantEngine:
                         "prob_success": prob_success, "dna_stats": dna_stats, 
                         "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
                         "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
-                        "payload_features": {"symbol": symbol, "market_regime": regime, "virtual_sl": sgd_state["virtual_sl"], "virtual_tp": sgd_state["virtual_tp"], "adaptive_obi_z": stat_engine.ofi_fast_z, "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost, "reasoning": structural_verdict.get("reasoning", "MICROSTRUCTURE_ALPHA"), "ai_verdict": "DIRECT_MICROSTRUCTURE_ALPHA"},
+                        "payload_features": {
+                            "symbol": symbol, 
+                            "market_regime": regime, 
+                            "virtual_sl": sgd_state["virtual_sl"], 
+                            "virtual_tp": sgd_state["virtual_tp"], 
+                            "log_mlofi_z": stat_engine.ofi_fast_z, 
+                            "liquidity_density_ratio": vol_mult, 
+                            "bid_ask_spread": spread_cost, 
+                            "reasoning": structural_verdict.get("reasoning", "MICROSTRUCTURE_ALPHA"), 
+                            "ai_verdict": "DIRECT_MICROSTRUCTURE_ALPHA"
+                        },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
                     }
@@ -657,7 +660,7 @@ class DistributedQuantEngine:
                             return res
                     except Exception: return {"is_armed": True, "win_rate": 0.50} 
 
-                fetch_tasks = {sym: _safe_fetch(sym, {"vol_mult": self.screener_metrics.get(sym, {}).get("vol_mult", 1.0), "z_obi": self.stat_engines.get(sym).ofi_fast_z if self.stat_engines.get(sym) else 0.0, "spread_pct": (self.orderbook_snapshots.get(sym, {}).get("best_ask", 1) - self.orderbook_snapshots.get(sym, {}).get("best_bid", 1)) / max(self.orderbook_snapshots.get(sym, {}).get("best_bid", 1), 1e-9), "symbol": sym}) for sym in list(self.asset_basket)}
+                fetch_tasks = {sym: _safe_fetch(sym, {"vol_mult": self.screener_metrics.get(sym, {}).get("vol_mult", 1.0), "log_mlofi_z": self.stat_engines.get(sym).ofi_fast_z if self.stat_engines.get(sym) else 0.0, "spread_pct": (self.orderbook_snapshots.get(sym, {}).get("best_ask", 1) - self.orderbook_snapshots.get(sym, {}).get("best_bid", 1)) / max(self.orderbook_snapshots.get(sym, {}).get("best_bid", 1), 1e-9), "symbol": sym}) for sym in list(self.asset_basket)}
                 if not fetch_tasks: continue
                 results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
                 
@@ -781,7 +784,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V57.0 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
+            logger.info("🌌 V58.0 MICRO-UNIVERSE SCAN: Probing exchange for affordable liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             max_notional = await self._get_max_affordable_notional()
             
@@ -883,7 +886,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V57.0 POSITION LIFECYCLE FSM HANDLERS
+    # 🚀 V58.0 POSITION LIFECYCLE FSM HANDLERS
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1043,7 +1046,10 @@ class DistributedQuantEngine:
             theta_decay = 1.0 
 
         tox_mod = 0.6 if (is_buy and ctx["imbalance"] < -0.5) or (not is_buy and ctx["imbalance"] > 0.5) else 1.0
-        raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod, safe_c_price * 0.004)
+        
+        # 🚀 V58.0 Hawkes-Elastic Chandelier Stop
+        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, ctx["hawkes_z"])))
+        raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod * hawkes_scalar, safe_c_price * 0.003)
         
         if ctx["r_multiple"] >= 1.0:
             raw_sl = (ctx["max_favorable_price"] - raw_trail_dist) if is_buy else (ctx["max_favorable_price"] + raw_trail_dist)
@@ -1144,7 +1150,7 @@ class DistributedQuantEngine:
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
         """
-        V57.0 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
+        V58.0 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
         """
         async with self.execution_semaphore:
             ctx = {
@@ -1415,13 +1421,15 @@ class DistributedQuantEngine:
             
         await self._preseed_screener_history()
         
+        # 🚀 V58.0: Appended Yield Engine to DAEMON Execution List
         daemons = [
             self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, self.cleanup_stale_locks, 
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
             self.auction_engine.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon,
-            self.run_crowded_trade_oracle
+            self.run_crowded_trade_oracle,
+            self.yield_engine.run_yield_scanner_daemon 
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
 

@@ -1,9 +1,10 @@
 """
-🌌 V55.2 OMNI-SWARM CROSS-SECTIONAL SCANNER
+🌌 V58.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
-Features Titanium Blocklist filtering, Adaptive Session Volume Thresholds, 
-Wider Spread Tolerances for Maker-Grid Arbitrage, and X-Ray Telemetry.
+Upgraded with Relaxed Hot-Swap Thresholds to eradicate liquidity stagnation,
+ensuring the Swarm continuously rotates into high-RVOL, high-Alpha nodes.
+Features Titanium Blocklist filtering and Adaptive Session Volume Thresholds.
 """
 
 import math
@@ -19,7 +20,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V55.2 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
+    🚀 V58.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market factor
     across a stable 60-period return window, returning idiosyncratic alpha residuals.
     """
@@ -27,8 +28,9 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     if price_matrix.shape[0] < 2 or price_matrix.shape[1] < 30:
         return np.zeros(price_matrix.shape[0])
         
-    stds = np.std(price_matrix, axis=1, keepdims=True) + 1e-9
-    norm_matrix = (price_matrix - np.mean(price_matrix, axis=1, keepdims=True)) / stds
+    with np.errstate(divide='ignore', invalid='ignore'):
+        stds = np.std(price_matrix, axis=1, keepdims=True) + 1e-9
+        norm_matrix = (price_matrix - np.mean(price_matrix, axis=1, keepdims=True)) / stds
     
     try:
         # Singular Value Decomposition on N x T matrix
@@ -51,7 +53,7 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V55.2 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V58.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit perpetual universe with live microstructure spread gating and 
     logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
@@ -106,7 +108,7 @@ class GlobalOmniScanner:
                     self.btc_returns.pop(0)
             self.last_btc_price = current_btc_price
 
-        # 🚀 V55.2 TITANIUM BLOCKLIST
+        # 🚀 V58.0 TITANIUM BLOCKLIST
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         
         # 🚀 ADAPTIVE SESSION CLOCK
@@ -127,6 +129,7 @@ class GlobalOmniScanner:
                     
                 spread_bps = ((ask - bid) / bid) * 10000.0
                 
+                # Filter out illiquid or untradeable assets
                 if current_price < 0.01 or turnover24h < min_turnover or spread_bps > 12.0:
                     continue
 
@@ -191,8 +194,9 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # 🚀 Omni-Swarm Activation Trigger
-        if top_sym not in current_basket and top_z > 3.0 and top_score > 2500.0:
+        # 🚀 V58.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
+        # Lowered Z-Score requirement from 3.0 to 2.0. Lowered base score from 2500 to 1500.
+        if top_sym not in current_basket and top_z > 2.0 and top_score > 1500.0:
             basket_scores = [
                 item for item in scoring_matrix 
                 if item[1] in current_basket 
@@ -203,8 +207,8 @@ class GlobalOmniScanner:
             if basket_scores:
                 deadest_score, deadest_sym, deadest_z = basket_scores[-1]
                 
-                # Only execute swap if the candidate is 5x stronger than the weakest active symbol
-                if top_score > (deadest_score * 5.0):
+                # Only execute swap if the candidate is 3x stronger than the weakest active symbol (Was 5x)
+                if top_score > (deadest_score * 3.0):
                     logger.critical(
                         f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
                         f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"

@@ -1,11 +1,12 @@
 """
-💎 V57.0 QUANTUM SWARM: OPTIMISTIC DECOUPLED MEMORY LEDGER
+💎 V58.0 TITANIUM APEX: OPTIMISTIC DECOUPLED MEMORY LEDGER
 ----------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
 - Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
 - Pure NumPy vectorization for shadow OHLC forensics
-- Dynamic Rolling Variance for the Bayesian DNA Matrix
+- Upgraded Bayesian DNA Matrix utilizing K-Nearest Neighbors (KNN) 
+  clustering on Log-MLOFI, Sector Impulse, and Micro-Spread vectors.
 """
 
 import os
@@ -21,6 +22,10 @@ from supabase import create_client, Client
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
+    """
+    Serves as the ultimate forensic ledger and probabilistic memory engine.
+    Handles high-throughput shadow execution resolution and Latent DNA clustering.
+    """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
@@ -41,7 +46,6 @@ class MemoryBank:
 
     def _safe_execute(self, query_builder, max_retries: int = 2):
         """
-        🚀 V57.0 FIX: Stripped out blocking time.sleep()
         Cloud faults instantly fail over without freezing the event loop.
         """
         for attempt in range(max_retries):
@@ -70,8 +74,10 @@ class MemoryBank:
         if features is None:
             features = {}
             
+        # 🚀 V58.0 UPGRADE: Feature mapping to support Log-MLOFI and Sector Impulse
         market_regime = features.get("market_regime", "UNKNOWN")
-        z_obi = features.get("adaptive_obi_z", 0.0)
+        # Map the new Log-MLOFI to the legacy z_obi database column seamlessly
+        log_mlofi_z = features.get("log_mlofi_z", features.get("adaptive_obi_z", 0.0))
         vol_mult = features.get("liquidity_density_ratio", 1.0)
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
@@ -89,7 +95,7 @@ class MemoryBank:
             "price_at_prediction": float(price),
             "ai_confidence": float(confidence),
             "market_regime": str(market_regime),
-            "z_obi": float(z_obi),
+            "z_obi": float(log_mlofi_z),  # Stored as z_obi for backwards schema compatibility
             "vol_mult": float(vol_mult),
             "spread": float(spread),
             "resolved": False,
@@ -170,7 +176,8 @@ class MemoryBank:
         interval_mins: float = 15.0
     ) -> int:
         """
-        🚀 V57.0 APEX: OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
+        OHLC Vectorized Resolution Engine with Intra-Candle Hit Traversal.
+        Processes thousands of shadow executions in purely vectorized C-code space.
         """
         resolved_count = 0
 
@@ -190,6 +197,7 @@ class MemoryBank:
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
                 
+                # Resolving against the original dynamic nano-brackets
                 sl_price = float(row.get("virtual_sl", entry_price * 0.99))
                 tp_price = float(row.get("virtual_tp", entry_price * 1.015))
                 
@@ -307,7 +315,7 @@ class MemoryBank:
 
     def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
         """
-        🚀 V57.0 Evaluates if a shadow coin has proven sufficient statistical edge 
+        Evaluates if a shadow coin has proven sufficient statistical edge 
         to be promoted into the live capital allocation matrix (Minimum 35 trades).
         """
         try:
@@ -367,20 +375,22 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V57.0 BAYESIAN DNA MATRIX
-        Uses K-Nearest Neighbors matching on historical market regimes to determine 
-        if the current setup is statistically viable.
+        🚀 V58.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
+        Upgraded to cluster based on Log-MLOFI, Volume Multiplier, and Micro-Spread.
+        Matches current multi-dimensional conditions against historical outcomes 
+        to determine execution viability.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
-        c_obi = float(current_dna.get("z_obi", 0.0))
+        c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
         target_symbol = current_dna.get("symbol", "UNKNOWN")
         
+        # Coarse buckets for caching efficiency
         vol_bucket = round(c_vol * 2.0) / 2.0  
-        obi_bucket = round(c_obi * 2.0) / 2.0  
+        mlofi_bucket = round(c_log_mlofi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
         
-        dna_hash = f"{target_symbol}_{vol_bucket}_{obi_bucket}_{spread_bucket}"
+        dna_hash = f"{target_symbol}_{vol_bucket}_{mlofi_bucket}_{spread_bucket}"
         current_time = time.time()
         
         if dna_hash in self.dna_cache:
@@ -418,7 +428,8 @@ class MemoryBank:
                 }
 
             h_vols = [min(float(row.get("vol_mult", 1.0)), 10.0) for row in historical_data]
-            h_obis = [float(row.get("z_obi", 0.0)) for row in historical_data]
+            # z_obi represents the logged Log-MLOFI in the database
+            h_mlofis = [float(row.get("z_obi", 0.0)) for row in historical_data]
             
             h_spreads = []
             for row in historical_data:
@@ -428,20 +439,21 @@ class MemoryBank:
                 h_spreads.append(h_spread_pct)
                 
             std_vol = np.std(h_vols) + 1e-9
-            std_obi = np.std(h_obis) + 1e-9
+            std_mlofi = np.std(h_mlofis) + 1e-9
             std_spread = np.std(h_spreads) + 1e-9
 
             distances = []
             for i, row in enumerate(historical_data):
                 h_vol = h_vols[i]
-                h_obi = h_obis[i]
+                h_mlofi = h_mlofis[i]
                 h_spread_pct = h_spreads[i]
                 
                 norm_vol = (c_vol - h_vol) / std_vol
-                norm_obi = (c_obi - h_obi) / std_obi
+                norm_mlofi = (c_log_mlofi - h_mlofi) / std_mlofi
                 norm_spread = (c_spread - h_spread_pct) / std_spread
                 
-                dist = math.sqrt((1.5 * norm_vol)**2 + (2.0 * norm_obi)**2 + (1.0 * norm_spread)**2)
+                # 🚀 V58.0 KNN Distance Matrix: Higher weight to Log-MLOFI aggression (2.0)
+                dist = math.sqrt((1.5 * norm_vol)**2 + (2.0 * norm_mlofi)**2 + (1.0 * norm_spread)**2)
                 distances.append({"distance": dist, "is_correct": 1.0 if row.get("is_correct") is True else 0.0})
 
             distances.sort(key=lambda x: x["distance"])
@@ -449,6 +461,7 @@ class MemoryBank:
             
             wins = sum(n["is_correct"] for n in nearest_neighbors)
             total = len(nearest_neighbors)
+            # Add Laplace Smoothing (+2/+4) to avoid extreme 100% or 0% edges
             bayesian_edge = (wins + 2.0) / (total + 4.0)
             
             is_armed = (bayesian_edge >= 0.55) or promo_eval["should_promote"]
