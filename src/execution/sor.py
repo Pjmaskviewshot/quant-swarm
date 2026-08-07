@@ -1,10 +1,10 @@
 """
-💎 V61.1 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
+💎 V61.6 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Dynamic Volatility-Adjusted Slippage Firewalls, PostOnly Pegging, 
 Adverse Selection Protection, Null-Guard Parity, and Dynamic Asset-Aware Timeouts.
-Upgraded with V61.1 Dynamic Spread Firewalls and 2.5% Fallback Stops.
+Upgraded with V61.6 Instant Loop Shattering for Fatal Exchange Blocks.
 """
 
 import os
@@ -201,7 +201,6 @@ class SmartOrderRouter:
         logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive momentum escalation.")
         
         # 🚀 V61.1 AUDIT FIX: Defensive fallback if stop loss or take profit are missing/None.
-        # Now defaults to a realistic 2.5% stop instead of the dangerous 0.8%.
         if sl is None or tp is None or sl == tp:
             implied_sl_dist = current_mid_price * 0.025
             implied_tp_dist = implied_sl_dist * 2.0
@@ -213,9 +212,6 @@ class SmartOrderRouter:
                 tp = current_mid_price - implied_tp_dist
 
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
-        
-        # We explicitly removed the dangerous 0.1% artificial clamp here.
-        # final_sl and final_tp implicitly trust the inputs from AuctionEngine.
         final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
         final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
         side = "Buy" if direction.upper() == "BUY" else "Sell"
@@ -282,7 +278,13 @@ class SmartOrderRouter:
                     await asyncio.sleep(0.1) 
                     
             except Exception as e:
-                logger.error(f"[X-RAY] ⚠️ Network Exception during Flash Strike for {symbol}: {e}")
+                error_str = str(e)
+                logger.error(f"[X-RAY] ⚠️ Network Exception during Flash Strike for {symbol}: {error_str}")
+                
+                # 🚀 V61.6 INSTANT SHATTER: Break out of Flash Strike loops on fatal blocks
+                if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
+                    logger.error(f"[X-RAY] 🛑 FATAL BLOCK // {symbol} is banned or invalid. Shattering Flash Strike loop instantly.")
+                    break
                 
         logger.error(f"[X-RAY] ❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or Slippage Cap hit.")
         return False, 0.0, 0.0
@@ -305,7 +307,6 @@ class SmartOrderRouter:
 
         tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
 
-        # Default SL/TP safety fallbacks if None passed (Updated to 2.5%)
         if sl is None or tp is None:
             current_mid = depth_snapshot.get("bids", [[100, 1]])[0][0] if depth_snapshot else 100.0
             sl = current_mid * 0.975 if side == "Buy" else current_mid * 1.025
@@ -445,9 +446,16 @@ class SmartOrderRouter:
                             await self.executor.safe_call(self.executor.client.amend_order, category="linear", symbol=symbol, orderId=current_order_id, price=str(final_target_price))
 
             except Exception as e: 
-                logger.debug(f"[X-RAY] Maker peg cycle variance for {symbol}: {e}")
+                error_str = str(e)
+                # Elevate to warning so we can see it in production logs
+                logger.warning(f"[X-RAY] ⚠️ Maker peg cycle variance for {symbol}: {error_str}")
                 
-            await asyncio.sleep(loop_delay) 
+                # 🚀 V61.6 INSTANT SHATTER: Do not wait timeout seconds if the coin is banned
+                if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
+                    logger.error(f"[X-RAY] 🛑 FATAL BLOCK // {symbol} is banned or invalid. Shattering Maker Peg loop instantly.")
+                    break
+                    
+                await asyncio.sleep(loop_delay) 
 
         # Timeout Handler
         if current_order_id:
