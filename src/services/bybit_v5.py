@@ -280,7 +280,7 @@ class BybitUnifiedExecutor:
             logger.error(f"[X-RAY] ❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
             return False
 
-    async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 15_000_000.0) -> List[str]:
+    async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
         """
         🚀 V61.4 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
         Calculates Volatility-Adjusted Spread Coefficient AND enforces a minimum

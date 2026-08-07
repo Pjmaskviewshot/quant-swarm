@@ -1,9 +1,9 @@
 """
-💎 V62.0 ULTRA-APEX NEURAL: STOCHASTIC CONTROL & HAWKES ORCHESTRATOR
+💎 V62.1 ULTRA-APEX NEURAL: STOCHASTIC CONTROL & HAWKES ORCHESTRATOR
 ------------------------------------------------------------------------
 Microstructure Execution Engine featuring Hawkes Process Self-Excitation 
 Branching Ratio Analysis (η >= 0.85 Cascade Guards), HJB Optimal Stopping Exits,
-Gram-Schmidt Feature Alignment, and Scale-Invariant Risk Adaptation (SIDNA).
+Dynamic Regime Conviction Gates, and 16-Node Omni-Dataset Streaming.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V62.0_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V62.1_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V62.0 ULTRA-APEX NEURAL ACTIVE.")
+            logger.critical("💎 LIVE MODE: V62.1 ULTRA-APEX NEURAL ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -562,23 +562,21 @@ class DistributedQuantEngine:
                 routing_mode = structural_verdict.get("routing", "STANDARD")
 
                 # -------------------------------------------------------------
-                # 🚀 V62.0 HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
+                # 🚀 HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
                 # -------------------------------------------------------------
-                # Compute excitation parameter α and decay β from Hawkes intensity
                 alpha_hawkes = max(0.01, abs(stat_engine.hawkes_z) * 0.3) if stat_engine else 0.1
                 beta_hawkes = max(0.1, 1.0 / (vol_mult + 1e-9))
                 branching_ratio = alpha_hawkes / beta_hawkes
 
-                # SUPER-CRITICAL CASCADE GUARD: If η >= 0.85, block all counter-trend/mean-reversion entries
                 if branching_ratio >= 0.85 and regime == "MEAN_REVERTING":
                     logger.warning(f"[X-RAY] 🛑 HAWKES CASCADE GUARD // {symbol} Branching Ratio η={branching_ratio:.2f} >= 0.85. Blocking Mean-Reversion Entry.")
                     return
 
                 # -------------------------------------------------------------
-                # 🚀 V62.0 REINFORCED REGIME CONVICTION GATE
+                # 🚀 V62.1 DYNAMIC REGIME CONVICTION GATE (Optimized for Market Chop)
                 # -------------------------------------------------------------
                 if regime == "MEAN_REVERTING":
-                    min_conviction = 0.63
+                    min_conviction = 0.565 if vol_mult > 1.2 else 0.585
                     if prob_success < min_conviction:
                         logger.info(f"[X-RAY] ⏸️ MEAN-REVERSION CHURN GATE // {symbol} Conviction {prob_success:.2%} < {min_conviction:.2%}. Rejecting chop.")
                         return
@@ -841,10 +839,11 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V62.0 ULTRA-APEX REFRESH: Dynamically probing exchange for liquid nodes...")
+            logger.info("🌌 V62.1 ULTRA-APEX REFRESH: Probing 16 liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             
-            dynamic_basket = await self.executor.get_top_volatile_assets(limit=6)
+            # 🚀 V62.1 EXPANDED DATASET: 16 Nodes (4 Live, 12 Shadow)
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=16)
             
             async with self.portfolio_state_lock:
                 self.asset_basket = dynamic_basket[:4]
@@ -864,7 +863,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:6], 
+                basket=self.asset_basket + self.shadow_basket[:12],  # Stream up to 16 total nodes
                 intervals=[self.timeframe, "60", "240"], 
                 orderbook_callback=self.handle_incoming_orderbook_tick, 
                 screener_callback=self.handle_incoming_basket_screener_update, 
@@ -907,7 +906,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V62.0 HJB OPTIMAL STOPPING & POSITION LIFECYCLE FSM
+    # 🚀 V62.1 HJB OPTIMAL STOPPING & POSITION LIFECYCLE FSM
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -960,9 +959,7 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        🧬 V62.0 HJB OPTIMAL STOPPING & NEURAL EXIT MATRIX
-        Calculates Ornstein-Uhlenbeck mean reversion speed θ and Hawkes Branching Ratio η
-        to orchestrate optimal profit extraction and zero-loss preemptive escapes.
+        🧬 V62.1 HJB OPTIMAL STOPPING & NEURAL EXIT MATRIX
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -974,9 +971,6 @@ class DistributedQuantEngine:
         r_multiple = ctx["r_multiple"]
         time_alive = ctx["time_in_mins"]
 
-        # -------------------------------------------------------------
-        # 1. PREDICTIVE ORDERBOOK FRAGILITY EJECTION (Top-3 Depth Shield)
-        # -------------------------------------------------------------
         ob = self.orderbook_snapshots.get(symbol, {})
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
@@ -991,31 +985,21 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # -------------------------------------------------------------
-        # 2. HAWKES PROCESS CASCADE DETECTOR (η = α / β)
-        # -------------------------------------------------------------
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
         branching_ratio = alpha_h / beta_h
 
-        # Super-Critical Inverse Flow Trap:
         if branching_ratio >= 0.85 and ((is_buy and cvd_z < -2.0) or (not is_buy and cvd_z > 2.0)):
             logger.critical(f"🛑 SUPER-CRITICAL CASCADE EJECTION // {symbol} Hawkes η={branching_ratio:.2f} with inverse CVD flow ({cvd_z:.2f}). Escaping instantly.")
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # -------------------------------------------------------------
-        # 3. HAWKES-DECAY TIME STOP (Non-Linear Theta)
-        # -------------------------------------------------------------
         if time_alive > 3.0 and r_multiple < 0.3:
             if hawkes_z < -1.5 and inst_var < 0.00005:
                 logger.warning(f"⏳ HAWKES DECAY EXIT // {symbol} Volume heartbeat dead. Cutting position at zero-loss prior to chop.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # -------------------------------------------------------------
-        # 4. HJB ELASTIC DIVERGENCE SNAP-TRAP
-        # -------------------------------------------------------------
         if r_multiple >= 1.2:
             flow_divergence = (is_buy and cvd_z < -1.5) or (not is_buy and cvd_z > 1.5)
             if flow_divergence:
@@ -1025,9 +1009,6 @@ class DistributedQuantEngine:
                     ctx["current_sl"] = snap_price
                     ctx["requires_sl_update"] = True
 
-        # -------------------------------------------------------------
-        # 5. PARABOLIC CASCADE SQUEEZE
-        # -------------------------------------------------------------
         if r_multiple >= 2.0 and hawkes_z > 3.5 and abs(cvd_z) > 3.0:
             logger.critical(f"🚀 PARABOLIC CASCADE SQUEEZE // {symbol} Liquidation cascade active. Liquidating into peak strength.")
             squeeze_price = safe_c_price * 1.001 if is_buy else safe_c_price * 0.999
@@ -1037,11 +1018,6 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_execute_scale_outs(self, ctx: dict) -> str:
-        """
-        🚀 V62.0 PROFIT PAYOFF FLOOR ENFORCER
-        Strictly enforces R >= 1.2R minimum payoff before taking partial profits,
-        ensuring Average Win strictly exceeds Average Loss across all trade regimes.
-        """
         if self.test_mode or ctx["r_multiple"] < 1.2: 
             return "CONTINUE"
 
@@ -1204,7 +1180,6 @@ class DistributedQuantEngine:
                         prev_loss.append(time.time())
                         self.tick_error_counts[symbol] = prev_loss
                         
-                        # ANTI-WHIPSAW LOCKOUT: 180s asset freeze post-loss to eradicate range churn
                         dynamic_lockout = 180.0 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if (stat_engine := self.stat_engines.get(symbol)) else 0.0) * 2.0)
                         self.circuit_breakers[symbol] = time.time() + dynamic_lockout
                         logger.warning(f"[X-RAY] ⏸️ ANTI-WHIPSAW LOCKOUT: {symbol} frozen for {dynamic_lockout:.0f}s to eliminate range churn.")
@@ -1446,7 +1421,8 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        dynamic_boot = await self.executor.get_top_volatile_assets(limit=6)
+        # 🚀 V62.1 16-Node Expanded Dataset Boot (4 Live, 12 Shadow)
+        dynamic_boot = await self.executor.get_top_volatile_assets(limit=16)
         self.asset_basket = dynamic_boot[:4]
         self.shadow_basket = dynamic_boot[4:] if len(dynamic_boot) > 4 else []
         self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
