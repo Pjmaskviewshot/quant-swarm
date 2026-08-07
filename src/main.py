@@ -1,9 +1,9 @@
 """
-💎 V62.1 ULTRA-APEX NEURAL: STOCHASTIC CONTROL & HAWKES ORCHESTRATOR
+💎 V64.0 ULTRA-APEX NEURAL: KINETIC ELASTICITY MATRIX
 ------------------------------------------------------------------------
-Microstructure Execution Engine featuring Hawkes Process Self-Excitation 
-Branching Ratio Analysis (η >= 0.85 Cascade Guards), HJB Optimal Stopping Exits,
-Dynamic Regime Conviction Gates, and 16-Node Omni-Dataset Streaming.
+Massive Expansion Upgrade: 15 Live Nodes, 4-Phase Elastic Trailing System,
+Infinite Take-Profit Expansion, and Gram-Schmidt Feature Alignment.
+Built to let winners run infinitely while choking risk organically.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V62.1_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V64.0_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V62.1 ULTRA-APEX NEURAL ACTIVE.")
+            logger.critical("💎 LIVE MODE: V64.0 KINETIC ELASTICITY MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -561,9 +561,7 @@ class DistributedQuantEngine:
                     
                 routing_mode = structural_verdict.get("routing", "STANDARD")
 
-                # -------------------------------------------------------------
-                # 🚀 HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
-                # -------------------------------------------------------------
+                # HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
                 alpha_hawkes = max(0.01, abs(stat_engine.hawkes_z) * 0.3) if stat_engine else 0.1
                 beta_hawkes = max(0.1, 1.0 / (vol_mult + 1e-9))
                 branching_ratio = alpha_hawkes / beta_hawkes
@@ -572,9 +570,6 @@ class DistributedQuantEngine:
                     logger.warning(f"[X-RAY] 🛑 HAWKES CASCADE GUARD // {symbol} Branching Ratio η={branching_ratio:.2f} >= 0.85. Blocking Mean-Reversion Entry.")
                     return
 
-                # -------------------------------------------------------------
-                # 🚀 V62.1 DYNAMIC REGIME CONVICTION GATE (Optimized for Market Chop)
-                # -------------------------------------------------------------
                 if regime == "MEAN_REVERTING":
                     min_conviction = 0.565 if vol_mult > 1.2 else 0.585
                     if prob_success < min_conviction:
@@ -839,15 +834,15 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V62.1 ULTRA-APEX REFRESH: Probing 16 liquid nodes...")
+            logger.info("🌌 V64.0 ULTRA-APEX REFRESH: Probing Massive 25-Node Matrix...")
             await self._fetch_exchange_tick_sizes()
             
-            # 🚀 V62.1 EXPANDED DATASET: 16 Nodes (4 Live, 12 Shadow)
-            dynamic_basket = await self.executor.get_top_volatile_assets(limit=16)
+            # 🚀 V64.0 EXPANDED DATASET: 25 Nodes (15 Live, 10 Shadow)
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=25)
             
             async with self.portfolio_state_lock:
-                self.asset_basket = dynamic_basket[:4]
-                self.shadow_basket = dynamic_basket[4:] if len(dynamic_basket) > 4 else []
+                self.asset_basket = dynamic_basket[:15] # 15 LIVE COINS ANALYZED
+                self.shadow_basket = dynamic_basket[15:] if len(dynamic_basket) > 15 else []
                 
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
@@ -863,7 +858,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:12],  # Stream up to 16 total nodes
+                basket=self.asset_basket + self.shadow_basket[:10],  # Stream up to 25 total nodes
                 intervals=[self.timeframe, "60", "240"], 
                 orderbook_callback=self.handle_incoming_orderbook_tick, 
                 screener_callback=self.handle_incoming_basket_screener_update, 
@@ -906,7 +901,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V62.1 HJB OPTIMAL STOPPING & POSITION LIFECYCLE FSM
+    # 🚀 V64.0 KINETIC ELASTICITY MATRIX & OPTIMAL STOPPING
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -959,7 +954,9 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        🧬 V62.1 HJB OPTIMAL STOPPING & NEURAL EXIT MATRIX
+        🧬 V64.0 RELAXED ESCAPE MATRIX
+        We eliminated the "Paranoid 15-minute decay" completely.
+        Let the structural stop loss do its job! Trades can now breathe.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -971,48 +968,15 @@ class DistributedQuantEngine:
         r_multiple = ctx["r_multiple"]
         time_alive = ctx["time_in_mins"]
 
-        ob = self.orderbook_snapshots.get(symbol, {})
-        bids = ob.get("bids", [])
-        asks = ob.get("asks", [])
-        
-        if bids and asks:
-            top_bid_depth_usd = sum(float(b[0]) * float(b[1]) for b in bids[:3])
-            top_ask_depth_usd = sum(float(a[0]) * float(a[1]) for a in asks[:3])
-            thin_side_depth = top_ask_depth_usd if is_buy else top_bid_depth_usd
-            
-            if thin_side_depth < 150.0 and time_alive > 0.5:
-                logger.critical(f"🚨 ORDERBOOK FRAGILITY ALERT // {symbol} Top-3 Depth collapsed to ${thin_side_depth:.1f}. Preemptive escape executed.")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-
+        # SUPER-CRITICAL CASCADE DETECTOR (Only eject if structural collapse is confirmed)
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
         branching_ratio = alpha_h / beta_h
 
-        if branching_ratio >= 0.85 and ((is_buy and cvd_z < -2.0) or (not is_buy and cvd_z > 2.0)):
-            logger.critical(f"🛑 SUPER-CRITICAL CASCADE EJECTION // {symbol} Hawkes η={branching_ratio:.2f} with inverse CVD flow ({cvd_z:.2f}). Escaping instantly.")
+        # Only abort if the dump is fully toxic AND going aggressively against us
+        if branching_ratio >= 1.25 and ((is_buy and cvd_z < -3.0) or (not is_buy and cvd_z > 3.0)):
+            logger.critical(f"🛑 STRUCTURAL CASCADE EJECTION // {symbol} Severe Hawkes breakdown (η={branching_ratio:.2f}). Escaping.")
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-            return "ESCAPED"
-
-        if time_alive > 3.0 and r_multiple < 0.3:
-            if hawkes_z < -1.5 and inst_var < 0.00005:
-                logger.warning(f"⏳ HAWKES DECAY EXIT // {symbol} Volume heartbeat dead. Cutting position at zero-loss prior to chop.")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-
-        if r_multiple >= 1.2:
-            flow_divergence = (is_buy and cvd_z < -1.5) or (not is_buy and cvd_z > 1.5)
-            if flow_divergence:
-                snap_price = safe_c_price * 0.9995 if is_buy else safe_c_price * 1.0005
-                if (is_buy and snap_price > ctx["current_sl"]) or (not is_buy and snap_price < ctx["current_sl"]):
-                    logger.critical(f"⚡ ELASTIC SNAP-TRAP // {symbol} Order flow diverged at peak (+{r_multiple:.2f}R). Snapping stop to lock profit.")
-                    ctx["current_sl"] = snap_price
-                    ctx["requires_sl_update"] = True
-
-        if r_multiple >= 2.0 and hawkes_z > 3.5 and abs(cvd_z) > 3.0:
-            logger.critical(f"🚀 PARABOLIC CASCADE SQUEEZE // {symbol} Liquidation cascade active. Liquidating into peak strength.")
-            squeeze_price = safe_c_price * 1.001 if is_buy else safe_c_price * 0.999
-            await self._execute_emergency_escape(symbol, squeeze_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
         return "CONTINUE"
@@ -1067,73 +1031,63 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_manage_trailing_stops(self, ctx: dict):
+        """
+        🚀 V64.0 KINETIC 4-PHASE ELASTICITY MATRIX
+        Built to stop choking trades early. Let winners run using wide ATR bands.
+        """
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
+        r_mult = ctx["r_multiple"]
         
-        baseline_sl = ctx["realigned_sl"] if ctx["realigned_sl"] else (ctx["actual_entry"] - ctx["initial_risk"] if is_buy else ctx["actual_entry"] + ctx["initial_risk"])
-        if ctx["time_in_mins"] >= 2.0 and ctx["r_multiple"] >= 0.8 and abs(ctx["current_sl"] - baseline_sl) < (ctx["actual_entry"] * 0.0001):
-            sub_1r_sl = (ctx["max_favorable_price"] - (ctx["initial_risk"] * 0.3)) if is_buy else (ctx["max_favorable_price"] + (ctx["initial_risk"] * 0.3))
-            if (is_buy and sub_1r_sl > ctx["current_sl"]) or (not is_buy and sub_1r_sl < ctx["current_sl"]):
-                ctx["current_sl"] = sub_1r_sl
-                ctx["requires_sl_update"] = True
-                logger.info(f"[X-RAY] 🛡️ SUB-1R HJB RATCHET // {symbol} Excursion hit +{ctx['r_multiple']:.2f}R. Locked profit floor.")
-
+        # 1. Calculate live dynamic ATR for structural spacing
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
-        
-        base_mult = 2.5 if ctx["regime"] in ["TRENDING", "VOLATILE"] else 1.8
-        min_mult = 0.4 
-        
-        x = 5.0 * (ctx["r_multiple"] - 1.0) 
-        x = max(-700, min(700, x))
-        sigmoid_factor = min_mult + (base_mult - min_mult) / (1.0 + math.exp(x))
 
-        vol_ratio = live_atr / max(safe_c_price, 1e-9)
-        dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
-
-        if ctx["r_multiple"] < 0.5 and ctx["time_in_mins"] > dynamic_grace_period:
-            theta_decay = max(0.4, 1.0 - ((ctx["time_in_mins"] - dynamic_grace_period) * 0.010)) 
-        else:
-            theta_decay = 1.0 
-
-        tox_mod = 0.6 if (is_buy and ctx["imbalance"] < -0.5) or (not is_buy and ctx["imbalance"] > 0.5) else 1.0
+        # 2. 4-Phase Elastic Trailing Logic
+        new_sl_val = ctx["current_sl"]
         
-        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, ctx["hawkes_z"])))
-        raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod * hawkes_scalar, safe_c_price * 0.003)
-        
-        if ctx["r_multiple"] >= 1.0:
-            raw_sl = (ctx["max_favorable_price"] - raw_trail_dist) if is_buy else (ctx["max_favorable_price"] + raw_trail_dist)
-            be_plus = (ctx["actual_entry"] + ctx["actual_entry"] * 0.002) if is_buy else (ctx["actual_entry"] - ctx["actual_entry"] * 0.002)
-            new_sl_val = max(raw_sl, be_plus) if is_buy else min(raw_sl, be_plus)
+        if r_mult >= 4.0:
+            # PHASE 4: Parabolic Choke (Tighten to 1.5x ATR to catch the blow-off top)
+            trail_dist = live_atr * 1.5
+            raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
+            new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
-            if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
-                ctx["current_sl"] = new_sl_val
-                ctx["requires_sl_update"] = True
+        elif r_mult >= 2.0:
+            # PHASE 3: Kinetic Trailing (Wide 2.5x ATR band to ride the trend cleanly)
+            trail_dist = live_atr * 2.5
+            raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
+            new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
+            
+        elif r_mult >= 1.0:
+            # PHASE 2: Risk-Free Orbit (Lock BE + 0.15% Fees, giving massive breathing room)
+            be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0015)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0015))
+            new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
 
-        momentum_stretch = max(0.0, ctx["hawkes_z"] * 0.6) if ctx["regime"] == "TRENDING" else 0.0
-        if ctx["hawkes_z"] < -1.5 and ctx["r_multiple"] > 1.0:
-            momentum_stretch -= 0.5 
-        
-        target_rr = min(6.0, ctx["dynamic_rr_ratio"] + momentum_stretch + (max(0.0, ctx["r_multiple"] - 1.0) * 0.3)) 
-        calc_tp = ctx["actual_entry"] + (ctx["initial_risk"] * target_rr) if is_buy else ctx["actual_entry"] - (ctx["initial_risk"] * target_rr)
-        
-        if (is_buy and calc_tp > ctx["current_tp"]) or (not is_buy and calc_tp < ctx["current_tp"]):
-            if abs(calc_tp - ctx["current_tp"]) / ctx["actual_entry"] > 0.0025:
-                ctx["current_tp"] = calc_tp
-                ctx["requires_tp_update"] = True
+        # Apply SL Update to Context
+        if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
+            ctx["current_sl"] = new_sl_val
+            ctx["requires_sl_update"] = True
 
+        # 3. Dynamic Take-Profit Expansion (Push the ceiling away infinitely)
+        tp_proximity_r = abs(ctx["current_tp"] - safe_c_price) / (ctx["initial_risk"] + 1e-9)
+        if tp_proximity_r < 0.8:
+            expanded_tp = ctx["current_tp"] + (ctx["initial_risk"] * 2.5) if is_buy else ctx["current_tp"] - (ctx["initial_risk"] * 2.5)
+            ctx["current_tp"] = expanded_tp
+            ctx["requires_tp_update"] = True
+
+        # 4. Exchange API Dispatch (Throttled to avoid API spam)
         if (ctx["requires_sl_update"] or ctx["requires_tp_update"]) and (ctx["now"] - ctx["last_api_update_time"] >= 5.0):
             ob = self.orderbook_snapshots.get(symbol, {})
             spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
-            min_distance = max(live_atr * 0.2, safe_c_price * 0.003, spread * 1.5 * safe_c_price) 
+            min_distance = max(live_atr * 0.5, safe_c_price * 0.005, spread * 2.0 * safe_c_price) 
             
             if is_buy:
                 ctx["current_sl"] = min(ctx["current_sl"], safe_c_price - min_distance)
                 ctx["current_tp"] = max(ctx["current_tp"], safe_c_price + min_distance)
-                if ctx["current_tp"] <= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 1.01
+                if ctx["current_tp"] <= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 1.02
             else:
                 ctx["current_sl"] = max(ctx["current_sl"], safe_c_price + min_distance)
                 ctx["current_tp"] = min(ctx["current_tp"], safe_c_price - min_distance)
-                if ctx["current_tp"] >= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 0.99
+                if ctx["current_tp"] >= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 0.98
 
             new_sl_str = self._align_price(symbol, ctx["current_sl"])
             new_tp_str = self._align_price(symbol, ctx["current_tp"])
@@ -1144,8 +1098,8 @@ class DistributedQuantEngine:
                     ctx["last_sent_sl_str"] = new_sl_str
                     ctx["last_sent_tp_str"] = new_tp_str
                     
-                    if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 ASYMMETRIC TP REPULSION // {symbol} Target shifted to {new_tp_str}.")
-                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ TRAILING RATCHET // {symbol} SL locked at {new_sl_str}.")
+                    if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 INFINITE TP EXPANSION // {symbol} Target pushed to {new_tp_str}.")
+                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ KINETIC RATCHET // {symbol} SL safely elevated to {new_sl_str}.")
 
 
     async def _state_settle_trade(self, ctx: dict):
@@ -1421,10 +1375,10 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V62.1 16-Node Expanded Dataset Boot (4 Live, 12 Shadow)
-        dynamic_boot = await self.executor.get_top_volatile_assets(limit=16)
-        self.asset_basket = dynamic_boot[:4]
-        self.shadow_basket = dynamic_boot[4:] if len(dynamic_boot) > 4 else []
+        # 🚀 V64.0 MASSIVE 15-NODE LIVE DATASET EXPANSION
+        dynamic_boot = await self.executor.get_top_volatile_assets(limit=25)
+        self.asset_basket = dynamic_boot[:15] # 15 LIVE COINS 
+        self.shadow_basket = dynamic_boot[15:] if len(dynamic_boot) > 15 else []
         self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             
         await self._preseed_screener_history()
