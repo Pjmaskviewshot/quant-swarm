@@ -1,10 +1,10 @@
 """
-💎 V61.3 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
+💎 V61.4 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 True Unified Equity Parsing, and Dynamic L2 Depth Ticker Discovery.
-Upgraded with V61.3 Volatility-Adjusted Spread Coefficient (VASC) and 
-Top-of-Book Notional Depth Floor ($250 USD minimum) to eliminate hollow orderbook sweeps.
+Upgraded with V61.4 Innovation Zone Auto-Banning (ErrCode 110126), 
+Volatility-Adjusted Spread Coefficient (VASC), and Top-of-Book Depth Shields.
 """
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V61.3 BYBIT RETURN CODES
+    🚀 V61.4 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -35,6 +35,7 @@ class BybitRetCode:
     RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
     LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
     LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
+    AGREEMENT_NOT_SIGNED = 110126    # 🚀 V61.4: Innovation Zone UI agreement required
 
 
 class TokenBucketRateLimiter:
@@ -66,7 +67,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V61.3 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V61.4 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
@@ -89,6 +90,7 @@ class BybitUnifiedExecutor:
             thread_name_prefix="BybitIsolator"
         )
         self._leverage_cache: Dict[str, int] = {}
+        self._banned_innovation_zones = set() # 🚀 V61.4 Dynamic Blacklist
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
@@ -113,6 +115,15 @@ class BybitUnifiedExecutor:
                 response = await loop.run_in_executor(self._api_thread_pool, bound_func)
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
                 
+                # 🚀 V61.4 FAIL FAST: Innovation Zone Block
+                if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
+                    symbol_banned = kwargs.get("symbol", "UNKNOWN")
+                    if symbol_banned != "UNKNOWN":
+                        self._banned_innovation_zones.add(symbol_banned)
+                    error_msg = f"[X-RAY] 🚫 110126 INNOVATION ZONE BLOCK: {symbol_banned} requires manual UI agreement. Banning from matrix."
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+
                 # Fail Fast on Parameter Error
                 if ret_code == BybitRetCode.PARAMETER_ERROR:
                     error_msg = f"[X-RAY] ❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
@@ -135,6 +146,13 @@ class BybitUnifiedExecutor:
                 if self.api_secret and self.api_secret in error_str:
                     error_str = error_str.replace(self.api_secret, "********")
                 
+                # Catch raw exception strings for Innovation Zone blocks
+                if "110126" in error_str:
+                    symbol_banned = kwargs.get("symbol", "UNKNOWN")
+                    if symbol_banned != "UNKNOWN":
+                        self._banned_innovation_zones.add(symbol_banned)
+                    raise ValueError(f"[X-RAY] 🚫 110126 INNOVATION ZONE BLOCK: {symbol_banned} banned from matrix.")
+
                 if "10002 Parameter Fault" in error_str:
                     raise ValueError(error_str)
                     
@@ -264,9 +282,10 @@ class BybitUnifiedExecutor:
 
     async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        🚀 V61.3 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
+        🚀 V61.4 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
         Calculates Volatility-Adjusted Spread Coefficient AND enforces a minimum
         Top-of-Book Depth Floor ($250 USD) to reject paper-thin, sweep-prone coins.
+        Automatically filters out Innovation Zone blocks.
         """
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         
@@ -282,9 +301,10 @@ class BybitUnifiedExecutor:
             for t in tickers:
                 symbol = t.get("symbol", "")
                 
-                # 1. Broad Universe Filters
+                # 1. Broad Universe & Innovation Zone Filters
                 if not symbol.endswith("USDT"): continue
                 if any(b in symbol for b in banned_keywords): continue
+                if symbol in self._banned_innovation_zones: continue # 🚀 V61.4 Innovation Zone Ban
                     
                 turnover = float(t.get("turnover24h", 0.0) or 0.0)
                 bid = float(t.get("bid1Price", 0.0) or 0.0)
