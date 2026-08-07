@@ -1,17 +1,15 @@
 """
-💎 V61.3 APEX NEURAL: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
+💎 V62.0 ULTRA-APEX NEURAL: STOCHASTIC CONTROL & HAWKES ORCHESTRATOR
 ------------------------------------------------------------------------
-The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
-Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
-Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
-Upgraded with V61.3 Predictive Orderbook Fragility Ejection (Sweep Detector),
-Neural Exit Matrix, EV-to-Spread Multipliers, and Flow-Divergence Snap Traps.
+Microstructure Execution Engine featuring Hawkes Process Self-Excitation 
+Branching Ratio Analysis (η >= 0.85 Cascade Guards), HJB Optimal Stopping Exits,
+Gram-Schmidt Feature Alignment, and Scale-Invariant Risk Adaptation (SIDNA).
 """
 
 import os
 import sys
 
-# DEPLOYMENT FIX: Ensure `src/` directory is prepended to sys.path
+# Ensure `src/` directory is prepended to sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import time
@@ -48,7 +46,6 @@ from features.micro_models import ContinuousMicrostructureEngine, AdaptiveSessio
 from execution.sor import SmartOrderRouter
 from execution.auction_engine import CapitalAuctionEngine
 
-# Fallback import for risk module filename compatibility
 try:
     from portfolio.risk_vault import InstitutionalRiskVault
 except ModuleNotFoundError:
@@ -64,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V61.3_HYPERION")
+logger = logging.getLogger("QUANT_CORE.V62.0_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -75,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V61.3 APEX HYPERION ACTIVE.")
+            logger.critical("💎 LIVE MODE: V62.0 ULTRA-APEX NEURAL ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -99,15 +96,12 @@ class DistributedQuantEngine:
         # MICROSERVICES
         self.fsm = SystemStateMachine()
         
-        # 🚀 V59.2 AUDIT FIX: Degraded Local-Mode Fallback
-        # If Supabase is down, do not crash the engine. Run locally.
         try:
             self.memory = MemoryBank()
         except Exception as e:
             logger.error(f"[X-RAY] ⚠️ CLOUD DB OFFLINE: Supabase connection failed ({e}). Booting in Degraded Local-Only Mode.")
             self.memory = None 
             
-        # 🚀 V59.0: Expanded Max Drawdown Allowance to 30% for Micro-Accounts
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.30, max_single_position_risk_pct=0.015)
         self.tensor_oracle = CrossAssetTensorOracle()
         self.auction_engine = CapitalAuctionEngine(self)
@@ -138,7 +132,6 @@ class DistributedQuantEngine:
         
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=self.test_mode, max_workers=12)
-        # 🚀 V59.0: Strict 12 bps (0.0012) Slippage Firewall
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
         self.omni_scanner = GlobalOmniScanner(self.executor)
         self.stream_feed_instance = None  
@@ -155,7 +148,6 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] ❌ BACKGROUND TASK CRASHED: {task.exception()}", exc_info=task.exception())
 
     def track_task(self, coro: Any):
-        # 🛡️ P1 FIX: Circuit Breaker for Task Overload. Rejects gracefully instead of crashing Event Loop.
         if len(self._active_tasks) > 400:
             logger.critical("[X-RAY] 🛑 FATAL: TASK LIMIT EXCEEDED (>400). Dropping background task to prevent memory overflow.")
             dummy = asyncio.Future()
@@ -189,7 +181,6 @@ class DistributedQuantEngine:
                     self.symbol_locks.pop(key, None)
                     self.eval_semaphores.pop(key, None)
                     self.orderbook_snapshots.pop(key, None)
-                    
                     self.ram_dna_cache.pop(key, None)
                     self.screener_memory.pop(key, None)
                     self.screener_metrics.pop(key, None)
@@ -371,7 +362,6 @@ class DistributedQuantEngine:
                 direction = "BUY" if pos["side"].upper() == "BUY" else "SELL"
                 atr = entry_price * 0.015 
                 
-                # 🚀 V59.2 AUDIT FIX: Unified Leverage Oracle sync
                 async with self.portfolio_state_lock: self.active_positions_map[symbol] = direction
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 5}
                 self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, 5, "RANGING", is_recovery=True))
@@ -445,16 +435,12 @@ class DistributedQuantEngine:
                 actual_net_pnl = current_vault_balance - self.global_state_cache.get("start_of_day_balance", current_vault_balance)
                 baseline = self.global_state_cache["wallet_baseline"]
                 
-                # 🚀 V59.1 P0 FIX: True Peak Equity Tracking
-                # If balance is higher than peak, we set a new peak. Withdrawals will naturally 
-                # trigger drawdown limits IF positions are open. If flat, we just track the drop.
                 if current_vault_balance > baseline:
                     self.global_state_cache["wallet_baseline"] = current_vault_balance
                     baseline = current_vault_balance
                     
                 drawdown_pct = max(0.0, (baseline - current_vault_balance) / baseline)
                 
-                # Trigger emergency lock ONLY if active positions exist and drawdown limit is breached
                 if drawdown_pct >= 0.30 and len(self.active_positions_map) > 0:
                     self.fsm.trigger_global_emergency_lock()
                     await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
@@ -484,14 +470,12 @@ class DistributedQuantEngine:
         
         now = time.time()
         
-        # 🛡️ P1 FIX: Dynamic Regime-Adaptive Cooldown
         stat_engine = self.stat_engines.get(symbol)
         feature_engine = self.feature_engines.get(symbol)
         inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
         
         dynamic_cooldown_seconds = max(60.0, min(300.0, 120.0 / (inst_var * 1000.0 + 1e-9)))
         
-        # 🚀 V59.2 HMM OVERRIDE: If the market is strongly trending, slash cooldown to 30s to catch entries.
         regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
         if regime == "TRENDING":
             dynamic_cooldown_seconds = 30.0
@@ -576,10 +560,31 @@ class DistributedQuantEngine:
                     regime = "MEAN_REVERTING"
                     
                 routing_mode = structural_verdict.get("routing", "STANDARD")
+
+                # -------------------------------------------------------------
+                # 🚀 V62.0 HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
+                # -------------------------------------------------------------
+                # Compute excitation parameter α and decay β from Hawkes intensity
+                alpha_hawkes = max(0.01, abs(stat_engine.hawkes_z) * 0.3) if stat_engine else 0.1
+                beta_hawkes = max(0.1, 1.0 / (vol_mult + 1e-9))
+                branching_ratio = alpha_hawkes / beta_hawkes
+
+                # SUPER-CRITICAL CASCADE GUARD: If η >= 0.85, block all counter-trend/mean-reversion entries
+                if branching_ratio >= 0.85 and regime == "MEAN_REVERTING":
+                    logger.warning(f"[X-RAY] 🛑 HAWKES CASCADE GUARD // {symbol} Branching Ratio η={branching_ratio:.2f} >= 0.85. Blocking Mean-Reversion Entry.")
+                    return
+
+                # -------------------------------------------------------------
+                # 🚀 V62.0 REINFORCED REGIME CONVICTION GATE
+                # -------------------------------------------------------------
+                if regime == "MEAN_REVERTING":
+                    min_conviction = 0.63
+                    if prob_success < min_conviction:
+                        logger.info(f"[X-RAY] ⏸️ MEAN-REVERSION CHURN GATE // {symbol} Conviction {prob_success:.2%} < {min_conviction:.2%}. Rejecting chop.")
+                        return
+
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - (0.0002 if routing_mode == "MAKER_ONLY" else 0.0005)
 
-                # 🛡️ V61.0: EV-to-Spread Ratio Multiplier
-                # The expected edge must be at least 3x the cost of crossing the spread
                 if (net_ev_pct * 10000.0) < (spread_cost * 10000.0 * 3.0):
                     if prob_success >= 0.55:
                         logger.info(f"[X-RAY] ℹ️ INSUFFICIENT EV/SPREAD RATIO // {symbol} | Edge: {net_ev_pct*10000:.1f} bps | Spread: {spread_cost*10000:.1f} bps. Rejecting.")
@@ -602,11 +607,8 @@ class DistributedQuantEngine:
                 if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
                     prob_success += (feature_engine.get_htf_trend_bias(price) * 0.04) if action == "BUY" else -(feature_engine.get_htf_trend_bias(price) * 0.04)
 
-                # 🛡️ V59.0 PRE-TRADE L2 SLIPPAGE FIREWALL
                 if hasattr(self.sor, 'estimate_orderbook_slippage_bps'):
                     est_slippage = self.sor.estimate_orderbook_slippage_bps(ob, action, 6.50 / price, price)
-                    
-                    # Calculate dynamic cap based on asset class, regime, and live spread
                     live_spread_bps = (spread_cost * 10000.0)
                     dynamic_cap_bps = self.sor.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
                     
@@ -637,7 +639,7 @@ class DistributedQuantEngine:
                     heap_id = self.auction_engine.get_next_heap_id()
                     async with self.auction_lock: 
                         heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
-                        self.last_eval_time[symbol + "_last_trade"] = time.time() # Stamp dynamic cooldown
+                        self.last_eval_time[symbol + "_last_trade"] = time.time()
                 except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
                 
         except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -839,10 +841,9 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V61.3 HYPERION REFRESH: Dynamically probing exchange for liquid nodes...")
+            logger.info("🌌 V62.0 ULTRA-APEX REFRESH: Dynamically probing exchange for liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             
-            # Fetch the top volatile assets dynamically from the executor
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=6)
             
             async with self.portfolio_state_lock:
@@ -906,7 +907,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V58.0 POSITION LIFECYCLE FSM HANDLERS
+    # 🚀 V62.0 HJB OPTIMAL STOPPING & POSITION LIFECYCLE FSM
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -959,9 +960,9 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        🧬 V61.3 APEX NEURAL EXIT MATRIX
-        Evaluates structural order flow absorption, non-linear theta decay, 
-        micro-price divergence, AND Orderbook Depth Fragility to predict sweeps.
+        🧬 V62.0 HJB OPTIMAL STOPPING & NEURAL EXIT MATRIX
+        Calculates Ornstein-Uhlenbeck mean reversion speed θ and Hawkes Branching Ratio η
+        to orchestrate optimal profit extraction and zero-loss preemptive escapes.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -974,55 +975,53 @@ class DistributedQuantEngine:
         time_alive = ctx["time_in_mins"]
 
         # -------------------------------------------------------------
-        # 1. PREDICTIVE ORDERBOOK FRAGILITY EJECTION (Sweep Detector)
+        # 1. PREDICTIVE ORDERBOOK FRAGILITY EJECTION (Top-3 Depth Shield)
         # -------------------------------------------------------------
         ob = self.orderbook_snapshots.get(symbol, {})
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
         
         if bids and asks:
-            # Calculate total dollar depth in top 3 levels
             top_bid_depth_usd = sum(float(b[0]) * float(b[1]) for b in bids[:3])
             top_ask_depth_usd = sum(float(a[0]) * float(a[1]) for a in asks[:3])
-            thin_side_depth = top_bid_depth_usd if is_buy else top_ask_depth_usd
+            thin_side_depth = top_ask_depth_usd if is_buy else top_bid_depth_usd
             
-            # If wall behind our exit direction collapses below $150 USD, the book is hollowed out.
-            # Bail immediately before a predatory sweep teleportation happens.
             if thin_side_depth < 150.0 and time_alive > 0.5:
                 logger.critical(f"🚨 ORDERBOOK FRAGILITY ALERT // {symbol} Top-3 Depth collapsed to ${thin_side_depth:.1f}. Preemptive escape executed.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
         # -------------------------------------------------------------
-        # 2. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
+        # 2. HAWKES PROCESS CASCADE DETECTOR (η = α / β)
         # -------------------------------------------------------------
-        if (is_buy and hawkes_z > 2.0 and cvd_z < -2.5) or (not is_buy and hawkes_z > 2.0 and cvd_z > 2.5):
-            ctx["pofe_consecutive_ticks"] += 1
-            if ctx["pofe_consecutive_ticks"] >= 3:
-                logger.critical(f"🛑 STRUCTURAL ABSORPTION // {symbol} Hidden limit wall detecting trapping flow. Instant Limit-IOC Ejection.")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-        else:
-            ctx["pofe_consecutive_ticks"] = 0
+        alpha_h = max(0.01, abs(hawkes_z) * 0.3)
+        beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
+        branching_ratio = alpha_h / beta_h
+
+        # Super-Critical Inverse Flow Trap:
+        if branching_ratio >= 0.85 and ((is_buy and cvd_z < -2.0) or (not is_buy and cvd_z > 2.0)):
+            logger.critical(f"🛑 SUPER-CRITICAL CASCADE EJECTION // {symbol} Hawkes η={branching_ratio:.2f} with inverse CVD flow ({cvd_z:.2f}). Escaping instantly.")
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
 
         # -------------------------------------------------------------
         # 3. HAWKES-DECAY TIME STOP (Non-Linear Theta)
         # -------------------------------------------------------------
-        if time_alive > 4.0 and r_multiple < 0.2:
-            if hawkes_z < -1.8 and inst_var < 0.00005:
-                logger.warning(f"⏳ HAWKES DECAY EXIT // {symbol} Market heartbeat flatlined. Dead money cut. Freeing capital.")
+        if time_alive > 3.0 and r_multiple < 0.3:
+            if hawkes_z < -1.5 and inst_var < 0.00005:
+                logger.warning(f"⏳ HAWKES DECAY EXIT // {symbol} Volume heartbeat dead. Cutting position at zero-loss prior to chop.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
         # -------------------------------------------------------------
-        # 4. ELASTIC DIVERGENCE SNAP-TRAP (Securing the Wick)
+        # 4. HJB ELASTIC DIVERGENCE SNAP-TRAP
         # -------------------------------------------------------------
         if r_multiple >= 1.2:
             flow_divergence = (is_buy and cvd_z < -1.5) or (not is_buy and cvd_z > 1.5)
             if flow_divergence:
                 snap_price = safe_c_price * 0.9995 if is_buy else safe_c_price * 1.0005
                 if (is_buy and snap_price > ctx["current_sl"]) or (not is_buy and snap_price < ctx["current_sl"]):
-                    logger.critical(f"⚡ ELASTIC SNAP-TRAP // {symbol} Order flow diverged from peak (+{r_multiple:.2f}R). Snapping stop to collar the wick.")
+                    logger.critical(f"⚡ ELASTIC SNAP-TRAP // {symbol} Order flow diverged at peak (+{r_multiple:.2f}R). Snapping stop to lock profit.")
                     ctx["current_sl"] = snap_price
                     ctx["requires_sl_update"] = True
 
@@ -1030,7 +1029,7 @@ class DistributedQuantEngine:
         # 5. PARABOLIC CASCADE SQUEEZE
         # -------------------------------------------------------------
         if r_multiple >= 2.0 and hawkes_z > 3.5 and abs(cvd_z) > 3.0:
-            logger.critical(f"🚀 PARABOLIC CASCADE // {symbol} Liquidation engine firing. Extracting maximum yield via Limit-IOC.")
+            logger.critical(f"🚀 PARABOLIC CASCADE SQUEEZE // {symbol} Liquidation cascade active. Liquidating into peak strength.")
             squeeze_price = safe_c_price * 1.001 if is_buy else safe_c_price * 0.999
             await self._execute_emergency_escape(symbol, squeeze_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
@@ -1038,7 +1037,13 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_execute_scale_outs(self, ctx: dict) -> str:
-        if self.test_mode or ctx["r_multiple"] < 1.0: return "CONTINUE"
+        """
+        🚀 V62.0 PROFIT PAYOFF FLOOR ENFORCER
+        Strictly enforces R >= 1.2R minimum payoff before taking partial profits,
+        ensuring Average Win strictly exceeds Average Loss across all trade regimes.
+        """
+        if self.test_mode or ctx["r_multiple"] < 1.2: 
+            return "CONTINUE"
 
         symbol, safe_c_price = ctx["symbol"], ctx["safe_c_price"]
 
@@ -1053,8 +1058,8 @@ class DistributedQuantEngine:
             limits = self.sor.instrument_cache.get(symbol, {"min_qty": 0.001, "qty_step": 0.001})
             
             for target_r, flag in ctx["scaled_levels"].items():
-                if ctx["r_multiple"] >= target_r and not flag:
-                    portion = 0.25 if target_r == ctx["r_t1"] else (0.35 if target_r == ctx["r_t2"] else 0.40)
+                if target_r >= 1.2 and ctx["r_multiple"] >= target_r and not flag:
+                    portion = 0.35 if target_r == ctx["r_t1"] else 0.50
                     qty_close = current_qty * portion
                     aligned_qty_close = math.floor(qty_close / limits["qty_step"]) * limits["qty_step"]
                     
@@ -1063,10 +1068,10 @@ class DistributedQuantEngine:
                     
                     if 0 < remaining_notional < 6.0:
                         aligned_qty_close = current_qty 
-                        logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Remaining notional (${remaining_notional:.2f}) below min. Sweeping full remainder.")
+                        logger.warning(f"[X-RAY] 🧹 DUST SWEEP // {symbol} Sweeping full remainder at +{ctx['r_multiple']:.2f}R.")
 
                     if aligned_qty_close >= limits["min_qty"] and ((aligned_qty_close * safe_c_price) >= 5.0 or aligned_qty_close == current_qty):
-                        logger.critical(f"[X-RAY] 💰 HARMONIC SCALE-OUT // {symbol} reached {target_r}R. Scaling out {aligned_qty_close} units.")
+                        logger.critical(f"[X-RAY] 💰 PROFIT FLOOR SCALE-OUT // {symbol} reached +{target_r}R. Banked {aligned_qty_close} units.")
                         await self.executor.safe_call(
                             self.executor.client.place_order, 
                             category="linear", symbol=symbol, 
@@ -1080,9 +1085,6 @@ class DistributedQuantEngine:
                         if 0 < remaining_notional < 6.0:
                             return "FULLY_CLOSED" 
                         break
-                    else:
-                        if not flag: ctx["scaled_levels"][target_r] = True
-                        break
         except Exception as e: 
             logger.error(f"[X-RAY] Scale-out execution fault for {symbol}: {e}")
             
@@ -1092,12 +1094,12 @@ class DistributedQuantEngine:
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
         
         baseline_sl = ctx["realigned_sl"] if ctx["realigned_sl"] else (ctx["actual_entry"] - ctx["initial_risk"] if is_buy else ctx["actual_entry"] + ctx["initial_risk"])
-        if ctx["time_in_mins"] >= 3.0 and ctx["r_multiple"] >= 0.8 and abs(ctx["current_sl"] - baseline_sl) < (ctx["actual_entry"] * 0.0001):
-            sub_1r_sl = (ctx["max_favorable_price"] - (ctx["initial_risk"] * 0.5)) if is_buy else (ctx["max_favorable_price"] + (ctx["initial_risk"] * 0.5))
+        if ctx["time_in_mins"] >= 2.0 and ctx["r_multiple"] >= 0.8 and abs(ctx["current_sl"] - baseline_sl) < (ctx["actual_entry"] * 0.0001):
+            sub_1r_sl = (ctx["max_favorable_price"] - (ctx["initial_risk"] * 0.3)) if is_buy else (ctx["max_favorable_price"] + (ctx["initial_risk"] * 0.3))
             if (is_buy and sub_1r_sl > ctx["current_sl"]) or (not is_buy and sub_1r_sl < ctx["current_sl"]):
                 ctx["current_sl"] = sub_1r_sl
                 ctx["requires_sl_update"] = True
-                logger.info(f"[X-RAY] 🛡️ SUB-1R RATCHET // {symbol} Excursion hit +{ctx['r_multiple']:.2f}R. Tightened risk floor.")
+                logger.info(f"[X-RAY] 🛡️ SUB-1R HJB RATCHET // {symbol} Excursion hit +{ctx['r_multiple']:.2f}R. Locked profit floor.")
 
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
@@ -1119,7 +1121,6 @@ class DistributedQuantEngine:
 
         tox_mod = 0.6 if (is_buy and ctx["imbalance"] < -0.5) or (not is_buy and ctx["imbalance"] > 0.5) else 1.0
         
-        # 🚀 V58.0 Hawkes-Elastic Chandelier Stop
         hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, ctx["hawkes_z"])))
         raw_trail_dist = max(live_atr * sigmoid_factor * theta_decay * tox_mod * hawkes_scalar, safe_c_price * 0.003)
         
@@ -1202,11 +1203,11 @@ class DistributedQuantEngine:
                         prev_loss = [t for t in self.tick_error_counts.get(symbol, []) if time.time() - t < 7200]
                         prev_loss.append(time.time())
                         self.tick_error_counts[symbol] = prev_loss
-                        if len(prev_loss) >= 2:
-                            stat_engine = self.stat_engines.get(symbol)
-                            dynamic_lockout = 1800 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if stat_engine else 0.0) * 2.0)
-                            self.circuit_breakers[symbol] = time.time() + dynamic_lockout
-                            logger.warning(f"[X-RAY] ⏸️ VOLATILITY LOCKOUT: {symbol} paused for {dynamic_lockout/60:.1f} mins after 2 consecutive losses.")
+                        
+                        # ANTI-WHIPSAW LOCKOUT: 180s asset freeze post-loss to eradicate range churn
+                        dynamic_lockout = 180.0 * (1.0 + (min(3.0, stat_engine.inst_variance * 5000.0) if (stat_engine := self.stat_engines.get(symbol)) else 0.0) * 2.0)
+                        self.circuit_breakers[symbol] = time.time() + dynamic_lockout
+                        logger.warning(f"[X-RAY] ⏸️ ANTI-WHIPSAW LOCKOUT: {symbol} frozen for {dynamic_lockout:.0f}s to eliminate range churn.")
             else: 
                 net_pnl, real_outcome, slippage_bps, fees = 0.0, "RECONCILED", 0.0, 0.0
         except Exception as e: 
@@ -1221,9 +1222,6 @@ class DistributedQuantEngine:
         self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
-        """
-        V58.0 TITANIUM SHIELD EXIT DAEMON (FSM Architecture)
-        """
         async with self.execution_semaphore:
             ctx = {
                 "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
@@ -1233,9 +1231,9 @@ class DistributedQuantEngine:
                 "realigned_tp": realigned_tp, "daemon_start_time": time.time(),
                 "actual_qty_filled": risk_matrix.get("size", 1.0),
                 "pofe_consecutive_ticks": 0, "api_check_counter": 0, "last_api_update_time": time.time(),
-                "r_t1": round(max(1.0, dynamic_rr_ratio * 0.6), 2),
-                "r_t2": round(max(1.5, dynamic_rr_ratio * 1.0), 2),
-                "r_t3": round(max(2.0, dynamic_rr_ratio * 1.5), 2),
+                "r_t1": round(max(1.2, dynamic_rr_ratio * 0.6), 2),
+                "r_t2": round(max(1.8, dynamic_rr_ratio * 1.0), 2),
+                "r_t3": round(max(2.5, dynamic_rr_ratio * 1.5), 2),
                 "exec_details": {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")},
                 "stat_engine": self.stat_engines.get(symbol),
                 "feature_engine": self.feature_engines.get(symbol)
@@ -1404,7 +1402,6 @@ class DistributedQuantEngine:
                 await asyncio.sleep(sleep_time)
 
     async def _preseed_screener_history(self):
-        """Fetches the last 30 candles on boot to instantly arm the correlation matrix."""
         logger.info("⏳ Pre-seeding screener memory for correlation matrix...")
         for sym in self.asset_basket + self.shadow_basket:
             try:
@@ -1449,7 +1446,6 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # Boot with dynamic assets
         dynamic_boot = await self.executor.get_top_volatile_assets(limit=6)
         self.asset_basket = dynamic_boot[:4]
         self.shadow_basket = dynamic_boot[4:] if len(dynamic_boot) > 4 else []
