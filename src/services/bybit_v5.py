@@ -1,10 +1,10 @@
 """
-💎 V61.1 APEX HYPERION: PARALLELIZED UNIFIED API EXECUTOR
+💎 V61.3 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 True Unified Equity Parsing, and Dynamic L2 Depth Ticker Discovery.
-Upgraded with V61.1 Volatility-Adjusted Spread Coefficient (VASC) — 
-Zero static magic numbers. 100% dynamic liquidity discovery.
+Upgraded with V61.3 Volatility-Adjusted Spread Coefficient (VASC) and 
+Top-of-Book Notional Depth Floor ($250 USD minimum) to eliminate hollow orderbook sweeps.
 """
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V61.1 BYBIT RETURN CODES
+    🚀 V61.3 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -66,7 +66,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V61.1 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V61.3 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
@@ -149,7 +149,7 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 V59.0 UPGRADE: True Intelligent Equity Parsing.
+        🚀 True Intelligent Equity Parsing.
         Calculates absolute Total Equity (Cash + Unrealized PnL), completely ignoring 
         Initial Margin locks. Prevents the "Margin Illusion" from triggering false drawdowns.
         """
@@ -264,10 +264,9 @@ class BybitUnifiedExecutor:
 
     async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        🚀 V61.1 TRUE DYNAMIC OMNI-SCANNER (VASC)
-        Zero static magic numbers. 
-        Calculates Volatility-Adjusted Spread Coefficient to determine if a coin
-        is moving fast enough to pay for its own orderbook friction.
+        🚀 V61.3 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
+        Calculates Volatility-Adjusted Spread Coefficient AND enforces a minimum
+        Top-of-Book Depth Floor ($250 USD) to reject paper-thin, sweep-prone coins.
         """
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         
@@ -304,9 +303,6 @@ class BybitUnifiedExecutor:
                 if volatility_bps < 200.0: continue
                 
                 # 4. 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
-                # The spread is allowed to be up to 1.5% of the total daily range, with an absolute floor of 5.0 bps.
-                # E.g. BTC moves 3% (300 bps) -> Cap is max(5.0, 4.5) = 5.0 bps
-                # E.g. PEPE moves 40% (4000 bps) -> Cap is max(5.0, 60.0) = 60.0 bps
                 dynamic_spread_cap_bps = max(5.0, volatility_bps * 0.015)
                 
                 # Calculate live spread
@@ -316,19 +312,29 @@ class BybitUnifiedExecutor:
                 if live_spread_bps > dynamic_spread_cap_bps: 
                     continue 
                 
-                # 5. Asset Approval
+                # 5. 🛡️ V61.3 TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
+                bid_size = float(t.get("bid1Size", 0.0) or 0.0)
+                ask_size = float(t.get("ask1Size", 0.0) or 0.0)
+                top_depth_usd = min(bid * bid_size, ask * ask_size)
+                
+                # If top level holds less than $250 USD, the coin is a hollow trap. Reject.
+                if top_depth_usd < 250.0:
+                    continue
+
+                # 6. Asset Approval
                 valid_assets.append({
                     "symbol": symbol,
                     "spread_bps": live_spread_bps,
                     "vol_bps": volatility_bps,
-                    "turnover": turnover
+                    "turnover": turnover,
+                    "top_depth_usd": top_depth_usd
                 })
                 
             # Rank dynamically by high-volatility momentum, weighted by turnover to prevent thin flash-crashes
             valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             
-            logger.info(f"[X-RAY] 📡 NEURAL VASC RADAR DISCOVERED {len(top_symbols)} ULTRA-KINETIC ASSETS.")
+            logger.info(f"[X-RAY] 📡 NEURAL VASC RADAR DISCOVERED {len(top_symbols)} QUALIFIED LIQUID NODES.")
             return top_symbols if top_symbols else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             
         except Exception as e:

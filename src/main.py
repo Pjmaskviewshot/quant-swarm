@@ -1,11 +1,11 @@
 """
-💎 V61.1 APEX NEURAL: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
+💎 V61.3 APEX NEURAL: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
 ------------------------------------------------------------------------
 The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
 Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
 Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
-Upgraded with V61.1 Neural Exit Matrix, EV-to-Spread Multipliers,
-and Flow-Divergence Snap Traps.
+Upgraded with V61.3 Predictive Orderbook Fragility Ejection (Sweep Detector),
+Neural Exit Matrix, EV-to-Spread Multipliers, and Flow-Divergence Snap Traps.
 """
 
 import os
@@ -64,7 +64,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V61.1_HYPERION")
+logger = logging.getLogger("QUANT_CORE.V61.3_HYPERION")
 
 
 class DistributedQuantEngine:
@@ -75,7 +75,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V61.1 APEX HYPERION ACTIVE.")
+            logger.critical("💎 LIVE MODE: V61.3 APEX HYPERION ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -839,7 +839,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V59.4 HYPERION REFRESH: Dynamically probing exchange for liquid nodes...")
+            logger.info("🌌 V61.3 HYPERION REFRESH: Dynamically probing exchange for liquid nodes...")
             await self._fetch_exchange_tick_sizes()
             
             # Fetch the top volatile assets dynamically from the executor
@@ -959,9 +959,9 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        🧬 V61.0 APEX NEURAL EXIT MATRIX
+        🧬 V61.3 APEX NEURAL EXIT MATRIX
         Evaluates structural order flow absorption, non-linear theta decay, 
-        and micro-price divergence to orchestrate perfect tactical ejections.
+        micro-price divergence, AND Orderbook Depth Fragility to predict sweeps.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -974,7 +974,27 @@ class DistributedQuantEngine:
         time_alive = ctx["time_in_mins"]
 
         # -------------------------------------------------------------
-        # 1. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
+        # 1. PREDICTIVE ORDERBOOK FRAGILITY EJECTION (Sweep Detector)
+        # -------------------------------------------------------------
+        ob = self.orderbook_snapshots.get(symbol, {})
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+        
+        if bids and asks:
+            # Calculate total dollar depth in top 3 levels
+            top_bid_depth_usd = sum(float(b[0]) * float(b[1]) for b in bids[:3])
+            top_ask_depth_usd = sum(float(a[0]) * float(a[1]) for a in asks[:3])
+            thin_side_depth = top_bid_depth_usd if is_buy else top_ask_depth_usd
+            
+            # If wall behind our exit direction collapses below $150 USD, the book is hollowed out.
+            # Bail immediately before a predatory sweep teleportation happens.
+            if thin_side_depth < 150.0 and time_alive > 0.5:
+                logger.critical(f"🚨 ORDERBOOK FRAGILITY ALERT // {symbol} Top-3 Depth collapsed to ${thin_side_depth:.1f}. Preemptive escape executed.")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+
+        # -------------------------------------------------------------
+        # 2. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
         # -------------------------------------------------------------
         if (is_buy and hawkes_z > 2.0 and cvd_z < -2.5) or (not is_buy and hawkes_z > 2.0 and cvd_z > 2.5):
             ctx["pofe_consecutive_ticks"] += 1
@@ -986,7 +1006,7 @@ class DistributedQuantEngine:
             ctx["pofe_consecutive_ticks"] = 0
 
         # -------------------------------------------------------------
-        # 2. HAWKES-DECAY TIME STOP (Non-Linear Theta)
+        # 3. HAWKES-DECAY TIME STOP (Non-Linear Theta)
         # -------------------------------------------------------------
         if time_alive > 4.0 and r_multiple < 0.2:
             if hawkes_z < -1.8 and inst_var < 0.00005:
@@ -995,7 +1015,7 @@ class DistributedQuantEngine:
                 return "ESCAPED"
 
         # -------------------------------------------------------------
-        # 3. ELASTIC DIVERGENCE SNAP-TRAP (Securing the Wick)
+        # 4. ELASTIC DIVERGENCE SNAP-TRAP (Securing the Wick)
         # -------------------------------------------------------------
         if r_multiple >= 1.2:
             flow_divergence = (is_buy and cvd_z < -1.5) or (not is_buy and cvd_z > 1.5)
@@ -1007,7 +1027,7 @@ class DistributedQuantEngine:
                     ctx["requires_sl_update"] = True
 
         # -------------------------------------------------------------
-        # 4. PARABOLIC CASCADE SQUEEZE
+        # 5. PARABOLIC CASCADE SQUEEZE
         # -------------------------------------------------------------
         if r_multiple >= 2.0 and hawkes_z > 3.5 and abs(cvd_z) > 3.0:
             logger.critical(f"🚀 PARABOLIC CASCADE // {symbol} Liquidation engine firing. Extracting maximum yield via Limit-IOC.")
