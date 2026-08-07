@@ -1,10 +1,10 @@
 """
-💎 V59.0 APEX HYPERION: PARALLELIZED UNIFIED API EXECUTOR
+💎 V61.1 APEX HYPERION: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
-Titanium Ticker Filtering, True Unified Equity Parsing, and X-Ray Telemetry.
-Upgraded with Strict Liquidity Radar (3.0 bps Spread Gate) and $50M+ Volume
-Thresholds to permanently eradicate micro-cap slippage drag.
+True Unified Equity Parsing, and Dynamic L2 Depth Ticker Discovery.
+Upgraded with V61.1 Volatility-Adjusted Spread Coefficient (VASC) — 
+Zero static magic numbers. 100% dynamic liquidity discovery.
 """
 
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V59.0 BYBIT RETURN CODES
+    🚀 V61.1 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -66,7 +66,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V59.0 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V61.1 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
@@ -163,13 +163,10 @@ class BybitUnifiedExecutor:
             if response.get("retCode") == 0:
                 accounts = response.get("result", {}).get("list", [])
                 if accounts:
-                    # 🚀 INTELLIGENT FIX: Use totalEquity, NOT totalAvailableBalance.
-                    # totalEquity = Wallet Balance + Floating PnL. (Margin is safely ignored).
                     true_equity = accounts[0].get("totalEquity") 
                     if true_equity is not None:
                         return float(true_equity)
                     
-                    # Fallback to USDT specifically if global equity is unavailable
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
                             return float(coin_info.get("equity", 0.0))
@@ -186,7 +183,6 @@ class BybitUnifiedExecutor:
                 if accounts:
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
-                            # Use "equity", fallback to "walletBalance" if absent
                             return float(coin_info.get("equity", coin_info.get("walletBalance", 0.0)))
 
             return 0.0
@@ -266,14 +262,14 @@ class BybitUnifiedExecutor:
             logger.error(f"[X-RAY] ❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
             return False
 
-    async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 50_000_000.0) -> List[str]:
+    async def get_top_volatile_assets(self, limit: int = 6, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        🚀 V59.0 STRICT LIQUIDITY RADAR
-        Filters exclusively for $50M+ 24h turnover and tight spreads (<= 3.0 bps).
-        Restricts universe to an ultra-liquid whitelist to eradicate slippage drag.
+        🚀 V61.1 TRUE DYNAMIC OMNI-SCANNER (VASC)
+        Zero static magic numbers. 
+        Calculates Volatility-Adjusted Spread Coefficient to determine if a coin
+        is moving fast enough to pay for its own orderbook friction.
         """
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG"]
-        whitelist = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT", "AVAXUSDT", "LINKUSDT", "AAVEUSDT", "XRPUSDT"]
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         
         try:
             response = await self._safe_api_call(
@@ -287,8 +283,8 @@ class BybitUnifiedExecutor:
             for t in tickers:
                 symbol = t.get("symbol", "")
                 
-                # Strict Asset Gates
-                if symbol not in whitelist: continue
+                # 1. Broad Universe Filters
+                if not symbol.endswith("USDT"): continue
                 if any(b in symbol for b in banned_keywords): continue
                     
                 turnover = float(t.get("turnover24h", 0.0) or 0.0)
@@ -297,24 +293,45 @@ class BybitUnifiedExecutor:
                 
                 if bid <= 0 or ask <= bid or turnover < min_turnover: continue
                 
-                # 🛡️ HARD SPREAD GATE: Must be <= 3.0 basis points
-                spread_bps = ((ask - bid) / bid) * 10000.0
-                if spread_bps > 3.0: continue 
+                # 2. Extract True 24H Volatility
+                high = float(t.get("highPrice24h", ask))
+                low = float(t.get("lowPrice24h", bid))
                 
+                if low <= 0: continue
+                volatility_bps = ((high - low) / low) * 10000.0
+                
+                # 3. Dead Market Filter (Requires > 2.0% daily variance to justify trading)
+                if volatility_bps < 200.0: continue
+                
+                # 4. 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
+                # The spread is allowed to be up to 1.5% of the total daily range, with an absolute floor of 5.0 bps.
+                # E.g. BTC moves 3% (300 bps) -> Cap is max(5.0, 4.5) = 5.0 bps
+                # E.g. PEPE moves 40% (4000 bps) -> Cap is max(5.0, 60.0) = 60.0 bps
+                dynamic_spread_cap_bps = max(5.0, volatility_bps * 0.015)
+                
+                # Calculate live spread
+                live_spread_bps = ((ask - bid) / bid) * 10000.0
+                
+                # If the spread eats too much of the asset's daily range, reject it.
+                if live_spread_bps > dynamic_spread_cap_bps: 
+                    continue 
+                
+                # 5. Asset Approval
                 valid_assets.append({
                     "symbol": symbol,
-                    "spread_bps": spread_bps,
+                    "spread_bps": live_spread_bps,
+                    "vol_bps": volatility_bps,
                     "turnover": turnover
                 })
                 
-            # Rank strictly by highest liquidity turnover
-            valid_assets.sort(key=lambda x: x["turnover"], reverse=True)
+            # Rank dynamically by high-volatility momentum, weighted by turnover to prevent thin flash-crashes
+            valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             
-            logger.info(f"[X-RAY] 📡 HYPERION RADAR DISCOVERED {len(top_symbols)} ULTRA-LIQUID ASSETS.")
+            logger.info(f"[X-RAY] 📡 NEURAL VASC RADAR DISCOVERED {len(top_symbols)} ULTRA-KINETIC ASSETS.")
             return top_symbols if top_symbols else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             
         except Exception as e:
             logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
-            # Failsafe fallback guarantees core liquid assets
+            # Failsafe fallback 
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]

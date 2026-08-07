@@ -1,11 +1,11 @@
 """
-💎 V59.2 APEX HYPERION: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
+💎 V61.1 APEX NEURAL: UNIVERSAL SCALE-INVARIANT CORE ORCHESTRATOR
 ------------------------------------------------------------------------
 The Apex Microstructure Execution Engine. Features Scale-Invariant Dynamic 
 Notional Adaptation (SIDNA), Gram-Schmidt Feature Alignment, Dynamic Margin 
 Sweeping, Limit-IOC Emergency Escapes, and Rate-Limit Defense.
-Upgraded with V59.2 HMM Momentum Overrides, Unified Leverage Parity, and
-Degraded Local-Mode Fallbacks to survive cloud database outages.
+Upgraded with V61.1 Neural Exit Matrix, EV-to-Spread Multipliers,
+and Flow-Divergence Snap Traps.
 """
 
 import os
@@ -64,7 +64,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V59.2_HYPERION")
+logger = logging.getLogger("QUANT_CORE.V61.1_HYPERION")
 
 
 class DistributedQuantEngine:
@@ -75,7 +75,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V59.2 APEX HYPERION ACTIVE.")
+            logger.critical("💎 LIVE MODE: V61.1 APEX HYPERION ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -578,6 +578,13 @@ class DistributedQuantEngine:
                 routing_mode = structural_verdict.get("routing", "STANDARD")
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - (0.0002 if routing_mode == "MAKER_ONLY" else 0.0005)
 
+                # 🛡️ V61.0: EV-to-Spread Ratio Multiplier
+                # The expected edge must be at least 3x the cost of crossing the spread
+                if (net_ev_pct * 10000.0) < (spread_cost * 10000.0 * 3.0):
+                    if prob_success >= 0.55:
+                        logger.info(f"[X-RAY] ℹ️ INSUFFICIENT EV/SPREAD RATIO // {symbol} | Edge: {net_ev_pct*10000:.1f} bps | Spread: {spread_cost*10000:.1f} bps. Rejecting.")
+                    return
+
                 ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
                 if net_ev_pct < ev_floor: 
                     if prob_success >= 0.55: logger.info(f"[X-RAY] ℹ️ NEAR-MISS // {symbol} | Prob: {prob_success:.1%} | Routing: {routing_mode} | Net EV: {net_ev_pct*10000:.1f} bps < Floor {ev_floor*10000:.1f} bps (Spread: {spread_cost*10000:.1f} bps)")
@@ -598,8 +605,13 @@ class DistributedQuantEngine:
                 # 🛡️ V59.0 PRE-TRADE L2 SLIPPAGE FIREWALL
                 if hasattr(self.sor, 'estimate_orderbook_slippage_bps'):
                     est_slippage = self.sor.estimate_orderbook_slippage_bps(ob, action, 6.50 / price, price)
-                    if est_slippage > 12.0:
-                        logger.warning(f"[X-RAY] 🛑 SLIPPAGE FIREWALL REJECTED {symbol} (est. {est_slippage:.1f} bps > 12.0 bps max)")
+                    
+                    # Calculate dynamic cap based on asset class, regime, and live spread
+                    live_spread_bps = (spread_cost * 10000.0)
+                    dynamic_cap_bps = self.sor.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
+                    
+                    if est_slippage > dynamic_cap_bps:
+                        logger.warning(f"[X-RAY] 🛑 DYNAMIC FIREWALL REJECTED {symbol} (est. {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps)")
                         return
 
                 try:
@@ -769,11 +781,33 @@ class DistributedQuantEngine:
 
     async def run_omni_swarm_director(self):
         logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         while True:
             await asyncio.sleep(15) 
             try:
-                # 🚀 V59.0 Locked strictly to major assets to prevent altcoin slippage
-                pass
+                protected_symbols = set()
+                async with self.portfolio_state_lock: protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
+                if dead_sym and hot_sym and not any(b in hot_sym for b in banned_keywords):
+                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
+                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
+                        t_data = tick_res["result"]["list"][0]
+                        bid, ask, turnover = float(t_data.get("bid1Price", 0.0) or 0.0), float(t_data.get("ask1Price", 0.0) or 0.0), float(t_data.get("turnover24h", 0.0) or 0.0)
+                        
+                        spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
+                        
+                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 3.5:
+                            max_notional = await self._get_max_affordable_notional()
+                            if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
+                                async with self.portfolio_state_lock:
+                                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                                self._initialize_symbol_structures([hot_sym])
+                                await self._prune_dead_symbols() 
+                                if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                                    await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                                logger.critical(f"[X-RAY] 🚀 DYNAMIC SWAP // {hot_sym} PASSED GATES AND INJECTED INTO MATRIX (Replaced {dead_sym}).")
             except Exception as e: logger.error(f"[X-RAY] Omni-Swarm Director iteration failed: {e}", exc_info=True)
 
     async def handle_incoming_kline_update(self, data: Dict[str, Any]):
@@ -805,13 +839,18 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V59.1 HYPERION REFRESH: Maintaining Majors-Only asset basket...")
+            logger.info("🌌 V59.4 HYPERION REFRESH: Dynamically probing exchange for liquid nodes...")
             await self._fetch_exchange_tick_sizes()
+            
+            # Fetch the top volatile assets dynamically from the executor
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=6)
+            
             async with self.portfolio_state_lock:
-                self.asset_basket = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]
-                self.shadow_basket = []
+                self.asset_basket = dynamic_basket[:4]
+                self.shadow_basket = dynamic_basket[4:] if len(dynamic_basket) > 4 else []
+                
             await self._prune_dead_symbols() 
-            self._initialize_symbol_structures(self.asset_basket)
+            self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
@@ -919,29 +958,61 @@ class DistributedQuantEngine:
         return "ACTIVE_MONITORING"
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
-        if ctx["time_in_mins"] < 3.0: return "CONTINUE"
-
+        """
+        🧬 V61.0 APEX NEURAL EXIT MATRIX
+        Evaluates structural order flow absorption, non-linear theta decay, 
+        and micro-price divergence to orchestrate perfect tactical ejections.
+        """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
-        cvd_z = getattr(ctx["stat_engine"], 'ofi_fast_z', 0.0) if ctx["stat_engine"] else 0.0
         
-        if (is_buy and ctx["imbalance"] < -0.85 and cvd_z < -2.0) or (not is_buy and ctx["imbalance"] > 0.85 and cvd_z > 2.0):
+        stat_engine = ctx["stat_engine"]
+        cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) if stat_engine else 0.0
+        hawkes_z = getattr(stat_engine, 'hawkes_z', 0.0) if stat_engine else 0.0
+        inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
+        
+        r_multiple = ctx["r_multiple"]
+        time_alive = ctx["time_in_mins"]
+
+        # -------------------------------------------------------------
+        # 1. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
+        # -------------------------------------------------------------
+        if (is_buy and hawkes_z > 2.0 and cvd_z < -2.5) or (not is_buy and hawkes_z > 2.0 and cvd_z > 2.5):
             ctx["pofe_consecutive_ticks"] += 1
-            if ctx["pofe_consecutive_ticks"] >= 5:
-                logger.critical(f"🛑 VERIFIED POFE EJECTION // {symbol} Sustained momentum shift. Escaping via Limit-IOC.")
+            if ctx["pofe_consecutive_ticks"] >= 3:
+                logger.critical(f"🛑 STRUCTURAL ABSORPTION // {symbol} Hidden limit wall detecting trapping flow. Instant Limit-IOC Ejection.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
         else:
             ctx["pofe_consecutive_ticks"] = 0
 
-        inst_var = getattr(ctx["stat_engine"], 'inst_variance', 0.01) if ctx["stat_engine"] else 0.01
-        if inst_var >= 0.0001 and ctx["current_r"] < -0.35 and ctx["hawkes_z"] < -1.5 and ctx["time_in_mins"] > 15.0:
-            logger.warning(f"📉 VOLUME DEATH EJECTION // {symbol} Trade bleeding with dropping volatility. Escaping via Limit-IOC.")
-            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-            return "ESCAPED"
+        # -------------------------------------------------------------
+        # 2. HAWKES-DECAY TIME STOP (Non-Linear Theta)
+        # -------------------------------------------------------------
+        if time_alive > 4.0 and r_multiple < 0.2:
+            if hawkes_z < -1.8 and inst_var < 0.00005:
+                logger.warning(f"⏳ HAWKES DECAY EXIT // {symbol} Market heartbeat flatlined. Dead money cut. Freeing capital.")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
 
-        if ctx["r_multiple"] >= 1.5 and (ctx["hawkes_z"] > 3.0 and abs(cvd_z) > 2.5):
-            logger.critical(f"🚀 PARABOLIC EJECTION // {symbol} Liquidation cascade detected. Exiting into strength via Limit-IOC.")
-            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+        # -------------------------------------------------------------
+        # 3. ELASTIC DIVERGENCE SNAP-TRAP (Securing the Wick)
+        # -------------------------------------------------------------
+        if r_multiple >= 1.2:
+            flow_divergence = (is_buy and cvd_z < -1.5) or (not is_buy and cvd_z > 1.5)
+            if flow_divergence:
+                snap_price = safe_c_price * 0.9995 if is_buy else safe_c_price * 1.0005
+                if (is_buy and snap_price > ctx["current_sl"]) or (not is_buy and snap_price < ctx["current_sl"]):
+                    logger.critical(f"⚡ ELASTIC SNAP-TRAP // {symbol} Order flow diverged from peak (+{r_multiple:.2f}R). Snapping stop to collar the wick.")
+                    ctx["current_sl"] = snap_price
+                    ctx["requires_sl_update"] = True
+
+        # -------------------------------------------------------------
+        # 4. PARABOLIC CASCADE SQUEEZE
+        # -------------------------------------------------------------
+        if r_multiple >= 2.0 and hawkes_z > 3.5 and abs(cvd_z) > 3.0:
+            logger.critical(f"🚀 PARABOLIC CASCADE // {symbol} Liquidation engine firing. Extracting maximum yield via Limit-IOC.")
+            squeeze_price = safe_c_price * 1.001 if is_buy else safe_c_price * 0.999
+            await self._execute_emergency_escape(symbol, squeeze_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
         return "CONTINUE"
@@ -1358,9 +1429,11 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        self.asset_basket = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT"]
-        self.shadow_basket = []
-        self._initialize_symbol_structures(self.asset_basket)
+        # Boot with dynamic assets
+        dynamic_boot = await self.executor.get_top_volatile_assets(limit=6)
+        self.asset_basket = dynamic_boot[:4]
+        self.shadow_basket = dynamic_boot[4:] if len(dynamic_boot) > 4 else []
+        self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             
         await self._preseed_screener_history()
         

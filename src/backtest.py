@@ -1,10 +1,11 @@
 """
-🌌 V58.0 TITANIUM APEX BACKTESTER
+🌌 V61.1 APEX NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V58.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
+of the live V61.1 L2-tick engine and cannot simulate true Order Flow Imbalance.
 Upgraded with Stationarized Log-MLOFI approximations, 1D Kalman Filtered HMMs,
-Hawkes-Elastic Chandelier Exits, and Anti-Starvation Kelly Floors (0.3%).
+Neural Exit Matrix Simulations (Snap-Traps & Absorption Ejections), 
+and EV-to-Spread Multipiers (3x).
 """
 
 import argparse
@@ -97,7 +98,7 @@ def get_cluster_priors(symbol: str):
         w_trend = np.array([0.45, 0.35, 0.20])
         w_range = np.array([0.20, 0.35, 0.45])
         p_scale = 1.0
-    elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
+    elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR", "APT"]):
         w_trend = np.array([0.40, 0.40, 0.20])
         w_range = np.array([0.20, 0.40, 0.40])
         p_scale = 2.0
@@ -108,7 +109,7 @@ def get_cluster_priors(symbol: str):
     return w_trend, w_range, np.eye(3) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
-    """V58.0 UPGRADE: Bounded correlation damping and threshold tuning."""
+    """Bounded correlation damping and threshold tuning."""
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
     aligned_b, aligned_a = [], []
     
@@ -159,7 +160,7 @@ def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
     return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
 def _apply_kalman_smoothing(prices: np.ndarray) -> np.ndarray:
-    """V58.0 UPGRADE: 1D Kalman Filter for Regime Smoothing."""
+    """1D Kalman Filter for Regime Smoothing."""
     if len(prices) < 2: return prices
     n = len(prices)
     filtered = np.zeros(n)
@@ -180,7 +181,6 @@ def detect_hmm_regime(raw_closes_arr: np.ndarray, volumes_arr: np.ndarray, curre
     if len(raw_closes_arr) < 20:
         return "MEAN_REVERTING", current_state_probs, 0.5
 
-    # Apply V58.0 Kalman Smoothing
     closes_arr = _apply_kalman_smoothing(raw_closes_arr)
 
     log_returns = np.diff(np.log(closes_arr + 1e-9))
@@ -272,7 +272,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     mse_penalty = min(0.08, mse * 0.3)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -385,7 +385,7 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
-        # 🚀 V58.0: LOG-MLOFI PROXY
+        # V58.0: LOG-MLOFI PROXY
         vol_step = c_prev['volume']
         log_vol_step = math.log1p(vol_step)
         price_step = (c_prev['close'] - c_prev_prev['close'])
@@ -399,7 +399,7 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (mlofi_step - ofi_slow_mean)**2
         ofi_slow_z = (mlofi_step - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
         
-        # 🚀 V58.0: HAWKES NORMALIZED VOLUME
+        # HAWKES NORMALIZED VOLUME
         vol_ewma = (1 - 0.05) * vol_ewma + 0.05 * vol_step if vol_ewma > 0 else vol_step
         normalized_volume = vol_step / (vol_ewma + 1e-9)
         volume_mark = math.log1p(max(0.0, normalized_volume))
@@ -472,7 +472,6 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if len(historical_probs) >= 30:
             prob_arr = np.fromiter(historical_probs, dtype=float, count=len(historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
-            # 🚀 V58.0 FIX: Strict 0.72 ceiling clamp
             dynamic_ceiling = min(0.72, float(np.percentile(prob_arr, 95)) + 0.05)
         else:
             baseline_gate = 0.55
@@ -573,7 +572,7 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             
-            # 🚀 V58.0: Anti-Starvation Kelly Sizing
+            # Anti-Starvation Kelly Sizing
             if len(rolling_outcomes) >= 10:
                 p_win = np.mean(rolling_outcomes)
                 q_loss = 1.0 - p_win
@@ -610,6 +609,10 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 net_edge_bps = net_ev_pct * 10000.0
                 
+                # 🚀 V61.1 EV-TO-SPREAD GATE: Edge must be 3x the spread cost
+                if net_edge_bps < (spread_cost * 10000.0 * 3.0):
+                    continue
+
                 if net_ev_pct > ev_floor:  
                     entry = c['open'] 
                     initial_risk = sl_dist_pct * entry
@@ -628,6 +631,8 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     pnl_accum = 0.0
                     position_size = 1.0
                     
+                    pofe_consecutive_ticks = 0
+                    
                     for j in range(i + 1, min(i + 300, len(target_candles))): 
                         bars_held = j - i
                         h, l = target_candles[j]["high"], target_candles[j]["low"]
@@ -637,25 +642,40 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         elif action_dir == "SELL" and l < max_favorable_price: max_favorable_price = l
                         
                         r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
-                        current_r = (c_j - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - c_j) / (initial_risk + 1e-9)
                         
-                        if r_multiple < 0.8:
-                            proxy_imbalance = -1.0 if (skew < -0.5 and ofi_fast_z < -1.0) else (1.0 if (skew > 0.5 and ofi_fast_z > 1.0) else 0.0)
-                            if (action_dir == "BUY" and proxy_imbalance < -0.80 and ofi_fast_z < -1.5) or \
-                               (action_dir == "SELL" and proxy_imbalance > 0.80 and ofi_fast_z > 1.5):
-                                outcome = "VERIFIED_POFE_EJECT"
-                                exit_price = c_j
+                        # 🧬 V61.1 SIMULATED NEURAL MATRIX PROXIES
+                        c_prev_j = target_candles[j-1]
+                        ret_j = (c_j - c_prev_j["close"]) / (c_prev_j["close"] + 1e-9)
+                        norm_vol_j = target_candles[j]["volume"] / (vol_ewma + 1e-9)
+                        hawkes_z_j = math.log1p(max(0.0, norm_vol_j)) * 1.5
+                        cvd_z_j = np.sign(ret_j) * hawkes_z_j * 1.2
+                        
+                        # 1. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
+                        if (action_dir == "BUY" and hawkes_z_j > 2.0 and cvd_z_j < -2.5) or (action_dir == "SELL" and hawkes_z_j > 2.0 and cvd_z_j > 2.5):
+                            pofe_consecutive_ticks += 1
+                            if pofe_consecutive_ticks >= 2: # 2 mins in backtester equivalent
+                                outcome, exit_price = "ABSORPTION_EJECT", c_j
                                 break
-                                    
-                        is_coiling = inst_variance < 0.0001
-                        if not is_coiling and current_r < -0.35 and hawkes_z < -1.5 and bars_held > 15.0:
-                            outcome = "VOLUME_DEATH_ESCAPE"
-                            exit_price = c_j
-                            break
+                        else:
+                            pofe_consecutive_ticks = 0
+                                
+                        # 2. HAWKES-DECAY TIME STOP
+                        if bars_held > 4.0 and r_multiple < 0.2:
+                            if hawkes_z_j < -1.0 and inst_variance < 0.00005:
+                                outcome, exit_price = "DECAY_EXIT", c_j
+                                break
 
-                        if r_multiple >= 1.5 and (hawkes_z > 3.0 and abs(ofi_fast_z) > 2.5):
-                            outcome = "PARABOLIC_ESCAPE"
-                            exit_price = c_j
+                        # 3. ELASTIC DIVERGENCE SNAP-TRAP
+                        if r_multiple >= 1.2:
+                            flow_divergence = (action_dir == "BUY" and cvd_z_j < -1.5) or (action_dir == "SELL" and cvd_z_j > 1.5)
+                            if flow_divergence:
+                                snap_price = c_j * 0.9995 if action_dir == "BUY" else c_j * 1.0005
+                                if (action_dir == "BUY" and snap_price > current_sl) or (action_dir == "SELL" and snap_price < current_sl):
+                                    current_sl = snap_price
+
+                        # 4. PARABOLIC CASCADE SQUEEZE
+                        if r_multiple >= 2.0 and hawkes_z_j > 3.0 and abs(cvd_z_j) > 2.5:
+                            outcome, exit_price = "PARABOLIC_SQUEEZE", c_j
                             break
 
                         if r_multiple >= 0.4 and current_sl == realigned_sl:
@@ -672,7 +692,6 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                                 position_size -= (position_size * portion)
                                 scaled_levels[target_r] = True
 
-                        # 🚀 V58.0: Hawkes-Elastic Chandelier Proxy
                         time_in_mins = bars_held
                         vol_ratio = (initial_risk / p.sl_atr_mult) / entry
                         dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
@@ -682,7 +701,7 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         else:
                             theta_decay = 1.0
                             
-                        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, hawkes_z)))
+                        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, hawkes_z_j)))
                         raw_trail_dist = max((initial_risk / p.sl_atr_mult) * hawkes_scalar * theta_decay, entry * 0.003)
                         
                         if r_multiple < 1.0:
@@ -693,8 +712,8 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             if action_dir == "BUY": current_sl = max(raw_sl, be_plus)
                             else: current_sl = min(raw_sl, be_plus)
 
-                        momentum_stretch = max(0.0, hawkes_z * 0.6) if regime == "TRENDING" else 0.0
-                        if hawkes_z < -1.5 and r_multiple > 1.0:
+                        momentum_stretch = max(0.0, hawkes_z_j * 0.6) if regime == "TRENDING" else 0.0
+                        if hawkes_z_j < -1.5 and r_multiple > 1.0:
                             momentum_stretch -= 0.5 
                         
                         target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3))
@@ -717,7 +736,7 @@ def run_v58_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
-                    if outcome in ["VERIFIED_POFE_EJECT", "VOLUME_DEATH_ESCAPE", "PARABOLIC_ESCAPE"]:
+                    if outcome in ["ABSORPTION_EJECT", "DECAY_EXIT", "PARABOLIC_SQUEEZE"]:
                         max_slippage = 0.0015 if any(m in symbol for m in ["BTC", "ETH", "SOL"]) else 0.0035
                         slippage_penalty = max_slippage
                         applied_fee = TAKER_FEE * 2 
@@ -813,7 +832,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V58.0 TITANIUM APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V61.1 APEX NEURAL Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -835,7 +854,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v58_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v61_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -888,9 +907,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v58_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v61_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V58.0 TITANIUM APEX OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V61.1 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")
