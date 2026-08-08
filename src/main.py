@@ -1,9 +1,9 @@
 """
-💎 V68.0 ULTRA-APEX NEURAL: DYNAMIC EV-CONFLUENCE MATRIX
+💎 V68.5 ULTRA-APEX NEURAL: DYNAMIC EV-CONFLUENCE MATRIX
 ------------------------------------------------------------------------
 Features Dynamic Expected Value (EV) Routing, Active Trajectory & Peak 
-Retracement Engine, Order Flow Reversal Harvesting, Guaranteed 15/10 
-Slot Population, and Scale-Invariant Risk Adaptation.
+Retracement Engine, Order Flow Reversal Harvesting, Adverse Loss Cuts,
+Guaranteed 15/10 Slot Population, and Scale-Invariant Risk Adaptation.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V68.0_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V68.5_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V68.0 DYNAMIC EV-CONFLUENCE MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V68.5 DYNAMIC EV-CONFLUENCE MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -464,7 +464,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V67.0 APEX", "V68.0 APEX")
+                report = report.replace("V67.0 APEX", "V68.5 APEX").replace("V68.0 APEX", "V68.5 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -572,7 +572,6 @@ class DistributedQuantEngine:
                     logger.warning(f"[X-RAY] 🛑 HAWKES CASCADE GUARD // {symbol} Branching Ratio η={branching_ratio:.2f} >= 0.85. Blocking Mean-Reversion Entry.")
                     return
 
-                # 🚀 V68.0 RELAXED CHURN GATE (Dropped to 51.5% to allow high EV confluence)
                 if regime == "MEAN_REVERTING":
                     min_conviction = 0.515 if spread_cost < 0.0005 else 0.525
                     if prob_success < min_conviction:
@@ -839,13 +838,12 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V68.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V68.5 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
             
             if not dynamic_basket or len(dynamic_basket) < 15:
-                # Fallback to general high-volume movers if filter is too tight
                 dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=5_000_000.0)
 
             async with self.portfolio_state_lock:
@@ -855,7 +853,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V68.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V68.5 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -910,7 +908,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V68.0 ACTIVE TRAJECTORY & REVERSAL LIFE LIFECYCLE DAEMON
+    # 🚀 V68.5 ACTIVE TRAJECTORY & REVERSAL LIFE LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -962,6 +960,10 @@ class DistributedQuantEngine:
         return "ACTIVE_MONITORING"
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
+        """
+        🧬 V68.5 ADVERSE LOSS & REVERSAL RADAR
+        Includes Adverse Microstructure Loss Cuts for immediate drawdown positions.
+        """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
         stat_engine = ctx["stat_engine"]
@@ -973,7 +975,16 @@ class DistributedQuantEngine:
         current_r = ctx["current_r"]
         time_alive = ctx["time_in_mins"]
 
-        # 🚀 1. PEAK RETRACEMENT PROTECTION
+        # 🚀 1. ADVERSE MICROSTRUCTURE LOSS CUT
+        if current_r <= -0.70 and ((not is_buy and cvd_z > 2.0) or (is_buy and cvd_z < -2.0)):
+            logger.critical(
+                f"🛑 ADVERSE LOSS CUT // {symbol} Drawdown ({current_r:.2f}R) with opposing CVD flow (Z: {cvd_z:.2f}). "
+                f"Cutting trade early before Hard SL."
+            )
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
+
+        # 🚀 2. PEAK RETRACEMENT PROTECTION
         if r_multiple >= 0.35:
             retracement_r = r_multiple - current_r
             retracement_ratio = retracement_r / (r_multiple + 1e-9)
@@ -986,7 +997,7 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # 🚀 2. FAST ORDER FLOW REVERSAL
+        # 🚀 3. FAST ORDER FLOW REVERSAL
         if current_r >= 0.20 and ((is_buy and cvd_z < -2.0) or (not is_buy and cvd_z > 2.0)):
             logger.warning(
                 f"⚡ ORDERFLOW DISLOCATION REVERSAL // {symbol} Orderbook flow flipped (CVD Z: {cvd_z:.2f}) "
@@ -995,7 +1006,7 @@ class DistributedQuantEngine:
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # 🚀 3. HAWKES CASCADE EMERGENCY GUARD
+        # 🚀 4. HAWKES CASCADE EMERGENCY GUARD
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
         branching_ratio = alpha_h / beta_h
@@ -1005,7 +1016,7 @@ class DistributedQuantEngine:
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # 🚀 4. STALE POSITION HARVEST
+        # 🚀 5. STALE POSITION HARVEST
         if time_alive >= 20.0 and current_r >= 0.15:
             logger.warning(f"⏳ STALE PROFIT HARVEST // {symbol} Stalled for 20m at +{current_r:.2f}R. Freeing capital slot.")
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
@@ -1121,7 +1132,6 @@ class DistributedQuantEngine:
                     
                     if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 INFINITE TP EXPANSION // {symbol} Target pushed to {new_tp_str}.")
                     if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ KINETIC RATCHET // {symbol} SL safely elevated to {new_sl_str}.")
-
 
     async def _state_settle_trade(self, ctx: dict):
         symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
@@ -1396,7 +1406,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V68.0 GUARANTEED 25-NODE POPULATION
+        # 🚀 V67.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [

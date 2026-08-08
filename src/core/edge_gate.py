@@ -1,9 +1,10 @@
 """
-💎 V58.0 TITANIUM APEX: MICROSTRUCTURE EDGE GATE & PREDATORY MAKER ENGINE
+💎 V68.5 TITANIUM APEX: MICROSTRUCTURE EDGE GATE & EXHAUSTION VETO ENGINE
 -------------------------------------------------------------------------
 Evaluates Stationarized Log-MLOFI (Spoof-Resistant), Dark Pool Iceberg Absorption,
-Micro-Price Effective Spreads (Liquidity Vacuums), and Roll Implicit Spreads. 
-Patched to eradicate trade starvation and allow Standard Confluence routing.
+Micro-Price Effective Spreads (Liquidity Vacuums), Roll Implicit Spreads, and
+VWAP Volatility Stretch (Z-VWAP) / Limit Order Absorption Vetoes.
+Patched to eliminate shorting capitulation wicks or buying blow-off tops.
 """
 
 import math
@@ -18,9 +19,9 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V58.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
-    Exploits orderbook dark pool absorptions and liquidity vacuums using Maker Pegging.
-    Upgraded with Log-MLOFI spoofing immunity and Standard Confluence routing.
+    🚀 V68.5 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    Exploits orderbook dark pool absorptions, liquidity vacuums, and deep book breakouts.
+    Upgraded with VWAP Volatility Stretch (Z-VWAP) and Limit Order Absorption Vetoes.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -28,12 +29,15 @@ class MicrostructureEdgeGate:
         self.decay_alpha = decay_alpha  
         
         self.prices = deque(maxlen=window_size)
+        self.volumes = deque(maxlen=window_size)
+        self.vwap_history = deque(maxlen=window_size)
         self.ofis = deque(maxlen=window_size)     
         self.mlofis = deque(maxlen=window_size)   
         
         self._trade_imbalances = deque(maxlen=window_size)
         self._current_trade_buy_vol = 0.0
         self._current_trade_sell_vol = 0.0
+        self._current_period_volume = 0.0
         
         self.lambda_history = deque(maxlen=window_size)
         self.micro_spread_history = deque(maxlen=window_size)
@@ -52,25 +56,29 @@ class MicrostructureEdgeGate:
             logger.warning(message)
         
     def update_trade_flow(self, volume: float, is_buy: bool):
-        """Tracks signed tick trade flow imbalance (True Aggressor Side)."""
+        """Tracks signed tick trade flow imbalance (True Aggressor Side) and total period volume."""
         if is_buy:
             self._current_trade_buy_vol += volume
         else:
             self._current_trade_sell_vol += volume
+        self._current_period_volume += volume
 
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         """
-        🚀 V58.0 UPGRADE: Updates Stationarized Log-MLOFI across book depth levels.
-        Calculates rolling Kyle's Lambda (price impact) and Micro-Price Spread metrics.
+        🚀 V68.5 UPGRADE: Updates Stationarized Log-MLOFI, Rolling VWAP,
+        Kyle's Lambda (price impact), and Micro-Price Spread metrics.
         """
         if not self.prev_bids or not self.prev_asks:
             self.prev_bids = bids[:self.mlofi_levels]
             self.prev_asks = asks[:self.mlofi_levels]
             self.prices.append(mid_price)
+            self.volumes.append(max(1.0, self._current_period_volume))
+            self.vwap_history.append(mid_price)
             self.ofis.append(0.0)
             self.mlofis.append(0.0)
             self._trade_imbalances.append(0.0)
             self.micro_spread_history.append(0.0)
+            self._current_period_volume = 0.0
             return
 
         current_bids = bids[:self.mlofi_levels]
@@ -86,7 +94,7 @@ class MicrostructureEdgeGate:
                 curr_bid_p, curr_bid_s = float(current_bids[i][0]), float(current_bids[i][1])
                 prev_bid_p, prev_bid_s = float(self.prev_bids[i][0]), float(self.prev_bids[i][1])
                 
-                # 🚀 V58.0 LOG-OFI FIX: Damps spoofing walls using math.log1p
+                # Log-OFI: Damps spoofing walls using math.log1p
                 if curr_bid_p > prev_bid_p: 
                     delta_bid = math.log1p(curr_bid_s)
                 elif curr_bid_p == prev_bid_p: 
@@ -97,7 +105,6 @@ class MicrostructureEdgeGate:
                 curr_ask_p, curr_ask_s = float(current_asks[i][0]), float(current_asks[i][1])
                 prev_ask_p, prev_ask_s = float(self.prev_asks[i][0]), float(self.prev_asks[i][1])
                 
-                # 🚀 V58.0 LOG-OFI FIX: Damps spoofing walls using math.log1p
                 if curr_ask_p < prev_ask_p: 
                     delta_ask = math.log1p(curr_ask_s)
                 elif curr_ask_p == prev_ask_p: 
@@ -118,6 +125,16 @@ class MicrostructureEdgeGate:
         self.ofis.append(l1_ofi_t)
         self.mlofis.append(mlofi_t)
         self.prices.append(mid_price)
+        
+        # Track volume & calculate Rolling VWAP
+        period_vol = max(1.0, self._current_period_volume)
+        self.volumes.append(period_vol)
+        self._current_period_volume = 0.0
+
+        p_arr = np.array(self.prices)
+        v_arr = np.array(self.volumes)
+        rolling_vwap = float(np.sum(p_arr * v_arr) / (np.sum(v_arr) + 1e-9))
+        self.vwap_history.append(rolling_vwap)
         
         t_imb = self._current_trade_buy_vol - self._current_trade_sell_vol
         self._trade_imbalances.append(t_imb)
@@ -179,11 +196,75 @@ class MicrostructureEdgeGate:
         except Exception:
             return 0.0
 
+    def evaluate_exhaustion_veto(self, symbol: str, current_price: float, target_direction: str) -> Dict[str, Any]:
+        """
+        🚀 V68.5 EXHAUSTION & VOLATILITY STRETCH VETO
+        Evaluates VWAP Standard Deviation Stretch (Z-VWAP) and Volume Absorption Index (VAI)
+        to prevent shorting capitulation wicks or buying blow-off tops.
+        """
+        if len(self.prices) < 20 or len(self.vwap_history) < 20:
+            return {"veto": False, "reason": "STRETCH_CALIBRATING"}
+
+        p_arr = np.array(self.prices)
+        v_arr = np.array(self.volumes)
+        vwap = self.vwap_history[-1]
+
+        # 1. VWAP VOLATILITY STRETCH (Z-VWAP)
+        std_dev = np.std(p_arr) + 1e-9
+        z_vwap = (current_price - vwap) / std_dev
+
+        # 2. VOLUME ABSORPTION INDEX (VAI)
+        high_p = np.max(p_arr[-5:])
+        low_p = np.min(p_arr[-5:])
+        price_range_pct = (high_p - low_p) / (current_price + 1e-9)
+        
+        recent_vol = np.mean(v_arr[-5:])
+        baseline_vol = np.mean(v_arr) + 1e-9
+        vol_multiplier = recent_vol / baseline_vol
+
+        # 🚀 SHORT VETO: Shorting an oversold capitulation wick
+        if target_direction == "SELL":
+            if z_vwap < -2.2:
+                self._throttled_warn(
+                    f"capitulation_{symbol}",
+                    f"[X-RAY] 🛑 CAPITULATION VETO // {symbol} SELL blocked. "
+                    f"Price stretched {z_vwap:.2f}σ below VWAP (Oversold Bottom Wick)."
+                )
+                return {"veto": True, "reason": f"OVERSOLD_CAPITULATION_WICK | Z_VWAP: {z_vwap:.2f}σ"}
+
+            if vol_multiplier > 3.0 and price_range_pct < 0.0030:
+                self._throttled_warn(
+                    f"absorption_buy_{symbol}",
+                    f"[X-RAY] 🛑 LIMIT ABSORPTION VETO // {symbol} SELL blocked. "
+                    f"Volume surge {vol_multiplier:.1f}x on small price range ({price_range_pct*100:.2f}%). Whales absorbing sells."
+                )
+                return {"veto": True, "reason": f"LIMIT_BUY_ABSORPTION | Vol: {vol_multiplier:.1f}x"}
+
+        # 🚀 BUY VETO: Buying an overbought blow-off top wick
+        elif target_direction == "BUY":
+            if z_vwap > 2.2:
+                self._throttled_warn(
+                    f"blowoff_{symbol}",
+                    f"[X-RAY] 🛑 BLOW-OFF VETO // {symbol} BUY blocked. "
+                    f"Price stretched {z_vwap:.2f}σ above VWAP (Overbought Top Wick)."
+                )
+                return {"veto": True, "reason": f"OVERBOUGHT_BLOWOFF_WICK | Z_VWAP: {z_vwap:.2f}σ"}
+
+            if vol_multiplier > 3.0 and price_range_pct < 0.0030:
+                self._throttled_warn(
+                    f"absorption_sell_{symbol}",
+                    f"[X-RAY] 🛑 LIMIT ABSORPTION VETO // {symbol} BUY blocked. "
+                    f"Volume surge {vol_multiplier:.1f}x on small price range ({price_range_pct*100:.2f}%). Whales absorbing buys."
+                )
+                return {"veto": True, "reason": f"LIMIT_SELL_ABSORPTION | Vol: {vol_multiplier:.1f}x"}
+
+        return {"veto": False, "reason": "SAFE"}
+
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 V58.0 STRUCTURAL EDGE EVALUATOR
+        🚀 V68.5 STRUCTURAL EDGE EVALUATOR
         Evaluates confluence between statistical prediction, Log-MLOFI, Dark Pool Iceberg
-        absorption, and Micro-Price Liquidity Vacuums.
+        absorption, Micro-Price Liquidity Vacuums, and Exhaustion Volatility Stretch.
         """
         if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
@@ -194,11 +275,12 @@ class MicrostructureEdgeGate:
         current_t_imb = np.mean(list(self._trade_imbalances)[-5:])
         t_imb_std = np.std(self._trade_imbalances)
         
-        # 🚀 ANTI-STARVATION FIX: Lowered the Log-MLOFI flat gate from 1.0 to 0.5 standard deviations
+        # Anti-Starvation Gate: Require active order flow imbalance
         if mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 0.5):
             return {"action": "HOLD", "confidence": 0.0, "reasoning": "LOG_MLOFI_FLAT", "routing": "STANDARD"}
 
         direction = "BUY" if current_mlofi > 0 else "SELL"
+        target_direction = intended_direction if intended_direction else direction
         
         if intended_direction and direction != intended_direction:
             return {
@@ -207,7 +289,19 @@ class MicrostructureEdgeGate:
                 "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, Log-MLOFI wants {direction}",
                 "routing": "STANDARD"
             }
-        
+
+        # 🚀 V68.5 EXHAUSTION & VOLATILITY STRETCH VETO CHECK
+        current_price = self.prices[-1] if self.prices else 0.0
+        if current_price > 0:
+            veto_status = self.evaluate_exhaustion_veto(symbol, current_price, target_direction)
+            if veto_status["veto"]:
+                return {
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "reasoning": f"EXHAUSTION_VETO | {veto_status['reason']}",
+                    "routing": "STANDARD"
+                }
+
         current_lambda = self._calculate_instantaneous_lambda()
         raw_baseline = np.mean(self.lambda_history) if self.lambda_history else current_lambda
         baseline_lambda = max(1e-6, float(raw_baseline))
@@ -264,7 +358,7 @@ class MicrostructureEdgeGate:
                 "routing": "STANDARD"
             }
 
-        # 4. 🚀 ANTI-STARVATION FIX: ALLOW STANDARD CONFLUENCE TRADES
+        # 4. STANDARD CONFLUENCE TRADES
         if intended_direction and direction == intended_direction:
             mlofi_strength = abs(current_mlofi) / (mlofi_std + 1e-9)
             confidence = min(0.75, 0.50 + (mlofi_strength * 0.05))
