@@ -1,9 +1,9 @@
 """
-💎 V66.0 APEX NEURAL: OMNI-SNIPER HYBRID RISK VAULT
+💎 V68.0 APEX NEURAL: DYNAMIC EV-CONFLUENCE RISK VAULT
 ------------------------------------------------------------
-Features Sigmoidal Conviction Thresholds, Dynamic Slot Allocation,
-Quantization-Aware Micro-Loss Caps ($1.20 Max Risk Ceiling),
-and Pure Unclamped Half-Kelly with CVaR Volatility Protections.
+Features Recalibrated Sigmoidal Conviction Gates (57.8% Floor at $12.70),
+Net Expected Value (EV) Edge Multipliers, and Quantization Loss Shields.
+Upgraded to unblock idle states and execute high EV asymmetric trades.
 """
 
 import math
@@ -94,35 +94,37 @@ class InstitutionalRiskVault:
             capped_r = min(2.5, max(0.1, abs(realized_r_multiple)))
             self.avg_loss_r = (self.avg_loss_r * 0.95) + (capped_r * 0.05)
 
-    def get_dynamic_conviction_threshold(self, balance: float) -> float:
+    def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V66.0 SIGMOIDAL CONVICTION THRESHOLD
-        Sub-$20 balance requires ~64%+ win probability.
-        $50+ balance smoothly relaxes to 52.5% for high-frequency trading.
+        🚀 V68.0 RECALIBRATED SIGMOIDAL THRESHOLD
+        Sub-$20 balance requires ~57.8% win probability (down from 64.3%).
+        High Net EV (>140 bps) further lowers required conviction by up to 2.0%.
         """
-        sigmoid = 1.0 / (1.0 + math.exp((balance - 35.0) / 8.0))
-        return 0.525 + (0.125 * sigmoid)
+        # Smoothed curve: 58.5% at low balances, 52.5% at higher balances
+        sigmoid = 1.0 / (1.0 + math.exp((balance - 30.0) / 7.0))
+        base_threshold = 0.525 + (0.060 * sigmoid)  
+        
+        # High Expected Value (EV) Discount (Allows slightly lower win-rate if edge is massive)
+        ev_discount = min(0.020, max(0.0, (net_edge_bps - 100.0) / 5000.0))
+        
+        return max(0.515, base_threshold - ev_discount)
 
     def get_max_allowed_slots(self, balance: float) -> int:
-        """
-        🚀 V66.0 DYNAMIC CONCURRENT SLOT ALLOCATION
-        Scales active slot capacity cleanly with account growth.
-        """
         if balance < 25.0:
-            return 1  # Hard single-position lock for micro-accounts
+            return 1  
         elif balance < 50.0:
-            return 2  # Dual slots for growing balances
+            return 2  
         else:
             return min(5, max(3, int(balance / 25.0)))
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
         """
-        🧬 V66.0 OMNI-SNIPER HYBRID KELLY SIZING
+        🧬 V68.0 DYNAMIC EV-CONFLUENCE SIZING
         """
-        # 1. Sigmoidal Conviction Check
-        min_required_conviction = self.get_dynamic_conviction_threshold(current_balance)
+        # 1. Sigmoidal EV Conviction Check
+        min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if base_confidence < min_required_conviction:
-            return 0.0  # Rejected by Sigmoidal Sniper Gate
+            return 0.0  # Rejected by Dynamic EV Gate
 
         # 2. Hybrid Allocation Sizing
         total_trades = len(self.outcomes_history)

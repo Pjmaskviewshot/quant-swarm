@@ -1,9 +1,8 @@
 """
-🏛️ V66.0 APEX HYPERION: OMNI-SNIPER HYBRID AUCTION ENGINE
+🏛️ V68.0 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
 -----------------------------------------------------------------
-Features Sigmoidal Conviction Adaptation, Quantization-Aware Risk Floors,
-O(1) Heap Deduplication, Dynamic Micro-Loss Caps ($1.20 Ceiling), 
-and Asymmetric Micro-Price Drift Guards.
+Features Recalibrated Conviction Gates, Net EV Edge Multipliers,
+O(1) Heap Deduplication, and Quantization Loss Ceilings.
 """
 
 import time
@@ -51,7 +50,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V66.0 OMNI-SNIPER HYBRID AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V68.0 DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -78,7 +77,7 @@ class CapitalAuctionEngine:
                     item = heapq.heappop(self.core.auction_queue)
                     _, _, sym, _, payload = item
                     
-                    # 🚀 V66.0 O(1) HEAP DEDUPLICATION PURGE
+                    # 🚀 V68.0 O(1) HEAP DEDUPLICATION PURGE
                     if hasattr(self.core, 'auction_queue_symbols') and sym in self.core.auction_queue_symbols:
                         self.core.auction_queue_symbols.remove(sym)
                     
@@ -188,8 +187,8 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V66.0 Universal Execution Engine. 
-        Patched with Omni-Sniper Hybrid Kelly Sizing and Quantization-Aware Micro-Loss Caps.
+        V68.0 Universal Execution Engine. 
+        Patched with Dynamic EV Kelly Sizing and Quantization-Aware Micro-Loss Caps.
         """
         try:
             # Duplicate Daemon Check
@@ -227,7 +226,7 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🚀 V66.0 HYBRID KELLY SIZING (Passes Balance for Sigmoidal Scaling)
+            # 4. 🚀 V68.0 DYNAMIC EV KELLY EVALUATION
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
                 confidence, 
                 net_edge_bps=edge_bps, 
@@ -235,13 +234,13 @@ class CapitalAuctionEngine:
             )
             
             if fractional_risk <= 0.0:
-                logger.info(f"[X-RAY] 🚫 SIGMOIDAL REJECT // {symbol} Conviction < Threshold. Aborting.")
+                logger.info(f"[X-RAY] 🚫 DYNAMIC EV REJECT // {symbol} Conviction/EV below threshold. Aborting.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 5. 🚀 V66.0 QUANTIZATION LOSS CAP & POSITION SIZING
+            # 5. 🚀 V68.0 QUANTIZATION LOSS CAP & POSITION SIZING
             if available_balance < 50.0:
-                # MICRO-ACCOUNT SNIPER MODE: Hard lock to exchange minimum.
+                # MICRO-ACCOUNT MODE: Hard lock to exchange minimum.
                 target_notional = exchange_min_notional
                 actual_dollar_risk = target_notional * sl_distance_pct
                 
@@ -295,7 +294,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 HYBRID SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
+            logger.info(f"[X-RAY] 🌉 DYNAMIC EV ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
