@@ -1,10 +1,9 @@
 """
-🏛️ V59.2 APEX HYPERION: UNIVERSAL CONTINUOUS AUCTION ENGINE
+🏛️ V66.0 APEX HYPERION: OMNI-SNIPER HYBRID AUCTION ENGINE
 -----------------------------------------------------------------
-Features Scale-Invariant Dynamic Notional Adaptation (SIDNA),
-Asymmetric Micro-Price Drift Guards, O(1) Sector Eigenvector Vetoes,
-Granular Asset Micro-Lock Evaluation, and Direct Risk-to-Quantity Mapping.
-Upgraded with V59.2 Post-Upscaling Safety Bounds and Universal Hard Risk Caps.
+Features Sigmoidal Conviction Adaptation, Quantization-Aware Risk Floors,
+O(1) Heap Deduplication, Dynamic Micro-Loss Caps ($1.20 Ceiling), 
+and Asymmetric Micro-Price Drift Guards.
 """
 
 import time
@@ -52,7 +51,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V59.2 UNIVERSAL CAPITAL AUCTION ENGINE ONLINE: Active Swarm Monitoring.")
+        logger.info("🏛️ V66.0 OMNI-SNIPER HYBRID AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -78,6 +77,10 @@ class CapitalAuctionEngine:
                 while self.core.auction_queue:
                     item = heapq.heappop(self.core.auction_queue)
                     _, _, sym, _, payload = item
+                    
+                    # 🚀 V66.0 O(1) HEAP DEDUPLICATION PURGE
+                    if hasattr(self.core, 'auction_queue_symbols') and sym in self.core.auction_queue_symbols:
+                        self.core.auction_queue_symbols.remove(sym)
                     
                     # 1. Latency/Staleness Check
                     if now - payload["timestamp"] > 3.0: 
@@ -107,9 +110,11 @@ class CapitalAuctionEngine:
                 # The top item has the most negative Sharpe (highest priority)
                 best_candidate = valid_candidates[0]
                 
-                # Push the rest back into the heap
+                # Push the rest back into the heap and restore deduplication tracker
                 for i in range(1, len(valid_candidates)):
                     heapq.heappush(self.core.auction_queue, valid_candidates[i])
+                    if hasattr(self.core, 'auction_queue_symbols'):
+                        self.core.auction_queue_symbols.add(valid_candidates[i][2])
 
             if not best_candidate: 
                 continue
@@ -152,7 +157,7 @@ class CapitalAuctionEngine:
                         continue
 
                 # Provisional Scale-Aware Check
-                provisional_notional = max(6.50, current_bal * 0.15)
+                provisional_notional = max(6.50, current_bal * 0.35)
                 is_safe, risk_reason = self.core.risk_vault.evaluate_portfolio_safety(
                     current_balance=current_bal,
                     new_position_notional=provisional_notional,
@@ -183,9 +188,8 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V59.2 Universal Execution Engine. 
-        Patched with Scale-Invariant Dynamic Notional Adaptation (SIDNA),
-        Risk-of-Ruin Floor, Direct Risk-to-Quantity Mapping, and Universal Risk Caps.
+        V66.0 Universal Execution Engine. 
+        Patched with Omni-Sniper Hybrid Kelly Sizing and Quantization-Aware Micro-Loss Caps.
         """
         try:
             # Duplicate Daemon Check
@@ -223,56 +227,46 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🌌 RISK & EXPOSURE CLAMPS (ZERO-EDGE AVOIDANCE)
-            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(confidence, net_edge_bps=edge_bps)
+            # 4. 🚀 V66.0 HYBRID KELLY SIZING (Passes Balance for Sigmoidal Scaling)
+            fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
+                confidence, 
+                net_edge_bps=edge_bps, 
+                current_balance=available_balance
+            )
             
-            # Strictly reject execution if Kelly fraction is zero or negative
             if fractional_risk <= 0.0:
-                logger.info(f"[X-RAY] 🚫 KELLY REJECT // {symbol} Non-positive edge (f* <= 0). Aborting execution.")
+                logger.info(f"[X-RAY] 🚫 SIGMOIDAL REJECT // {symbol} Conviction < Threshold. Aborting.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # Enforce Vault Risk Limits across all accounts
-            vault_max_risk = getattr(self.core.risk_vault, 'max_single_risk', 0.015)
-            fractional_risk = min(vault_max_risk, fractional_risk)
-
-            target_dollar_risk = available_balance * fractional_risk
-            raw_notional = target_dollar_risk / sl_distance_pct
-
-            # 🚀 SCALE-INVARIANT DYNAMIC NOTIONAL ADAPTER (SIDNA)
+            # 5. 🚀 V66.0 QUANTIZATION LOSS CAP & POSITION SIZING
             if available_balance < 50.0:
-                # Micro-balance mode: scale to exchange min ($6.00-$6.50) while maintaining safe dollar stops
-                standard_max_notional = available_balance * 0.35
-                max_allowed_notional = max(exchange_min_notional * 1.05, standard_max_notional)
-                # Cap dollar risk at $1.20 or 6% of micro-balance to prevent rapid depletion
-                max_tolerable_risk = max(1.20, available_balance * 0.06)  
-            else:
-                # Institutional mode: 15% notional exposure cap
-                max_allowed_notional = available_balance * 0.15
-                max_tolerable_risk = available_balance * (vault_max_risk * 1.5)
-
-            target_notional = min(raw_notional, max_allowed_notional)
+                # MICRO-ACCOUNT SNIPER MODE: Hard lock to exchange minimum.
+                target_notional = exchange_min_notional
+                actual_dollar_risk = target_notional * sl_distance_pct
                 
-            if target_notional < exchange_min_notional:
-                target_notional = exchange_min_notional * 1.05
+                # Hard max risk cap to prevent rapid micro-account depletion
+                max_micro_loss_ceiling = max(1.20, available_balance * 0.10) 
+                
+                if actual_dollar_risk > max_micro_loss_ceiling:
+                    logger.warning(
+                        f"[X-RAY] 🛑 QUANTIZATION LOSS OVERFLOW // {symbol} Risk (${actual_dollar_risk:.2f}) "
+                        f"> Micro Ceiling (${max_micro_loss_ceiling:.2f}). Aborting."
+                    )
+                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                    return
+            else:
+                # INSTITUTIONAL SWARM MODE: Continuous Half-Kelly
+                raw_notional = (available_balance * fractional_risk) / sl_distance_pct
+                target_notional = max(exchange_min_notional, min(raw_notional, available_balance * 0.25))
 
-            actual_dollar_risk = target_notional * sl_distance_pct
-
-            if actual_dollar_risk > max_tolerable_risk:
-                logger.warning(
-                    f"[X-RAY] 🚫 RISK OVERFLOW ABORT // {symbol} Min notional (${exchange_min_notional:.2f}) "
-                    f"forces risk of ${actual_dollar_risk:.2f} > ceiling (${max_tolerable_risk:.2f}). Skipping."
-                )
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
-
-            # 🛡️ V59.2 AUDIT FIX: Safe Math.Floor Position Sizing Calculation
+            # 🛡️ Safe Math.Floor Position Sizing Calculation
             safe_qty = target_notional / current_price
             stepped_qty = math.floor(safe_qty / qty_step) * qty_step
 
             # If floored quantity drops below Bybit minimums, upscale SAFELY
-            if (stepped_qty * current_price) < 6.50:
-                stepped_qty = math.ceil(6.50 / (current_price * qty_step)) * qty_step
+            if (stepped_qty * current_price) < exchange_min_notional:
+                stepped_qty = math.ceil(exchange_min_notional / (current_price * qty_step)) * qty_step
                 
             if stepped_qty < min_qty:
                 stepped_qty = min_qty
@@ -280,26 +274,13 @@ class CapitalAuctionEngine:
             target_position_size = stepped_qty
             target_notional = target_position_size * current_price
 
-            # 🛡️ V59.2 AUDIT FIX (N2): Post-Upscaling Notional Check
-            # Prevent pathological altcoin step-size explosions if price*qty_step is huge
-            if target_notional > max(15.0, max_allowed_notional * 1.5):
-                logger.warning(f"[X-RAY] 🚫 PATHOLOGICAL STEP SIZE ABORT // {symbol} upscaled notional (${target_notional:.2f}) exceeds safety bounds. Aborting.")
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
-            
-            # 🛡️ V59.2 AUDIT FIX (N1): Universal Hard Risk Cap Verification (Post-Rounding)
-            # Replaces the asymmetrical 'available_balance > 50.0' check. Applies to all account sizes.
             trade_risk_dollars = target_notional * sl_distance_pct
-            if trade_risk_dollars > max_tolerable_risk:
-                logger.warning(f"[X-RAY] 🛡️ AUCTION RISK REJECTION // {symbol} post-rounding risk (${trade_risk_dollars:.2f}) exceeds macro ceiling (${max_tolerable_risk:.2f}). Aborting.")
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
 
+            # Determine Target Leverage dynamically based on risk constraints
             margin_target = max(1.0, target_notional / 3.0)
-            implied_leverage = target_notional / margin_target
-            target_leverage = int(max(2, min(5, math.ceil(implied_leverage))))
+            target_leverage = int(max(2, min(5, math.ceil(target_notional / margin_target))))
 
-            # 5. Target Price Calculus & Formatting (Wide Initial Brackets)
+            # 6. Target Price Calculus & Formatting (Wide Initial Brackets)
             tp_distance = sl_distance * dynamic_rr_ratio 
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
             def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(tick_dec, rounding=ROUND_HALF_UP))
@@ -314,7 +295,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
+            logger.info(f"[X-RAY] 🌉 HYBRID SIDNA ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}

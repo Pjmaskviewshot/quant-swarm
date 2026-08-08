@@ -1,9 +1,9 @@
 """
-💎 V64.0 ULTRA-APEX NEURAL: KINETIC ELASTICITY MATRIX
+💎 V65.2 ULTRA-APEX NEURAL: FLUID NATURAL MATRIX
 ------------------------------------------------------------------------
-Massive Expansion Upgrade: 15 Live Nodes, 4-Phase Elastic Trailing System,
-Infinite Take-Profit Expansion, and Gram-Schmidt Feature Alignment.
-Built to let winners run infinitely while choking risk organically.
+Microstructure Execution Engine featuring 15 Live / 10 Shadow Stream Nodes,
+Natural Flow Sizing (Safe $6.50 limits), O(1) Heap Deduplication, 
+Time-Decay Profit Harvesting, and Anti-Shitcoin Liquidity Shields.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V64.0_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V65.2_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -72,15 +72,15 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V64.0 KINETIC ELASTICITY MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V65.2 FLUID NATURAL MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
         self.db_semaphore = asyncio.Semaphore(5)
-        self.eval_semaphore = asyncio.Semaphore(10)
-        self.execution_semaphore = asyncio.Semaphore(5)
+        self.eval_semaphore = asyncio.Semaphore(15)
+        self.execution_semaphore = asyncio.Semaphore(10)
         
         self.wal_db_path = "quant_swarm_wal.db"
         self.wal_batch_queue = []
@@ -103,6 +103,7 @@ class DistributedQuantEngine:
             self.memory = None 
             
         self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.30, max_single_position_risk_pct=0.015)
+            
         self.tensor_oracle = CrossAssetTensorOracle()
         self.auction_engine = CapitalAuctionEngine(self)
         self.yield_engine = DeltaNeutralYieldEngine(self)  
@@ -120,7 +121,9 @@ class DistributedQuantEngine:
         
         self.symbol_locks, self.eval_semaphores, self.daemon_tasks, self.last_eval_time = {}, {}, {}, {}
         self._active_tasks = set()
+        
         self.auction_queue: List[tuple] = []  
+        self.auction_queue_symbols = set() # 🚀 V65.2 O(1) Heap Deduplication Set
         self.auction_lock = asyncio.Lock()
         
         self.tick_sizes: Dict[str, float] = {}
@@ -263,14 +266,19 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
     async def _get_max_affordable_notional(self):
+        """
+        🚀 V65.2 NATURAL SIZING CALIBRATION
+        Organic scaling. No forced compression. Returns to strict $6.50 base minimum.
+        """
         try: 
             raw_balance = await self.executor.get_wallet_balance_usdt()
             available_balance = max(1.0, raw_balance) 
         except Exception: 
-            available_balance = 7.00
+            available_balance = 12.90
             
         if available_balance < 50.0:
-            return max(6.50, available_balance * 0.35)
+            # V65.2: Natural Bybit minimum + safe margin buffer
+            return max(6.50, available_balance * 0.40)
             
         min_exposure_ratio = 0.40 
         max_exposure_ratio = 0.10
@@ -415,7 +423,7 @@ class DistributedQuantEngine:
 
                 if "wallet_baseline" not in self.global_state_cache: 
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
-                
+
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
                 current_day = now_utc.strftime("%Y-%m-%d")
                 if self.global_state_cache.get("current_day") != current_day:
@@ -462,6 +470,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
+                report = report.replace("V58.0 APEX", "V65.2 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -561,7 +570,7 @@ class DistributedQuantEngine:
                     
                 routing_mode = structural_verdict.get("routing", "STANDARD")
 
-                # HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO (η = α / β)
+                # HAWKES PROCESS SELF-EXCITATION BRANCHING RATIO
                 alpha_hawkes = max(0.01, abs(stat_engine.hawkes_z) * 0.3) if stat_engine else 0.1
                 beta_hawkes = max(0.1, 1.0 / (vol_mult + 1e-9))
                 branching_ratio = alpha_hawkes / beta_hawkes
@@ -571,7 +580,7 @@ class DistributedQuantEngine:
                     return
 
                 if regime == "MEAN_REVERTING":
-                    min_conviction = 0.565 if vol_mult > 1.2 else 0.585
+                    min_conviction = 0.525 if spread_cost < 0.0005 else 0.545
                     if prob_success < min_conviction:
                         logger.info(f"[X-RAY] ⏸️ MEAN-REVERSION CHURN GATE // {symbol} Conviction {prob_success:.2%} < {min_conviction:.2%}. Rejecting chop.")
                         return
@@ -630,9 +639,15 @@ class DistributedQuantEngine:
                         "dynamic_rr": dynamic_rr_ratio 
                     }
                     heap_id = self.auction_engine.get_next_heap_id()
+                    
+                    # 🚀 V65.2 HEAP DEDUPLICATION
                     async with self.auction_lock: 
-                        heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
-                        self.last_eval_time[symbol + "_last_trade"] = time.time()
+                        if symbol not in self.auction_queue_symbols:
+                            heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
+                            self.auction_queue_symbols.add(symbol)
+                            self.last_eval_time[symbol + "_last_trade"] = time.time()
+                        else:
+                            logger.debug(f"[X-RAY] ♻️ SYMBOL DEDUPLICATION // {symbol} already in auction heap.")
                 except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
                 
         except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
@@ -792,7 +807,7 @@ class DistributedQuantEngine:
                         
                         spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
                         
-                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 3.5:
+                        if bid > 0 and ask > bid and turnover >= 35_000_000.0 and spread_bps <= 3.5:
                             max_notional = await self._get_max_affordable_notional()
                             if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
                                 async with self.portfolio_state_lock:
@@ -834,14 +849,13 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V64.0 ULTRA-APEX REFRESH: Probing Massive 25-Node Matrix...")
+            logger.info("🌌 V65.2 ULTRA-APEX REFRESH: Probing Massive 25-Node Matrix...")
             await self._fetch_exchange_tick_sizes()
             
-            # 🚀 V64.0 EXPANDED DATASET: 25 Nodes (15 Live, 10 Shadow)
-            dynamic_basket = await self.executor.get_top_volatile_assets(limit=25)
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=25, min_turnover=35_000_000.0)
             
             async with self.portfolio_state_lock:
-                self.asset_basket = dynamic_basket[:15] # 15 LIVE COINS ANALYZED
+                self.asset_basket = dynamic_basket[:15]
                 self.shadow_basket = dynamic_basket[15:] if len(dynamic_basket) > 15 else []
                 
             await self._prune_dead_symbols() 
@@ -858,7 +872,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:10],  # Stream up to 25 total nodes
+                basket=self.asset_basket + self.shadow_basket[:10],
                 intervals=[self.timeframe, "60", "240"], 
                 orderbook_callback=self.handle_incoming_orderbook_tick, 
                 screener_callback=self.handle_incoming_basket_screener_update, 
@@ -901,7 +915,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V64.0 KINETIC ELASTICITY MATRIX & OPTIMAL STOPPING
+    # 🚀 V65.2 KINETIC ELASTICITY MATRIX & OPTIMAL STOPPING
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -953,11 +967,6 @@ class DistributedQuantEngine:
         return "ACTIVE_MONITORING"
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
-        """
-        🧬 V64.0 RELAXED ESCAPE MATRIX
-        We eliminated the "Paranoid 15-minute decay" completely.
-        Let the structural stop loss do its job! Trades can now breathe.
-        """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
         stat_engine = ctx["stat_engine"]
@@ -968,14 +977,17 @@ class DistributedQuantEngine:
         r_multiple = ctx["r_multiple"]
         time_alive = ctx["time_in_mins"]
 
-        # SUPER-CRITICAL CASCADE DETECTOR (Only eject if structural collapse is confirmed)
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
         branching_ratio = alpha_h / beta_h
 
-        # Only abort if the dump is fully toxic AND going aggressively against us
         if branching_ratio >= 1.25 and ((is_buy and cvd_z < -3.0) or (not is_buy and cvd_z > 3.0)):
             logger.critical(f"🛑 STRUCTURAL CASCADE EJECTION // {symbol} Severe Hawkes breakdown (η={branching_ratio:.2f}). Escaping.")
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
+
+        if time_alive >= 45.0 and r_multiple >= 0.3:
+            logger.warning(f"⏳ TIME-PROFIT HARVEST // {symbol} Trade stalled for 45m. Securing profit to free capital slot.")
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
@@ -1031,50 +1043,38 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_manage_trailing_stops(self, ctx: dict):
-        """
-        🚀 V64.0 KINETIC 4-PHASE ELASTICITY MATRIX
-        Built to stop choking trades early. Let winners run using wide ATR bands.
-        """
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
         r_mult = ctx["r_multiple"]
         
-        # 1. Calculate live dynamic ATR for structural spacing
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
 
-        # 2. 4-Phase Elastic Trailing Logic
         new_sl_val = ctx["current_sl"]
         
         if r_mult >= 4.0:
-            # PHASE 4: Parabolic Choke (Tighten to 1.5x ATR to catch the blow-off top)
-            trail_dist = live_atr * 1.5
+            trail_dist = live_atr * 1.0
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
         elif r_mult >= 2.0:
-            # PHASE 3: Kinetic Trailing (Wide 2.5x ATR band to ride the trend cleanly)
-            trail_dist = live_atr * 2.5
+            trail_dist = live_atr * 2.0
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
         elif r_mult >= 1.0:
-            # PHASE 2: Risk-Free Orbit (Lock BE + 0.15% Fees, giving massive breathing room)
             be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0015)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0015))
             new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
 
-        # Apply SL Update to Context
         if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
             ctx["current_sl"] = new_sl_val
             ctx["requires_sl_update"] = True
 
-        # 3. Dynamic Take-Profit Expansion (Push the ceiling away infinitely)
         tp_proximity_r = abs(ctx["current_tp"] - safe_c_price) / (ctx["initial_risk"] + 1e-9)
         if tp_proximity_r < 0.8:
             expanded_tp = ctx["current_tp"] + (ctx["initial_risk"] * 2.5) if is_buy else ctx["current_tp"] - (ctx["initial_risk"] * 2.5)
             ctx["current_tp"] = expanded_tp
             ctx["requires_tp_update"] = True
 
-        # 4. Exchange API Dispatch (Throttled to avoid API spam)
         if (ctx["requires_sl_update"] or ctx["requires_tp_update"]) and (ctx["now"] - ctx["last_api_update_time"] >= 5.0):
             ob = self.orderbook_snapshots.get(symbol, {})
             spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
@@ -1188,7 +1188,7 @@ class DistributedQuantEngine:
                 try: 
                     ctx["available_balance"] = await self.executor.get_wallet_balance_usdt()
                 except Exception: 
-                    ctx["available_balance"] = 7.00
+                    ctx["available_balance"] = 12.90
                     
                 while state == "ACTIVE_MONITORING":
                     ob = self.orderbook_snapshots.get(symbol, {})
@@ -1375,8 +1375,8 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V64.0 MASSIVE 15-NODE LIVE DATASET EXPANSION
-        dynamic_boot = await self.executor.get_top_volatile_assets(limit=25)
+        # 🚀 V65.0 25-NODE EXPANDED DATASET BOOT WITH ANTI-SHITCOIN SHIELD ($35M Turnover Floor)
+        dynamic_boot = await self.executor.get_top_volatile_assets(limit=25, min_turnover=35_000_000.0)
         self.asset_basket = dynamic_boot[:15] # 15 LIVE COINS 
         self.shadow_basket = dynamic_boot[15:] if len(dynamic_boot) > 15 else []
         self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
