@@ -1,9 +1,9 @@
 """
-💎 V68.0 APEX NEURAL: DYNAMIC EV-CONFLUENCE RISK VAULT
+💎 V68.6 APEX NEURAL: NATURAL SWARM RISK VAULT
 ------------------------------------------------------------
-Features Recalibrated Sigmoidal Conviction Gates (57.8% Floor at $12.70),
-Net Expected Value (EV) Edge Multipliers, and Quantization Loss Shields.
-Upgraded to unblock idle states and execute high EV asymmetric trades.
+Features Natural Slot Allocation (Max 5, bounded by math),
+Recalibrated Sigmoidal Conviction Gates, Net Expected Value (EV) Edge Multipliers,
+and Organic Margin-Based Heat Caps.
 """
 
 import math
@@ -96,7 +96,7 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V68.0 RECALIBRATED SIGMOIDAL THRESHOLD
+        🚀 V68.6 RECALIBRATED SIGMOIDAL THRESHOLD
         Sub-$20 balance requires ~57.8% win probability (down from 64.3%).
         High Net EV (>140 bps) further lowers required conviction by up to 2.0%.
         """
@@ -110,16 +110,16 @@ class InstitutionalRiskVault:
         return max(0.515, base_threshold - ev_discount)
 
     def get_max_allowed_slots(self, balance: float) -> int:
-        if balance < 25.0:
-            return 1  
-        elif balance < 50.0:
-            return 2  
-        else:
-            return min(5, max(3, int(balance / 25.0)))
+        """
+        🚀 V68.6 NATURAL SLOT CAP
+        Universal Max of 5. The engine will naturally restrict trades 
+        only if the real-time margin/heat cap math rejects the sizing.
+        """
+        return 5
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
         """
-        🧬 V68.0 DYNAMIC EV-CONFLUENCE SIZING
+        🧬 V68.6 DYNAMIC EV-CONFLUENCE SIZING
         """
         # 1. Sigmoidal EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
@@ -169,7 +169,7 @@ class InstitutionalRiskVault:
         if symbol in self.active_positions:
             return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
 
-        # 🚀 Slot Limit Check
+        # 🚀 Natural Slot Limit Check
         max_slots = self.get_max_allowed_slots(current_balance)
         if len(self.active_positions) >= max_slots:
             return False, f"DYNAMIC_SLOT_CAP_REACHED // Active: {len(self.active_positions)} >= Max Allowed: {max_slots}"
@@ -185,13 +185,14 @@ class InstitutionalRiskVault:
                         if corr_value > dynamic_corr_threshold:
                             return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
 
-        # 🚀 Hybrid Heat Map Allowance
-        logistic_heat_allowance = 0.10 + 0.85 * math.exp(-current_balance / 100.0)
-        max_heat_dollars = max(self.exchange_min_notional * 1.15, current_balance * logistic_heat_allowance)
+        # 🚀 V68.6 NATURAL HEAT MAP (Organic Scaling)
+        # Replaced the restrictive logistic curve with an organic 1.8x leveraged equity multiplier.
+        max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
+        
         total_exposure = sum(self.active_positions.values()) + new_position_notional
 
         if total_exposure > max_heat_dollars:
-            return False, f"SIDNA_HEAT_CAP_EXCEEDED // Req: ${total_exposure:.2f} > Max: ${max_heat_dollars:.2f}"
+            return False, f"NATURAL_HEAT_CAP_EXCEEDED // Req: ${total_exposure:.2f} > Max Margin Available: ${max_heat_dollars:.2f}"
                 
         return True, "SAFE"
 
