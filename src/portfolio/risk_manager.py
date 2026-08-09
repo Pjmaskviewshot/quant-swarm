@@ -1,9 +1,9 @@
 """
-💎 V68.6 APEX NEURAL: NATURAL SWARM RISK VAULT
+💎 V69.0 APEX NEURAL: STRUCTURAL DYNAMICS RISK VAULT
 ------------------------------------------------------------
-Features Natural Slot Allocation (Max 5, bounded by math),
+Features Natural Slot Allocation (Max 5, bounded strictly by margin math),
 Recalibrated Sigmoidal Conviction Gates, Net Expected Value (EV) Edge Multipliers,
-and Organic Margin-Based Heat Caps.
+and Organic Leveraged Heat Caps (1.8x Multiplier).
 """
 
 import math
@@ -96,30 +96,29 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V68.6 RECALIBRATED SIGMOIDAL THRESHOLD
-        Sub-$20 balance requires ~57.8% win probability (down from 64.3%).
+        🚀 V69.0 RECALIBRATED SIGMOIDAL THRESHOLD
+        Sub-$20 balance requires ~57.5% base win probability.
         High Net EV (>140 bps) further lowers required conviction by up to 2.0%.
         """
-        # Smoothed curve: 58.5% at low balances, 52.5% at higher balances
         sigmoid = 1.0 / (1.0 + math.exp((balance - 30.0) / 7.0))
         base_threshold = 0.525 + (0.060 * sigmoid)  
         
-        # High Expected Value (EV) Discount (Allows slightly lower win-rate if edge is massive)
+        # High Expected Value (EV) Discount
         ev_discount = min(0.020, max(0.0, (net_edge_bps - 100.0) / 5000.0))
         
         return max(0.515, base_threshold - ev_discount)
 
     def get_max_allowed_slots(self, balance: float) -> int:
         """
-        🚀 V68.6 NATURAL SLOT CAP
-        Universal Max of 5. The engine will naturally restrict trades 
-        only if the real-time margin/heat cap math rejects the sizing.
+        🚀 V69.0 NATURAL SLOT CAP
+        Universal Max of 5. The engine natively restricts trades 
+        if the real-time margin/heat cap math rejects the sizing.
         """
         return 5
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
         """
-        🧬 V68.6 DYNAMIC EV-CONFLUENCE SIZING
+        🧬 V69.0 DYNAMIC EV-CONFLUENCE SIZING
         """
         # 1. Sigmoidal EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
@@ -185,8 +184,8 @@ class InstitutionalRiskVault:
                         if corr_value > dynamic_corr_threshold:
                             return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
 
-        # 🚀 V68.6 NATURAL HEAT MAP (Organic Scaling)
-        # Replaced the restrictive logistic curve with an organic 1.8x leveraged equity multiplier.
+        # 🚀 V69.0 NATURAL HEAT MAP (Organic Scaling)
+        # Allows an organic 1.8x leveraged equity multiplier to efficiently use available margin
         max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
         
         total_exposure = sum(self.active_positions.values()) + new_position_notional
