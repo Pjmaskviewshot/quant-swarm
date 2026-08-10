@@ -1,8 +1,8 @@
 """
-💎 V69.0 ULTRA-APEX NEURAL: STRUCTURAL DYNAMICS MATRIX
+💎 V70.0 ULTRA-APEX NEURAL: QUANTUM ELASTIC MATRIX
 ------------------------------------------------------------------------
-Features Dynamic Expected Value (EV) Routing, Structural Dynamics Lifecycle,
-Order Flow Reversal Harvesting, Guaranteed 15/10 Slot Population,
+Features Dynamic Expected Value (EV) Routing, Active Order Flow Divergence,
+Elastic Volatility Compression, Guaranteed 15/10 Slot Population,
 and Organic Market-Flow Risk Adaptation.
 """
 
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V69.0_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V70.0_ULTRA_APEX")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V69.0 STRUCTURAL DYNAMICS MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V70.0 QUANTUM ELASTIC MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -464,7 +464,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V69.0 APEX").replace("V68.0 APEX", "V69.0 APEX")
+                report = report.replace("V68.5 APEX", "V70.0 APEX").replace("V69.0 APEX", "V70.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -838,7 +838,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V69.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V70.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -853,7 +853,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V69.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V70.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -908,7 +908,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V69.0 ACTIVE TRAJECTORY & REVERSAL LIFE LIFECYCLE DAEMON
+    # 🚀 V70.0 ACTIVE TRAJECTORY & REVERSAL LIFE LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -961,57 +961,51 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        💎 V69.0 STRUCTURAL DYNAMICS & ORDER FLOW INVALIDATION RADAR
-        Pure market-driven exits: Zero arbitrary time clocks.
-        Exits strictly on CVD flow reversals, peak profit retracements,
-        and adverse order flow breakdowns.
+        💎 V70.0 QUANTUM ORDER FLOW & MOMENTUM DECAY RADAR
+        Actively monitors mid-trade execution using tick-level CVD divergence 
+        and liquidity absorption to cut trades before they reverse into losses.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
         stat_engine = ctx["stat_engine"]
         cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) if stat_engine else 0.0
         hawkes_z = getattr(stat_engine, 'hawkes_z', 0.0) if stat_engine else 0.0
-        inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
         
         r_multiple = ctx["r_multiple"]
         current_r = ctx["current_r"]
+        regime = ctx.get("regime", "TRENDING")
 
-        # 🚀 1. ADVERSE ORDER FLOW INVALIDATION (Drawdown Protection)
-        # If trade is in drawdown (<= -0.65R) AND orderbook CVD turns heavily against us,
-        # cut the loss early before hitting the full -1.00R Hard SL.
-        if current_r <= -0.65 and ((not is_buy and cvd_z > 1.8) or (is_buy and cvd_z < -1.8)):
-            logger.critical(
-                f"🛑 STRUCTURAL FLOW INVALIDATION // {symbol} Drawdown ({current_r:.2f}R) "
-                f"with opposing CVD flow (Z: {cvd_z:.2f}). Cutting loss before Hard SL."
+        # 🚀 1. ACTIVE ORDER FLOW DIVERGENCE (The Mid-Way Reversal Killer)
+        if current_r > 0.05 and ((is_buy and cvd_z < -2.2) or (not is_buy and cvd_z > 2.2)):
+            logger.warning(
+                f"⚡ MOMENTUM DIVERGENCE // {symbol} Price is holding but Order Flow is heavily reversing (CVD Z: {cvd_z:.2f}). "
+                f"Whales are absorbing momentum. Harvesting at +{current_r:.2f}R before the dump."
             )
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # 🚀 2. PEAK GAIN RETRACEMENT HARVEST (Profit Preservation)
-        # If trade reached +0.35R+ and retraces >= 35% of peak gains, lock in profit.
-        if r_multiple >= 0.35:
-            retracement_r = r_multiple - current_r
-            retracement_ratio = retracement_r / (r_multiple + 1e-9)
-            
-            if retracement_ratio >= 0.35:
-                logger.warning(
-                    f"⚡ PEAK RETRACEMENT LOCK // {symbol} Peak was +{r_multiple:.2f}R, "
-                    f"retraced {retracement_ratio*100:.1f}% to +{current_r:.2f}R. Banked profit."
-                )
+        # 🚀 2. DYNAMIC REGIME PROFIT LOCK
+        if regime == "MEAN_REVERTING":
+            if current_r >= 0.65:
+                logger.critical(f"💰 RANGE HARVEST // {symbol} Captured +{current_r:.2f}R in a choppy market. Exiting before the chop reverses.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
+        else:
+            if r_multiple >= 0.40:
+                retracement_ratio = (r_multiple - current_r) / (r_multiple + 1e-9)
+                if retracement_ratio >= 0.30:
+                    logger.warning(f"⚡ PEAK RETRACEMENT // {symbol} Dropped 30% from peak of +{r_multiple:.2f}R. Securing gains.")
+                    await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                    return "ESCAPED"
 
-        # 🚀 3. PROFIT ORDER FLOW REVERSAL (Dislocation Exit)
-        # If trade is in profit (+0.20R+) and orderbook flow completely collapses, eject.
-        if current_r >= 0.20 and ((is_buy and cvd_z < -2.0) or (not is_buy and cvd_z > 2.0)):
-            logger.warning(
-                f"⚡ ORDERBOOK FLOW DISLOCATION // {symbol} CVD flipped (Z: {cvd_z:.2f}) "
-                f"at +{current_r:.2f}R profit. Harvesting."
-            )
+        # 🚀 3. ADVERSE FLOW INVALIDATION (Stop losses before they hit Hard SL)
+        if current_r <= -0.50 and ((not is_buy and cvd_z > 1.5) or (is_buy and cvd_z < -1.5)):
+            logger.critical(f"🛑 STRUCTURAL BREAKDOWN // {symbol} Drawdown with toxic opposing flow. Cutting early.")
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
         # 🚀 4. HAWKES STRUCTURAL CASCADE EJECTION
+        inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
         branching_ratio = alpha_h / beta_h
@@ -1074,41 +1068,43 @@ class DistributedQuantEngine:
 
     async def _state_manage_trailing_stops(self, ctx: dict):
         """
-        💎 V69.0 STRUCTURAL DYNAMICS TRAILING RATCHET
-        Moves SL to Break-Even + Fees at +0.20R.
-        Trails ATR dynamically as trade advances.
-        Pushes TP out indefinitely (Infinite TP) during megatrends.
+        💎 V70.0 ELASTIC VOLATILITY TRAILING RATCHET
+        Continuously tightens the Stop Loss based on real-time volatility decay.
         """
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
         r_mult = ctx["r_multiple"]
+        current_r = ctx["current_r"]
+        regime = ctx.get("regime", "TRENDING")
         
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
 
+        vol_mult = ctx.get("vol_mult", 1.0)
+        dynamic_atr_mult = max(0.5, min(1.5, vol_mult)) if regime == "MEAN_REVERTING" else 1.5
+
         new_sl_val = ctx["current_sl"]
         
-        # 1. Mega-Trend Trail (3.0R+) -> 1.0x ATR tight trail
-        if r_mult >= 3.0:
-            trail_dist = live_atr * 1.0
+        # 1. Continuous Elastic Trail
+        if r_mult >= 1.0:
+            trail_dist = live_atr * dynamic_atr_mult
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
-        # 2. Mid-Trend Trail (1.5R+) -> 1.5x ATR wide trail
-        elif r_mult >= 1.5:
-            trail_dist = live_atr * 1.5
-            raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
-            new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
-            
-        # 3. Early Break-Even Lock (+0.20R) -> Lock entry + exchange fees
-        elif r_mult >= 0.20:
+        # 2. Hyper-Fast Break-Even in Ranging Markets
+        elif r_mult >= 0.15:
             be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0015)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0015))
             new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
+
+        # 3. Dynamic "Zombie" Compression (No Time Clock)
+        if current_r < 0 and live_atr < (ctx["atr"] * 0.7):
+            compressed_sl = (ctx["actual_entry"] - (ctx["initial_risk"] * 0.40)) if is_buy else (ctx["actual_entry"] + (ctx["initial_risk"] * 0.40))
+            new_sl_val = max(ctx["current_sl"], compressed_sl) if is_buy else min(ctx["current_sl"], compressed_sl)
 
         if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
             ctx["current_sl"] = new_sl_val
             ctx["requires_sl_update"] = True
 
-        # Infinite TP Expansion (Push TP out when within 0.8R)
+        # Infinite TP Expansion
         tp_proximity_r = abs(ctx["current_tp"] - safe_c_price) / (ctx["initial_risk"] + 1e-9)
         if tp_proximity_r < 0.8:
             expanded_tp = ctx["current_tp"] + (ctx["initial_risk"] * 2.5) if is_buy else ctx["current_tp"] - (ctx["initial_risk"] * 2.5)
@@ -1139,7 +1135,7 @@ class DistributedQuantEngine:
                     ctx["last_sent_tp_str"] = new_tp_str
                     
                     if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 INFINITE TP EXPANSION // {symbol} Target pushed to {new_tp_str}.")
-                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ KINETIC RATCHET // {symbol} SL safely elevated to {new_sl_str}.")
+                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ ELASTIC RATCHET // {symbol} SL safely elevated to {new_sl_str}.")
 
 
     async def _state_settle_trade(self, ctx: dict):
@@ -1415,7 +1411,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V69.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
+        # 🚀 V70.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [
