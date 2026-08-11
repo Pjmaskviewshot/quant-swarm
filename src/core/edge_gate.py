@@ -1,5 +1,5 @@
 """
-💎 V68.5 TITANIUM APEX: MICROSTRUCTURE EDGE GATE & EXHAUSTION VETO ENGINE
+💎 V72.0 TITANIUM APEX: MICROSTRUCTURE EDGE GATE & EXHAUSTION VETO ENGINE
 -------------------------------------------------------------------------
 Evaluates Stationarized Log-MLOFI (Spoof-Resistant), Dark Pool Iceberg Absorption,
 Micro-Price Effective Spreads (Liquidity Vacuums), Roll Implicit Spreads, and
@@ -19,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V68.5 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
+    🚀 V72.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
     Exploits orderbook dark pool absorptions, liquidity vacuums, and deep book breakouts.
     Upgraded with VWAP Volatility Stretch (Z-VWAP) and Limit Order Absorption Vetoes.
     """
@@ -65,7 +65,7 @@ class MicrostructureEdgeGate:
 
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
         """
-        🚀 V68.5 UPGRADE: Updates Stationarized Log-MLOFI, Rolling VWAP,
+        🚀 V72.0 UPGRADE: Updates Stationarized Log-MLOFI, Rolling VWAP,
         Kyle's Lambda (price impact), and Micro-Price Spread metrics.
         """
         if not self.prev_bids or not self.prev_asks:
@@ -198,7 +198,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_exhaustion_veto(self, symbol: str, current_price: float, target_direction: str) -> Dict[str, Any]:
         """
-        🚀 V68.5 EXHAUSTION & VOLATILITY STRETCH VETO
+        🚀 V72.0 EXHAUSTION & VOLATILITY STRETCH VETO
         Evaluates VWAP Standard Deviation Stretch (Z-VWAP) and Volume Absorption Index (VAI)
         to prevent shorting capitulation wicks or buying blow-off tops.
         """
@@ -222,7 +222,7 @@ class MicrostructureEdgeGate:
         baseline_vol = np.mean(v_arr) + 1e-9
         vol_multiplier = recent_vol / baseline_vol
 
-        # 🚀 SHORT VETO: Shorting an oversold capitulation wick
+        # SHORT VETO: Shorting an oversold capitulation wick
         if target_direction == "SELL":
             if z_vwap < -2.2:
                 self._throttled_warn(
@@ -240,7 +240,7 @@ class MicrostructureEdgeGate:
                 )
                 return {"veto": True, "reason": f"LIMIT_BUY_ABSORPTION | Vol: {vol_multiplier:.1f}x"}
 
-        # 🚀 BUY VETO: Buying an overbought blow-off top wick
+        # BUY VETO: Buying an overbought blow-off top wick
         elif target_direction == "BUY":
             if z_vwap > 2.2:
                 self._throttled_warn(
@@ -262,7 +262,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 V68.5 STRUCTURAL EDGE EVALUATOR
+        🚀 V72.0 STRUCTURAL EDGE EVALUATOR
         Evaluates confluence between statistical prediction, Log-MLOFI, Dark Pool Iceberg
         absorption, Micro-Price Liquidity Vacuums, and Exhaustion Volatility Stretch.
         """
@@ -290,7 +290,7 @@ class MicrostructureEdgeGate:
                 "routing": "STANDARD"
             }
 
-        # 🚀 V68.5 EXHAUSTION & VOLATILITY STRETCH VETO CHECK
+        # 🚀 V72.0 EXHAUSTION & VOLATILITY STRETCH VETO CHECK
         current_price = self.prices[-1] if self.prices else 0.0
         if current_price > 0:
             veto_status = self.evaluate_exhaustion_veto(symbol, current_price, target_direction)
