@@ -1,9 +1,9 @@
 """
-💎 V85.0 ULTRA-APEX NEURAL: OMNI-KINETIC ORACLE MATRIX
+💎 V86.0 ULTRA-APEX NEURAL: UNIVERSAL WICK SNIPER MATRIX
 ------------------------------------------------------------------------
-Features Real-Time Omni-Kinetic Predictor, Bivariate Macro Tensors (BTC/ETH),
-Auto-Calibrating Queue Replenishment (Z-Refill), Micro-Price Dislocation Radar,
-and Adverse Price-Drift Early Invalidation.
+Features Real-Time Omni-Kinetic Predictor, Universal Wick Sniper (Peak Retracement),
+Bivariate Macro Tensors (BTC/ETH), Auto-Calibrating Queue Replenishment (Z-Refill), 
+Micro-Price Dislocation Radar, and Adverse Price-Drift Early Invalidation.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V85.0_OMNI_KINETIC")
+logger = logging.getLogger("QUANT_CORE.V86.0_WICK_SNIPER")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V85.0 OMNI-KINETIC QUANTUM MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V86.0 UNIVERSAL WICK SNIPER MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -464,7 +464,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V85.0 APEX").replace("V69.0 APEX", "V85.0 APEX").replace("V70.0 APEX", "V85.0 APEX").replace("V71.0 APEX", "V85.0 APEX").replace("V72.0 APEX", "V85.0 APEX").replace("V75.0 APEX", "V85.0 APEX")
+                report = report.replace("V68.5 APEX", "V86.0 APEX").replace("V69.0 APEX", "V86.0 APEX").replace("V70.0 APEX", "V86.0 APEX").replace("V71.0 APEX", "V86.0 APEX").replace("V72.0 APEX", "V86.0 APEX").replace("V75.0 APEX", "V86.0 APEX").replace("V85.0 APEX", "V86.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -846,7 +846,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V85.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V86.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -861,7 +861,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V85.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V86.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -916,7 +916,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V85.0 OMNI-KINETIC LIFECYCLE DAEMON
+    # 🚀 V86.0 OMNI-KINETIC LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -969,10 +969,9 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        💎 V85.0 OMNI-KINETIC ORACLE: PRE-EMPTIVE EXHAUSTION VETO
+        💎 V86.0 OMNI-KINETIC ORACLE: UNIVERSAL WICK SNIPER
         Calculates dynamic thresholds based on real-time CVD, Micro-Price Dislocation,
-        Auto-Calibrating Queue Refill Rates, and Bivariate Macro Tensors.
-        Cuts loss early to prevent full Hard SL drawdowns.
+        and enforces Universal Peak Retracement harvesting across ALL regimes.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -1036,22 +1035,31 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # 2. DYNAMIC REGIME PROFIT LOCK
+        # 🚀 2. UNIVERSAL WICK SNIPER (PEAK RETRACEMENT)
+        # This now applies to ALL regimes. Never let a massive wick bounce back without taking profit.
+        if r_multiple >= 0.40:
+            retracement_ratio = (r_multiple - current_r) / (r_multiple + 1e-9)
+            
+            # Tighter allowance in Mean Reverting markets because they bounce violently
+            max_retrace = 0.25 if regime == "MEAN_REVERTING" else 0.35
+            
+            if retracement_ratio >= max_retrace:
+                logger.warning(
+                    f"⚡ WICK SNIPER EJECTION // {symbol} Dropped {retracement_ratio*100:.0f}% from peak of +{r_multiple:.2f}R. "
+                    f"Securing wick gains before full reversal."
+                )
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+
+        # 3. DYNAMIC REGIME PROFIT LOCK
         if regime == "MEAN_REVERTING":
-            dynamic_harvest_r = max(0.50, min(1.20, 0.70 * vol_mult))
+            dynamic_harvest_r = max(0.40, min(1.00, 0.60 * vol_mult))
             if current_r >= dynamic_harvest_r:
                 logger.critical(f"💰 RANGE HARVEST // {symbol} Captured +{current_r:.2f}R. Exiting before reversal.")
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
-        else:
-            if r_multiple >= 0.50:
-                retracement_ratio = (r_multiple - current_r) / (r_multiple + 1e-9)
-                if retracement_ratio >= 0.35:
-                    logger.warning(f"⚡ PEAK RETRACEMENT // {symbol} Dropped 35% from peak. Securing gains.")
-                    await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                    return "ESCAPED"
 
-        # 3. ADVERSE PRICE-DRIFT INVALIDATION
+        # 4. ADVERSE PRICE-DRIFT INVALIDATION
         if current_r <= -0.30:
             logger.critical(
                 f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
@@ -1060,7 +1068,7 @@ class DistributedQuantEngine:
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # 4. HAWKES STRUCTURAL CASCADE EJECTION
+        # 5. HAWKES STRUCTURAL CASCADE EJECTION
         inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
@@ -1124,7 +1132,7 @@ class DistributedQuantEngine:
 
     async def _state_manage_trailing_stops(self, ctx: dict):
         """
-        💎 V85.0 OMNI-KINETIC ADAPTIVE ELASTICITY
+        💎 V86.0 OMNI-KINETIC ADAPTIVE ELASTICITY
         Trailing stops expand if order flow supports the trade,
         and constrict if flow turns toxic.
         """
@@ -1505,7 +1513,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V85.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
+        # 🚀 V86.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [
