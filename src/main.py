@@ -1,8 +1,8 @@
 """
-💎 V75.0 ULTRA-APEX NEURAL: HYBRID MATRIX ENGINE
+💎 V85.0 ULTRA-APEX NEURAL: OMNI-KINETIC ORACLE MATRIX
 ------------------------------------------------------------------------
-Features Higher-Timeframe Trend Hard-Locking, L2 Depth Pressure Shields,
-VWAP Volatility Stretch Vetoes, Structure-Based Risk Bracketing,
+Features Real-Time Omni-Kinetic Predictor, Bivariate Macro Tensors (BTC/ETH),
+Auto-Calibrating Queue Replenishment (Z-Refill), Micro-Price Dislocation Radar,
 and Adverse Price-Drift Early Invalidation.
 """
 
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V75.0_HYBRID_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V85.0_OMNI_KINETIC")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V75.0 HYBRID QUANTUM MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V85.0 OMNI-KINETIC QUANTUM MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -464,7 +464,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V75.0 APEX").replace("V69.0 APEX", "V75.0 APEX").replace("V70.0 APEX", "V75.0 APEX").replace("V71.0 APEX", "V75.0 APEX").replace("V72.0 APEX", "V75.0 APEX")
+                report = report.replace("V68.5 APEX", "V85.0 APEX").replace("V69.0 APEX", "V85.0 APEX").replace("V70.0 APEX", "V85.0 APEX").replace("V71.0 APEX", "V85.0 APEX").replace("V72.0 APEX", "V85.0 APEX").replace("V75.0 APEX", "V85.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -553,7 +553,7 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 V75.0 HTF TREND HARD-LOCK GATE
+                # 🚀 HTF TREND HARD-LOCK GATE
                 htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
                 if action == "BUY" and htf_bias < -0.20:
                     logger.warning(f"[X-RAY] 🛑 HTF TREND VETO // {symbol} BUY blocked. 1H/4H Trend is Bearish (Bias: {htf_bias:.2f}).")
@@ -788,7 +788,7 @@ class DistributedQuantEngine:
 
     async def run_omni_swarm_director(self):
         logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT"]
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", "SSPCUSDT"]
         while True:
             await asyncio.sleep(15) 
             try:
@@ -846,7 +846,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V75.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V85.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -861,7 +861,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V75.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V85.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -916,7 +916,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V75.0 HYBRID LIFECYCLE DAEMON
+    # 🚀 V85.0 OMNI-KINETIC LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -969,9 +969,10 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        💎 V75.0 HYBRID ORDER FLOW & ADVERSE DRIFT INVALIDATION
-        Calculates dynamic thresholds based on real-time CVD and price drift.
-        Cuts loss early at -0.30R to prevent full Hard SL drawdowns.
+        💎 V85.0 OMNI-KINETIC ORACLE: PRE-EMPTIVE EXHAUSTION VETO
+        Calculates dynamic thresholds based on real-time CVD, Micro-Price Dislocation,
+        Auto-Calibrating Queue Refill Rates, and Bivariate Macro Tensors.
+        Cuts loss early to prevent full Hard SL drawdowns.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -983,17 +984,57 @@ class DistributedQuantEngine:
         current_r = ctx["current_r"]
         regime = ctx.get("regime", "TRENDING")
         vol_mult = ctx.get("vol_mult", 1.0)
-
-        # 1. DYNAMIC DIVERGENCE EXIT
-        dynamic_divergence_r = max(0.20, min(0.60, 0.30 * vol_mult))
         
-        if current_r > dynamic_divergence_r and ((is_buy and cvd_z < -2.2) or (not is_buy and cvd_z > 2.2)):
-            logger.warning(
-                f"⚡ MOMENTUM DIVERGENCE // {symbol} Order Flow abruptly reversed (CVD Z: {cvd_z:.2f}). "
-                f"Harvesting at +{current_r:.2f}R."
-            )
-            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-            return "ESCAPED"
+        # 🚀 OMNI-KINETIC MATH ENGINE
+        hist = ctx.get("kinetic_history", {})
+        accel_z, ask_refill_z, bid_refill_z, recent_dislocation, composite_macro_cov = 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        if hist and len(hist["cvd"]) >= 5:
+            cvd_arr = np.array(hist["cvd"])
+            cvd_vel = np.diff(cvd_arr)
+            if len(cvd_vel) > 1:
+                cvd_accel = np.diff(cvd_vel)
+                accel_std = np.std(cvd_accel) + 1e-9
+                accel_z = np.mean(cvd_accel[-3:]) / accel_std
+            
+            ask_refill_arr = np.array(hist["ask_refill"])
+            bid_refill_arr = np.array(hist["bid_refill"])
+            ask_refill_z = (ask_refill_arr[-1] - np.mean(ask_refill_arr)) / (np.std(ask_refill_arr) + 1e-9)
+            bid_refill_z = (bid_refill_arr[-1] - np.mean(bid_refill_arr)) / (np.std(bid_refill_arr) + 1e-9)
+            
+            recent_dislocation = np.mean(list(hist["micro_dislocation"])[-3:])
+            
+            btc_arr = np.array(hist["btc_cvd"])
+            eth_arr = np.array(hist["eth_cvd"])
+            if np.std(cvd_arr) > 0:
+                if np.std(btc_arr) > 0: macro_btc_cov = np.cov(btc_arr, cvd_arr)[0][1] / (np.std(btc_arr) * np.std(cvd_arr) + 1e-9)
+                else: macro_btc_cov = 0.0
+                if np.std(eth_arr) > 0: macro_eth_cov = np.cov(eth_arr, cvd_arr)[0][1] / (np.std(eth_arr) * np.std(cvd_arr) + 1e-9)
+                else: macro_eth_cov = 0.0
+                composite_macro_cov = (macro_btc_cov * 0.6) + (macro_eth_cov * 0.4)
+
+        ctx["flow_alignment"] = cvd_z if is_buy else -cvd_z
+        ctx["accel_z"] = accel_z
+
+        # 1. OMNI-KINETIC DEATH EXIT
+        if is_buy:
+            if accel_z < -2.0 and ask_refill_z > 2.0 and recent_dislocation < -1.5:
+                logger.critical(f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} BUY momentum scientifically dead. (Flow Z: {accel_z:.2f}σ, Ask Refill: {ask_refill_z:.2f}σ).")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+            if composite_macro_cov < -0.70:
+                logger.critical(f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-pump. BTC/ETH Composite collapsing (Cov: {composite_macro_cov:.2f}).")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+        else:
+            if accel_z > 2.0 and bid_refill_z > 2.0 and recent_dislocation > 1.5:
+                logger.critical(f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} SELL momentum scientifically dead. (Flow Z: {accel_z:.2f}σ, Bid Refill: {bid_refill_z:.2f}σ).")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
+            if composite_macro_cov > 0.70:
+                logger.critical(f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-dump. BTC/ETH Composite surging (Cov: {composite_macro_cov:.2f}).")
+                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+                return "ESCAPED"
 
         # 2. DYNAMIC REGIME PROFIT LOCK
         if regime == "MEAN_REVERTING":
@@ -1010,8 +1051,7 @@ class DistributedQuantEngine:
                     await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                     return "ESCAPED"
 
-        # 🚀 3. V75.0 ADVERSE PRICE-DRIFT INVALIDATION
-        # Exits trade if price drifts against entry by -0.30R to eliminate long drawdowns
+        # 3. ADVERSE PRICE-DRIFT INVALIDATION
         if current_r <= -0.30:
             logger.critical(
                 f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
@@ -1084,7 +1124,7 @@ class DistributedQuantEngine:
 
     async def _state_manage_trailing_stops(self, ctx: dict):
         """
-        💎 V75.0 TRUE ADAPTIVE ELASTICITY
+        💎 V85.0 OMNI-KINETIC ADAPTIVE ELASTICITY
         Trailing stops expand if order flow supports the trade,
         and constrict if flow turns toxic.
         """
@@ -1092,17 +1132,14 @@ class DistributedQuantEngine:
         r_mult = ctx["r_multiple"]
         current_r = ctx["current_r"]
         
-        stat_engine = ctx["stat_engine"]
-        cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) if stat_engine else 0.0
         vol_mult = ctx.get("vol_mult", 1.0)
         
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
 
-        # 1. Flow Alignment
-        flow_alignment = cvd_z if is_buy else -cvd_z
+        flow_alignment = ctx.get("flow_alignment", 0.0)
         
-        # 2. Dynamic Trailing Multiplier
+        # Dynamic Trailing Multiplier
         dynamic_trail_mult = max(0.5, min(2.5, 1.2 + (flow_alignment * 0.4)))
 
         new_sl_val = ctx["current_sl"]
@@ -1113,7 +1150,7 @@ class DistributedQuantEngine:
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
-        # 3. Dynamic Break-Even Activation
+        # Dynamic Break-Even Activation
         dynamic_be_threshold = max(0.20, min(0.80, 0.30 * vol_mult))
         
         if flow_alignment > 1.5:
@@ -1123,7 +1160,7 @@ class DistributedQuantEngine:
             be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0020)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0020))
             new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
 
-        # 4. Dynamic Zombie Compression
+        # Dynamic Zombie Compression
         if current_r < 0 and live_atr < (ctx["atr"] * 0.7):
             compressed_sl = (ctx["actual_entry"] - (ctx["initial_risk"] * 0.40)) if is_buy else (ctx["actual_entry"] + (ctx["initial_risk"] * 0.40))
             new_sl_val = max(ctx["current_sl"], compressed_sl) if is_buy else min(ctx["current_sl"], compressed_sl)
@@ -1229,7 +1266,16 @@ class DistributedQuantEngine:
                 "r_t3": round(max(2.2, dynamic_rr_ratio * 1.2), 2),
                 "exec_details": {"leverage": target_leverage, "execution_mode": "RECOVERY" if is_recovery else ("GHOST" if self.test_mode else "LIVE")},
                 "stat_engine": self.stat_engines.get(symbol),
-                "feature_engine": self.feature_engines.get(symbol)
+                "feature_engine": self.feature_engines.get(symbol),
+                "kinetic_history": {
+                    "cvd": deque(maxlen=20),
+                    "ask_refill": deque(maxlen=20),
+                    "bid_refill": deque(maxlen=20),
+                    "micro_dislocation": deque(maxlen=20),
+                    "btc_cvd": deque(maxlen=20),
+                    "eth_cvd": deque(maxlen=20)
+                },
+                "last_ob": {}
             }
             
             ctx["scaled_levels"] = {ctx["r_t1"]: False, ctx["r_t2"]: False, ctx["r_t3"]: False}
@@ -1256,13 +1302,16 @@ class DistributedQuantEngine:
                     
                 while state == "ACTIVE_MONITORING":
                     ob = self.orderbook_snapshots.get(symbol, {})
-                    ctx["safe_c_price"] = ob.get("best_bid" if ctx["is_buy"] else "best_ask", current_price)
+                    best_bid = ob.get("best_bid", current_price)
+                    best_ask = ob.get("best_ask", current_price)
+                    bid_v = ob.get("bid_size", 1.0)
+                    ask_v = ob.get("ask_size", 1.0)
                     
+                    ctx["safe_c_price"] = best_bid if ctx["is_buy"] else best_ask
                     if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0: 
                         ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
                         
                     sl_proximity = abs(ctx["safe_c_price"] - ctx["current_sl"]) / (ctx["safe_c_price"] + 1e-9)
-                    
                     loop_sleep = 0.5 if sl_proximity < 0.005 else 1.5 
                     await asyncio.sleep(loop_sleep) 
                     
@@ -1272,8 +1321,27 @@ class DistributedQuantEngine:
                     
                     ctx["requires_sl_update"] = False
                     ctx["requires_tp_update"] = False
-                    
                     ctx["vol_mult"] = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
+
+                    # 🚀 OMNI-KINETIC DATA INGESTION
+                    micro_price = (best_bid * ask_v + best_ask * bid_v) / (bid_v + ask_v + 1e-9)
+                    mid_price = (best_bid + best_ask) / 2.0
+                    dislocation_bps = ((micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
+                    ctx["kinetic_history"]["micro_dislocation"].append(dislocation_bps)
+                    
+                    current_cvd = getattr(ctx["stat_engine"], 'ofi_fast_z', 0.0)
+                    ctx["kinetic_history"]["cvd"].append(current_cvd)
+                    
+                    prev_ask_v = ctx["last_ob"].get("ask_size", ask_v)
+                    prev_bid_v = ctx["last_ob"].get("bid_size", bid_v)
+                    ctx["kinetic_history"]["ask_refill"].append(max(0.0, ask_v - prev_ask_v))
+                    ctx["kinetic_history"]["bid_refill"].append(max(0.0, bid_v - prev_bid_v))
+                    ctx["last_ob"] = {"ask_size": ask_v, "bid_size": bid_v}
+                    
+                    btc_engine = self.stat_engines.get("BTCUSDT")
+                    eth_engine = self.stat_engines.get("ETHUSDT")
+                    ctx["kinetic_history"]["btc_cvd"].append(getattr(btc_engine, 'ofi_fast_z', 0.0) if btc_engine else 0.0)
+                    ctx["kinetic_history"]["eth_cvd"].append(getattr(eth_engine, 'ofi_fast_z', 0.0) if eth_engine else 0.0)
                     
                     if ctx["api_check_counter"] >= (15 if loop_sleep == 1.5 else 75):
                         ctx["api_check_counter"] = 0
@@ -1293,11 +1361,7 @@ class DistributedQuantEngine:
                         
                     ctx["r_multiple"] = (ctx["max_favorable_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["max_favorable_price"]) / (ctx["initial_risk"] + 1e-9)
                     ctx["current_r"] = (ctx["safe_c_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["safe_c_price"]) / (ctx["initial_risk"] + 1e-9)
-
                     ctx["hawkes_z"] = getattr(ctx["stat_engine"], 'hawkes_z', getattr(ctx["stat_engine"], 'vpin_z', 0.0))
-                    
-                    b_vol, a_vol = float(ob.get("bid_size", 0.0)), float(ob.get("ask_size", 0.0))
-                    ctx["imbalance"] = (b_vol - a_vol) / (b_vol + a_vol + 1e-9)
                     
                     if await self._state_monitor_escapes(ctx) == "ESCAPED":
                         break
@@ -1441,7 +1505,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V75.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
+        # 🚀 V85.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [
