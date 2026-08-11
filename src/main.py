@@ -1,9 +1,9 @@
 """
-💎 V72.0 ULTRA-APEX NEURAL: TITANIUM APEX MATRIX
+💎 V75.0 ULTRA-APEX NEURAL: HYBRID MATRIX ENGINE
 ------------------------------------------------------------------------
-Features Exhaustion Volatility Stretch Veto (Z-VWAP), Adverse Price-Drift 
-Invalidation, Dynamic EV Routing, True Adaptive Order Flow Trailing,
-and Organic Market-Flow Risk Adaptation.
+Features Higher-Timeframe Trend Hard-Locking, L2 Depth Pressure Shields,
+VWAP Volatility Stretch Vetoes, Structure-Based Risk Bracketing,
+and Adverse Price-Drift Early Invalidation.
 """
 
 import os
@@ -61,7 +61,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V72.0_ULTRA_APEX")
+logger = logging.getLogger("QUANT_CORE.V75.0_HYBRID_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -72,7 +72,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V72.0 TITANIUM APEX MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V75.0 HYBRID QUANTUM MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -464,7 +464,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V72.0 APEX").replace("V69.0 APEX", "V72.0 APEX").replace("V70.0 APEX", "V72.0 APEX").replace("V71.0 APEX", "V72.0 APEX")
+                report = report.replace("V68.5 APEX", "V75.0 APEX").replace("V69.0 APEX", "V75.0 APEX").replace("V70.0 APEX", "V75.0 APEX").replace("V71.0 APEX", "V75.0 APEX").replace("V72.0 APEX", "V75.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -553,6 +553,15 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
+                # 🚀 V75.0 HTF TREND HARD-LOCK GATE
+                htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
+                if action == "BUY" and htf_bias < -0.20:
+                    logger.warning(f"[X-RAY] 🛑 HTF TREND VETO // {symbol} BUY blocked. 1H/4H Trend is Bearish (Bias: {htf_bias:.2f}).")
+                    return
+                elif action == "SELL" and htf_bias > 0.20:
+                    logger.warning(f"[X-RAY] 🛑 HTF TREND VETO // {symbol} SELL blocked. 1H/4H Trend is Bullish (Bias: {htf_bias:.2f}).")
+                    return
+
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 if structural_verdict["action"] == "HOLD": return
                 if structural_verdict["action"] != action:
@@ -599,8 +608,7 @@ class DistributedQuantEngine:
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.48))): 
                     return
                     
-                if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias'):
-                    prob_success += (feature_engine.get_htf_trend_bias(price) * 0.04) if action == "BUY" else -(feature_engine.get_htf_trend_bias(price) * 0.04)
+                prob_success += (htf_bias * 0.04) if action == "BUY" else -(htf_bias * 0.04)
 
                 if hasattr(self.sor, 'estimate_orderbook_slippage_bps'):
                     est_slippage = self.sor.estimate_orderbook_slippage_bps(ob, action, 6.50 / price, price)
@@ -838,7 +846,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V72.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V75.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -853,7 +861,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V72.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V75.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -908,7 +916,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V72.0 TRUE ADAPTIVE ELASTICITY LIFECYCLE DAEMON
+    # 🚀 V75.0 HYBRID LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -961,9 +969,9 @@ class DistributedQuantEngine:
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
         """
-        💎 V72.0 TRUE ADAPTIVE ORDER FLOW & ADVERSE DRIFT INVALIDATION
+        💎 V75.0 HYBRID ORDER FLOW & ADVERSE DRIFT INVALIDATION
         Calculates dynamic thresholds based on real-time CVD and price drift.
-        Exits on limit order absorption without waiting for Hard SL.
+        Cuts loss early at -0.30R to prevent full Hard SL drawdowns.
         """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
@@ -982,7 +990,7 @@ class DistributedQuantEngine:
         if current_r > dynamic_divergence_r and ((is_buy and cvd_z < -2.2) or (not is_buy and cvd_z > 2.2)):
             logger.warning(
                 f"⚡ MOMENTUM DIVERGENCE // {symbol} Order Flow abruptly reversed (CVD Z: {cvd_z:.2f}). "
-                f"Harvesting at +{current_r:.2f}R (Dynamic Threshold: +{dynamic_divergence_r:.2f}R)."
+                f"Harvesting at +{current_r:.2f}R."
             )
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
@@ -1002,16 +1010,15 @@ class DistributedQuantEngine:
                     await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                     return "ESCAPED"
 
-        # 🚀 3. V72.0 ADVERSE PRICE-DRIFT INVALIDATION (Limit Order Absorption Cut)
-        if current_r <= -0.35:
-            opposing_flow = (not is_buy and cvd_z > 1.2) or (is_buy and cvd_z < -1.2)
-            if opposing_flow or current_r <= -0.50:
-                logger.critical(
-                    f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
-                    f"Limit order absorption detected. Cutting trade early before Hard SL."
-                )
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
+        # 🚀 3. V75.0 ADVERSE PRICE-DRIFT INVALIDATION
+        # Exits trade if price drifts against entry by -0.30R to eliminate long drawdowns
+        if current_r <= -0.30:
+            logger.critical(
+                f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
+                f"Cutting trade early before Hard SL."
+            )
+            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+            return "ESCAPED"
 
         # 4. HAWKES STRUCTURAL CASCADE EJECTION
         inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
@@ -1077,8 +1084,8 @@ class DistributedQuantEngine:
 
     async def _state_manage_trailing_stops(self, ctx: dict):
         """
-        💎 V72.0 TRUE ADAPTIVE ELASTICITY
-        Trailing stops expand organically if order flow supports the trade, 
+        💎 V75.0 TRUE ADAPTIVE ELASTICITY
+        Trailing stops expand if order flow supports the trade,
         and constrict if flow turns toxic.
         """
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
@@ -1092,7 +1099,7 @@ class DistributedQuantEngine:
         live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
 
-        # 1. Flow Alignment (Whale Movement Validation)
+        # 1. Flow Alignment
         flow_alignment = cvd_z if is_buy else -cvd_z
         
         # 2. Dynamic Trailing Multiplier
@@ -1106,11 +1113,11 @@ class DistributedQuantEngine:
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
-        # 3. Dynamic Break-Even Activation (Scales with volatility)
-        dynamic_be_threshold = max(0.15, min(0.80, 0.25 * vol_mult))
+        # 3. Dynamic Break-Even Activation
+        dynamic_be_threshold = max(0.20, min(0.80, 0.30 * vol_mult))
         
         if flow_alignment > 1.5:
-            dynamic_be_threshold += 0.25 
+            dynamic_be_threshold += 0.20 
             
         if r_mult >= dynamic_be_threshold:
             be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0020)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0020))
@@ -1434,7 +1441,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V72.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
+        # 🚀 V75.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [
