@@ -1,9 +1,9 @@
 """
-💎 V100.0 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
+💎 V100.1 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
 ------------------------------------------------------------------------
-Eradicated all lagging historical moving averages and binary gate blocks. 
-Operates exclusively on real-time microsecond order flow, continuous manifold 
-execution weights, and non-stationary Tensor-Prime anomaly mapping.
+Restored Universe Refresher module. Operates exclusively on real-time 
+microsecond order flow, continuous manifold execution weights, and 
+non-stationary Tensor-Prime anomaly mapping.
 """
 
 import os
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V100.0_CONTINUOUS_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V100.1_CONTINUOUS_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V100.0 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V100.1 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -535,7 +535,7 @@ class DistributedQuantEngine:
                             min_spread_floor = 0.0030 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0080
                             
                             if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
-                                self.circuit_breakers[symbol] = now + 5.0  # Ultra-short 5s micro-pause
+                                self.circuit_breakers[symbol] = now + 5.0
                     
                     if stat_engine: 
                         stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
@@ -586,7 +586,7 @@ class DistributedQuantEngine:
         dynamic_cooldown_seconds = max(5.0, min(30.0, 15.0 / (inst_var * 1000.0 + 1e-9))) 
         regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
         if regime == "TRENDING":
-            dynamic_cooldown_seconds = 2.0  # Ultra-fast re-entry during active sweeps
+            dynamic_cooldown_seconds = 2.0  
 
         last_trade_time = self.last_eval_time.get(symbol + "_last_trade", 0.0)
         if now - last_trade_time < dynamic_cooldown_seconds:
@@ -680,18 +680,15 @@ class DistributedQuantEngine:
                         asks=asks_raw,
                         htf_bias=htf_bias
                     )
-                    # 🚀 ZERO BINARY VETO: We use execution_weight to scale aggression instead of blocking
                     exec_weight = alpha_verdict.get("execution_weight", 1.0)
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
-                # 🚀 ZERO HOLD REJECTION: Edge weight dynamically scales confidence
                 action = structural_verdict.get("action", action)
                 edge_weight = structural_verdict.get("edge_weight", 1.0)
                 prob_success = min(0.95, prob_success * edge_weight)
 
                 routing_mode = structural_verdict.get("routing", "STANDARD")
 
-                # Continuous Net Expected Value Calculation (Zero Binary Stops)
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
 
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
@@ -699,16 +696,14 @@ class DistributedQuantEngine:
                 async with self.portfolio_state_lock: 
                     dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
 
-                # 🚀 BBO DEPTH SIZING BARRIER WITH CONTINUOUS SCALING
                 if action == "BUY":
                     bbo_depth_qty = float(ob.get("ask_size", 1.0))
                 else:
                     bbo_depth_qty = float(ob.get("bid_size", 1.0))
                 
-                max_qty_by_depth = bbo_depth_qty * 0.50  # Expanded depth participation
+                max_qty_by_depth = bbo_depth_qty * 0.50
 
                 max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
-                # Apply continuous manifold execution weight ($w_{\text{exec}}$) to sizing
                 calculated_qty = (max_notional * exec_weight) / price
                 
                 min_qty = self.hardware_min_qty.get(symbol, 1.0)
@@ -716,7 +711,7 @@ class DistributedQuantEngine:
                     calculated_qty = min_qty
                     
                 if calculated_qty > max_qty_by_depth:
-                    calculated_qty = max_qty_by_depth  # Soft clamp instead of rejection
+                    calculated_qty = max_qty_by_depth
                 
                 actual_notional = calculated_qty * price
                 try: 
@@ -729,7 +724,7 @@ class DistributedQuantEngine:
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
                 if actual_risk_pct > 2.0:
-                    calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9) # Soft scale down to risk limit
+                    calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9)
 
                 try:
                     payload = {
@@ -860,6 +855,81 @@ class DistributedQuantEngine:
                             if self.memory: await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
                         except Exception as e: logger.debug(f"[X-RAY] Shadow resolution batch timeout: {e}", exc_info=True)
             except Exception as e: logger.error(f"[X-RAY] Shadow resolution daemon error: {e}", exc_info=True)
+
+    async def run_universe_refresher(self):
+        try:
+            logger.info("🌌 V100.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            await self._fetch_exchange_tick_sizes()
+            
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
+            
+            if not dynamic_basket or len(dynamic_basket) < 15:
+                dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=5_000_000.0)
+
+            async with self.portfolio_state_lock:
+                self.asset_basket = dynamic_basket[:15]
+                self.shadow_basket = dynamic_basket[15:25] if len(dynamic_basket) >= 25 else dynamic_basket[15:]
+                
+            await self._prune_dead_symbols() 
+            self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
+            self.force_dna_refresh.set() 
+            logger.info(f"✅ V100.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+        except Exception as e:
+            logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
+
+    async def _universe_refresher_loop(self):
+        while True:
+            await asyncio.sleep(900)
+            await self.run_universe_refresher()
+
+    async def stream_manager_loop(self):
+        while True:
+            stream_feed = HighVelocityMultiFeed(
+                basket=self.asset_basket + self.shadow_basket[:10],
+                intervals=[self.timeframe, "60", "240"], 
+                orderbook_callback=self.handle_incoming_orderbook_tick, 
+                screener_callback=self.handle_incoming_basket_screener_update, 
+                kline_callback=self.handle_incoming_kline_update, 
+                trade_callback=self.handle_incoming_trade, 
+                engine_reference=self
+            )
+            self.stream_feed_instance = stream_feed  
+            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
+            
+            def _on_stream_done(t):
+                if not t.cancelled() and not self.stream_restart_event.is_set(): self.stream_restart_event.set()
+                    
+            stream_task.add_done_callback(_on_stream_done)
+            await self.stream_restart_event.wait()
+            stream_task.cancel()
+            stream_feed.terminate_all_feeds()
+            self.stream_restart_event.clear()
+            self.last_socket_reconnect = time.time() 
+            await asyncio.sleep(2)
+
+    async def run_exchange_state_reconciliation_daemon(self):
+        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
+        while True:
+            await asyncio.sleep(15)
+            try:
+                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
+                if pos_response.get("retCode") != 0: continue
+                
+                active_symbols = [p["symbol"] for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
+                
+                async with self.portfolio_state_lock:
+                    for symbol in list(self.active_positions_map.keys()):
+                        if symbol not in active_symbols:
+                            if not (active_daemon := self.daemon_tasks.get(symbol)) or active_daemon.done():
+                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
+                                self.active_positions_map.pop(symbol, None)
+                                self.risk_vault.update_position_ledger(symbol, 0.0)
+            except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
+
+
+    # ==============================================================================
+    # 🚀 V100.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
         for _ in range(5):  
