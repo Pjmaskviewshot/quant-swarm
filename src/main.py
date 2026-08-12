@@ -1,9 +1,9 @@
 """
-💎 V96.0 ULTRA-APEX NEURAL: ADAPTIVE FLOW MATRIX
+💎 V96.1 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
 ------------------------------------------------------------------------
-Features Directional Sweep Exploitation (Turning Toxicity into Alpha),
-Sub-Second Spread-Recovery Unlocking, Dynamic Adaptive Toxicity Ceilings,
-and Post-Quantization Risk Overflow Gates.
+Eradicated all lagging historical moving averages. Operates exclusively 
+on real-time microsecond order flow, live tape velocity, and non-stationary 
+Tensor-Prime anomaly detection.
 """
 
 import os
@@ -37,7 +37,7 @@ from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
-from core.quantum_entry import QuantumEntryMatrix  # 🚀 V96.0 TENSOR-PRIME ENTRY
+from core.quantum_entry import QuantumEntryMatrix  # 🚀 V96.1 TENSOR-PRIME ENTRY
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock 
 from features.omni_scanner import GlobalOmniScanner   
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V96.0_ADAPTIVE_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V96.1_ZERO_LAG_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V96.0 ADAPTIVE FLOW MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V96.1 ZERO-LAG ADAPTIVE MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -284,7 +284,6 @@ class DistributedQuantEngine:
         except Exception:
             equity = 12.00
 
-        # Hard-cap max risk at 1.5% of current equity
         max_risk_pct = 0.015
         max_risk_dollars = equity * max_risk_pct
 
@@ -302,20 +301,6 @@ class DistributedQuantEngine:
     def _align_price(self, symbol: str, price: float) -> str:
         tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
         return str(Decimal(str(price)).quantize(tick_dec, rounding=ROUND_HALF_UP))
-
-    def _get_hard_macro_trend(self, symbol: str) -> str:
-        """
-        🚀 V88.0 HARD MACRO TREND FILTER
-        """
-        if symbol not in self.screener_memory or len(self.screener_memory[symbol]["prices"]) < 28:
-            return "FLAT"
-        prices = list(self.screener_memory[symbol]["prices"])
-        ma7 = sum(prices[-7:]) / 7
-        ma28 = sum(prices[-28:]) / 28
-        
-        if ma7 > ma28 * 1.002: return "BULLISH"
-        if ma7 < ma28 * 0.998: return "BEARISH"
-        return "FLAT"
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
         try:
@@ -509,7 +494,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V96.0 APEX").replace("V88.0 APEX", "V96.0 APEX").replace("V87.0 APEX", "V96.0 APEX").replace("V95.0 APEX", "V96.0 APEX")
+                report = report.replace("V68.5 APEX", "V96.1 APEX").replace("V88.0 APEX", "V96.1 APEX").replace("V87.0 APEX", "V96.1 APEX").replace("V95.0 APEX", "V96.1 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -543,21 +528,14 @@ class DistributedQuantEngine:
                         async with self.circuit_breaker_lock:
                             med_spread = np.median(spread_hist) if len(spread_hist) >= 10 else spread_val
                             
-                            # 🚀 V96.0 SUB-SECOND SPREAD UNLOCKER
-                            # If spread has normalized back to baseline, instantly release circuit breaker
                             if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
                                 self.circuit_breakers[symbol] = 0.0
-                                logger.info(f"[X-RAY] ⚡ SPREAD NORMALIZED // {symbol} Circuit Breaker released early.")
                             
-                            # 🚀 DYNAMIC ADAPTIVE TOXICITY CEILING
-                            # Requires 5.0x spread spike for major coins, 6.0x for altcoins before locking
                             spread_mult_cap = 5.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 6.0
                             min_spread_floor = 0.0020 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0060
                             
                             if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
-                                # Dynamic micro-lockout (10s instead of rigid 60s)
                                 self.circuit_breakers[symbol] = now + 10.0
-                                logger.warning(f"[X-RAY] ⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked {spread_val*10000:.1f} bps. Micro-pause 10s.")
                     
                     if stat_engine: 
                         stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
@@ -589,7 +567,6 @@ class DistributedQuantEngine:
         feature_engine = self.feature_engines.get(symbol)
         clock = self.vpin_clocks.get(symbol)
 
-        # 🚀 EVENT-DRIVEN TICK ESCAPES
         if symbol in self.active_contexts:
             ctx = self.active_contexts[symbol]
             ctx["latest_tick_price"] = price
@@ -674,13 +651,8 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                macro_trend = self._get_hard_macro_trend(symbol)
-                if action == "BUY" and macro_trend == "BEARISH":
-                    logger.warning(f"[X-RAY] 🛑 MACRO TREND LOCK // {symbol} BUY rejected. Fighting 1H/4H Downtrend.")
-                    return
-                elif action == "SELL" and macro_trend == "BULLISH":
-                    logger.warning(f"[X-RAY] 🛑 MACRO TREND LOCK // {symbol} SELL rejected. Fighting 1H/4H Uptrend.")
-                    return
+                # 🚀 LAGGING MACRO TREND LOCK REMOVED ENTIRELY
+                # Pure real-time order flow physics drive execution instead of historical past-data.
 
                 entry_matrix = self.entry_matrices.get(symbol)
                 if entry_matrix:
@@ -701,14 +673,12 @@ class DistributedQuantEngine:
                     asks_raw = ob.get("asks", [])
                     htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
                     
-                    # 🚀 V96.0 DIRECTIONAL SWEEP EXPLOITATION
+                    # 🚀 V96.1 DIRECTIONAL SWEEP EXPLOITATION
                     macro_sweep_z = (btc_ofi * 0.6) + (eth_ofi * 0.4)
                     if action == "BUY" and macro_sweep_z > 2.5:
                         prob_success = min(0.95, prob_success + 0.08)
-                        logger.info(f"[X-RAY] 🚀 TOXIC SWEEP HARNESS // {symbol} BUY Conviction boosted (+8%) to ride +{macro_sweep_z:.2f}σ sweep.")
                     elif action == "SELL" and macro_sweep_z < -2.5:
                         prob_success = min(0.95, prob_success + 0.08)
-                        logger.info(f"[X-RAY] 🚀 TOXIC SWEEP HARNESS // {symbol} SELL Conviction boosted (+8%) to ride {macro_sweep_z:.2f}σ sweep.")
                     
                     alpha_verdict = entry_matrix.evaluate_entry_alpha(
                         symbol=symbol,
@@ -738,25 +708,20 @@ class DistributedQuantEngine:
                 branching_ratio = alpha_hawkes / beta_hawkes
 
                 if branching_ratio >= 0.85 and regime == "MEAN_REVERTING":
-                    logger.warning(f"[X-RAY] 🛑 HAWKES CASCADE GUARD // {symbol} Branching Ratio η={branching_ratio:.2f} >= 0.85. Blocking Mean-Reversion Entry.")
                     return
 
                 if regime == "MEAN_REVERTING":
                     min_conviction = 0.515 if spread_cost < 0.0005 else 0.525
                     if prob_success < min_conviction:
-                        logger.info(f"[X-RAY] ⏸️ MEAN-REVERSION CHURN GATE // {symbol} Conviction {prob_success:.2%} < {min_conviction:.2%}. Rejecting chop.")
                         return
 
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - (0.0002 if routing_mode == "MAKER_ONLY" else 0.0005)
 
                 if (net_ev_pct * 10000.0) < (spread_cost * 10000.0 * 2.0):
-                    if prob_success >= 0.55:
-                        logger.info(f"[X-RAY] ℹ️ INSUFFICIENT EV/SPREAD RATIO // {symbol} | Edge: {net_ev_pct*10000:.1f} bps | Spread: {spread_cost*10000:.1f} bps. Rejecting.")
                     return
 
                 ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
                 if net_ev_pct < ev_floor: 
-                    if prob_success >= 0.55: logger.info(f"[X-RAY] ℹ️ NEAR-MISS // {symbol} | Prob: {prob_success:.1%} | Routing: {routing_mode} | Net EV: {net_ev_pct*10000:.1f} bps < Floor {ev_floor*10000:.1f} bps (Spread: {spread_cost*10000:.1f} bps)")
                     return
                     
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
@@ -777,7 +742,6 @@ class DistributedQuantEngine:
                     dynamic_cap_bps = self.sor.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
                     
                     if est_slippage > dynamic_cap_bps:
-                        logger.warning(f"[X-RAY] 🛑 DYNAMIC FIREWALL REJECTED {symbol} (est. {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps)")
                         return
 
                 # 🚀 BBO DEPTH SIZING BARRIER
@@ -796,10 +760,6 @@ class DistributedQuantEngine:
                     calculated_qty = min_qty
                     
                 if calculated_qty > max_qty_by_depth:
-                    logger.warning(
-                        f"[X-RAY] 🛑 BBO DEPTH BARRIER REJECT // {symbol} | "
-                        f"Req Qty: {calculated_qty:.2f} > 30% of BBO Depth ({max_qty_by_depth:.2f}). Rejecting to prevent self-slippage."
-                    )
                     return
                 
                 # 🚀 POST-QUANTIZATION DOLLAR RISK CHECK
@@ -814,11 +774,6 @@ class DistributedQuantEngine:
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
                 if actual_risk_pct > 1.5:
-                    logger.warning(
-                        f"[X-RAY] 🛑 POST-QUANTIZATION RISK OVERFLOW // {symbol} | "
-                        f"Notional ${actual_notional:.2f} with {sl_dist_pct*100:.1f}% SL "
-                        f"risks {actual_risk_pct:.2f}% equity (Cap: 1.5%). Rejecting."
-                    )
                     return
 
                 try:
@@ -984,14 +939,12 @@ class DistributedQuantEngine:
                             
                             if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
                                 self.circuit_breakers[symbol] = 0.0
-                                logger.info(f"[X-RAY] ⚡ SPREAD NORMALIZED // {symbol} Circuit Breaker released early.")
                             
                             spread_mult_cap = 5.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 6.0
                             min_spread_floor = 0.0020 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0060
                             
                             if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
                                 self.circuit_breakers[symbol] = now + 10.0
-                                logger.warning(f"[X-RAY] ⚠️ LIQUIDITY FRACTURE // {symbol} Spread spiked {spread_val*10000:.1f} bps. Micro-pause 10s.")
                     
                     if stat_engine: 
                         stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
@@ -1068,7 +1021,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V96.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V96.1 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -1083,7 +1036,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V96.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V96.1 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1135,6 +1088,11 @@ class DistributedQuantEngine:
                                 self.active_positions_map.pop(symbol, None)
                                 self.risk_vault.update_position_ledger(symbol, 0.0)
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
+
+
+    # ==============================================================================
+    # 🚀 V96.1 EVENT-DRIVEN LIFECYCLE DAEMON
+    # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
         for _ in range(5):  
