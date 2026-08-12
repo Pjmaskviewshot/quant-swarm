@@ -1,8 +1,8 @@
 """
-💎 V100.2 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
+💎 V100.3 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
 ------------------------------------------------------------------------
-All structural daemons fully restored. Operates exclusively on real-time 
-microsecond order flow, continuous manifold execution weights, and 
+Screener callback and streaming routes fully reconciled. Operates exclusively 
+on real-time microsecond order flow, continuous manifold execution weights, and 
 non-stationary Tensor-Prime anomaly mapping.
 """
 
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V100.2_CONTINUOUS_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V100.3_CONTINUOUS_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V100.2 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V100.3 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -886,6 +886,33 @@ class DistributedQuantEngine:
                                     await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
                                 logger.critical(f"[X-RAY] 🚀 DYNAMIC SWAP // {hot_sym} PASSED GATES AND INJECTED INTO MATRIX (Replaced {dead_sym}).")
             except Exception as e: logger.error(f"[X-RAY] Omni-Swarm Director iteration failed: {e}", exc_info=True)
+
+    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
+        symbol = data.get("symbol")
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
+        self._initialize_symbol_structures([symbol]) 
+        interval, candle = str(data["interval"]), data["candle_data"]
+        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
+
+        async with self.symbol_locks[symbol]:
+            if feature_engine := self.feature_engines.get(symbol):
+                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
+                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
+                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
+                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
+                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
+                    self.screener_memory[symbol]["last_update_time"] = time.time()
+
+    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
+        if (symbol := data.get("symbol")) not in self.asset_basket and symbol not in self.shadow_basket: return
+        try:
+            if "turnover24h" in (raw_data := data.get("raw_data", {})):
+                turnover = float(raw_data["turnover24h"])
+                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
+                baseline = self.volatility_baseline.get(symbol, turnover)
+                if baseline > 0: self.screener_metrics[symbol]["vol_mult"] = min(10.0, max(0.1, turnover / baseline))
+                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
+        except Exception as e: logger.debug(f"[X-RAY] Screener update parse failed for {symbol}: {e}")
 
     async def run_universe_refresher(self):
         try:
