@@ -1,13 +1,10 @@
 """
-💎 V95.0 TENSOR-PRIME: HYBRID MICROSTRUCTURE EDGE GATE
+💎 V100.0 ULTRA-APEX NEURAL: CONTINUOUS EDGE GATE MANIFOLD
 -------------------------------------------------------------------------
-Features Stationarized Log-MLOFI, Dark Pool Iceberg Absorption,
-Directional Micro-Price Vacuums, VWAP Volatility Stretch (Z-VWAP) Vetoes,
-and L2 Orderbook Depth Ratio Shields.
-
-CRITICAL FIX: Eliminated silent exception swallowing. Implemented strict 
-NaN/Inf sanitization to prevent floating-point anomalies from corrupting 
-the orderbook elasticity and VWAP stretch logic.
+Eradicates all binary vetoes and hard-stop HOLD rejections. 
+Converts orderbook depth ratios, VWAP volatility stretches, and Log-MLOFI 
+into a continuous Execution Multiplier Surface ($w_{\text{edge}}$), ensuring 
+100% operational throughput and zero trade paralysis during volatility sweeps.
 """
 
 import math
@@ -22,9 +19,9 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V95.0 PREDATORY MAKER ENGINE & STRUCTURAL EDGE GATE
-    Exploits orderbook dark pool absorptions, liquidity vacuums, and deep book breakouts.
-    Guarded by VWAP Volatility Stretch (Z-VWAP) and L2 Depth Pressure Shields.
+    🚀 V100.0 ZERO-VETO CONTINUOUS STRUCTURAL EDGE GATE
+    Replaces binary depth walls and exhaustion vetoes with continuous scaling factors.
+    Dynamically weighs market pressure to maintain 100% execution flow.
     """
     def __init__(self, window_size=100, mlofi_levels=5, decay_alpha=0.5):
         self.window_size = window_size
@@ -131,7 +128,6 @@ class MicrostructureEdgeGate:
             p_arr = np.array(self.prices, dtype=float)
             v_arr = np.array(self.volumes, dtype=float)
             
-            # Safe VWAP calculation
             vol_sum = np.sum(v_arr) + 1e-9
             rolling_vwap = float(np.sum(p_arr * v_arr) / vol_sum)
             if math.isnan(rolling_vwap) or math.isinf(rolling_vwap):
@@ -206,14 +202,13 @@ class MicrostructureEdgeGate:
             logger.debug(f"[MATH_WARN] Numerical instability in _calculate_instantaneous_lambda: {e}")
             return 0.0
 
-    def evaluate_orderbook_depth_ratio(self, symbol: str) -> Dict[str, Any]:
+    def evaluate_orderbook_depth_ratio(self, symbol: str) -> float:
         """
-        🚀 V95.0 L2 ORDERBOOK DEPTH SHIELD
-        Hard-blocks Longs if Bid Depth < 45% of total top-5 book volume.
-        Hard-blocks Shorts if Ask Depth < 45% of total top-5 book volume.
+        🚀 CONTINUOUS L2 DEPTH PRESSURE FACTOR (V100.0)
+        Replaces binary hard-blocks with a continuous scaling coefficient [0.4 to 1.6].
         """
         if not self.prev_bids or not self.prev_asks:
-            return {"allow_long": True, "allow_short": True, "buy_ratio": 0.50}
+            return 1.0
 
         try:
             total_bid_vol = sum(float(b[1]) for b in self.prev_bids)
@@ -223,153 +218,89 @@ class MicrostructureEdgeGate:
             buy_ratio = float(total_bid_vol / total_depth)
             
             if math.isnan(buy_ratio) or math.isinf(buy_ratio):
-                return {"allow_long": True, "allow_short": True, "buy_ratio": 0.50}
+                return 1.0
 
-            if buy_ratio < 0.45:
-                self._throttled_warn(
-                    f"depth_sell_wall_{symbol}",
-                    f"[X-RAY] 🛑 HEAVY SELL WALL VETO // {symbol} BUY blocked. Buy Depth is only {buy_ratio*100:.1f}%."
-                )
-                return {"allow_long": False, "allow_short": True, "buy_ratio": buy_ratio}
-            elif buy_ratio > 0.55:
-                self._throttled_warn(
-                    f"depth_buy_wall_{symbol}",
-                    f"[X-RAY] 🛑 HEAVY BUY WALL VETO // {symbol} SELL blocked. Buy Depth is {buy_ratio*100:.1f}%."
-                )
-                return {"allow_long": True, "allow_short": False, "buy_ratio": buy_ratio}
+            # Continuous scaling factor based on book pressure
+            return max(0.4, min(1.6, buy_ratio * 2.0))
+        except Exception:
+            return 1.0
 
-            return {"allow_long": True, "allow_short": True, "buy_ratio": buy_ratio}
-        except Exception as e:
-            logger.debug(f"[MATH_WARN] Numerical instability in depth ratio evaluation: {e}")
-            return {"allow_long": True, "allow_short": True, "buy_ratio": 0.50}
-
-    def evaluate_exhaustion_veto(self, symbol: str, current_price: float, target_direction: str) -> Dict[str, Any]:
+    def evaluate_exhaustion_stretch(self, symbol: str, current_price: float, target_direction: str) -> float:
         """
-        🚀 V95.0 EXHAUSTION & VOLATILITY STRETCH VETO
-        Prevents shorting capitulation bottom wicks or buying blow-off tops.
+        🚀 CONTINUOUS EXHAUSTION & VWAP STRETCH DAMPENING (V100.0)
+        Replaces binary vetoes with smooth continuous damping multipliers [0.3 to 1.2].
         """
         if len(self.prices) < 20 or len(self.vwap_history) < 20:
-            return {"veto": False, "reason": "STRETCH_CALIBRATING"}
+            return 1.0
 
         try:
             p_arr = np.array(self.prices, dtype=float)
-            v_arr = np.array(self.volumes, dtype=float)
             vwap = float(self.vwap_history[-1])
 
-            # VWAP Volatility Stretch (Z-VWAP)
             std_dev = float(np.std(p_arr)) + 1e-9
             z_vwap = (current_price - vwap) / std_dev
             
             if math.isnan(z_vwap) or math.isinf(z_vwap):
                 z_vwap = 0.0
 
-            # Volume Absorption Index (VAI)
-            high_p = float(np.max(p_arr[-5:]))
-            low_p = float(np.min(p_arr[-5:]))
-            price_range_pct = (high_p - low_p) / (current_price + 1e-9)
-            
-            if math.isnan(price_range_pct) or math.isinf(price_range_pct):
-                price_range_pct = 0.005 # Safe default to bypass absorption block
-            
-            recent_vol = float(np.mean(v_arr[-5:]))
-            baseline_vol = float(np.mean(v_arr)) + 1e-9
-            vol_multiplier = recent_vol / baseline_vol
-            
-            if math.isnan(vol_multiplier) or math.isinf(vol_multiplier):
-                vol_multiplier = 1.0
-
-            if target_direction == "SELL":
-                if z_vwap < -2.2:
-                    self._throttled_warn(
-                        f"capitulation_{symbol}",
-                        f"[X-RAY] 🛑 CAPITULATION VETO // {symbol} SELL blocked. "
-                        f"Price stretched {z_vwap:.2f}σ below VWAP."
-                    )
-                    return {"veto": True, "reason": f"OVERSOLD_CAPITULATION_WICK | Z_VWAP: {z_vwap:.2f}σ"}
-
-                if vol_multiplier > 3.0 and price_range_pct < 0.0030:
-                    self._throttled_warn(
-                        f"absorption_buy_{symbol}",
-                        f"[X-RAY] 🛑 LIMIT ABSORPTION VETO // {symbol} SELL blocked. Whales absorbing sells."
-                    )
-                    return {"veto": True, "reason": f"LIMIT_BUY_ABSORPTION | Vol: {vol_multiplier:.1f}x"}
-
-            elif target_direction == "BUY":
-                if z_vwap > 2.2:
-                    self._throttled_warn(
-                        f"blowoff_{symbol}",
-                        f"[X-RAY] 🛑 BLOW-OFF VETO // {symbol} BUY blocked. "
-                        f"Price stretched {z_vwap:.2f}σ above VWAP."
-                    )
-                    return {"veto": True, "reason": f"OVERBOUGHT_BLOWOFF_WICK | Z_VWAP: {z_vwap:.2f}σ"}
-
-                if vol_multiplier > 3.0 and price_range_pct < 0.0030:
-                    self._throttled_warn(
-                        f"absorption_sell_{symbol}",
-                        f"[X-RAY] 🛑 LIMIT ABSORPTION VETO // {symbol} BUY blocked. Whales absorbing buys."
-                    )
-                    return {"veto": True, "reason": f"LIMIT_SELL_ABSORPTION | Vol: {vol_multiplier:.1f}x"}
-
-            return {"veto": False, "reason": "SAFE"}
-            
-        except Exception as e:
-            logger.debug(f"[MATH_WARN] Numerical instability in exhaustion veto: {e}")
-            return {"veto": False, "reason": "MATH_FAULT_SAFE_DEFAULT"}
+            # Continuous non-linear dampening instead of hard vetoes
+            if target_direction == "BUY":
+                stretch_factor = max(0.3, 1.0 - max(0.0, z_vwap - 1.0) * 0.3)
+            else:
+                stretch_factor = max(0.3, 1.0 - max(0.0, -z_vwap - 1.0) * 0.3)
+                
+            return stretch_factor
+        except Exception:
+            return 1.0
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
-        """Evaluates confluence between MLOFI, Iceberg Absorption, and Depth Pressure."""
-        if len(self.mlofis) < 20 or len(self.lambda_history) < 5 or len(self._trade_imbalances) < 20:
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "CALIBRATING_DEEP_BOOK", "routing": "STANDARD"}
+        """
+        🚀 CONTINUOUS STRUCTURAL EDGE EVALUATOR (V100.0)
+        Guarantees zero rejections. Evaluates MLOFI and depth pressure 
+        to output continuous confidence and execution weight scaling.
+        """
+        if len(self.mlofis) < 10 or len(self.lambda_history) < 3 or len(self._trade_imbalances) < 10:
+            default_dir = intended_direction if intended_direction else "BUY"
+            return {
+                "action": default_dir, 
+                "confidence": 0.50, 
+                "edge_weight": 0.5, 
+                "reasoning": "CALIBRATING_DEEP_BOOK_CONTINUOUS", 
+                "routing": "STANDARD"
+            }
 
         try:
             current_mlofi = float(np.mean(list(self.mlofis)[-5:]))
-            mlofi_std = float(np.std(self.mlofis))
-            
-            if math.isnan(mlofi_std) or math.isinf(mlofi_std) or mlofi_std == 0 or abs(current_mlofi) < (mlofi_std * 0.5):
-                return {"action": "HOLD", "confidence": 0.0, "reasoning": "LOG_MLOFI_FLAT", "routing": "STANDARD"}
+            mlofi_std = float(np.std(self.mlofis)) + 1e-9
 
-            direction = "BUY" if current_mlofi > 0 else "SELL"
+            direction = "BUY" if current_mlofi >= 0 else "SELL"
             target_direction = intended_direction if intended_direction else direction
 
-            # 🚀 L2 ORDERBOOK DEPTH PRESSURE VETO
-            depth_status = self.evaluate_orderbook_depth_ratio(symbol)
-            if target_direction == "BUY" and not depth_status["allow_long"]:
-                return {"action": "HOLD", "confidence": 0.0, "reasoning": f"HEAVY_SELL_DEPTH_VETO (Buy Depth: {depth_status['buy_ratio']*100:.1f}%)", "routing": "STANDARD"}
-            elif target_direction == "SELL" and not depth_status["allow_short"]:
-                return {"action": "HOLD", "confidence": 0.0, "reasoning": f"HEAVY_BUY_DEPTH_VETO (Buy Depth: {depth_status['buy_ratio']*100:.1f}%)", "routing": "STANDARD"}
-
-            # 🚀 EXHAUSTION VETO CHECK
+            depth_factor = self.evaluate_orderbook_depth_ratio(symbol)
             current_price = self.prices[-1] if self.prices else 0.0
-            if current_price > 0:
-                veto_status = self.evaluate_exhaustion_veto(symbol, current_price, target_direction)
-                if veto_status["veto"]:
-                    return {
-                        "action": "HOLD",
-                        "confidence": 0.0,
-                        "reasoning": f"EXHAUSTION_VETO | {veto_status['reason']}",
-                        "routing": "STANDARD"
-                    }
+            stretch_factor = self.evaluate_exhaustion_stretch(symbol, current_price, target_direction) if current_price > 0 else 1.0
 
-            if intended_direction and direction != intended_direction:
-                return {
-                    "action": "HOLD", 
-                    "confidence": 0.0, 
-                    "reasoning": f"CONFLUENCE_FAILURE | Model wants {intended_direction}, Log-MLOFI wants {direction}",
-                    "routing": "STANDARD"
-                }
+            mlofi_strength = abs(current_mlofi) / mlofi_std
+            confidence = min(0.95, max(0.40, 0.50 + (mlofi_strength * 0.05)))
+            
+            # Continuous Edge Weight combining MLOFI strength, book pressure, and VWAP stretch
+            edge_weight = min(2.0, max(0.2, (confidence * depth_factor * stretch_factor)))
 
-            if intended_direction and direction == intended_direction:
-                mlofi_strength = abs(current_mlofi) / (mlofi_std + 1e-9)
-                confidence = min(0.75, 0.50 + (mlofi_strength * 0.05))
-                return {
-                    "action": direction,
-                    "confidence": confidence,
-                    "reasoning": f"STANDARD_MLOFI_CONFLUENCE | Signal: {direction} (Strength: {mlofi_strength:.1f}x)",
-                    "routing": "STANDARD"
-                }
-
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "EDGE_GATE_UNDECIDED", "routing": "STANDARD"}
+            return {
+                "action": target_direction,
+                "confidence": confidence,
+                "edge_weight": edge_weight,
+                "reasoning": f"CONTINUOUS_EDGE_ACTIVE | Signal: {target_direction} (Weight: {edge_weight:.2f}x)",
+                "routing": "MAKER_ONLY" if abs(current_mlofi) < 0.5 else "STANDARD"
+            }
             
         except Exception as e:
             logger.debug(f"[MATH_WARN] Numerical instability in structural edge evaluation: {e}")
-            return {"action": "HOLD", "confidence": 0.0, "reasoning": "MATH_FAULT_SAFE_DEFAULT", "routing": "STANDARD"}
+            default_dir = intended_direction if intended_direction else "BUY"
+            return {
+                "action": default_dir, 
+                "confidence": 0.50, 
+                "edge_weight": 0.5, 
+                "reasoning": "MATH_FAULT_CONTINUOUS_DEFAULT", 
+                "routing": "STANDARD"
+            }

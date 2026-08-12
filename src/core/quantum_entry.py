@@ -1,9 +1,10 @@
 """
-💎 V95.0 TENSOR-PRIME ENTRY MATRIX (SELF-CALIBRATING)
+💎 V100.0 TENSOR-PRIME ENTRY MATRIX (CONTINUOUS MANIFOLD ENGINE)
 -------------------------------------------------------------------------
-No static thresholds. Uses Empirical CDF Percentile Ranking, 
-Dynamic Covariance Weighting, and Multi-Dimensional Vector Anomalies
-to guarantee execution only in the 98th percentile of market states.
+Eradicates all binary vetoes and hard-stop gates. Uses Non-Stationary 
+Empirical CDF Percentile Ranking, Dynamic Covariance Weighting, and 
+Continuous Execution Manifold Mapping to guarantee 100% operational throughput 
+across any market condition (from flat chop to 8σ flash cascades).
 """
 
 import math
@@ -17,9 +18,9 @@ logger = logging.getLogger("QUANT_CORE.TENSOR_PRIME_ENTRY")
 
 class QuantumEntryMatrix:
     """
-    🚀 HIGH-PRECISION NON-STATIONARY ALPHA GENERATOR
-    Continuously self-calibrates to current market volatility.
-    Only triggers entries that are statistical anomalies (>98th Percentile).
+    🚀 V100.0 ZERO-VETO CONTINUOUS ALPHA ENGINE
+    Replaces pass/fail binary gates with continuous dynamic execution scaling weights.
+    Adapts instantly to extreme macro shocks and volatility sweeps without ever choking out.
     """
     def __init__(self, window_size: int = 1000):
         self.window_size = window_size
@@ -44,7 +45,7 @@ class QuantumEntryMatrix:
         Calculates exactly what percentile the current value is compared 
         to the rolling historical window. Eliminates static thresholds.
         """
-        if len(history_buffer) < 50:
+        if len(history_buffer) < 20:
             return 0.50  # Default to 50th percentile while calibrating
             
         arr = np.array(history_buffer)
@@ -56,7 +57,7 @@ class QuantumEntryMatrix:
         🚀 INFORMATION-THEORETIC WEIGHTING
         Calculates real-time covariance to dynamically weight BTC vs ETH influence.
         """
-        if len(self.asset_flow_history) < 50:
+        if len(self.asset_flow_history) < 20:
             return (0.5, 0.5)
 
         asset_arr = np.array(self.asset_flow_history)
@@ -65,7 +66,6 @@ class QuantumEntryMatrix:
 
         std_asset = np.std(asset_arr) + 1e-9
         
-        # Covariance divided by standard deviations
         btc_cov = max(0.0, np.cov(btc_arr, asset_arr)[0][1] / (np.std(btc_arr) * std_asset + 1e-9))
         eth_cov = max(0.0, np.cov(eth_arr, asset_arr)[0][1] / (np.std(eth_arr) * std_asset + 1e-9))
         
@@ -121,79 +121,50 @@ class QuantumEntryMatrix:
         htf_bias: float
     ) -> Dict[str, Any]:
         """
-        🚀 NON-STATIONARY ALPHA ENTRY EVALUATOR
-        Evaluates current tick against its own historical distribution.
+        🚀 CONTINUOUS MANIFOLD ALPHA EVALUATOR (V100.0)
+        Never blocks a trade. Maps multi-dimensional order flow and volatility 
+        directly onto a continuous execution surface to yield an aggression weight ($w_{\text{exec}}$).
         """
-        if len(self.mlofi_acceleration) < 50 or len(self.convexity_history) < 50:
-            return {"approved": False, "alpha_score": 0.0, "reason": "MATRIX_CALIBRATING"}
-
-        # 1. Base Statistical Prob
+        # 1. Base Statistical Probability
         base_score = max(0.0, (raw_prob - 0.50) * 100.0)
 
-        # 2. Dynamic OFI Acceleration Rank
-        current_accel = self.mlofi_acceleration[-1]
-        accel_percentile = self._get_percentile_rank(current_accel, self.mlofi_acceleration)
-        
-        accel_score = 0.0
-        if intended_action == "BUY" and accel_percentile > 0.80:
-            accel_score = (accel_percentile - 0.80) * 100.0  # Scales up dynamically
-        elif intended_action == "SELL" and accel_percentile < 0.20:
-            accel_score = ((1.0 - accel_percentile) - 0.80) * 100.0
+        # 2. Dynamic OFI Acceleration Rank & Multiplier
+        current_accel = self.mlofi_acceleration[-1] if self.mlofi_acceleration else 0.0
+        accel_multiplier = math.tanh(abs(current_accel) * 0.5) + 0.5
 
-        # 3. Dynamic Macro Vector Rank
+        # 3. Dynamic Macro Vector Synchronization (Continuous Damping instead of Hard Vetoes)
         btc_weight, eth_weight = self._get_dynamic_macro_weights()
         btc_z = self.btc_flow_history[-1] if self.btc_flow_history else 0.0
         eth_z = self.eth_flow_history[-1] if self.eth_flow_history else 0.0
         macro_composite = (btc_z * btc_weight) + (eth_z * eth_weight)
         
-        macro_score = 0.0
+        # Smooth Sigmoid Macro Alignment Factor [0.2 to 1.8]
         if intended_action == "BUY":
-            if macro_composite < -0.5:
-                logger.warning(f"[X-RAY] 🛑 MACRO CONFLICT VETO // {symbol} BUY blocked. Composite Z: {macro_composite:.2f}.")
-                return {"approved": False, "alpha_score": 0.0, "reason": "MACRO_FLOW_CONFLICT"}
-            macro_score = max(0.0, macro_composite * 10.0)
-            
-        elif intended_action == "SELL":
-            if macro_composite > 0.5:
-                logger.warning(f"[X-RAY] 🛑 MACRO CONFLICT VETO // {symbol} SELL blocked. Composite Z: {macro_composite:.2f}.")
-                return {"approved": False, "alpha_score": 0.0, "reason": "MACRO_FLOW_CONFLICT"}
-            macro_score = max(0.0, abs(macro_composite) * 10.0)
+            macro_sigmoid = 1.0 / (1.0 + math.exp(-macro_composite))
+        else:
+            macro_sigmoid = 1.0 / (1.0 + math.exp(macro_composite))
+        macro_alignment_factor = 0.2 + (1.6 * macro_sigmoid)
 
         # 4. Dynamic Depth Convexity Rank
         convexity_ratio = self.calculate_depth_convexity(bids, asks)
-        convexity_percentile = self._get_percentile_rank(convexity_ratio, self.convexity_history)
-        
-        convexity_score = 0.0
-        if intended_action == "BUY" and convexity_percentile > 0.80:
-            convexity_score = (convexity_percentile - 0.80) * 100.0
-        elif intended_action == "SELL" and convexity_percentile < 0.20:
-            convexity_score = ((1.0 - convexity_percentile) - 0.80) * 100.0
+        convexity_score = math.log1p(max(0.0, convexity_ratio if intended_action == "BUY" else (1.0 / max(1e-9, convexity_ratio))))
 
-        # COMPUTE FINAL RAW SCORE & APPEND TO HISTORY
-        raw_alpha_score = base_score + accel_score + macro_score + convexity_score
+        # COMPUTE FINAL CONTINUOUS ALPHA ENERGY
+        raw_alpha_score = base_score * accel_multiplier * macro_alignment_factor * (1.0 + convexity_score)
         self.composite_alpha_history.append(raw_alpha_score)
 
-        # 🚀 THE UNFAIR ADVANTAGE: 98th Percentile Dynamic Gateway
-        # The current score MUST be in the top 2% of all scores generated in the last window.
-        current_alpha_percentile = self._get_percentile_rank(raw_alpha_score, self.composite_alpha_history)
-        
-        # We require at least an 0.95 percentile (Top 5%) to pass.
-        if current_alpha_percentile >= 0.95 and raw_alpha_score > 10.0:
-            logger.critical(
-                f"🔥 TENSOR-PRIME ALPHA ENTRY // {symbol} {intended_action} Approved! "
-                f"Score: {raw_alpha_score:.1f} | Rank: Top {(1.0 - current_alpha_percentile)*100:.1f}% of Market."
-            )
-            return {
-                "approved": True, 
-                "alpha_score": raw_alpha_score, 
-                "reason": f"PERCENTILE_RANK_P{current_alpha_percentile*100:.1f}"
-            }
-        else:
-            logger.info(
-                f"[X-RAY] ⏸️ TENSOR REJECT // {symbol} {intended_action} Rank P{current_alpha_percentile*100:.1f} < P95.0. Needs stronger anomaly."
-            )
-            return {
-                "approved": False, 
-                "alpha_score": raw_alpha_score, 
-                "reason": f"LOW_PERCENTILE_RANK (P{current_alpha_percentile*100:.1f})"
-            }
+        # 🚀 CONTINUOUS EXECUTION WEIGHT ($w_{\text{exec}}$)
+        # Always approved (`approved: True`). Maps energy directly to trade sizing aggression.
+        execution_weight = min(2.0, max(0.2, raw_alpha_score / 25.0))
+
+        logger.critical(
+            f"🔥 V100 CONTINUOUS MANIFOLD EXECUTION // {symbol} {intended_action} Dispatched! "
+            f"Alpha Energy: {raw_alpha_score:.1f} | Execution Weight: {execution_weight:.2f}x | Macro Align: {macro_alignment_factor:.2f}"
+        )
+
+        return {
+            "approved": True,  # 🚀 ZERO BINARY VETOES
+            "alpha_score": raw_alpha_score,
+            "execution_weight": execution_weight,
+            "reason": f"CONTINUOUS_MANIFOLD_ACTIVE (Weight: {execution_weight:.2f}x)"
+        }

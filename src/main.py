@@ -1,9 +1,9 @@
 """
-💎 V96.1 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
+💎 V100.0 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
 ------------------------------------------------------------------------
-Eradicated all lagging historical moving averages. Operates exclusively 
-on real-time microsecond order flow, live tape velocity, and non-stationary 
-Tensor-Prime anomaly detection.
+Eradicated all lagging historical moving averages and binary gate blocks. 
+Operates exclusively on real-time microsecond order flow, continuous manifold 
+execution weights, and non-stationary Tensor-Prime anomaly mapping.
 """
 
 import os
@@ -37,7 +37,7 @@ from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
-from core.quantum_entry import QuantumEntryMatrix  # 🚀 V96.1 TENSOR-PRIME ENTRY
+from core.quantum_entry import QuantumEntryMatrix  # 🚀 V100.0 CONTINUOUS MANIFOLD ENTRY
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock 
 from features.omni_scanner import GlobalOmniScanner   
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V96.1_ZERO_LAG_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V100.0_CONTINUOUS_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V96.1 ZERO-LAG ADAPTIVE MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V100.0 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -494,7 +494,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V96.1 APEX").replace("V88.0 APEX", "V96.1 APEX").replace("V87.0 APEX", "V96.1 APEX").replace("V95.0 APEX", "V96.1 APEX")
+                report = report.replace("V68.5 APEX", "V100.0 APEX").replace("V96.1 APEX", "V100.0 APEX").replace("V95.0 APEX", "V100.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -531,11 +531,11 @@ class DistributedQuantEngine:
                             if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
                                 self.circuit_breakers[symbol] = 0.0
                             
-                            spread_mult_cap = 5.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 6.0
-                            min_spread_floor = 0.0020 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0060
+                            spread_mult_cap = 6.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 8.0
+                            min_spread_floor = 0.0030 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0080
                             
                             if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
-                                self.circuit_breakers[symbol] = now + 10.0
+                                self.circuit_breakers[symbol] = now + 5.0  # Ultra-short 5s micro-pause
                     
                     if stat_engine: 
                         stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
@@ -583,10 +583,10 @@ class DistributedQuantEngine:
             return
 
         inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
-        dynamic_cooldown_seconds = max(10.0, min(60.0, 30.0 / (inst_var * 1000.0 + 1e-9))) 
+        dynamic_cooldown_seconds = max(5.0, min(30.0, 15.0 / (inst_var * 1000.0 + 1e-9))) 
         regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
         if regime == "TRENDING":
-            dynamic_cooldown_seconds = 5.0  
+            dynamic_cooldown_seconds = 2.0  # Ultra-fast re-entry during active sweeps
 
         last_trade_time = self.last_eval_time.get(symbol + "_last_trade", 0.0)
         if now - last_trade_time < dynamic_cooldown_seconds:
@@ -595,7 +595,7 @@ class DistributedQuantEngine:
         async with self.circuit_breaker_lock:
             if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
             
-        if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 10.0): return
+        if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
 
         try:
             self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
@@ -622,7 +622,7 @@ class DistributedQuantEngine:
                 else: vpin_z = 0.0
             else: vpin_z = 0.0
         
-            if now - self.last_eval_time.get(symbol, 0.0) < (0.1 if abs(vpin_z) > 1.5 else 0.5): return
+            if now - self.last_eval_time.get(symbol, 0.0) < (0.05 if abs(vpin_z) > 1.0 else 0.2): return
             self.last_eval_time[symbol] = now
             
             ob = self.orderbook_snapshots.get(symbol)
@@ -634,8 +634,8 @@ class DistributedQuantEngine:
                 raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                 atr = raw_atr if raw_atr > 0 else price * 0.005
                 
-                sl_atr_mult = max(2.5, self.live_params.get("sl_atr_mult", 2.5))
-                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.025)
+                sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
+                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.020)
                 dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
                 tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                 
@@ -651,10 +651,9 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 LAGGING MACRO TREND LOCK REMOVED ENTIRELY
-                # Pure real-time order flow physics drive execution instead of historical past-data.
-
+                # 🚀 V100.0 ZERO-VETO CONTINUOUS MANIFOLD EVALUATION
                 entry_matrix = self.entry_matrices.get(symbol)
+                exec_weight = 1.0
                 if entry_matrix:
                     btc_eng = self.stat_engines.get("BTCUSDT")
                     eth_eng = self.stat_engines.get("ETHUSDT")
@@ -673,13 +672,6 @@ class DistributedQuantEngine:
                     asks_raw = ob.get("asks", [])
                     htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
                     
-                    # 🚀 V96.1 DIRECTIONAL SWEEP EXPLOITATION
-                    macro_sweep_z = (btc_ofi * 0.6) + (eth_ofi * 0.4)
-                    if action == "BUY" and macro_sweep_z > 2.5:
-                        prob_success = min(0.95, prob_success + 0.08)
-                    elif action == "SELL" and macro_sweep_z < -2.5:
-                        prob_success = min(0.95, prob_success + 0.08)
-                    
                     alpha_verdict = entry_matrix.evaluate_entry_alpha(
                         symbol=symbol,
                         raw_prob=prob_success,
@@ -688,81 +680,44 @@ class DistributedQuantEngine:
                         asks=asks_raw,
                         htf_bias=htf_bias
                     )
-
-                    if not alpha_verdict["approved"]:
-                        return 
+                    # 🚀 ZERO BINARY VETO: We use execution_weight to scale aggression instead of blocking
+                    exec_weight = alpha_verdict.get("execution_weight", 1.0)
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
-                if structural_verdict["action"] == "HOLD": return
-                if structural_verdict["action"] != action:
-                    action, prob_success = structural_verdict["action"], max(prob_success, 0.58) 
-                
-                if spread_cost > 0.0004: 
-                    structural_verdict["routing"] = "MAKER_ONLY"
-                    regime = "MEAN_REVERTING"
-                    
+                # 🚀 ZERO HOLD REJECTION: Edge weight dynamically scales confidence
+                action = structural_verdict.get("action", action)
+                edge_weight = structural_verdict.get("edge_weight", 1.0)
+                prob_success = min(0.95, prob_success * edge_weight)
+
                 routing_mode = structural_verdict.get("routing", "STANDARD")
 
-                alpha_hawkes = max(0.01, abs(stat_engine.hawkes_z) * 0.3) if stat_engine else 0.1
-                beta_hawkes = max(0.1, 1.0 / (vol_mult + 1e-9))
-                branching_ratio = alpha_hawkes / beta_hawkes
+                # Continuous Net Expected Value Calculation (Zero Binary Stops)
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
 
-                if branching_ratio >= 0.85 and regime == "MEAN_REVERTING":
-                    return
-
-                if regime == "MEAN_REVERTING":
-                    min_conviction = 0.515 if spread_cost < 0.0005 else 0.525
-                    if prob_success < min_conviction:
-                        return
-
-                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - (0.0002 if routing_mode == "MAKER_ONLY" else 0.0005)
-
-                if (net_ev_pct * 10000.0) < (spread_cost * 10000.0 * 2.0):
-                    return
-
-                ev_floor = AdaptiveSessionClock.get_ev_floor(routing_mode)
-                if net_ev_pct < ev_floor: 
-                    return
-                    
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
-                async with self.portfolio_state_lock: dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
-                
-                dynamic_gate = max(0.515, sgd_state.get("dynamic_gate", 0.515) - (0.05 if routing_mode == "MAKER_ONLY" else 0.0))
+                async with self.portfolio_state_lock: 
+                    dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
 
-                if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.48))): 
-                    return
-                    
-                htf_bias_offset = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
-                prob_success += (htf_bias_offset * 0.04) if action == "BUY" else -(htf_bias_offset * 0.04)
-
-                if hasattr(self.sor, 'estimate_orderbook_slippage_bps'):
-                    est_slippage = self.sor.estimate_orderbook_slippage_bps(ob, action, 6.50 / price, price)
-                    live_spread_bps = (spread_cost * 10000.0)
-                    dynamic_cap_bps = self.sor.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
-                    
-                    if est_slippage > dynamic_cap_bps:
-                        return
-
-                # 🚀 BBO DEPTH SIZING BARRIER
+                # 🚀 BBO DEPTH SIZING BARRIER WITH CONTINUOUS SCALING
                 if action == "BUY":
                     bbo_depth_qty = float(ob.get("ask_size", 1.0))
                 else:
                     bbo_depth_qty = float(ob.get("bid_size", 1.0))
                 
-                max_qty_by_depth = bbo_depth_qty * 0.30
+                max_qty_by_depth = bbo_depth_qty * 0.50  # Expanded depth participation
 
                 max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
-                calculated_qty = max_notional / price
+                # Apply continuous manifold execution weight ($w_{\text{exec}}$) to sizing
+                calculated_qty = (max_notional * exec_weight) / price
                 
                 min_qty = self.hardware_min_qty.get(symbol, 1.0)
                 if calculated_qty < min_qty:
                     calculated_qty = min_qty
                     
                 if calculated_qty > max_qty_by_depth:
-                    return
+                    calculated_qty = max_qty_by_depth  # Soft clamp instead of rejection
                 
-                # 🚀 POST-QUANTIZATION DOLLAR RISK CHECK
                 actual_notional = calculated_qty * price
                 try: 
                     raw_balance = await self.executor.get_wallet_balance_usdt()
@@ -773,8 +728,8 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                if actual_risk_pct > 1.5:
-                    return
+                if actual_risk_pct > 2.0:
+                    calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9) # Soft scale down to risk limit
 
                 try:
                     payload = {
@@ -790,8 +745,8 @@ class DistributedQuantEngine:
                             "log_mlofi_z": stat_engine.ofi_fast_z, 
                             "liquidity_density_ratio": vol_mult, 
                             "bid_ask_spread": spread_cost, 
-                            "reasoning": structural_verdict.get("reasoning", "MICROSTRUCTURE_ALPHA"), 
-                            "ai_verdict": "DIRECT_MICROSTRUCTURE_ALPHA"
+                            "reasoning": structural_verdict.get("reasoning", "CONTINUOUS_MANIFOLD_ALPHA"), 
+                            "ai_verdict": "V100_CONTINUOUS_EXECUTION"
                         },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
@@ -905,194 +860,6 @@ class DistributedQuantEngine:
                             if self.memory: await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
                         except Exception as e: logger.debug(f"[X-RAY] Shadow resolution batch timeout: {e}", exc_info=True)
             except Exception as e: logger.error(f"[X-RAY] Shadow resolution daemon error: {e}", exc_info=True)
-
-    async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
-        symbol = depth_data.get("s")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
-
-        bids, asks = depth_data.get("b", []), depth_data.get("a", [])
-        is_snapshot = depth_data.get("type") == "snapshot"
-        
-        feature_engine = self.feature_engines.get(symbol)
-        if feature_engine:
-            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
-            book_metrics = feature_engine.get_book_depth_metrics()
-            if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
-                best_bid, best_ask = book_metrics["top_bid"], book_metrics["top_ask"]
-                top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
-                top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
-                
-                if best_bid > 0 and best_ask > best_bid:
-                    self.orderbook_snapshots[symbol] = {
-                        "best_bid": best_bid, "bid_size": top_bid_size, 
-                        "best_ask": best_ask, "ask_size": top_ask_size, 
-                        "bids": bids, "asks": asks
-                    }
-                    
-                    stat_engine = self.stat_engines.get(symbol)
-                    now, spread_val = time.time(), (best_ask - best_bid) / (best_bid + 1e-9)
-                    
-                    if (spread_hist := self.spread_history.get(symbol)) is not None:
-                        spread_hist.append(spread_val)
-                        async with self.circuit_breaker_lock:
-                            med_spread = np.median(spread_hist) if len(spread_hist) >= 10 else spread_val
-                            
-                            if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
-                                self.circuit_breakers[symbol] = 0.0
-                            
-                            spread_mult_cap = 5.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 6.0
-                            min_spread_floor = 0.0020 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0060
-                            
-                            if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
-                                self.circuit_breakers[symbol] = now + 10.0
-                    
-                    if stat_engine: 
-                        stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
-                        
-                    if (elasticity := self.elasticity_engines.get(symbol)) and stat_engine:
-                        elasticity.update_depth_state(
-                            best_bid, top_bid_size, best_ask, top_ask_size, 
-                            stat_engine.ofi_fast_z, float(depth_data.get("ts", time.time() * 1000)) / 1000.0
-                        )
-
-            if (edge_gate := self.edge_gates.get(symbol)) and bids and asks:
-                try:
-                    f_bids, f_asks = feature_engine.get_deep_book_floats()
-                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0)
-                except Exception as e: logger.debug(f"[X-RAY] Edge gate update error for {symbol}: {e}")
-
-    async def run_omni_swarm_director(self):
-        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
-        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", "SSPCUSDT"]
-        while True:
-            await asyncio.sleep(15) 
-            try:
-                protected_symbols = set()
-                async with self.portfolio_state_lock: protected_symbols = set(self.active_positions_map.keys())
-                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
-                
-                if dead_sym and hot_sym and not any(b in hot_sym for b in banned_keywords):
-                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
-                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
-                        t_data = tick_res["result"]["list"][0]
-                        bid, ask, turnover = float(t_data.get("bid1Price", 0.0) or 0.0), float(t_data.get("ask1Price", 0.0) or 0.0), float(t_data.get("turnover24h", 0.0) or 0.0)
-                        
-                        spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
-                        
-                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 4.0:
-                            max_notional = await self._get_max_affordable_notional()
-                            if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
-                                async with self.portfolio_state_lock:
-                                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
-                                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
-                                self._initialize_symbol_structures([hot_sym])
-                                await self._prune_dead_symbols() 
-                                if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
-                                    await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
-                                logger.critical(f"[X-RAY] 🚀 DYNAMIC SWAP // {hot_sym} PASSED GATES AND INJECTED INTO MATRIX (Replaced {dead_sym}).")
-            except Exception as e: logger.error(f"[X-RAY] Omni-Swarm Director iteration failed: {e}", exc_info=True)
-
-    async def handle_incoming_kline_update(self, data: Dict[str, Any]):
-        symbol = data.get("symbol")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket: return
-        self._initialize_symbol_structures([symbol]) 
-        interval, candle = str(data["interval"]), data["candle_data"]
-        c_open, c_high, c_low, c_close, c_vol = map(float, [candle.get("open", 0), candle.get("high", 0), candle.get("low", 0), candle.get("close", 0), candle.get("volume", 0)])
-
-        async with self.symbol_locks[symbol]:
-            if feature_engine := self.feature_engines.get(symbol):
-                feature_engine.update_multi_timeframe_candle(timeframe=interval, open_p=c_open, high_p=c_high, low_p=c_low, close_p=c_close, volume=c_vol)
-                if str(interval) == str(self.timeframe) and symbol in self.screener_memory:
-                    self.screener_memory[symbol].setdefault("highs", deque(maxlen=150)).append(c_high)
-                    self.screener_memory[symbol].setdefault("lows", deque(maxlen=150)).append(c_low)
-                    self.screener_memory[symbol].setdefault("prices", deque(maxlen=1440)).append(c_close)
-                    self.screener_memory[symbol]["last_update_time"] = time.time()
-
-    async def handle_incoming_basket_screener_update(self, data: Dict[str, Any]):
-        if (symbol := data.get("symbol")) not in self.asset_basket and symbol not in self.shadow_basket: return
-        try:
-            if "turnover24h" in (raw_data := data.get("raw_data", {})):
-                turnover = float(raw_data["turnover24h"])
-                if symbol not in self.screener_metrics: self.screener_metrics[symbol] = {}
-                baseline = self.volatility_baseline.get(symbol, turnover)
-                if baseline > 0: self.screener_metrics[symbol]["vol_mult"] = min(10.0, max(0.1, turnover / baseline))
-                self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
-        except Exception as e: logger.debug(f"[X-RAY] Screener update parse failed for {symbol}: {e}")
-
-    async def run_universe_refresher(self):
-        try:
-            logger.info("🌌 V96.1 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
-            await self._fetch_exchange_tick_sizes()
-            
-            dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
-            
-            if not dynamic_basket or len(dynamic_basket) < 15:
-                dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=5_000_000.0)
-
-            async with self.portfolio_state_lock:
-                self.asset_basket = dynamic_basket[:15]
-                self.shadow_basket = dynamic_basket[15:25] if len(dynamic_basket) >= 25 else dynamic_basket[15:]
-                
-            await self._prune_dead_symbols() 
-            self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
-            self.force_dna_refresh.set() 
-            logger.info(f"✅ V96.1 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
-        except Exception as e:
-            logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
-
-    async def _universe_refresher_loop(self):
-        while True:
-            await asyncio.sleep(900)
-            await self.run_universe_refresher()
-
-    async def stream_manager_loop(self):
-        while True:
-            stream_feed = HighVelocityMultiFeed(
-                basket=self.asset_basket + self.shadow_basket[:10],
-                intervals=[self.timeframe, "60", "240"], 
-                orderbook_callback=self.handle_incoming_orderbook_tick, 
-                screener_callback=self.handle_incoming_basket_screener_update, 
-                kline_callback=self.handle_incoming_kline_update, 
-                trade_callback=self.handle_incoming_trade, 
-                engine_reference=self
-            )
-            self.stream_feed_instance = stream_feed  
-            stream_task = asyncio.create_task(stream_feed.initialize_multiplexed_stream())
-            
-            def _on_stream_done(t):
-                if not t.cancelled() and not self.stream_restart_event.is_set(): self.stream_restart_event.set()
-                    
-            stream_task.add_done_callback(_on_stream_done)
-            await self.stream_restart_event.wait()
-            stream_task.cancel()
-            stream_feed.terminate_all_feeds()
-            self.stream_restart_event.clear()
-            self.last_socket_reconnect = time.time() 
-            await asyncio.sleep(2)
-
-    async def run_exchange_state_reconciliation_daemon(self):
-        logger.info("🛡️ STATE RECONCILIATION DAEMON ONLINE: Polling exchange state every 15s.")
-        while True:
-            await asyncio.sleep(15)
-            try:
-                pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
-                if pos_response.get("retCode") != 0: continue
-                
-                active_symbols = [p["symbol"] for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
-                
-                async with self.portfolio_state_lock:
-                    for symbol in list(self.active_positions_map.keys()):
-                        if symbol not in active_symbols:
-                            if not (active_daemon := self.daemon_tasks.get(symbol)) or active_daemon.done():
-                                logger.warning(f"🧹 STATE RECONCILIATION: Purging phantom lock for {symbol}")
-                                self.active_positions_map.pop(symbol, None)
-                                self.risk_vault.update_position_ledger(symbol, 0.0)
-            except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
-
-
-    # ==============================================================================
-    # 🚀 V96.1 EVENT-DRIVEN LIFECYCLE DAEMON
-    # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
         for _ in range(5):  
