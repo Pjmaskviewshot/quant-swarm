@@ -1,8 +1,9 @@
 """
-💎 V58.0 TITANIUM APEX: OPTIMISTIC DECOUPLED MEMORY LEDGER
+💎 V95.0 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
 ----------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
+- Strict Sub-second Cloud Fallbacks & Graceful RAM Defaults
 - Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
 - Pure NumPy vectorization for shadow OHLC forensics
 - Upgraded Bayesian DNA Matrix utilizing K-Nearest Neighbors (KNN) 
@@ -47,6 +48,7 @@ class MemoryBank:
     def _safe_execute(self, query_builder, max_retries: int = 2):
         """
         Cloud faults instantly fail over without freezing the event loop.
+        Includes a 50ms micro-backoff for transient network packet loss.
         """
         for attempt in range(max_retries):
             try:
@@ -55,6 +57,7 @@ class MemoryBank:
                 if attempt == max_retries - 1:
                     logger.debug(f"[X-RAY] Supabase fault absorbed after {max_retries} attempts: {e}")
                     raise Exception(f"Supabase fault after {max_retries} attempts: {e}")
+                time.sleep(0.05)  # 50ms micro-backoff before retry
 
     def _parse_iso_timestamp(self, ts_str: str) -> datetime:
         if ts_str.endswith('Z'):
@@ -74,7 +77,6 @@ class MemoryBank:
         if features is None:
             features = {}
             
-        # 🚀 V58.0 UPGRADE: Feature mapping to support Log-MLOFI and Sector Impulse
         market_regime = features.get("market_regime", "UNKNOWN")
         # Map the new Log-MLOFI to the legacy z_obi database column seamlessly
         log_mlofi_z = features.get("log_mlofi_z", features.get("adaptive_obi_z", 0.0))
@@ -375,10 +377,13 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V58.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
+        🚀 V95.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
         Upgraded to cluster based on Log-MLOFI, Volume Multiplier, and Micro-Spread.
         Matches current multi-dimensional conditions against historical outcomes 
         to determine execution viability.
+        
+        CRITICAL FIX: Fully decoupled fallback. If the cloud database drops, this
+        instantly returns a neutral RAM default instead of raising an exception.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
@@ -452,7 +457,7 @@ class MemoryBank:
                 norm_mlofi = (c_log_mlofi - h_mlofi) / std_mlofi
                 norm_spread = (c_spread - h_spread_pct) / std_spread
                 
-                # 🚀 V58.0 KNN Distance Matrix: Higher weight to Log-MLOFI aggression (2.0)
+                # KNN Distance Matrix: Higher weight to Log-MLOFI aggression (2.0)
                 dist = math.sqrt((1.5 * norm_vol)**2 + (2.0 * norm_mlofi)**2 + (1.0 * norm_spread)**2)
                 distances.append({"distance": dist, "is_correct": 1.0 if row.get("is_correct") is True else 0.0})
 
@@ -491,7 +496,16 @@ class MemoryBank:
             return result_payload
 
         except Exception as e:
-            raise Exception(f"Latent DNA matching failed: {e}")
+            logger.error(f"[X-RAY] Latent DNA matching failed (Falling back to RAM defaults): {e}")
+            return {
+                "bayesian_edge": 0.50, 
+                "is_armed": True, # Default to safe pass-through if DB goes down, allowing entry matrix to filter
+                "matched_samples": 0, 
+                "cluster_win_rate": 0.50,
+                "win_rate": 0.50,
+                "shadow_sharpe": 0.0,
+                "promotion_event": "CLOUD_FAULT_FALLBACK"
+            }
 
     def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
         """Fetches aggregate daily metrics for the Telegram Mission Control dashboard."""
@@ -528,4 +542,8 @@ class MemoryBank:
             }
 
         except Exception as e:
-            raise Exception(f"Forensic summary fetch failed: {e}")
+            logger.debug(f"[X-RAY] Forensic summary fetch failed: {e}")
+            return {
+                "trade_count": 0, "net_pnl": 0.0, "fees_paid": 0.0,
+                "avg_slippage_bps": 0.0, "avg_holding_mins": 0.0, "win_rate": 0.0
+            }

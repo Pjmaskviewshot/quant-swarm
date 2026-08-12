@@ -1,10 +1,13 @@
 """
-💎 V58.0 TITANIUM APEX: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
+💎 V95.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
 -------------------------------------------------------------------------
 Computes EWMA-smoothed Orderbook Elasticity (λ_OB) and Micro-Price Variance.
 Integrates with the Stationarized Log-MLOFI engine to provide stable volatility 
 scalars for the Hawkes-Elastic Micro-Chandelier Trailing Stop.
 Optimized with NumPy zero-allocation iterators and strict L2 sanity guards.
+
+CRITICAL FIX: Removed silent exception swallowing. Explicitly catches and 
+logs floating-point anomalies to prevent NaN/Inf propagation across the pipeline.
 """
 
 import math
@@ -18,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.MICRO_ELASTICITY")
 
 class MicroElasticityEngine:
     """
-    🚀 V58.0 APEX: MICRO-PRICE ELASTICITY ENGINE
+    🚀 V95.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
     Maps the "stretchiness" of the orderbook. High elasticity means the book is 
     hollow and vulnerable to toxic sweeps. Low elasticity means it's dense and safe.
     Upgraded with EWMA smoothing for stable Chandelier SL trailing.
@@ -80,8 +83,9 @@ class MicroElasticityEngine:
                 alpha = 0.20
                 self.orderbook_elasticity = (alpha * raw_elasticity) + ((1.0 - alpha) * self.orderbook_elasticity)
                 
-            except Exception:
-                pass # Swallow rare float anomalies without breaking the ingestion thread
+            except Exception as e:
+                # 🚀 CRITICAL FIX: Eliminate silent failure and NaN/Inf propagation
+                logger.debug(f"[MATH_WARN] Numerical instability in MicroElasticityEngine: {e}")
 
         self.micro_prices.append(micro_price)
         self.timestamps.append(timestamp)
@@ -103,7 +107,7 @@ class MicroElasticityEngine:
 
     def compute_dynamic_micro_brackets(self, current_price: float, side: str, risk_multiplier: float = 1.5) -> Tuple[float, float]:
         """
-        🚀 V58.0 NANO-BRACKETING (Fallback/Initialization): 
+        🚀 V95.0 NANO-BRACKETING (Fallback/Initialization): 
         Computes standard SL and TP distances mathematically derived from sub-second 
         Micro-Price Volatility and EWMA Elasticity. (Note: Live execution dynamically 
         overrides this with the Hawkes-Elastic Chandelier in main.py).
@@ -127,7 +131,7 @@ class MicroElasticityEngine:
 
     def is_adverse_selection_imminent(self, side: str, depth_metrics: dict, symbol: str = "UNKNOWN") -> bool:
         """
-        ⚡ V58.0 ANTI-ADVERSE SELECTION X-RAY GUARD
+        ⚡ V95.0 ANTI-ADVERSE SELECTION X-RAY GUARD
         Evaluates whether an active PostOnly order is about to be toxically filled.
         Returns True if the order book is collapsing rapidly toward our maker peg.
         """

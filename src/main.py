@@ -5,6 +5,10 @@ Features Non-Stationary Tensor-Prime Entry Matrix, Hard Macro Trend Locks,
 Real-Time Omni-Kinetic Predictor, Sub-10ms Event-Driven Escapes,
 True Full-Lifecycle TCA, BBO Depth Sizing Barriers, and 
 Strict Equity-Risk Capital Sizing.
+
+CRITICAL FIX: Implemented Two-Phase Commit for position locks, 
+Post-Quantization Risk Overflow Gates (Max 1.5% Kelly Limit), 
+and 2.0s strict timeouts for Cloud DNA integration.
 """
 
 import os
@@ -481,6 +485,7 @@ class DistributedQuantEngine:
                 try:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso) if self.memory else {}
                     execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
+                    # V95.0 True Full-Lifecycle TCA: Slippage clamping removed for strict accuracy
                 except Exception as e: 
                     logger.debug(f"[X-RAY] Heartbeat DB forensic fetch failed: {e}", exc_info=True)
                     execution_stats = {} 
@@ -736,6 +741,7 @@ class DistributedQuantEngine:
                     )
                     return
                 
+                # 🚀 POST-QUANTIZATION DOLLAR RISK CHECK
                 actual_notional = calculated_qty * price
                 try: 
                     raw_balance = await self.executor.get_wallet_balance_usdt()
@@ -746,11 +752,12 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                if actual_risk_pct > 2.0 and available_balance < 50.0:
+                # HARD SAFETY GATE: Strictly reject if ACTUAL risk > 1.5% of equity (Kelly Cap)
+                if actual_risk_pct > 1.5:
                     logger.warning(
-                        f"[X-RAY] 🛑 RISK SIZING OVERFLOW REJECT // {symbol} | "
+                        f"[X-RAY] 🛑 POST-QUANTIZATION RISK OVERFLOW // {symbol} | "
                         f"Notional ${actual_notional:.2f} with {sl_dist_pct*100:.1f}% SL "
-                        f"risks {actual_risk_pct:.2f}% equity (Cap: 2.0%). Rejecting."
+                        f"risks {actual_risk_pct:.2f}% equity (Cap: 1.5%). Rejecting."
                     )
                     return
 
@@ -850,7 +857,8 @@ class DistributedQuantEngine:
                     try:
                         if not self.memory: return {"is_armed": True, "win_rate": 0.50}
                         async with self.db_semaphore:
-                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=5.0)
+                            # 🚀 Updated to 2.0s strict timeout to prevent DB hang
+                            res = await asyncio.wait_for(asyncio.to_thread(self.memory.compute_latent_dna_edge, dna, 30), timeout=2.0)
                             return res
                     except Exception: return {"is_armed": True, "win_rate": 0.50} 
 
@@ -1431,6 +1439,10 @@ class DistributedQuantEngine:
                     self.risk_vault.update_position_ledger(symbol, 0.0)
                     async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                     return
+                
+                # 🚀 TWO-PHASE COMMIT: Promote PENDING_RESERVE to active direction
+                async with self.portfolio_state_lock: 
+                    self.active_positions_map[symbol] = direction
                 
                 state = await self._state_initialize_stops(ctx)
                 

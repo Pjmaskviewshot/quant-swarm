@@ -1,11 +1,12 @@
 """
-💎 V58.0 TITANIUM APEX: ADAPTIVE FEATURE ENGINE
+💎 V88.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
-micro-whipsaws and stabilize order routing decisions. Eradicates 
-fixed-threshold Look-Ahead Bias by dynamically scaling archetypes 
-to the asset's realized volatility envelope.
+micro-whipsaws and stabilize order routing decisions. 
+
+CRITICAL FIX: Standardized Markov transition mechanics (Removed matrix 
+transpose corruption) to enforce true forward-probability state evolution.
 """
 
 import math
@@ -39,7 +40,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 V58.0 APEX: HIDDEN MARKOV MODEL (HMM) STATE PRIORS
+        # 🚀 HMM STATE PRIORS & TRANSITIONS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -78,7 +79,7 @@ class AdaptiveFeatureEngine:
 
     def _apply_kalman_smoothing(self, prices: np.ndarray) -> np.ndarray:
         """
-        🚀 V58.0 UPGRADE: 1D Kalman Filter
+        🚀 1D Kalman Filter
         Strips high-frequency microstructure noise from the raw price feed.
         Ensures the HMM evaluates the true macro-trend rather than reacting to chop.
         """
@@ -127,7 +128,7 @@ class AdaptiveFeatureEngine:
         raw_closes = np.array([float(c["close"]) for c in candles])
         volumes = np.array([float(c["volume"]) for c in candles])
         
-        # 🚀 V58.0: Filter raw prices to stabilize HMM transition state
+        # Filter raw prices to stabilize HMM transition state
         closes = self._apply_kalman_smoothing(raw_closes)
         
         try:
@@ -165,7 +166,8 @@ class AdaptiveFeatureEngine:
                     
                 log_emissions[i] = log_emission
                 
-            prior = np.dot(self.transition_matrix.T, self.state_probs)
+            # 🚀 CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
+            prior = np.dot(self.transition_matrix, self.state_probs)
             prior_log = np.log(prior + 1e-9)
             
             unnormalized_log_posterior = log_emissions + prior_log
