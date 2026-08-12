@@ -1,7 +1,8 @@
 """
-💎 V87.0 ULTRA-APEX NEURAL: EVENT-DRIVEN EXECUTION MATRIX
+💎 V95.0 ULTRA-APEX NEURAL: TENSOR-PRIME EXECUTION MATRIX
 ------------------------------------------------------------------------
-Features Real-Time Omni-Kinetic Predictor, Sub-10ms Event-Driven Escapes,
+Features Non-Stationary Tensor-Prime Entry Matrix, Hard Macro Trend Locks,
+Real-Time Omni-Kinetic Predictor, Sub-10ms Event-Driven Escapes,
 True Full-Lifecycle TCA, BBO Depth Sizing Barriers, and 
 Strict Equity-Risk Capital Sizing.
 """
@@ -37,6 +38,7 @@ from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
+from core.quantum_entry import QuantumEntryMatrix  # 🚀 V95.0 TENSOR-PRIME ENTRY
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock 
 from features.omni_scanner import GlobalOmniScanner   
@@ -61,7 +63,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V87.0_EVENT_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V95.0_TENSOR_PRIME")
 
 
 class DistributedQuantEngine:
@@ -72,7 +74,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V87.0 EVENT-DRIVEN QUANTUM MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V95.0 TENSOR-PRIME QUANTUM MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -112,6 +114,7 @@ class DistributedQuantEngine:
         self.vpin_clocks: Dict[str, VolumeSynchronizedClock] = {}
         self.feature_engines: Dict[str, AdaptiveFeatureEngine] = {}
         self.edge_gates: Dict[str, MicrostructureEdgeGate] = {}
+        self.entry_matrices: Dict[str, QuantumEntryMatrix] = {} # 🚀 V95.0 TENSOR-PRIME
         self.elasticity_engines: Dict[str, MicroElasticityEngine] = {} 
         
         self.screener_memory, self.screener_metrics, self.orderbook_snapshots, self.ram_dna_cache = {}, {}, {}, {}
@@ -182,6 +185,7 @@ class DistributedQuantEngine:
                     self.vpin_clocks.pop(key, None)
                     self.feature_engines.pop(key, None)
                     self.edge_gates.pop(key, None)
+                    self.entry_matrices.pop(key, None) # 🚀 V95.0 Cleanup
                     self.elasticity_engines.pop(key, None)
                     self.spread_history.pop(key, None)
                     self.symbol_locks.pop(key, None)
@@ -235,6 +239,7 @@ class DistributedQuantEngine:
             if s not in self.vpin_clocks: self.vpin_clocks[s] = VolumeSynchronizedClock(bucket_volume=self._get_vpin_bucket_size(s), symbol=s)
             if s not in self.feature_engines: self.feature_engines[s] = AdaptiveFeatureEngine(memory_window_short=500, memory_window_long=3600)
             if s not in self.edge_gates: self.edge_gates[s] = MicrostructureEdgeGate(window_size=100)
+            if s not in self.entry_matrices: self.entry_matrices[s] = QuantumEntryMatrix(window_size=1000) # 🚀 V95.0 TENSOR-PRIME MATRIX
             if s not in self.elasticity_engines: self.elasticity_engines[s] = MicroElasticityEngine() 
             if s not in self.symbol_locks: self.symbol_locks[s] = asyncio.Lock()
             if s not in self.eval_semaphores: self.eval_semaphores[s] = asyncio.Semaphore(1)
@@ -284,10 +289,8 @@ class DistributedQuantEngine:
         max_risk_pct = 0.015
         max_risk_dollars = equity * max_risk_pct
 
-        # Calculate max allowable notional based on Stop Loss distance
         sl_pct = max(0.01, sl_dist_pct)
         allowed_notional = max_risk_dollars / sl_pct
-
         bybit_min_notional = 6.50
 
         # On small accounts (<$50), if allowed notional is below Bybit's minimum,
@@ -302,6 +305,22 @@ class DistributedQuantEngine:
     def _align_price(self, symbol: str, price: float) -> str:
         tick_dec = Decimal(str(self.tick_sizes.get(symbol, 0.0001)))
         return str(Decimal(str(price)).quantize(tick_dec, rounding=ROUND_HALF_UP))
+
+    def _get_hard_macro_trend(self, symbol: str) -> str:
+        """
+        🚀 V88.0 HARD MACRO TREND FILTER
+        Evaluates 1H/4H structure using 15m price memory.
+        """
+        if symbol not in self.screener_memory or len(self.screener_memory[symbol]["prices"]) < 28:
+            return "FLAT"
+        prices = list(self.screener_memory[symbol]["prices"])
+        ma7 = sum(prices[-7:]) / 7
+        ma28 = sum(prices[-28:]) / 28
+        
+        # Require a clear 0.2% separation to define a trend
+        if ma7 > ma28 * 1.002: return "BULLISH"
+        if ma7 < ma28 * 0.998: return "BEARISH"
+        return "FLAT"
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
         try:
@@ -381,9 +400,26 @@ class DistributedQuantEngine:
                 direction = "BUY" if pos["side"].upper() == "BUY" else "SELL"
                 atr = entry_price * 0.015 
                 
+                # 🚀 AMNESIA RECOVERY FIX: Rebuild max_favorable_price from historical wicks
+                historical_max_favorable = entry_price
+                try:
+                    create_time_ms = int(pos.get("createdTime", time.time() * 1000))
+                    klines = await self.executor.safe_call(self.executor.client.get_kline, category="linear", symbol=symbol, interval="15", limit=50)
+                    if klines.get("retCode") == 0:
+                        for k in klines.get("result", {}).get("list", []):
+                            k_time = int(k[0])
+                            if k_time >= create_time_ms - 900000:
+                                k_high, k_low = float(k[2]), float(k[3])
+                                if direction == "BUY" and k_high > historical_max_favorable: historical_max_favorable = k_high
+                                elif direction == "SELL" and k_low < historical_max_favorable: historical_max_favorable = k_low
+                except Exception as e: logger.debug(f"Amnesia recovery fetch failed for {symbol}: {e}")
+                
                 async with self.portfolio_state_lock: self.active_positions_map[symbol] = direction
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 5}
-                self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, 5, "RANGING", is_recovery=True))
+                self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
+                    symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, 5, "RANGING", 
+                    is_recovery=True, historical_favorable_price=historical_max_favorable
+                ))
         except Exception as e: logger.error(f"[X-RAY] Failed synchronizing exchange state: {e}", exc_info=True)
 
     async def cleanup_stale_locks(self):
@@ -445,7 +481,6 @@ class DistributedQuantEngine:
                 try:
                     def _fetch(): return self.memory.get_forensic_execution_summary(today_start_iso) if self.memory else {}
                     execution_stats = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=5.0)
-                    # V87.0 True Full-Lifecycle TCA: Slippage clamping removed for strict accuracy
                 except Exception as e: 
                     logger.debug(f"[X-RAY] Heartbeat DB forensic fetch failed: {e}", exc_info=True)
                     execution_stats = {} 
@@ -480,7 +515,7 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V87.0 APEX").replace("V69.0 APEX", "V87.0 APEX").replace("V70.0 APEX", "V87.0 APEX").replace("V71.0 APEX", "V87.0 APEX").replace("V72.0 APEX", "V87.0 APEX").replace("V75.0 APEX", "V87.0 APEX").replace("V85.0 APEX", "V87.0 APEX").replace("V86.0 APEX", "V87.0 APEX")
+                report = report.replace("V68.5 APEX", "V95.0 APEX").replace("V88.0 APEX", "V95.0 APEX").replace("V87.0 APEX", "V95.0 APEX").replace("V86.0 APEX", "V95.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
@@ -499,13 +534,11 @@ class DistributedQuantEngine:
         clock = self.vpin_clocks.get(symbol)
 
         # 🚀 EVENT-DRIVEN TICK ESCAPES
-        # Triggers sub-10ms escape checks for active positions directly from WebSocket tick stream
         if symbol in self.active_contexts:
             ctx = self.active_contexts[symbol]
             ctx["latest_tick_price"] = price
             ctx["tick_event"].set()
             
-            # Continue updating necessary microstructure indicators for the live trade context
             self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
             if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
             if feature_engine: feature_engine.push_trade_tick([trade_data])
@@ -585,14 +618,43 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 HTF TREND HARD-LOCK GATE
-                htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
-                if action == "BUY" and htf_bias < -0.20:
-                    logger.warning(f"[X-RAY] 🛑 HTF TREND VETO // {symbol} BUY blocked. 1H/4H Trend is Bearish (Bias: {htf_bias:.2f}).")
+                # 🚀 V88.0 HARD MACRO TREND LOCK
+                macro_trend = self._get_hard_macro_trend(symbol)
+                if action == "BUY" and macro_trend == "BEARISH":
+                    logger.warning(f"[X-RAY] 🛑 MACRO TREND LOCK // {symbol} BUY rejected. Fighting 1H/4H Downtrend.")
                     return
-                elif action == "SELL" and htf_bias > 0.20:
-                    logger.warning(f"[X-RAY] 🛑 HTF TREND VETO // {symbol} SELL blocked. 1H/4H Trend is Bullish (Bias: {htf_bias:.2f}).")
+                elif action == "SELL" and macro_trend == "BULLISH":
+                    logger.warning(f"[X-RAY] 🛑 MACRO TREND LOCK // {symbol} SELL rejected. Fighting 1H/4H Uptrend.")
                     return
+
+                # 🚀 V95.0 TENSOR-PRIME ENTRY MATRIX
+                entry_matrix = self.entry_matrices.get(symbol)
+                if entry_matrix:
+                    btc_eng = self.stat_engines.get("BTCUSDT")
+                    eth_eng = self.stat_engines.get("ETHUSDT")
+                    
+                    entry_matrix.update_macro_flows(
+                        asset_ofi_z=stat_engine.ofi_fast_z,
+                        btc_ofi_z=getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0,
+                        eth_ofi_z=getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
+                    )
+                    entry_matrix.update_mlofi_state(stat_engine.ofi_fast_z)
+
+                    bids_raw = ob.get("bids", [])
+                    asks_raw = ob.get("asks", [])
+                    htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
+                    
+                    alpha_verdict = entry_matrix.evaluate_entry_alpha(
+                        symbol=symbol,
+                        raw_prob=prob_success,
+                        intended_action=action,
+                        bids=bids_raw,
+                        asks=asks_raw,
+                        htf_bias=htf_bias
+                    )
+
+                    if not alpha_verdict["approved"]:
+                        return  # Hard-block entries that are not top percentile anomalies
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 if structural_verdict["action"] == "HOLD": return
@@ -640,7 +702,8 @@ class DistributedQuantEngine:
                 if prob_success < max(dynamic_gate, dna_stats.get("cluster_win_rate", dna_stats.get("win_rate", 0.48))): 
                     return
                     
-                prob_success += (htf_bias * 0.04) if action == "BUY" else -(htf_bias * 0.04)
+                htf_bias_offset = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
+                prob_success += (htf_bias_offset * 0.04) if action == "BUY" else -(htf_bias_offset * 0.04)
 
                 if hasattr(self.sor, 'estimate_orderbook_slippage_bps'):
                     est_slippage = self.sor.estimate_orderbook_slippage_bps(ob, action, 6.50 / price, price)
@@ -924,7 +987,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V87.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V95.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -939,7 +1002,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V87.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V95.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -994,7 +1057,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V87.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V95.0 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1007,9 +1070,14 @@ class DistributedQuantEngine:
                     ctx["actual_entry"] = float(pos_data[0].get("avgPrice", ctx["current_price"]))
                     ctx["actual_qty_filled"] = float(pos_data[0].get("size", ctx["actual_qty_filled"]))
                     
-                    ctx["highest_since_entry"] = ctx["actual_entry"] if ctx["is_buy"] else None
-                    ctx["lowest_since_entry"] = ctx["actual_entry"] if not ctx["is_buy"] else None
-                    ctx["max_favorable_price"] = ctx["actual_entry"]
+                    if "historical_favorable_price" in ctx:
+                        ctx["max_favorable_price"] = ctx["historical_favorable_price"]
+                        ctx["highest_since_entry"] = ctx["historical_favorable_price"] if ctx["is_buy"] else ctx["actual_entry"]
+                        ctx["lowest_since_entry"] = ctx["historical_favorable_price"] if not ctx["is_buy"] else ctx["actual_entry"]
+                    else:
+                        ctx["highest_since_entry"] = ctx["actual_entry"] if ctx["is_buy"] else None
+                        ctx["lowest_since_entry"] = ctx["actual_entry"] if not ctx["is_buy"] else None
+                        ctx["max_favorable_price"] = ctx["actual_entry"]
                     
                     return "INITIALIZE_STOPS"
             except Exception as e: 
@@ -1046,11 +1114,6 @@ class DistributedQuantEngine:
         return "ACTIVE_MONITORING"
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
-        """
-        💎 V87.0 OMNI-KINETIC ORACLE: UNIVERSAL WICK SNIPER
-        Calculates dynamic thresholds based on real-time CVD, Micro-Price Dislocation,
-        and enforces Universal Peak Retracement harvesting across ALL regimes.
-        """
         is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
         
         stat_engine = ctx["stat_engine"]
@@ -1062,7 +1125,6 @@ class DistributedQuantEngine:
         regime = ctx.get("regime", "TRENDING")
         vol_mult = ctx.get("vol_mult", 1.0)
         
-        # 🚀 OMNI-KINETIC MATH ENGINE
         hist = ctx.get("kinetic_history", {})
         accel_z, ask_refill_z, bid_refill_z, recent_dislocation, composite_macro_cov = 0.0, 0.0, 0.0, 0.0, 0.0
         
@@ -1093,7 +1155,6 @@ class DistributedQuantEngine:
         ctx["flow_alignment"] = cvd_z if is_buy else -cvd_z
         ctx["accel_z"] = accel_z
 
-        # 1. OMNI-KINETIC DEATH EXIT
         if is_buy:
             if accel_z < -2.0 and ask_refill_z > 2.0 and recent_dislocation < -1.5:
                 logger.critical(f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} BUY momentum scientifically dead. (Flow Z: {accel_z:.2f}σ, Ask Refill: {ask_refill_z:.2f}σ).")
@@ -1113,13 +1174,9 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # 🚀 2. UNIVERSAL WICK SNIPER (PEAK RETRACEMENT)
         if r_multiple >= 0.40:
             retracement_ratio = (r_multiple - current_r) / (r_multiple + 1e-9)
-            
-            # Tighter allowance in Mean Reverting markets because they bounce violently
             max_retrace = 0.25 if regime == "MEAN_REVERTING" else 0.35
-            
             if retracement_ratio >= max_retrace:
                 logger.warning(
                     f"⚡ WICK SNIPER EJECTION // {symbol} Dropped {retracement_ratio*100:.0f}% from peak of +{r_multiple:.2f}R. "
@@ -1128,7 +1185,6 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # 3. DYNAMIC REGIME PROFIT LOCK
         if regime == "MEAN_REVERTING":
             dynamic_harvest_r = max(0.40, min(1.00, 0.60 * vol_mult))
             if current_r >= dynamic_harvest_r:
@@ -1136,7 +1192,6 @@ class DistributedQuantEngine:
                 await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
                 return "ESCAPED"
 
-        # 4. ADVERSE PRICE-DRIFT INVALIDATION
         if current_r <= -0.30:
             logger.critical(
                 f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
@@ -1145,7 +1200,6 @@ class DistributedQuantEngine:
             await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
             return "ESCAPED"
 
-        # 5. HAWKES STRUCTURAL CASCADE EJECTION
         inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
         alpha_h = max(0.01, abs(hawkes_z) * 0.3)
         beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
@@ -1208,11 +1262,6 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_manage_trailing_stops(self, ctx: dict):
-        """
-        💎 V87.0 OMNI-KINETIC ADAPTIVE ELASTICITY
-        Trailing stops expand if order flow supports the trade,
-        and constrict if flow turns toxic.
-        """
         symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
         r_mult = ctx["r_multiple"]
         current_r = ctx["current_r"]
@@ -1223,19 +1272,15 @@ class DistributedQuantEngine:
         live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
 
         flow_alignment = ctx.get("flow_alignment", 0.0)
-        
-        # Dynamic Trailing Multiplier
         dynamic_trail_mult = max(0.5, min(2.5, 1.2 + (flow_alignment * 0.4)))
 
         new_sl_val = ctx["current_sl"]
         
-        # Continuous Elastic Trail
         if r_mult >= 1.0:
             trail_dist = live_atr * dynamic_trail_mult
             raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
             new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
             
-        # Dynamic Break-Even Activation
         dynamic_be_threshold = max(0.20, min(0.80, 0.30 * vol_mult))
         
         if flow_alignment > 1.5:
@@ -1245,7 +1290,6 @@ class DistributedQuantEngine:
             be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0020)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0020))
             new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
 
-        # Dynamic Zombie Compression
         if current_r < 0 and live_atr < (ctx["atr"] * 0.7):
             compressed_sl = (ctx["actual_entry"] - (ctx["initial_risk"] * 0.40)) if is_buy else (ctx["actual_entry"] + (ctx["initial_risk"] * 0.40))
             new_sl_val = max(ctx["current_sl"], compressed_sl) if is_buy else min(ctx["current_sl"], compressed_sl)
@@ -1254,7 +1298,6 @@ class DistributedQuantEngine:
             ctx["current_sl"] = new_sl_val
             ctx["requires_sl_update"] = True
 
-        # Infinite TP Expansion
         tp_proximity_r = abs(ctx["current_tp"] - safe_c_price) / (ctx["initial_risk"] + 1e-9)
         if tp_proximity_r < 0.8:
             expanded_tp = ctx["current_tp"] + (ctx["initial_risk"] * 2.5) if is_buy else ctx["current_tp"] - (ctx["initial_risk"] * 2.5)
@@ -1283,17 +1326,12 @@ class DistributedQuantEngine:
                     ctx["last_api_update_time"] = ctx["now"]
                     ctx["last_sent_sl_str"] = new_sl_str
                     ctx["last_sent_tp_str"] = new_tp_str
-                    
-                    if ctx["requires_tp_update"]: logger.info(f"[X-RAY] 🌌 INFINITE TP EXPANSION // {symbol} Target pushed to {new_tp_str}.")
-                    if ctx["requires_sl_update"]: logger.info(f"[X-RAY] 🛡️ ELASTIC RATCHET // {symbol} SL safely elevated to {new_sl_str}.")
-
 
     async def _state_settle_trade(self, ctx: dict):
         symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
         
         net_pnl, real_outcome, slippage_bps, fees, exit_price = 0.0, "RECONCILED", 0.0, 0.0, actual_entry
         
-        # 🚀 10-Second Retry Loop for Bybit API Latency
         for _ in range(5):
             await asyncio.sleep(2.0) 
             try: 
@@ -1315,7 +1353,6 @@ class DistributedQuantEngine:
         arrival_price = ctx.get("arrival_price", actual_entry)
         trigger_price = ctx.get("exit_trigger_price", exit_price)
 
-        # 🚀 TRUE FULL-LIFECYCLE TCA (Un-clamped)
         if ctx["is_buy"]:
             entry_slip = ((actual_entry - arrival_price) / (arrival_price + 1e-9)) * 10000.0
             exit_slip = ((trigger_price - exit_price) / (trigger_price + 1e-9)) * 10000.0
@@ -1346,7 +1383,7 @@ class DistributedQuantEngine:
         async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
         self.risk_vault.update_position_ledger(symbol, 0.0)
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
         async with self.execution_semaphore:
             ctx = {
                 "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
@@ -1375,6 +1412,7 @@ class DistributedQuantEngine:
                 "latest_tick_price": current_price,
                 "exit_trigger_price": current_price
             }
+            if historical_favorable_price: ctx["historical_favorable_price"] = historical_favorable_price
             
             ctx["scaled_levels"] = {ctx["r_t1"]: False, ctx["r_t2"]: False, ctx["r_t3"]: False}
 
@@ -1402,7 +1440,6 @@ class DistributedQuantEngine:
                     ctx["available_balance"] = 12.90
                     
                 while state == "ACTIVE_MONITORING":
-                    # 🚀 Wait for exact tick arrival (bypasses static sleep loop)
                     try:
                         await asyncio.wait_for(ctx["tick_event"].wait(), timeout=1.0)
                         ctx["tick_event"].clear()
@@ -1429,7 +1466,6 @@ class DistributedQuantEngine:
                     ctx["requires_tp_update"] = False
                     ctx["vol_mult"] = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
 
-                    # 🚀 OMNI-KINETIC DATA INGESTION
                     micro_price = (best_bid * ask_v + best_ask * bid_v) / (bid_v + ask_v + 1e-9)
                     mid_price = (best_bid + best_ask) / 2.0
                     dislocation_bps = ((micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
@@ -1614,7 +1650,7 @@ class DistributedQuantEngine:
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
-        # 🚀 V87.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
+        # 🚀 V95.0 25-NODE EXPANDED DATASET BOOT WITH GUARANTEED 15 LIVE SLOTS
         await self.run_universe_refresher()
         
         daemons = [
