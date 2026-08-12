@@ -1,7 +1,7 @@
 """
-💎 V100.1 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
+💎 V100.2 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
 ------------------------------------------------------------------------
-Restored Universe Refresher module. Operates exclusively on real-time 
+All structural daemons fully restored. Operates exclusively on real-time 
 microsecond order flow, continuous manifold execution weights, and 
 non-stationary Tensor-Prime anomaly mapping.
 """
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V100.1_CONTINUOUS_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V100.2_CONTINUOUS_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V100.1 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V100.2 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -855,6 +855,37 @@ class DistributedQuantEngine:
                             if self.memory: await asyncio.wait_for(asyncio.to_thread(self.memory.resolve_batch_historical_predictions, list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
                         except Exception as e: logger.debug(f"[X-RAY] Shadow resolution batch timeout: {e}", exc_info=True)
             except Exception as e: logger.error(f"[X-RAY] Shadow resolution daemon error: {e}", exc_info=True)
+
+    async def run_omni_swarm_director(self):
+        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE: Monitoring Global Vectors.")
+        banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", "SSPCUSDT"]
+        while True:
+            await asyncio.sleep(15) 
+            try:
+                protected_symbols = set()
+                async with self.portfolio_state_lock: protected_symbols = set(self.active_positions_map.keys())
+                dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
+                
+                if dead_sym and hot_sym and not any(b in hot_sym for b in banned_keywords):
+                    tick_res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear", symbol=hot_sym)
+                    if tick_res.get("retCode") == 0 and tick_res.get("result", {}).get("list"):
+                        t_data = tick_res["result"]["list"][0]
+                        bid, ask, turnover = float(t_data.get("bid1Price", 0.0) or 0.0), float(t_data.get("ask1Price", 0.0) or 0.0), float(t_data.get("turnover24h", 0.0) or 0.0)
+                        
+                        spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
+                        
+                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 4.0:
+                            max_notional = await self._get_max_affordable_notional()
+                            if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
+                                async with self.portfolio_state_lock:
+                                    if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
+                                    if hot_sym not in self.asset_basket: self.asset_basket.append(hot_sym)
+                                self._initialize_symbol_structures([hot_sym])
+                                await self._prune_dead_symbols() 
+                                if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
+                                    await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
+                                logger.critical(f"[X-RAY] 🚀 DYNAMIC SWAP // {hot_sym} PASSED GATES AND INJECTED INTO MATRIX (Replaced {dead_sym}).")
+            except Exception as e: logger.error(f"[X-RAY] Omni-Swarm Director iteration failed: {e}", exc_info=True)
 
     async def run_universe_refresher(self):
         try:
