@@ -1,9 +1,9 @@
 ﻿"""
-💎 V1.0 PRECISION MATRIX: ZERO-LAG ADAPTIVE CORE
+💎 V2.0 ADAPTIVE CORE: ZERO-DISCARD ENGINE
 ------------------------------------------------------------------------
 Operates exclusively on real-time microsecond order flow, strict 
 binary percentile filtering, and non-stationary Tensor-Prime anomalies.
-Includes Strict Small Account Safety Limits and Zero-Spam Sniper Gates.
+Features V2.0 Dynamic Stop Compression to eliminate small-account discards.
 """
 
 import os
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V1.0_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V2.0_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V1.0 PRECISION MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V2.0 ADAPTIVE MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -490,8 +490,8 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                # Sanitize telegram versions to V1.0
-                report = report.replace("V68.5 APEX", "V1.0 APEX").replace("V96.1 APEX", "V1.0 APEX").replace("V100.4 APEX", "V1.0 APEX").replace("V100.0 APEX", "V1.0 APEX")
+                # Sanitize telegram versions to V2.0
+                report = report.replace("V1.0 APEX", "V2.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -648,7 +648,7 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 V1.0 TENSOR-PRIME MANIFOLD & SNIPER GATE
+                # 🚀 V2.0 TENSOR-PRIME MANIFOLD & SNIPER GATE
                 entry_matrix = self.entry_matrices.get(symbol)
                 exec_weight = 1.0
                 if entry_matrix:
@@ -692,9 +692,6 @@ class DistributedQuantEngine:
                 prob_success = min(0.95, prob_success * edge_weight)
 
                 routing_mode = structural_verdict.get("routing", "STANDARD")
-
-                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
-
                 prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
 
                 async with self.portfolio_state_lock: 
@@ -727,12 +724,30 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                # 🚀 V1.0 SMALL ACCOUNT SAFETY BLOCK
+                # 🚀 V2.0 ADAPTIVE MICRO-ACCOUNT SIZING (Zero Discards)
                 if available_balance < 50.0 and actual_risk_pct > 3.0:
-                    # Silently reject to keep logs clean from minimum order size spam
-                    return
+                    target_risk_dollars = available_balance * 0.025  # Force 2.5% max risk
+                    compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
+                    compressed_sl_pct = max(0.012, compressed_sl_pct)  # Floor at 1.2% distance
+                    
+                    # Back-calculate ATR so downstream engine reconstructs the compressed SL
+                    sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
+                    atr = (compressed_sl_pct * price) / sl_atr_mult
+                    
+                    # Re-calculate Net EV with the newly compressed tight stop
+                    tp_dist_pct = compressed_sl_pct * dynamic_rr_ratio
+                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * compressed_sl_pct) - (spread_cost * 0.5)
+
+                    logger.info(
+                        f"[X-RAY] 🛠️ DYNAMIC STOP COMPRESSION // {symbol} | "
+                        f"Compressed SL to {compressed_sl_pct*100:.2f}% to fit order safely."
+                    )
                 elif actual_risk_pct > 2.0 and available_balance >= 50.0:
+                    # Standard logic for larger accounts
                     calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9)
+                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
+                else:
+                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
 
                 try:
                     payload = {
@@ -749,7 +764,7 @@ class DistributedQuantEngine:
                             "liquidity_density_ratio": vol_mult, 
                             "bid_ask_spread": spread_cost, 
                             "reasoning": structural_verdict.get("reasoning", "CONTINUOUS_MANIFOLD_ALPHA"), 
-                            "ai_verdict": "V1.0_PRECISION_EXECUTION"
+                            "ai_verdict": "V2.0_ADAPTIVE_EXECUTION"
                         },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
@@ -924,7 +939,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V1.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V2.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -939,7 +954,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V1.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V2.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -994,7 +1009,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V1.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V2.0 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:

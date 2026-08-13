@@ -1,9 +1,9 @@
 ﻿"""
-ðŸ’Ž V1.0 TENSOR-PRIME ENTRY MATRIX (PRECISION SNIPER CORE)
+💎 V2.0 ADAPTIVE DYNAMIC ENTRY MATRIX (REGIME-AWARE SNIPER)
 -------------------------------------------------------------------------
-Re-instates Binary Veto Gates while maintaining Dynamic Empirical CDF 
-Ranking. Only dispatches entries that represent true statistical anomalies 
-(>=85th Percentile) with positive macro-flow alignment. Eliminates log spam.
+Eradicates fixed static percentages. Dynamically scales entry thresholds, 
+macro-flow alignment, and execution weights based on real-time Kaufman 
+Market Efficiency and Order Book Convexity.
 """
 
 import math
@@ -17,47 +17,52 @@ logger = logging.getLogger("QUANT_CORE.TENSOR_PRIME_ENTRY")
 
 class QuantumEntryMatrix:
     """
-    ðŸš€ DYNAMIC BINARY TENSOR ALPHA ENGINE
-    Enforces strict pass/fail gates. Filters noise early before 
-    sending payloads to the Capital Auction Queue.
+    🚀 V2.0 DYNAMIC ADAPTIVE ALPHA ENGINE
+    Dynamically adjusts signal approval thresholds based on real-time market efficiency.
     """
     def __init__(self, window_size: int = 1000):
         self.window_size = window_size
-        
-        # 1. Microstructure Vectors
         self.mlofi_history = deque(maxlen=window_size)
         self.mlofi_velocity = deque(maxlen=window_size)
         self.mlofi_acceleration = deque(maxlen=window_size)
         
-        # 2. Dynamic Covariance Tensors
         self.asset_flow_history = deque(maxlen=window_size)
         self.btc_flow_history = deque(maxlen=window_size)
         self.eth_flow_history = deque(maxlen=window_size)
         
-        # 3. Empirical CDF Ranking Buffers
         self.convexity_history = deque(maxlen=window_size)
         self.composite_alpha_history = deque(maxlen=window_size)
+        self.efficiency_history = deque(maxlen=window_size)
 
     def _get_percentile_rank(self, value: float, history_buffer: deque) -> float:
-        """
-        ðŸš€ EMPIRICAL CDF (eCDF) RANKING
-        Calculates exactly what percentile the current value is compared 
-        to the rolling historical window.
-        """
-        if len(history_buffer) < 30:
-            return 0.50  # Default to 50th percentile while calibrating
-            
+        if len(history_buffer) < 20:
+            return 0.50 
         arr = np.array(history_buffer)
         return float(np.sum(arr < value) / len(arr))
 
+    def _calculate_market_efficiency(self, window: int = 20) -> float:
+        """
+        Calculates Kaufman Efficiency Ratio (KER).
+        1.0 = Pure Trend (Low friction, lower gate threshold)
+        0.0 = Pure Chop (High friction, strict gate threshold)
+        """
+        if len(self.mlofi_history) < window:
+            return 0.50
+        
+        recent = list(self.mlofi_history)[-window:]
+        net_change = abs(recent[-1] - recent[0])
+        total_path = sum(abs(recent[i] - recent[i-1]) for i in range(1, len(recent))) + 1e-9
+        
+        ker = net_change / total_path
+        self.efficiency_history.append(ker)
+        return ker
+
     def update_macro_flows(self, asset_ofi_z: float, btc_ofi_z: float, eth_ofi_z: float):
-        """Ingests high-speed flow Z-scores for macro alignment."""
         self.asset_flow_history.append(asset_ofi_z)
         self.btc_flow_history.append(btc_ofi_z)
         self.eth_flow_history.append(eth_ofi_z)
 
     def update_mlofi_state(self, current_mlofi: float, dt: float = 1.0):
-        """Tracks 1st and 2nd derivatives of Log-MLOFI for tape acceleration."""
         self.mlofi_history.append(current_mlofi)
         if len(self.mlofi_history) >= 2:
             velocity = (self.mlofi_history[-1] - self.mlofi_history[-2]) / max(0.001, dt)
@@ -67,7 +72,6 @@ class QuantumEntryMatrix:
                 self.mlofi_acceleration.append(accel)
 
     def calculate_depth_convexity(self, bids: List[List[float]], asks: List[List[float]], decay_alpha: float = 0.3) -> float:
-        """Calculates exponential orderbook depth convexity."""
         if not bids or not asks:
             return 1.0
         limit = min(10, len(bids), len(asks))
@@ -92,74 +96,72 @@ class QuantumEntryMatrix:
         asks: List[List[float]], 
         htf_bias: float
     ) -> Dict[str, Any]:
-        """
-        ðŸš€ BINARY SNIPER EVALUATOR
-        Hard-blocks weak signals, macro conflicts, and noisy order flow.
-        Returns approved=True ONLY when alpha energy exceeds strict bounds.
-        """
-        # 1. HARD GATE: Calibrating Check
-        if len(self.mlofi_acceleration) < 30 or len(self.convexity_history) < 30:
-            return {"approved": False, "alpha_score": 0.0, "reason": "CALIBRATING_DATA_BUFFERS"}
+        if len(self.mlofi_acceleration) < 20 or len(self.convexity_history) < 20:
+            return {"approved": False, "alpha_score": 0.0, "reason": "CALIBRATING_BUFFERS"}
+
+        # 1. Real-Time Efficiency Rating
+        market_efficiency = self._calculate_market_efficiency()
+
+        # 2. Dynamic Threshold Shift
+        # High efficiency (trending) -> Gate lowers to 60th percentile
+        # Low efficiency (choppy) -> Gate tightens to 88th percentile
+        dynamic_percentile_gate = 0.88 - (market_efficiency * 0.28)
+        dynamic_min_score = 12.0 - (market_efficiency * 7.0)
 
         base_score = max(0.0, (raw_prob - 0.50) * 100.0)
 
-        # 2. Acceleration Derivative Rank
         current_accel = self.mlofi_acceleration[-1] if self.mlofi_acceleration else 0.0
         accel_percentile = self._get_percentile_rank(current_accel, self.mlofi_acceleration)
         
         accel_score = 0.0
-        if intended_action == "BUY" and accel_percentile > 0.70:
-            accel_score = (accel_percentile - 0.70) * 100.0
-        elif intended_action == "SELL" and accel_percentile < 0.30:
-            accel_score = ((1.0 - accel_percentile) - 0.70) * 100.0
+        if intended_action == "BUY" and accel_percentile > 0.55:
+            accel_score = (accel_percentile - 0.55) * 100.0
+        elif intended_action == "SELL" and accel_percentile < 0.45:
+            accel_score = ((1.0 - accel_percentile) - 0.55) * 100.0
 
-        # 3. Macro Composite Sync & Hard Conflict Veto
+        # Macro Alignment
         btc_z = self.btc_flow_history[-1] if self.btc_flow_history else 0.0
         eth_z = self.eth_flow_history[-1] if self.eth_flow_history else 0.0
         macro_composite = (btc_z * 0.6) + (eth_z * 0.4)
 
-        # HARD VETO: Do not trade directly against strong macro flow
-        if intended_action == "BUY" and macro_composite < -1.5:
-            return {"approved": False, "alpha_score": 0.0, "reason": f"HARD_MACRO_BEARISH_VETO ({macro_composite:.2f}Ïƒ)"}
-        elif intended_action == "SELL" and macro_composite > 1.5:
-            return {"approved": False, "alpha_score": 0.0, "reason": f"HARD_MACRO_BULLISH_VETO ({macro_composite:.2f}Ïƒ)"}
+        if intended_action == "BUY" and macro_composite < -1.8:
+            return {"approved": False, "alpha_score": 0.0, "reason": "MACRO_BEARISH_CONFLICT"}
+        elif intended_action == "SELL" and macro_composite > 1.8:
+            return {"approved": False, "alpha_score": 0.0, "reason": "MACRO_BULLISH_CONFLICT"}
 
-        # 4. Depth Convexity Rank
         convexity_ratio = self.calculate_depth_convexity(bids, asks)
         convexity_percentile = self._get_percentile_rank(convexity_ratio, self.convexity_history)
         
         convexity_score = 0.0
-        if intended_action == "BUY" and convexity_percentile > 0.70:
-            convexity_score = (convexity_percentile - 0.70) * 50.0
-        elif intended_action == "SELL" and convexity_percentile < 0.30:
-            convexity_score = ((1.0 - convexity_percentile) - 0.70) * 50.0
+        if intended_action == "BUY" and convexity_percentile > 0.55:
+            convexity_score = (convexity_percentile - 0.55) * 50.0
+        elif intended_action == "SELL" and convexity_percentile < 0.45:
+            convexity_score = ((1.0 - convexity_percentile) - 0.55) * 50.0
 
-        # Compute Raw Alpha Score
         raw_alpha_score = base_score + accel_score + convexity_score
         self.composite_alpha_history.append(raw_alpha_score)
 
         current_alpha_percentile = self._get_percentile_rank(raw_alpha_score, self.composite_alpha_history)
 
-        # 5. HARD BINARY APPROVAL THRESHOLD
-        # Requires score to be in top 15% (>= 85th percentile) AND score > 12.0
-        if current_alpha_percentile >= 0.85 and raw_alpha_score >= 12.0:
-            execution_weight = min(1.5, max(0.5, raw_alpha_score / 20.0))
+        # 3. Dynamic Approval Evaluation
+        if current_alpha_percentile >= dynamic_percentile_gate and raw_alpha_score >= dynamic_min_score:
+            execution_weight = min(1.8, max(0.4, raw_alpha_score / 15.0))
             
             logger.critical(
-                f"ðŸ”¥ TENSOR SNIPER ENTRY APPROVED // {symbol} {intended_action} | "
-                f"Alpha Score: {raw_alpha_score:.1f} (P{current_alpha_percentile*100:.1f}) | Exec Weight: {execution_weight:.2f}x"
+                f"🔥 ADAPTIVE ENTRY APPROVED // {symbol} {intended_action} | "
+                f"Alpha: {raw_alpha_score:.1f} (P{current_alpha_percentile*100:.1f} >= P{dynamic_percentile_gate*100:.1f}) | "
+                f"KER: {market_efficiency:.2f} | Exec Weight: {execution_weight:.2f}x"
             )
             return {
                 "approved": True,
                 "alpha_score": raw_alpha_score,
                 "execution_weight": execution_weight,
-                "reason": f"QUALIFIED_ANOMALY_P{current_alpha_percentile*100:.1f}"
+                "reason": f"DYNAMIC_QUALIFIED_KER_{market_efficiency:.2f}"
             }
 
-        # Silent Rejection for anything not in the top tier (Stops terminal spam)
         return {
             "approved": False,
             "alpha_score": raw_alpha_score,
             "execution_weight": 0.0,
-            "reason": f"INSUFFICIENT_ALPHA_ENERGY (Score: {raw_alpha_score:.1f}, Rank: P{current_alpha_percentile*100:.1f})"
+            "reason": f"BELOW_DYNAMIC_GATE (Score: {raw_alpha_score:.1f} < {dynamic_min_score:.1f})"
         }
