@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: STATIONARIZED LOG-MLOFI ENGINE
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: STATIONARIZED LOG-MLOFI ENGINE
 -------------------------------------------------------
 Calculates Spoof-Resistant Logarithmic Order Flow Imbalance across depth levels.
 Dampens institutional quote manipulation (fake walls) while preserving genuine 
@@ -63,7 +63,7 @@ class StationarizedLogOFI:
                 c_bp, c_bv = float(curr_bids[i][0]), float(curr_bids[i][1])
                 p_bp, p_bv = float(self.prev_bids[i][0]), float(self.prev_bids[i][1])
 
-                # 🚀 LOGARITHMIC BID VOLUME DELTA
+                # ðŸš€ LOGARITHMIC BID VOLUME DELTA
                 if c_bp > p_bp:
                     delta_bid = math.log1p(c_bv)
                 elif c_bp == p_bp:
@@ -74,7 +74,7 @@ class StationarizedLogOFI:
                 c_ap, c_av = float(curr_asks[i][0]), float(curr_asks[i][1])
                 p_ap, p_av = float(self.prev_asks[i][0]), float(self.prev_asks[i][1])
 
-                # 🚀 LOGARITHMIC ASK VOLUME DELTA
+                # ðŸš€ LOGARITHMIC ASK VOLUME DELTA
                 if c_ap < p_ap:
                     delta_ask = math.log1p(c_av)
                 elif c_ap == p_ap:
@@ -94,7 +94,7 @@ class StationarizedLogOFI:
         self.log_mlofi_history.append(log_mlofi_t)
         self.current_raw_mlofi = log_mlofi_t
 
-        # 🚀 ROLLING Z-SCORE CALCULATION
+        # ðŸš€ ROLLING Z-SCORE CALCULATION
         if len(self.log_mlofi_history) >= 20:
             # Using NumPy for fast array variance computation
             arr = np.array(self.log_mlofi_history)

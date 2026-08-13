@@ -1,10 +1,10 @@
-"""
-💎 V61.6 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
+﻿"""
+ðŸ’Ž V1.0 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features X-Ray Diagnostic Telemetry, Maker-Grid Spread Capture,
 Dynamic Volatility-Adjusted Slippage Firewalls, PostOnly Pegging, 
 Adverse Selection Protection, Null-Guard Parity, and Dynamic Asset-Aware Timeouts.
-Upgraded with V61.6 Instant Loop Shattering for Fatal Exchange Blocks.
+Upgraded with V1.0 Instant Loop Shattering for Fatal Exchange Blocks.
 """
 
 import os
@@ -45,7 +45,7 @@ class SmartOrderRouter:
                 "qty_step": float(lot_filter["qtyStep"]),
                 "tick_size": float(price_filter["tickSize"])
             }
-            logger.info(f"[X-RAY] 📡 DYNAMIC LIMITS ACQUIRED // {symbol} | Min Qty: {self.instrument_cache[symbol]['min_qty']} | Step: {self.instrument_cache[symbol]['qty_step']}")
+            logger.info(f"[X-RAY] ðŸ“¡ DYNAMIC LIMITS ACQUIRED // {symbol} | Min Qty: {self.instrument_cache[symbol]['min_qty']} | Step: {self.instrument_cache[symbol]['qty_step']}")
         except Exception as e:
             logger.error(f"[X-RAY] Failed to fetch strict limits for {symbol}, using safe defaults: {e}")
             self.instrument_cache[symbol] = {"min_qty": 1.0, "qty_step": 1.0, "tick_size": 0.01}
@@ -73,7 +73,7 @@ class SmartOrderRouter:
 
     def compute_dynamic_slippage_cap_bps(self, symbol: str, regime: str, live_spread_bps: float) -> float:
         """
-        🚀 V61.1 DYNAMIC SLIPPAGE CAP CALCULATOR
+        ðŸš€ V1.0 DYNAMIC SLIPPAGE CAP CALCULATOR
         Adapts allowable slippage based on asset class, live spread, and regime.
         """
         is_major = symbol in ["BTCUSDT", "ETHUSDT"]
@@ -97,7 +97,7 @@ class SmartOrderRouter:
 
     def estimate_orderbook_slippage_bps(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
         """
-        🛡️ PRE-TRADE L2 SLIPPAGE FIREWALL
+        ðŸ›¡ï¸ PRE-TRADE L2 SLIPPAGE FIREWALL
         Simulates walking the orderbook for `qty` to calculate expected fill price.
         Returns expected slippage in basis points.
         """
@@ -198,9 +198,9 @@ class SmartOrderRouter:
         Aggressive IOC Execution with robust NoneType and empty-string guards for price/qty parameters.
         Escalates price through orderbook depth to guarantee fill during extreme momentum.
         """
-        logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive momentum escalation.")
+        logger.critical(f"[X-RAY] âš¡ FLASH STRIKE AUTHORIZED // {symbol} executing aggressive momentum escalation.")
         
-        # 🚀 V61.1 AUDIT FIX: Defensive fallback if stop loss or take profit are missing/None.
+        # ðŸš€ V1.0 AUDIT FIX: Defensive fallback if stop loss or take profit are missing/None.
         if sl is None or tp is None or sl == tp:
             implied_sl_dist = current_mid_price * 0.025
             implied_tp_dist = implied_sl_dist * 2.0
@@ -226,7 +226,7 @@ class SmartOrderRouter:
                 
             final_price = self._format_dynamic_price(target_price, symbol)
 
-            logger.info(f"[X-RAY] ⚡ Flash Strike Attempt {attempt+1}/3 // {side} {cleaned_qty} {symbol} at {final_price}")
+            logger.info(f"[X-RAY] âš¡ Flash Strike Attempt {attempt+1}/3 // {side} {cleaned_qty} {symbol} at {final_price}")
 
             try:
                 # Place limit IOC order (Stops attached post-fill to avoid immediate rejection)
@@ -255,7 +255,7 @@ class SmartOrderRouter:
                         avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
 
                         if cum_exec > 0:
-                            logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
+                            logger.critical(f"âœ… FLASH STRIKE SUCCESS // {symbol} filled {cum_exec} units at {avg_price} on attempt {attempt+1}.")
                             
                             # Attach TP/SL exactly to the average fill price
                             if final_sl or final_tp:
@@ -264,38 +264,38 @@ class SmartOrderRouter:
                                         self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=self.position_idx, 
                                         stopLoss=str(final_sl) if final_sl else None, takeProfit=str(final_tp) if final_tp else None
                                     )
-                                    logger.info(f"[X-RAY] 🛡️ Stops successfully attached to Flash Strike: SL {final_sl} | TP {final_tp}")
+                                    logger.info(f"[X-RAY] ðŸ›¡ï¸ Stops successfully attached to Flash Strike: SL {final_sl} | TP {final_tp}")
                                 except Exception as e:
-                                    logger.error(f"[X-RAY] 🛑 FATAL: Failed to attach stops to Flash Strike for {symbol}: {e}")
+                                    logger.error(f"[X-RAY] ðŸ›‘ FATAL: Failed to attach stops to Flash Strike for {symbol}: {e}")
                                     
                             return True, avg_price, cum_exec
                         else:
-                            logger.warning(f"[X-RAY] ⚠️ Flash Strike IOC missed (Liquidity vanished before execution). Escalating...")
+                            logger.warning(f"[X-RAY] âš ï¸ Flash Strike IOC missed (Liquidity vanished before execution). Escalating...")
                     else:
-                        logger.warning(f"[X-RAY] ⚠️ API history delayed. Cannot verify fill for ID: {order_id}. Assuming missed.")
+                        logger.warning(f"[X-RAY] âš ï¸ API history delayed. Cannot verify fill for ID: {order_id}. Assuming missed.")
                 else:
-                    logger.warning(f"[X-RAY] ⚠️ API rejection (Attempt {attempt+1}): {response.get('retMsg')}")
+                    logger.warning(f"[X-RAY] âš ï¸ API rejection (Attempt {attempt+1}): {response.get('retMsg')}")
                     await asyncio.sleep(0.1) 
                     
             except Exception as e:
                 error_str = str(e)
-                logger.error(f"[X-RAY] ⚠️ Network Exception during Flash Strike for {symbol}: {error_str}")
+                logger.error(f"[X-RAY] âš ï¸ Network Exception during Flash Strike for {symbol}: {error_str}")
                 
-                # 🚀 V61.6 INSTANT SHATTER: Break out of Flash Strike loops on fatal blocks
+                # ðŸš€ V1.0 INSTANT SHATTER: Break out of Flash Strike loops on fatal blocks
                 if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
-                    logger.error(f"[X-RAY] 🛑 FATAL BLOCK // {symbol} is banned or invalid. Shattering Flash Strike loop instantly.")
+                    logger.error(f"[X-RAY] ðŸ›‘ FATAL BLOCK // {symbol} is banned or invalid. Shattering Flash Strike loop instantly.")
                     break
                 
-        logger.error(f"[X-RAY] ❌ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or Slippage Cap hit.")
+        logger.error(f"[X-RAY] âŒ Flash Strike failed permanently after 3 escalation attempts. Order book evaporated or Slippage Cap hit.")
         return False, 0.0, 0.0
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], feature_engine=None, depth_snapshot: dict=None, timeout: int = 12) -> Tuple[bool, float, float]:
         """
-        🛡️ MAKER-GRID SPREAD CAPTURE:
+        ðŸ›¡ï¸ MAKER-GRID SPREAD CAPTURE:
         Tries to capture spread rebates with PostOnly limit orders. Drops execution if 
         adverse selection is detected (Micro-price absorbing against us).
         """
-        logger.info(f"🛡️ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners. (Timeout: {timeout}s)")
+        logger.info(f"ðŸ›¡ï¸ HFT MAKER-PEGGING INITIATED // {symbol}. Engaging Spread Capture & Anti-Spoofing Scanners. (Timeout: {timeout}s)")
         
         start_time = time.time()
         current_order_id = None
@@ -322,10 +322,10 @@ class SmartOrderRouter:
                     imbalance = depth_metrics.get("depth_imbalance", 0.0)
                     
                     if direction.upper() == "BUY" and imbalance > 0.80:
-                        logger.warning(f"[X-RAY] 🚫 ADVERSE SELECTION // {symbol} Bid wall collapsing. Aborting peg to prevent bad entry.")
+                        logger.warning(f"[X-RAY] ðŸš« ADVERSE SELECTION // {symbol} Bid wall collapsing. Aborting peg to prevent bad entry.")
                         break
                     elif direction.upper() == "SELL" and imbalance < -0.80:
-                        logger.warning(f"[X-RAY] 🚫 ADVERSE SELECTION // {symbol} Ask wall collapsing. Aborting peg to prevent bad entry.")
+                        logger.warning(f"[X-RAY] ðŸš« ADVERSE SELECTION // {symbol} Ask wall collapsing. Aborting peg to prevent bad entry.")
                         break
 
                 # 2. Fetch LIVE Orderbook Snapshot
@@ -345,10 +345,10 @@ class SmartOrderRouter:
 
                 # 3. Check Chase Deviation Limits
                 if direction.upper() == "BUY" and target_price > anchor_price * (1 + max_chase_deviation):
-                    logger.warning(f"[X-RAY] 🏃 CHASE ABORTED // {symbol} ran +{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
+                    logger.warning(f"[X-RAY] ðŸƒ CHASE ABORTED // {symbol} ran +{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
                     break
                 if direction.upper() == "SELL" and target_price < anchor_price * (1 - max_chase_deviation):
-                    logger.warning(f"[X-RAY] 🏃 CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
+                    logger.warning(f"[X-RAY] ðŸƒ CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor. Surrendering peg.")
                     break
 
                 # 4. Format SL/TP cleanly based on actual target price
@@ -370,7 +370,7 @@ class SmartOrderRouter:
                 
                 # 5. Place or Amend Order
                 if not current_order_id:
-                    logger.info(f"[X-RAY] 🛡️ Placing initial PostOnly Maker Peg for {symbol} at {final_target_price}")
+                    logger.info(f"[X-RAY] ðŸ›¡ï¸ Placing initial PostOnly Maker Peg for {symbol} at {final_target_price}")
                     place_response = await self.executor.safe_call(
                         self.executor.client.place_order, category="linear", symbol=symbol, side=side, orderType="Limit",
                         qty=str(cleaned_qty), price=str(final_target_price), timeInForce="PostOnly", 
@@ -383,7 +383,7 @@ class SmartOrderRouter:
                         rejection_count += 1
                         logger.warning(f"[X-RAY] PostOnly placement rejected: {place_response.get('retMsg')}")
                         if rejection_count >= 3:
-                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} PostOnly rejected 3 times. Market is likely running away.")
+                            logger.error(f"[X-RAY] ðŸ›‘ PEG CIRCUIT BREAKER TRIPPED // {symbol} PostOnly rejected 3 times. Market is likely running away.")
                             break
                         await asyncio.sleep(loop_delay); continue
                 
@@ -405,7 +405,7 @@ class SmartOrderRouter:
                             avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else final_target_price
 
                             if cum_exec > 0:
-                                logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units at {avg_price}. Spread Captured!")
+                                logger.critical(f"âœ… MAKER PEG RESOLVED // {symbol} secured {cum_exec} units at {avg_price}. Spread Captured!")
                                 return True, avg_price, cum_exec
                         
                         # If not in history, it was likely canceled. Reset to try again.
@@ -424,46 +424,46 @@ class SmartOrderRouter:
                     avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_peg_price
                     
                     if order_status in ["Filled"]:
-                        logger.critical(f"✅ MAKER PEG SECURED // {symbol} filled completely. Earned Maker Rebates.")
+                        logger.critical(f"âœ… MAKER PEG SECURED // {symbol} filled completely. Earned Maker Rebates.")
                         return True, avg_price, cum_exec_qty
                         
                     elif order_status in ["Cancelled", "Rejected"]: 
                         rejection_count += 1
                         current_order_id = None 
-                        logger.warning(f"[X-RAY] ⚠️ Maker Peg Cancelled by Exchange (Likely spread cross). Retrying with fresh TOB.")
+                        logger.warning(f"[X-RAY] âš ï¸ Maker Peg Cancelled by Exchange (Likely spread cross). Retrying with fresh TOB.")
                         if cum_exec_qty > 0:
-                            logger.critical(f"✅ MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
+                            logger.critical(f"âœ… MAKER PEG PARTIAL // {symbol} secured {cum_exec_qty} units before rejection.")
                             return True, avg_price, cum_exec_qty
                             
                         if rejection_count >= 3:
-                            logger.error(f"[X-RAY] 🛑 PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 3 times. Aborting.")
+                            logger.error(f"[X-RAY] ðŸ›‘ PEG CIRCUIT BREAKER TRIPPED // {symbol} canceled/rejected 3 times. Aborting.")
                             break
                             
                     elif order_status in ["New", "PartiallyFilled"]:
                         # Only amend if price drifted significantly (> 1 tick)
                         if abs(final_target_price - current_peg_price) >= tick_size:
-                            logger.info(f"[X-RAY] 🔄 Amending Maker Peg from {current_peg_price} to new Top-of-Book {final_target_price}")
+                            logger.info(f"[X-RAY] ðŸ”„ Amending Maker Peg from {current_peg_price} to new Top-of-Book {final_target_price}")
                             await self.executor.safe_call(self.executor.client.amend_order, category="linear", symbol=symbol, orderId=current_order_id, price=str(final_target_price))
 
             except Exception as e: 
                 error_str = str(e)
                 # Elevate to warning so we can see it in production logs
-                logger.warning(f"[X-RAY] ⚠️ Maker peg cycle variance for {symbol}: {error_str}")
+                logger.warning(f"[X-RAY] âš ï¸ Maker peg cycle variance for {symbol}: {error_str}")
                 
-                # 🚀 V61.6 INSTANT SHATTER: Do not wait timeout seconds if the coin is banned
+                # ðŸš€ V1.0 INSTANT SHATTER: Do not wait timeout seconds if the coin is banned
                 if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
-                    logger.error(f"[X-RAY] 🛑 FATAL BLOCK // {symbol} is banned or invalid. Shattering Maker Peg loop instantly.")
+                    logger.error(f"[X-RAY] ðŸ›‘ FATAL BLOCK // {symbol} is banned or invalid. Shattering Maker Peg loop instantly.")
                     break
                     
                 await asyncio.sleep(loop_delay) 
 
         # Timeout Handler
         if current_order_id:
-            logger.warning(f"[X-RAY] ⏳ MAKER CHASE TIMEOUT // {timeout}s elapsed. Market escaped {symbol} peg range. Canceling to protect capital.")
+            logger.warning(f"[X-RAY] â³ MAKER CHASE TIMEOUT // {timeout}s elapsed. Market escaped {symbol} peg range. Canceling to protect capital.")
             cancel_success = await self.cancel_order_safe(symbol, current_order_id)
             
             if not cancel_success:
-                logger.critical(f"🛑 ORPHAN ORDER ALERT // Failed to cancel peg order {current_order_id} for {symbol}. Manual intervention may be needed.")
+                logger.critical(f"ðŸ›‘ ORPHAN ORDER ALERT // Failed to cancel peg order {current_order_id} for {symbol}. Manual intervention may be needed.")
                 
             try:
                 hist_res = await self.executor.safe_call(self.executor.client.get_order_history, category="linear", symbol=symbol, orderId=current_order_id, limit=1)
@@ -485,7 +485,7 @@ class SmartOrderRouter:
         Time-Weighted Iceberg Execution with Patched SL/TP propagation.
         Slices massive institutional orders into undetectable smaller chunks executed sequentially.
         """
-        logger.critical(f"[X-RAY] 🧊 ICEBERG ENGAGED // {symbol} large notional size detected. Slicing order into {slices} TWAP chunks.")
+        logger.critical(f"[X-RAY] ðŸ§Š ICEBERG ENGAGED // {symbol} large notional size detected. Slicing order into {slices} TWAP chunks.")
         
         slice_qty = total_qty / slices
         total_executed_qty = 0.0
@@ -496,7 +496,7 @@ class SmartOrderRouter:
         chunk_timeout = 8.0 if is_major_asset else 15.0
         
         for i in range(slices):
-            logger.info(f"[X-RAY] 🧊 TWAP SLICE [{i+1}/{slices}] // Routing {slice_qty:.4f} {symbol}")
+            logger.info(f"[X-RAY] ðŸ§Š TWAP SLICE [{i+1}/{slices}] // Routing {slice_qty:.4f} {symbol}")
             
             success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
                 symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=chunk_timeout
@@ -504,7 +504,7 @@ class SmartOrderRouter:
             
             # GUARANTEED FALLBACK: If a slice misses its peg, flash strike it immediately.
             if not success or fill_qty == 0:
-                logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
+                logger.warning(f"[X-RAY] ðŸ§Š TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
                 success, fill_price, fill_qty = await self._execute_flash_strike(
                     symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=sl, tp=tp
                 )
@@ -537,20 +537,20 @@ class SmartOrderRouter:
                     self.executor.client.set_trading_stop, category="linear", symbol=symbol, positionIdx=self.position_idx, 
                     takeProfit=align_price(actual_tp), stopLoss=align_price(actual_sl)
                 )
-                logger.info(f"[X-RAY] 🛡️ Bracket synchronized to Avg Fill {avg_fill_price:.5f} | SL: {actual_sl:.5f} | TP: {actual_tp:.5f}")
+                logger.info(f"[X-RAY] ðŸ›¡ï¸ Bracket synchronized to Avg Fill {avg_fill_price:.5f} | SL: {actual_sl:.5f} | TP: {actual_tp:.5f}")
             except Exception as e:
-                logger.warning(f"[X-RAY] 🧊 Failed to reattach bracket to TWAP position: {e}")
+                logger.warning(f"[X-RAY] ðŸ§Š Failed to reattach bracket to TWAP position: {e}")
                 
-            logger.critical(f"✅ ICEBERG COMPLETE // {symbol} secured {total_executed_qty:.4f} total units at avg price {avg_fill_price:.4f}.")
+            logger.critical(f"âœ… ICEBERG COMPLETE // {symbol} secured {total_executed_qty:.4f} total units at avg price {avg_fill_price:.4f}.")
             return True, avg_fill_price, total_executed_qty
             
-        logger.error(f"[X-RAY] ❌ ICEBERG FAILED // {symbol} could not secure any slices. Evaporated liquidity.")
+        logger.error(f"[X-RAY] âŒ ICEBERG FAILED // {symbol} could not secure any slices. Evaporated liquidity.")
         return False, 0.0, 0.0
 
     async def execute_iceberg_block(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, regime: str = "TRENDING", **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         
-        # 🛡️ V61.1 DYNAMIC SLIPPAGE FIREWALL
+        # ðŸ›¡ï¸ V1.0 DYNAMIC SLIPPAGE FIREWALL
         ob = depth_snapshot or {}
         best_bid = float(ob.get("bids", [[current_mid_price, 1]])[0][0])
         best_ask = float(ob.get("asks", [[current_mid_price, 1]])[0][0])
@@ -560,7 +560,7 @@ class SmartOrderRouter:
         est_slippage = self.estimate_orderbook_slippage_bps(depth_snapshot, direction, total_qty, current_mid_price)
         
         if est_slippage > dynamic_cap_bps:
-            logger.warning(f"[X-RAY] 🛑 DYNAMIC FIREWALL REJECT // {symbol} est. slippage {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps. Aborting.")
+            logger.warning(f"[X-RAY] ðŸ›‘ DYNAMIC FIREWALL REJECT // {symbol} est. slippage {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps. Aborting.")
             return False, 0.0, 0.0
 
         is_large_order = False
@@ -572,10 +572,10 @@ class SmartOrderRouter:
                 is_large_order = True
         
         if is_large_order:
-            logger.info(f"[X-RAY] 🐋 WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
+            logger.info(f"[X-RAY] ðŸ‹ WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
             return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         
-        logger.info(f"[X-RAY] 🚀 TRENDING REGIME ROUTING // Initiating high-speed dispatch for {symbol} {direction}")
+        logger.info(f"[X-RAY] ðŸš€ TRENDING REGIME ROUTING // Initiating high-speed dispatch for {symbol} {direction}")
         if abs(vol_z) >= 1.5 or vol_mult >= 1.5:
             return await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
         else:
@@ -589,7 +589,7 @@ class SmartOrderRouter:
             
             # GUARANTEED FALLBACK: No more trade starvation
             if not success or qty == 0:
-                logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
+                logger.warning(f"[X-RAY] âš ï¸ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
                 return await self._execute_flash_strike(
                     symbol=symbol, direction=direction, qty=total_qty, 
                     current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit
@@ -600,7 +600,7 @@ class SmartOrderRouter:
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, regime: str = "MEAN_REVERTING", **kwargs) -> Tuple[bool, float, float]:
         await self._fetch_exchange_limits(symbol)
         
-        # 🛡️ V61.1 DYNAMIC SLIPPAGE FIREWALL
+        # ðŸ›¡ï¸ V1.0 DYNAMIC SLIPPAGE FIREWALL
         ob = depth_snapshot or {}
         best_bid = float(ob.get("bids", [[current_mid_price, 1]])[0][0])
         best_ask = float(ob.get("asks", [[current_mid_price, 1]])[0][0])
@@ -610,7 +610,7 @@ class SmartOrderRouter:
         est_slippage = self.estimate_orderbook_slippage_bps(depth_snapshot, direction, total_qty, current_mid_price)
         
         if est_slippage > dynamic_cap_bps:
-            logger.warning(f"[X-RAY] 🛑 DYNAMIC FIREWALL REJECT // {symbol} est. slippage {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps. Aborting.")
+            logger.warning(f"[X-RAY] ðŸ›‘ DYNAMIC FIREWALL REJECT // {symbol} est. slippage {est_slippage:.1f} bps > Cap {dynamic_cap_bps:.1f} bps. Aborting.")
             return False, 0.0, 0.0
 
         is_large_order = False
@@ -622,13 +622,13 @@ class SmartOrderRouter:
                 is_large_order = True
                 
         if is_large_order:
-            logger.info(f"[X-RAY] 🐋 WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
+            logger.info(f"[X-RAY] ðŸ‹ WHALE ROUTING // {symbol} size > 5% of Top-of-Book depth. Triggering Iceberg Protocol.")
             return await self._execute_twap_iceberg(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
 
         is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         dynamic_timeout = 8.0 if is_major_asset else 15.0  # Tightened timeout for faster fallback
         
-        logger.info(f"[X-RAY] 🕸️ RANGING REGIME ROUTING // Attempting Maker-Grid Peg on {symbol} ({dynamic_timeout}s timeout).")
+        logger.info(f"[X-RAY] ðŸ•¸ï¸ RANGING REGIME ROUTING // Attempting Maker-Grid Peg on {symbol} ({dynamic_timeout}s timeout).")
         success, price, qty = await self._execute_dynamic_maker_peg(
             symbol, direction, total_qty, stop_loss, take_profit, 
             feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
@@ -636,7 +636,7 @@ class SmartOrderRouter:
 
         # GUARANTEED FALLBACK: Resolves the Root Cause #2 Starvation Issue
         if not success or qty == 0:
-            logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
+            logger.warning(f"[X-RAY] âš ï¸ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
             return await self._execute_flash_strike(
                 symbol=symbol, direction=direction, qty=total_qty, 
                 current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit

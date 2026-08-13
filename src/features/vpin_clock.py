@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: INSTITUTIONAL TOXICITY MONITOR
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: INSTITUTIONAL TOXICITY MONITOR
 ---------------------------------------------------------------------
 Replaces legacy VPIN and array-based Autocorrelation with a true O(1)
 Volume-Weighted Lag-1 Trade-Sign Covariance engine. 
@@ -19,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.TOXICITY_MONITOR")
 
 class TradeSignToxicityMonitor:
     """
-    🚀 V58.0 UPGRADE: True O(1) Volume-Weighted Autocorrelation.
+    ðŸš€ V1.0 UPGRADE: True O(1) Volume-Weighted Autocorrelation.
     Measures order flow toxicity iteratively. Eliminates `np.correlate` bottleneck, 
     applies logarithmic volume damping to eradicate spoofing attacks, and uses 
     a bounded directional bias to prevent exponential Z-score crushing.
@@ -31,7 +31,7 @@ class TradeSignToxicityMonitor:
         # Calculate equivalent EWMA alpha for the requested window size
         self.alpha = 2.0 / (window_size + 1.0)
         
-        # 🚀 V58.0 True O(1) Recursive State Matrix
+        # ðŸš€ V1.0 True O(1) Recursive State Matrix
         self.mean_x = 0.0
         self.mean_abs_x = 0.0  # Tracks absolute volume for bounded bias
         self.var_x = 1e-9
@@ -52,7 +52,7 @@ class TradeSignToxicityMonitor:
         """
         self.tick_count += 1
         
-        # V58.0: Volume-Weighted & Log-Damped Trade Sign
+        # V1.0: Volume-Weighted & Log-Damped Trade Sign
         # If buyer is maker, the taker was a SELLER (-1). Otherwise BUYER (+1).
         sign = -1.0 if is_buyer_maker else 1.0
         x_t = sign * math.log1p(volume)
@@ -65,7 +65,7 @@ class TradeSignToxicityMonitor:
             self.x_prev = x_t
             return [{"valid": False}]
 
-        # 🚀 O(1) Recursive Covariance and Variance (Welford EWMA)
+        # ðŸš€ O(1) Recursive Covariance and Variance (Welford EWMA)
         # Center current and previous against the old mean to avoid stability bias
         delta_curr = x_t - self.mean_x
         delta_prev = self.x_prev - self.mean_x
@@ -90,7 +90,7 @@ class TradeSignToxicityMonitor:
         # Lag-1 Autocorrelation (Bounded between -1.0 and 1.0 naturally)
         lag_1_corr = self.cov_x / (self.var_x + 1e-9)
 
-        # 🚀 FIX: O(1) Bounded Directional Bias 
+        # ðŸš€ FIX: O(1) Bounded Directional Bias 
         # Prevents math.exp() from blowing up the Z-score after massive block trades.
         # Ratio of Net Flow to Total Flow (Bounded 0.0 to 1.0)
         directional_bias = abs(self.mean_x) / (self.mean_abs_x + 1e-9)
@@ -113,7 +113,7 @@ class TradeSignToxicityMonitor:
             # Log extreme toxicity spikes for X-Ray Telemetry
             if z_score > 2.5:
                 logger.info(
-                    f"[X-RAY] ⚡ HIGH-SPEED TOXICITY SPIKE // {self.symbol} | "
+                    f"[X-RAY] âš¡ HIGH-SPEED TOXICITY SPIKE // {self.symbol} | "
                     f"Z-Score: {z_score:.2f} (Predatory algorithmic sweeping detected)."
                 )
                 
@@ -121,5 +121,5 @@ class TradeSignToxicityMonitor:
             
         return [{"valid": False}]
 
-# 🚀 V58.0 ALIAS: Seamless drop-in replacement to prevent import crashes in main.py
+# ðŸš€ V1.0 ALIAS: Seamless drop-in replacement to prevent import crashes in main.py
 VolumeSynchronizedClock = TradeSignToxicityMonitor

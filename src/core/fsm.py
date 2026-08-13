@@ -1,5 +1,5 @@
-"""
-⚡ V58.0 TITANIUM APEX: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
+﻿"""
+âš¡ V1.0 TITANIUM APEX: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
 --------------------------------------------------------------
 Serves as the O(1) in-memory cache for macro regime analysis, Sector Eigenvector 
 momentum states, and the single source of truth for Swarm-level circuit breakers.
@@ -21,13 +21,13 @@ class TradingState(Enum):
     EMERGENCY_LOCK = "EMERGENCY_LOCK"
     AI_MACRO_BULL = "AI_MACRO_BULL"
     AI_MACRO_BEAR = "AI_MACRO_BEAR"
-    # 🚀 V58.0 NEW STATES
+    # ðŸš€ V1.0 NEW STATES
     ABSORPTION_COOLDOWN = "ABSORPTION_COOLDOWN"  
     SECTOR_MISALIGNMENT = "SECTOR_MISALIGNMENT"
 
 class SystemStateMachine:
     """
-    ⚡ V58.0 APEX UPGRADE: DYNAMIC MACRO & SECTOR STATE MANAGER
+    âš¡ V1.0 APEX UPGRADE: DYNAMIC MACRO & SECTOR STATE MANAGER
     Serves as the O(1) in-memory cache for Off-Path AI Debate, Sector SVD Eigenvectors,
     and granular localized/global Circuit Breakers.
     """
@@ -41,10 +41,10 @@ class SystemStateMachine:
         # Single Source of Truth for Swarm-level hardware locks
         self.global_emergency_lock = False
         
-        # 🚀 V58.0 NEW: Per-Asset Micro-Locks (Timestamp expiration)
+        # ðŸš€ V1.0 NEW: Per-Asset Micro-Locks (Timestamp expiration)
         self.asset_locks: Dict[str, float] = {}
         
-        logger.info("⚡ FSM Core Upgraded to V58.0: Now serving Granular Asset Locks & Sector Eigenvector Cache.")
+        logger.info("âš¡ FSM Core Upgraded to V1.0: Now serving Granular Asset Locks & Sector Eigenvector Cache.")
 
     # =====================================================================
     # MACRO & SECTOR STATE CACHING
@@ -57,7 +57,7 @@ class SystemStateMachine:
             "confidence_multiplier": max(0.5, min(2.0, confidence_multiplier)), 
             "last_updated": time.time()
         }
-        logger.info(f"🧠 AI MACRO CACHED // {symbol}: {action.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
+        logger.info(f"ðŸ§  AI MACRO CACHED // {symbol}: {action.upper()} (Mult: {self.ai_macro_cache[symbol]['confidence_multiplier']:.2f}x)")
 
     def get_ai_macro_state(self, symbol: str, staleness_limit_seconds: float = 900.0) -> Dict[str, Any]:
         """O(1) lookup for the SOR pipeline. Reverts to neutral safety if LLM is lagging."""
@@ -68,7 +68,7 @@ class SystemStateMachine:
 
     def update_sector_state(self, target_symbol: str, impulse_score: float, correlation: float):
         """
-        🚀 V58.0 UPGRADE: Caches the SVD Sector Eigenvector impulse.
+        ðŸš€ V1.0 UPGRADE: Caches the SVD Sector Eigenvector impulse.
         Allows the execution router to verify sector tailwinds in O(1) time.
         """
         self.sector_macro_cache[target_symbol] = {
@@ -90,12 +90,12 @@ class SystemStateMachine:
 
     def trigger_asset_lock(self, symbol: str, duration_seconds: float, reason: str = "ABSORPTION_WALL"):
         """
-        🚀 V58.0 UPGRADE: Isolates specific assets that have hit an absorption wall 
+        ðŸš€ V1.0 UPGRADE: Isolates specific assets that have hit an absorption wall 
         or extreme slippage, freezing them without taking down the entire Swarm.
         """
         expiration = time.time() + duration_seconds
         self.asset_locks[symbol] = expiration
-        logger.warning(f"⏸️ ASSET MICRO-LOCK ENGAGED // {symbol} isolated for {duration_seconds:.1f}s. Reason: {reason}")
+        logger.warning(f"â¸ï¸ ASSET MICRO-LOCK ENGAGED // {symbol} isolated for {duration_seconds:.1f}s. Reason: {reason}")
 
     def is_asset_locked(self, symbol: str) -> bool:
         """O(1) check to see if an asset is currently in a micro-lock cooldown."""
@@ -116,13 +116,13 @@ class SystemStateMachine:
         """Instantly locks all swarm execution pathways across all nodes."""
         self.global_emergency_lock = True
         self.current_state = TradingState.EMERGENCY_LOCK
-        logger.critical("🛑 FSM GLOBAL EMERGENCY LOCK ENGAGED. ALL NEW EXECUTIONS HALTED.")
+        logger.critical("ðŸ›‘ FSM GLOBAL EMERGENCY LOCK ENGAGED. ALL NEW EXECUTIONS HALTED.")
 
     def release_global_emergency_lock(self):
         """Restores swarm execution pathways."""
         self.global_emergency_lock = False
         self.current_state = TradingState.ACTIVE_TRADING
-        logger.warning("🔓 FSM GLOBAL EMERGENCY LOCK LIFTED. SWARM RE-ARMED.")
+        logger.warning("ðŸ”“ FSM GLOBAL EMERGENCY LOCK LIFTED. SWARM RE-ARMED.")
 
     def is_emergency_locked(self) -> bool:
         """Explicit boolean check used by main.py to stop executions."""

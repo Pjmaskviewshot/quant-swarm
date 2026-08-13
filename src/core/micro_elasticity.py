@@ -1,7 +1,7 @@
-"""
-💎 V95.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
+﻿"""
+ðŸ’Ž V1.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
 -------------------------------------------------------------------------
-Computes EWMA-smoothed Orderbook Elasticity (λ_OB) and Micro-Price Variance.
+Computes EWMA-smoothed Orderbook Elasticity (Î»_OB) and Micro-Price Variance.
 Integrates with the Stationarized Log-MLOFI engine to provide stable volatility 
 scalars for the Hawkes-Elastic Micro-Chandelier Trailing Stop.
 Optimized with NumPy zero-allocation iterators and strict L2 sanity guards.
@@ -21,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.MICRO_ELASTICITY")
 
 class MicroElasticityEngine:
     """
-    🚀 V95.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
+    ðŸš€ V1.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
     Maps the "stretchiness" of the orderbook. High elasticity means the book is 
     hollow and vulnerable to toxic sweeps. Low elasticity means it's dense and safe.
     Upgraded with EWMA smoothing for stable Chandelier SL trailing.
@@ -40,14 +40,14 @@ class MicroElasticityEngine:
         
         # Rolling Elasticity & Variance Metrics
         self.instant_variance = 1e-8
-        self.orderbook_elasticity = 1.0  # EWMA Smoothed λ_OB
+        self.orderbook_elasticity = 1.0  # EWMA Smoothed Î»_OB
 
     def update_depth_state(self, best_bid: float, bid_qty: float, best_ask: float, ask_qty: float, log_mlofi_z: float, timestamp: float) -> dict:
         """
         Calculates Micro-Price, Real-Time Variance, and EWMA Orderbook Elasticity on every L2 tick.
         Protected against ZeroDivision, crossed books, and high-frequency memory allocation spikes.
         """
-        # 🚀 SANITY PRECONDITION: Reject crossed, zero, or invalid orderbook states
+        # ðŸš€ SANITY PRECONDITION: Reject crossed, zero, or invalid orderbook states
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask or bid_qty <= 0 or ask_qty <= 0:
             return {
                 "micro_price": self.micro_prices[-1] if self.micro_prices else 0.0,
@@ -69,12 +69,12 @@ class MicroElasticityEngine:
                 log_ret = math.log(micro_price / self.micro_prices[-1])
                 self.log_returns.append(log_ret)
                 
-                # 🚀 OPTIMIZATION: Zero allocation iteration for high-frequency variance calculation
+                # ðŸš€ OPTIMIZATION: Zero allocation iteration for high-frequency variance calculation
                 if len(self.log_returns) >= 10:
                     log_rets_arr = np.fromiter(self.log_returns, dtype=float, count=len(self.log_returns))
                     self.instant_variance = float(np.var(log_rets_arr[-20:]) + 1e-9)
                 
-                # 2. Compute EWMA Orderbook Elasticity (λ_OB)
+                # 2. Compute EWMA Orderbook Elasticity (Î»_OB)
                 # Calculates price movement per unit of Log-MLOFI Z-Score aggression
                 price_delta_bps = abs((micro_price - self.micro_prices[-1]) / self.micro_prices[-1]) * 10000.0
                 raw_elasticity = price_delta_bps / (abs(log_mlofi_z) + 1.0)
@@ -84,7 +84,7 @@ class MicroElasticityEngine:
                 self.orderbook_elasticity = (alpha * raw_elasticity) + ((1.0 - alpha) * self.orderbook_elasticity)
                 
             except Exception as e:
-                # 🚀 CRITICAL FIX: Eliminate silent failure and NaN/Inf propagation
+                # ðŸš€ CRITICAL FIX: Eliminate silent failure and NaN/Inf propagation
                 logger.debug(f"[MATH_WARN] Numerical instability in MicroElasticityEngine: {e}")
 
         self.micro_prices.append(micro_price)
@@ -107,7 +107,7 @@ class MicroElasticityEngine:
 
     def compute_dynamic_micro_brackets(self, current_price: float, side: str, risk_multiplier: float = 1.5) -> Tuple[float, float]:
         """
-        🚀 V95.0 NANO-BRACKETING (Fallback/Initialization): 
+        ðŸš€ V1.0 NANO-BRACKETING (Fallback/Initialization): 
         Computes standard SL and TP distances mathematically derived from sub-second 
         Micro-Price Volatility and EWMA Elasticity. (Note: Live execution dynamically 
         overrides this with the Hawkes-Elastic Chandelier in main.py).
@@ -131,7 +131,7 @@ class MicroElasticityEngine:
 
     def is_adverse_selection_imminent(self, side: str, depth_metrics: dict, symbol: str = "UNKNOWN") -> bool:
         """
-        ⚡ V95.0 ANTI-ADVERSE SELECTION X-RAY GUARD
+        âš¡ V1.0 ANTI-ADVERSE SELECTION X-RAY GUARD
         Evaluates whether an active PostOnly order is about to be toxically filled.
         Returns True if the order book is collapsing rapidly toward our maker peg.
         """
@@ -143,11 +143,11 @@ class MicroElasticityEngine:
         
         if side.upper() == "BUY":
             if bid_depletion_rate > 3.0 and self.orderbook_elasticity > elasticity_threshold:
-                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
+                logger.warning(f"[X-RAY] ðŸ›¡ï¸ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
                 return True
         else:
             if ask_depletion_rate > 3.0 and self.orderbook_elasticity > elasticity_threshold:
-                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
+                logger.warning(f"[X-RAY] ðŸ›¡ï¸ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
                 return True
                 
         return False

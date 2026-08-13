@@ -1,9 +1,9 @@
-"""
-💎 V100.3 ULTRA-APEX NEURAL: ZERO-LAG ADAPTIVE FLOW MATRIX
+﻿"""
+💎 V1.0 PRECISION MATRIX: ZERO-LAG ADAPTIVE CORE
 ------------------------------------------------------------------------
-Screener callback and streaming routes fully reconciled. Operates exclusively 
-on real-time microsecond order flow, continuous manifold execution weights, and 
-non-stationary Tensor-Prime anomaly mapping.
+Operates exclusively on real-time microsecond order flow, strict 
+binary percentile filtering, and non-stationary Tensor-Prime anomalies.
+Includes Strict Small Account Safety Limits and Zero-Spam Sniper Gates.
 """
 
 import os
@@ -37,7 +37,7 @@ from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
-from core.quantum_entry import QuantumEntryMatrix  # 🚀 V100.0 CONTINUOUS MANIFOLD ENTRY
+from core.quantum_entry import QuantumEntryMatrix  
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock 
 from features.omni_scanner import GlobalOmniScanner   
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V100.3_CONTINUOUS_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V1.0_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V100.3 CONTINUOUS MANIFOLD MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V1.0 PRECISION MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -273,11 +273,6 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
     async def _get_max_affordable_notional(self, sl_dist_pct: float = 0.025) -> float:
-        """
-        🚀 STRICT EQUITY-RISK CAPITAL SIZER
-        Hard-caps position notional value so that a full Stop Loss hit 
-        never exceeds the max allowed percentage of account equity.
-        """
         try:
             raw_balance = await self.executor.get_wallet_balance_usdt()
             equity = max(1.0, raw_balance)
@@ -494,7 +489,9 @@ class DistributedQuantEngine:
                 report = self.telegram.format_mission_control_dashboard(
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
-                report = report.replace("V68.5 APEX", "V100.0 APEX").replace("V96.1 APEX", "V100.0 APEX").replace("V95.0 APEX", "V100.0 APEX")
+                
+                # Sanitize telegram versions to V1.0
+                report = report.replace("V68.5 APEX", "V1.0 APEX").replace("V96.1 APEX", "V1.0 APEX").replace("V100.4 APEX", "V1.0 APEX").replace("V100.0 APEX", "V1.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -651,7 +648,7 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 V100.0 ZERO-VETO CONTINUOUS MANIFOLD EVALUATION
+                # 🚀 V1.0 TENSOR-PRIME MANIFOLD & SNIPER GATE
                 entry_matrix = self.entry_matrices.get(symbol)
                 exec_weight = 1.0
                 if entry_matrix:
@@ -680,7 +677,14 @@ class DistributedQuantEngine:
                         asks=asks_raw,
                         htf_bias=htf_bias
                     )
+                    
+                    # 🛑 THE SNIPER GATE: Silently drop noise. 
+                    if not alpha_verdict.get("approved", False):
+                        return
+                        
                     exec_weight = alpha_verdict.get("execution_weight", 1.0)
+                else:
+                    return # Require matrix approval
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 action = structural_verdict.get("action", action)
@@ -723,7 +727,11 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                if actual_risk_pct > 2.0:
+                # 🚀 V1.0 SMALL ACCOUNT SAFETY BLOCK
+                if available_balance < 50.0 and actual_risk_pct > 3.0:
+                    # Silently reject to keep logs clean from minimum order size spam
+                    return
+                elif actual_risk_pct > 2.0 and available_balance >= 50.0:
                     calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9)
 
                 try:
@@ -741,7 +749,7 @@ class DistributedQuantEngine:
                             "liquidity_density_ratio": vol_mult, 
                             "bid_ask_spread": spread_cost, 
                             "reasoning": structural_verdict.get("reasoning", "CONTINUOUS_MANIFOLD_ALPHA"), 
-                            "ai_verdict": "V100_CONTINUOUS_EXECUTION"
+                            "ai_verdict": "V1.0_PRECISION_EXECUTION"
                         },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
@@ -916,7 +924,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V100.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V1.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -931,7 +939,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V100.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V1.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -986,7 +994,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V100.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V1.0 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:

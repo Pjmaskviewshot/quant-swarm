@@ -1,5 +1,5 @@
-"""
-💎 V95.0 TENSOR-PRIME: OMNI-KINETIC EXHAUSTION ORACLE
+﻿"""
+ðŸ’Ž V1.0 TENSOR-PRIME: OMNI-KINETIC EXHAUSTION ORACLE
 -------------------------------------------------------------------------
 A self-calibrating HFT reversal predictor.
 Computes Micro-Price Dislocation, Auto-Scaling Queue Replenishment Z-Scores,
@@ -19,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_KINETIC")
 
 class OmniKineticOracle:
     """
-    🚀 HIGH-SPEED KINETIC EXHAUSTION & LEAD-LAG RADAR
+    ðŸš€ HIGH-SPEED KINETIC EXHAUSTION & LEAD-LAG RADAR
     Self-calibrating engine to detect spoofing, liquidity exhaustion, 
     and macro lead-lag dislocations for early trade ejections.
     """
@@ -116,7 +116,7 @@ class OmniKineticOracle:
 
     def evaluate_kinetic_exhaustion(self, symbol: str, position_direction: str) -> Dict[str, Any]:
         """
-        🚀 OMNI-KINETIC EXHAUSTION EVALUATOR
+        ðŸš€ OMNI-KINETIC EXHAUSTION EVALUATOR
         Dynamically calculates standard deviations and triggers surgical ejections
         before price reversal hits the chart.
         """
@@ -163,26 +163,26 @@ class OmniKineticOracle:
                     raise ValueError("NaN/Inf detected in matrix evaluation parameters")
 
             # =====================================================================
-            # 🚀 EARLY EXIT LOGIC: SURGICAL POSITION AMPUTATION
+            # ðŸš€ EARLY EXIT LOGIC: SURGICAL POSITION AMPUTATION
             # =====================================================================
             
             if position_direction == "BUY":
                 # A. KINETIC BUY EXHAUSTION (Deceleration + Extreme Ask Refill + Downward Spoofing)
                 if accel_z_score < -2.5 and ask_refill_z > 2.5 and recent_dislocation < -2.0:
                     logger.critical(
-                        f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} BUY momentum scientifically dead. "
-                        f"Flow Z: {accel_z_score:.2f}σ | Ask Refill Z: {ask_refill_z:.2f}σ | Spoof Dislocation: {recent_dislocation:.1f} bps."
+                        f"[X-RAY] ðŸ›‘ OMNI-KINETIC EJECTION // {symbol} BUY momentum scientifically dead. "
+                        f"Flow Z: {accel_z_score:.2f}Ïƒ | Ask Refill Z: {ask_refill_z:.2f}Ïƒ | Spoof Dislocation: {recent_dislocation:.1f} bps."
                     )
                     return {
                         "early_exit": True, 
                         "exhaustion_score": abs(accel_z_score) + ask_refill_z, 
-                        "reason": f"BUY_KINETIC_DEATH | Z-Refill: {ask_refill_z:.2f}σ"
+                        "reason": f"BUY_KINETIC_DEATH | Z-Refill: {ask_refill_z:.2f}Ïƒ"
                     }
                     
                 # B. BIVARIATE MACRO BREAKDOWN (BTC & ETH flows collapsing ahead of asset)
                 if composite_macro_cov < -0.75:
                     logger.critical(
-                        f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-pump detected. "
+                        f"[X-RAY] ðŸ›‘ MACRO TENSOR EJECTION // {symbol} Localized fake-pump detected. "
                         f"BTC/ETH Composite Flow collapsing (Cov: {composite_macro_cov:.2f}). Exiting Long."
                     )
                     return {
@@ -195,19 +195,19 @@ class OmniKineticOracle:
                 # A. KINETIC SELL EXHAUSTION (Deceleration + Extreme Bid Refill + Upward Spoofing)
                 if accel_z_score > 2.5 and bid_refill_z > 2.5 and recent_dislocation > 2.0:
                     logger.critical(
-                        f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} SELL momentum scientifically dead. "
-                        f"Flow Z: {accel_z_score:.2f}σ | Bid Refill Z: {bid_refill_z:.2f}σ | Spoof Dislocation: +{recent_dislocation:.1f} bps."
+                        f"[X-RAY] ðŸ›‘ OMNI-KINETIC EJECTION // {symbol} SELL momentum scientifically dead. "
+                        f"Flow Z: {accel_z_score:.2f}Ïƒ | Bid Refill Z: {bid_refill_z:.2f}Ïƒ | Spoof Dislocation: +{recent_dislocation:.1f} bps."
                     )
                     return {
                         "early_exit": True, 
                         "exhaustion_score": abs(accel_z_score) + bid_refill_z, 
-                        "reason": f"SELL_KINETIC_DEATH | Z-Refill: {bid_refill_z:.2f}σ"
+                        "reason": f"SELL_KINETIC_DEATH | Z-Refill: {bid_refill_z:.2f}Ïƒ"
                     }
 
                 # B. BIVARIATE MACRO RALLY (BTC & ETH flows surging ahead of asset)
                 if composite_macro_cov > 0.75:
                     logger.critical(
-                        f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-dump detected. "
+                        f"[X-RAY] ðŸ›‘ MACRO TENSOR EJECTION // {symbol} Localized fake-dump detected. "
                         f"BTC/ETH Composite Flow surging (Cov: {composite_macro_cov:.2f}). Exiting Short."
                     )
                     return {

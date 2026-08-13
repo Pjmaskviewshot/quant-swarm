@@ -1,5 +1,5 @@
-"""
-🏦 V58.0 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
+﻿"""
+ðŸ¦ V1.0 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
 -----------------------------------------------------
 Executes Cash-and-Carry (Basis) Arbitrage and Funding Rate Harvesting.
 Upgraded with Exact Execution Drag Calculus, Break-Even Horizon Gating, 
@@ -31,7 +31,7 @@ class DeltaNeutralYieldEngine:
         self.taker_fee_rate = 0.00055 # Bybit base taker fee
 
     async def run_yield_scanner_daemon(self):
-        logger.info("🏦 DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
+        logger.info("ðŸ¦ DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
         
         while True:
             await asyncio.sleep(300)  # Scan global rates every 5 minutes
@@ -85,7 +85,7 @@ class DeltaNeutralYieldEngine:
                 
                 # Eject if funding drops too low or flips negative
                 if current_funding <= self.exit_funding_threshold:
-                    logger.warning(f"[X-RAY] 📉 YIELD COLLAPSE // {active_symbol} funding dropped to {current_funding*10000:.1f} bps. Initiating Unwind.")
+                    logger.warning(f"[X-RAY] ðŸ“‰ YIELD COLLAPSE // {active_symbol} funding dropped to {current_funding*10000:.1f} bps. Initiating Unwind.")
                     symbols_to_unwind.append(active_symbol)
 
         for sym in symbols_to_unwind:
@@ -118,7 +118,7 @@ class DeltaNeutralYieldEngine:
         if funding_rate < self.entry_funding_threshold:
             return
             
-        logger.info(f"[X-RAY] ⚖️ YIELD LOCK EVALUATION // {symbol} | Target Funding Rate: {funding_rate*10000:.1f} bps")
+        logger.info(f"[X-RAY] âš–ï¸ YIELD LOCK EVALUATION // {symbol} | Target Funding Rate: {funding_rate*10000:.1f} bps")
         
         try:
             # 1. Evaluate Execution Drag vs. Break-Even Horizon
@@ -131,7 +131,7 @@ class DeltaNeutralYieldEngine:
             
             # Reject if it takes more than 1.5 days just to earn back the entry fees & spread
             if break_even_days > 1.5:
-                logger.warning(f"[X-RAY] 🚫 YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {break_even_days:.1f} days to break even. Skipping.")
+                logger.warning(f"[X-RAY] ðŸš« YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {break_even_days:.1f} days to break even. Skipping.")
                 return
 
             # 2. Calculate True Idle Capital Dynamically
@@ -152,7 +152,7 @@ class DeltaNeutralYieldEngine:
             if idle_capital < 15.0:
                 return
 
-            # 🚀 V58.0: Strict Capital Allocation Limits
+            # ðŸš€ V1.0: Strict Capital Allocation Limits
             # Sweep 90% of IDLE capital, but NEVER exceed 20% of TOTAL account equity per hedge
             max_allowed_hedge = total_bal * 0.20
             yield_capital = min(idle_capital * 0.90, max_allowed_hedge)
@@ -167,24 +167,24 @@ class DeltaNeutralYieldEngine:
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
             # ATOMIC EXECUTION BLOCK
-            logger.info(f"[X-RAY] 🏦 Routing SPOT BUY for {qty} {symbol}...")
+            logger.info(f"[X-RAY] ðŸ¦ Routing SPOT BUY for {qty} {symbol}...")
             spot_order = await self.core.executor.safe_call(
                 self.core.executor.client.place_order, category="spot", symbol=symbol, side="Buy", 
                 orderType="Market", qty=str(qty), marketUnit="baseCoin" # Force exact base coin matching
             )
             
             if spot_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] ❌ SPOT Leg Failed: {spot_order.get('retMsg')}. Aborting hedge.")
+                logger.error(f"[X-RAY] âŒ SPOT Leg Failed: {spot_order.get('retMsg')}. Aborting hedge.")
                 return
                 
-            logger.info(f"[X-RAY] 🏦 Routing PERPETUAL SHORT for {qty} {symbol}...")
+            logger.info(f"[X-RAY] ðŸ¦ Routing PERPETUAL SHORT for {qty} {symbol}...")
             perp_order = await self.core.executor.safe_call(
                 self.core.executor.client.place_order, category="linear", symbol=symbol, side="Sell", 
                 orderType="Market", qty=str(qty), positionIdx=self.core.sor.position_idx
             )
             
             if perp_order.get("retCode") != 0:
-                logger.critical(f"🚨 FATAL: PERPETUAL Leg Failed after Spot execution! Engaging emergency Spot liquidation.")
+                logger.critical(f"ðŸš¨ FATAL: PERPETUAL Leg Failed after Spot execution! Engaging emergency Spot liquidation.")
                 await self.core.executor.safe_call(self.core.executor.client.place_order, category="spot", symbol=symbol, side="Sell", orderType="Market", qty=str(qty))
                 return
             
@@ -196,14 +196,14 @@ class DeltaNeutralYieldEngine:
             }
             
             msg = (
-                f"✅ <b>DELTA-NEUTRAL YIELD LOCK SECURED</b>\n"
+                f"âœ… <b>DELTA-NEUTRAL YIELD LOCK SECURED</b>\n"
                 f"Asset: <code>{symbol}</code>\n"
                 f"Capital Swept: <code>${yield_capital:.2f}</code>\n"
                 f"Yield APY Target: <code>~{(funding_rate * 3 * 365)*100:.1f}%</code>\n"
                 f"Break-Even Horizon: <code>{break_even_days:.1f} Days</code>"
             )
             await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.critical(f"✅ DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
+            logger.critical(f"âœ… DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
             
         except Exception as e:
             logger.error(f"[X-RAY] Hedge execution failed for {symbol}: {e}", exc_info=True)
@@ -216,7 +216,7 @@ class DeltaNeutralYieldEngine:
         hedge_data = self.active_hedges[symbol]
         qty = str(hedge_data["qty"])
         
-        logger.critical(f"[X-RAY] 🌪️ UNWINDING HEDGE // {symbol}. Selling Spot, Covering Short.")
+        logger.critical(f"[X-RAY] ðŸŒªï¸ UNWINDING HEDGE // {symbol}. Selling Spot, Covering Short.")
         
         try:
             # 1. Close Perpetual Short
@@ -226,7 +226,7 @@ class DeltaNeutralYieldEngine:
             )
             
             if perp_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] ❌ Unwind PERP Leg Failed: {perp_order.get('retMsg')}. Manual intervention required.")
+                logger.error(f"[X-RAY] âŒ Unwind PERP Leg Failed: {perp_order.get('retMsg')}. Manual intervention required.")
                 
             # 2. Sell Spot Collateral
             spot_order = await self.core.executor.safe_call(
@@ -235,15 +235,15 @@ class DeltaNeutralYieldEngine:
             )
             
             if spot_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] ❌ Unwind SPOT Leg Failed: {spot_order.get('retMsg')}. Manual intervention required.")
+                logger.error(f"[X-RAY] âŒ Unwind SPOT Leg Failed: {spot_order.get('retMsg')}. Manual intervention required.")
             
             # Remove from tracking regardless of success to prevent infinite loop errors
             del self.active_hedges[symbol]
             
             duration_days = (time.time() - hedge_data["timestamp"]) / 86400.0
-            msg = f"🔄 <b>DELTA-NEUTRAL HEDGE UNWOUND</b>\nAsset: <code>{symbol}</code>\nHolding Time: <code>{duration_days:.1f} Days</code>\nReason: Funding Decay"
+            msg = f"ðŸ”„ <b>DELTA-NEUTRAL HEDGE UNWOUND</b>\nAsset: <code>{symbol}</code>\nHolding Time: <code>{duration_days:.1f} Days</code>\nReason: Funding Decay"
             await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.info(f"✅ HEDGE SUCCESSFULLY UNWOUND for {symbol}.")
+            logger.info(f"âœ… HEDGE SUCCESSFULLY UNWOUND for {symbol}.")
             
         except Exception as e:
             logger.error(f"[X-RAY] Unwind execution failed for {symbol}: {e}", exc_info=True)

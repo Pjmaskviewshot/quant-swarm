@@ -1,5 +1,5 @@
-"""
-💎 V100.0 ULTRA-APEX NEURAL: CONTINUOUS EDGE GATE MANIFOLD
+﻿"""
+ðŸ’Ž V1.0 ULTRA-APEX NEURAL: CONTINUOUS EDGE GATE MANIFOLD
 -------------------------------------------------------------------------
 Eradicates all binary vetoes and hard-stop HOLD rejections. 
 Converts orderbook depth ratios, VWAP volatility stretches, and Log-MLOFI 
@@ -19,7 +19,7 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V100.0 ZERO-VETO CONTINUOUS STRUCTURAL EDGE GATE
+    ðŸš€ V1.0 ZERO-VETO CONTINUOUS STRUCTURAL EDGE GATE
     Replaces binary depth walls and exhaustion vetoes with continuous scaling factors.
     Dynamically weighs market pressure to maintain 100% execution flow.
     """
@@ -204,7 +204,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_orderbook_depth_ratio(self, symbol: str) -> float:
         """
-        🚀 CONTINUOUS L2 DEPTH PRESSURE FACTOR (V100.0)
+        ðŸš€ CONTINUOUS L2 DEPTH PRESSURE FACTOR (V1.0)
         Replaces binary hard-blocks with a continuous scaling coefficient [0.4 to 1.6].
         """
         if not self.prev_bids or not self.prev_asks:
@@ -227,7 +227,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_exhaustion_stretch(self, symbol: str, current_price: float, target_direction: str) -> float:
         """
-        🚀 CONTINUOUS EXHAUSTION & VWAP STRETCH DAMPENING (V100.0)
+        ðŸš€ CONTINUOUS EXHAUSTION & VWAP STRETCH DAMPENING (V1.0)
         Replaces binary vetoes with smooth continuous damping multipliers [0.3 to 1.2].
         """
         if len(self.prices) < 20 or len(self.vwap_history) < 20:
@@ -255,7 +255,7 @@ class MicrostructureEdgeGate:
 
     def evaluate_structural_edge(self, symbol: str, vpin_z: float, intended_direction: str = None) -> dict:
         """
-        🚀 CONTINUOUS STRUCTURAL EDGE EVALUATOR (V100.0)
+        ðŸš€ CONTINUOUS STRUCTURAL EDGE EVALUATOR (V1.0)
         Guarantees zero rejections. Evaluates MLOFI and depth pressure 
         to output continuous confidence and execution weight scaling.
         """

@@ -1,5 +1,5 @@
-"""
-💎 V88.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
+﻿"""
+ðŸ’Ž V1.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
@@ -40,7 +40,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 HMM STATE PRIORS & TRANSITIONS
+        # ðŸš€ HMM STATE PRIORS & TRANSITIONS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -79,7 +79,7 @@ class AdaptiveFeatureEngine:
 
     def _apply_kalman_smoothing(self, prices: np.ndarray) -> np.ndarray:
         """
-        🚀 1D Kalman Filter
+        ðŸš€ 1D Kalman Filter
         Strips high-frequency microstructure noise from the raw price feed.
         Ensures the HMM evaluates the true macro-trend rather than reacting to chop.
         """
@@ -166,7 +166,7 @@ class AdaptiveFeatureEngine:
                     
                 log_emissions[i] = log_emission
                 
-            # 🚀 CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
+            # ðŸš€ CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
             prior = np.dot(self.transition_matrix, self.state_probs)
             prior_log = np.log(prior + 1e-9)
             
@@ -180,7 +180,7 @@ class AdaptiveFeatureEngine:
             
             now = time.time()
             if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
-                logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
+                logger.info(f"[X-RAY] ðŸŒŒ HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
                 self.last_detected_regime = detected_regime
                 self._last_log_time = now
             

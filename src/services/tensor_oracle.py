@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
 -------------------------------------------------------------
 Computes real-time cross-asset impulse propagation (BTC/ETH/SOL -> Alts).
 Uses Millisecond-Precise Event-Time Backward Pointer Alignment to eradicate 
@@ -18,7 +18,7 @@ logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
     """
-    🚀 V58.0 APEX: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
+    ðŸš€ V1.0 APEX: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
     Tracks real-time impulse propagation vectors from primary market anchors 
     (BTC, ETH, SOL) to target altcoins without future-data leakage.
     """
@@ -56,7 +56,7 @@ class CrossAssetTensorOracle:
 
     def compute_lead_lag_signal(self, target_symbol: str, benchmark_symbol: str = "BTCUSDT") -> float:
         """
-        🚀 V58.0 UPGRADE: Sub-Second Asynchronous Pointer Alignment.
+        ðŸš€ V1.0 UPGRADE: Sub-Second Asynchronous Pointer Alignment.
         Calculates cross-covariance tensor using exact millisecond timestamps.
         Strictly maps Benchmark[t-1] to Alt[t] to guarantee zero look-ahead bias.
         
@@ -120,7 +120,7 @@ class CrossAssetTensorOracle:
         # Compute leading momentum vector from Benchmark
         bench_momentum = float(np.mean(aligned_benchmark[-10:]))
         
-        # 🚀 V58.0 NOISE FILTER: Require minimum correlation threshold (0.45)
+        # ðŸš€ V1.0 NOISE FILTER: Require minimum correlation threshold (0.45)
         if abs(bench_momentum) > 0.00015 and correlation > 0.45:
             # Bound alpha signal between -1.0 and +1.0
             alpha_signal = math.copysign(min(1.0, abs(correlation)), bench_momentum)
@@ -130,7 +130,7 @@ class CrossAssetTensorOracle:
             if now - self._last_log_time.get(target_symbol, 0.0) > 60.0:
                 direction = "BULLISH" if alpha_signal > 0 else "BEARISH"
                 logger.info(
-                    f"[X-RAY] 🌌 TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
+                    f"[X-RAY] ðŸŒŒ TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
                     f"{direction} wave. Correlation: {correlation:.2f} | Momentum: {bench_momentum*10000:.1f} bps"
                 )
                 self._last_log_time[target_symbol] = now

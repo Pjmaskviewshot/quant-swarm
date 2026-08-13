@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: TELEGRAM MISSION CONTROL
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
 and institutional-grade Forensic X-Ray HTML formatters. Fully standardized
@@ -22,7 +22,7 @@ class AsyncTelegramReporter:
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         self._session: Optional[aiohttp.ClientSession] = None
         
-        # 🚀 Decoupled Message Queue
+        # ðŸš€ Decoupled Message Queue
         self._message_queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
 
@@ -38,7 +38,7 @@ class AsyncTelegramReporter:
         """Starts the background worker that processes the message queue out-of-band."""
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._queue_worker())
-            logger.info("📡 Telegram Background Dispatch Worker ONLINE.")
+            logger.info("ðŸ“¡ Telegram Background Dispatch Worker ONLINE.")
 
     async def _queue_worker(self):
         """Background worker that continuously pulls from the queue and dispatches payloads."""
@@ -62,7 +62,7 @@ class AsyncTelegramReporter:
             
         if self._session and not self._session.closed:
             await self._session.close()
-            logger.info("🔌 Telegram Reporter HTTP session gracefully closed.")
+            logger.info("ðŸ”Œ Telegram Reporter HTTP session gracefully closed.")
 
     def _sanitize_error(self, error_msg: str) -> str:
         """Scrubs token from plain-text server logs to prevent credential leakage."""
@@ -98,7 +98,7 @@ class AsyncTelegramReporter:
                             retry_after = float(err_json.get("parameters", {}).get("retry_after", 2.0))
                         except Exception:
                             retry_after = 2.0
-                        logger.warning(f"⚠️ Telegram Rate Limit hit. Backing off for {retry_after:.1f}s...")
+                        logger.warning(f"âš ï¸ Telegram Rate Limit hit. Backing off for {retry_after:.1f}s...")
                         await asyncio.sleep(retry_after)
                         continue
 
@@ -113,18 +113,18 @@ class AsyncTelegramReporter:
 
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(self._sanitize_error(f"❌ Telegram API permanently unreachable: {e}"))
+                    logger.error(self._sanitize_error(f"âŒ Telegram API permanently unreachable: {e}"))
                 else:
                     sleep_time = 2.0 ** attempt
-                    logger.warning(self._sanitize_error(f"⚠️ Telegram network fault: {e}. Retrying in {sleep_time}s..."))
+                    logger.warning(self._sanitize_error(f"âš ï¸ Telegram network fault: {e}. Retrying in {sleep_time}s..."))
                     await asyncio.sleep(sleep_time)
 
         return False
 
     async def log_message(self, text: str, alert_level: str = "INFO", max_retries: int = 3):
         """Places unified HTML-formatted alert into the dispatch queue."""
-        emojis = {"INFO": "ℹ️", "SUCCESS": "🟢", "WARNING": "⚠️", "CRITICAL": "🚨"}
-        prefix = emojis.get(str(alert_level).upper(), "🤖")
+        emojis = {"INFO": "â„¹ï¸", "SUCCESS": "ðŸŸ¢", "WARNING": "âš ï¸", "CRITICAL": "ðŸš¨"}
+        prefix = emojis.get(str(alert_level).upper(), "ðŸ¤–")
 
         html_body = f"<b>{prefix} [SYSTEM ALERT]</b>\n\n{text}"
         payload = {
@@ -148,7 +148,7 @@ class AsyncTelegramReporter:
         await self._message_queue.put((payload, max_retries))
 
     # ====================================================================
-    # 🚀 V58.0 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
+    # ðŸš€ V1.0 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
@@ -159,7 +159,7 @@ class AsyncTelegramReporter:
         spread_bps = features.get("bid_ask_spread", 0.0) * 10000.0
         
         micro_status = "STABLE"
-        # 🚀 V58.0: Map to the new Log-MLOFI architecture
+        # ðŸš€ V1.0: Map to the new Log-MLOFI architecture
         log_mlofi_z = features.get('log_mlofi_z', features.get('adaptive_obi_z', 0.0))
         reasoning = features.get('reasoning', '')
         
@@ -170,35 +170,35 @@ class AsyncTelegramReporter:
         elif "MAKER_ONLY" in reasoning: micro_status = "WIDE SPREAD (MAKER PEG)"
 
         return (
-            f"🎯 <b>X-RAY DISPATCH // {symbol}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Action: <b>{direction}</b>\n"
-            f"• Fill Price: <code>{price:.5f}</code>\n"
-            f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
-            f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
-            f"🔬 <b>X-RAY DIAGNOSTICS:</b>\n"
-            f"• HMM Regime: <code>{regime}</code>\n"
-            f"• Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
-            f"• Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
-            f"• Stop Loss: <code>{sl_pct:.2%}</code>\n"
-            f"• Depth Radar: <code>{micro_status}</code>"
+            f"ðŸŽ¯ <b>X-RAY DISPATCH // {symbol}</b>\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"â€¢ Action: <b>{direction}</b>\n"
+            f"â€¢ Fill Price: <code>{price:.5f}</code>\n"
+            f"â€¢ Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
+            f"â€¢ Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
+            f"ðŸ”¬ <b>X-RAY DIAGNOSTICS:</b>\n"
+            f"â€¢ HMM Regime: <code>{regime}</code>\n"
+            f"â€¢ Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
+            f"â€¢ Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
+            f"â€¢ Stop Loss: <code>{sl_pct:.2%}</code>\n"
+            f"â€¢ Depth Radar: <code>{micro_status}</code>"
         )
 
     def format_execution_receipt(self, symbol: str, net_pnl: float, slippage_bps: float, fees: float, duration_mins: float, is_win: bool) -> str:
         """Formats the Post-Trade Autopsy Receipt upon position closure."""
         gross_pnl = net_pnl + fees + (abs(slippage_bps)/10000 * net_pnl)
-        outcome_emoji = "🟢 WIN" if is_win else "🔴 LOSS"
+        outcome_emoji = "ðŸŸ¢ WIN" if is_win else "ðŸ”´ LOSS"
         
         return (
-            f"🔬 <b>POST-TRADE AUTOPSY // {symbol}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Outcome: <b>{outcome_emoji}</b>\n"
-            f"• Net PnL: <code>{net_pnl:+.4f} USDT</code>\n\n"
-            f"📊 <b>EXECUTION METRICS:</b>\n"
-            f"• Time in Market: <code>{duration_mins:.1f} mins</code>\n"
-            f"• Gross PnL: <code>{gross_pnl:+.4f} USDT</code>\n"
-            f"• Maker/Taker Fees: <code>-{fees:.4f} USDT</code>\n"
-            f"• Slippage Drag: <code>{slippage_bps:.1f} bps</code>"
+            f"ðŸ”¬ <b>POST-TRADE AUTOPSY // {symbol}</b>\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"â€¢ Outcome: <b>{outcome_emoji}</b>\n"
+            f"â€¢ Net PnL: <code>{net_pnl:+.4f} USDT</code>\n\n"
+            f"ðŸ“Š <b>EXECUTION METRICS:</b>\n"
+            f"â€¢ Time in Market: <code>{duration_mins:.1f} mins</code>\n"
+            f"â€¢ Gross PnL: <code>{gross_pnl:+.4f} USDT</code>\n"
+            f"â€¢ Maker/Taker Fees: <code>-{fees:.4f} USDT</code>\n"
+            f"â€¢ Slippage Drag: <code>{slippage_bps:.1f} bps</code>"
         )
 
     def format_mission_control_dashboard(self, uptime: float, live_count: int, shadow_count: int, balance: float, session_pnl: float, drawdown: float, dd_bar: str, execution_stats: Dict[str, Any]) -> str:
@@ -212,18 +212,18 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V58.0 APEX)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
-            f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
-            f"💵 <b>FINANCIAL VAULT</b>\n"
-            f"• Total Liquidity: <code>{balance:.4f} USDT</code>\n"
-            f"• Session Return:  <code>{session_pnl:+.4f} USDT</code>\n"
-            f"• Peak Drawdown:   <code>{drawdown:.2%}</code>\n"
-            f"• Risk Buffer:     <code>[{dd_bar}]</code>\n\n"
-            f"🔬 <b>TODAY's EXECUTION METRICS</b>\n"
-            f"• Trades Settled: <code>{trades}</code>\n"
-            f"• Live Win Rate:  <code>{win_rate:.1%}</code>\n"
-            f"• Avg Slippage:   <code>{avg_slip:.1f} bps</code>\n"
-            f"• Toxicity Radar: <code>{tox_radar}</code>"
+            f"ðŸ’Ž <b>QUANTUM SWARM (V1.0 APEX)</b>\n"
+            f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+            f"â±ï¸ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
+            f"ðŸ›°ï¸ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
+            f"ðŸ’µ <b>FINANCIAL VAULT</b>\n"
+            f"â€¢ Total Liquidity: <code>{balance:.4f} USDT</code>\n"
+            f"â€¢ Session Return:  <code>{session_pnl:+.4f} USDT</code>\n"
+            f"â€¢ Peak Drawdown:   <code>{drawdown:.2%}</code>\n"
+            f"â€¢ Risk Buffer:     <code>[{dd_bar}]</code>\n\n"
+            f"ðŸ”¬ <b>TODAY's EXECUTION METRICS</b>\n"
+            f"â€¢ Trades Settled: <code>{trades}</code>\n"
+            f"â€¢ Live Win Rate:  <code>{win_rate:.1%}</code>\n"
+            f"â€¢ Avg Slippage:   <code>{avg_slip:.1f} bps</code>\n"
+            f"â€¢ Toxicity Radar: <code>{tox_radar}</code>"
         )

@@ -1,5 +1,5 @@
-"""
-🌌 V58.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
+﻿"""
+ðŸŒŒ V1.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
 Upgraded with Relaxed Hot-Swap Thresholds to eradicate liquidity stagnation,
@@ -20,7 +20,7 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V58.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
+    ðŸš€ V1.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market factor
     across a stable 60-period return window, returning idiosyncratic alpha residuals.
     """
@@ -53,7 +53,7 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V58.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    ðŸŒŒ V1.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit perpetual universe with live microstructure spread gating and 
     logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
@@ -69,7 +69,7 @@ class GlobalOmniScanner:
             res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
             return {item['symbol']: item for item in res.get("result", {}).get("list", []) if item['symbol'].endswith('USDT')}
         except Exception as e:
-            logger.error(f"[X-RAY] ❌ Global ticker fetch failed during Omni-Scan: {e}")
+            logger.error(f"[X-RAY] âŒ Global ticker fetch failed during Omni-Scan: {e}")
             return {}
 
     async def scan_and_rank_universe(
@@ -108,10 +108,10 @@ class GlobalOmniScanner:
                     self.btc_returns.pop(0)
             self.last_btc_price = current_btc_price
 
-        # 🚀 V58.0 TITANIUM BLOCKLIST
+        # ðŸš€ V1.0 TITANIUM BLOCKLIST
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         
-        # 🚀 ADAPTIVE SESSION CLOCK
+        # ðŸš€ ADAPTIVE SESSION CLOCK
         min_turnover = AdaptiveSessionClock.get_turnover_threshold()
 
         for sym, data in tickers.items():
@@ -194,7 +194,7 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # 🚀 V58.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
+        # ðŸš€ V1.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
         # Lowered Z-Score requirement from 3.0 to 2.0. Lowered base score from 2500 to 1500.
         if top_sym not in current_basket and top_z > 2.0 and top_score > 1500.0:
             basket_scores = [
@@ -210,7 +210,7 @@ class GlobalOmniScanner:
                 # Only execute swap if the candidate is 3x stronger than the weakest active symbol (Was 5x)
                 if top_score > (deadest_score * 3.0):
                     logger.critical(
-                        f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
+                        f"[X-RAY] ðŸŒªï¸ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
                         f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
                     self.last_swap_time = time.time()  # Lock the matrix for 30 minutes

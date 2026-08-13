@@ -1,9 +1,9 @@
-"""
-💎 V61.4 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
+﻿"""
+ðŸ’Ž V1.0 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
 True Unified Equity Parsing, and Dynamic L2 Depth Ticker Discovery.
-Upgraded with V61.4 Innovation Zone Auto-Banning (ErrCode 110126), 
+Upgraded with V1.0 Innovation Zone Auto-Banning (ErrCode 110126), 
 Volatility-Adjusted Spread Coefficient (VASC), and Top-of-Book Depth Shields.
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EXECUTION")
 
 class BybitRetCode:
     """
-    🚀 V61.4 BYBIT RETURN CODES
+    ðŸš€ V1.0 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -35,12 +35,12 @@ class BybitRetCode:
     RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
     LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
     LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
-    AGREEMENT_NOT_SIGNED = 110126    # 🚀 V61.4: Innovation Zone UI agreement required
+    AGREEMENT_NOT_SIGNED = 110126    # ðŸš€ V1.0: Innovation Zone UI agreement required
 
 
 class TokenBucketRateLimiter:
     """
-    🚀 TOKEN-BUCKET RATE LIMITER
+    ðŸš€ TOKEN-BUCKET RATE LIMITER
     Throttles outbound API calls to strictly respect Bybit's private endpoint limits
     and prevent HTTP 429 rate-limit bans.
     """
@@ -67,7 +67,7 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V61.4 PARALLELIZED UNIFIED API EXECUTOR
+    ðŸš€ V1.0 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
@@ -90,11 +90,11 @@ class BybitUnifiedExecutor:
             thread_name_prefix="BybitIsolator"
         )
         self._leverage_cache: Dict[str, int] = {}
-        self._banned_innovation_zones = set() # 🚀 V61.4 Dynamic Blacklist
+        self._banned_innovation_zones = set() # ðŸš€ V1.0 Dynamic Blacklist
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
-        🛡️ UNIFIED API GATEWAY
+        ðŸ›¡ï¸ UNIFIED API GATEWAY
         Enforces rate-limiting, thread isolation, automatic retries on server load,
         fail-fast on parameter faults (10002), and token/secret scrubbing.
         """
@@ -115,24 +115,24 @@ class BybitUnifiedExecutor:
                 response = await loop.run_in_executor(self._api_thread_pool, bound_func)
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
                 
-                # 🚀 V61.4 FAIL FAST: Innovation Zone Block
+                # ðŸš€ V1.0 FAIL FAST: Innovation Zone Block
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
                         self._banned_innovation_zones.add(symbol_banned)
-                    error_msg = f"[X-RAY] 🚫 110126 INNOVATION ZONE BLOCK: {symbol_banned} requires manual UI agreement. Banning from matrix."
+                    error_msg = f"[X-RAY] ðŸš« 110126 INNOVATION ZONE BLOCK: {symbol_banned} requires manual UI agreement. Banning from matrix."
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 # Fail Fast on Parameter Error
                 if ret_code == BybitRetCode.PARAMETER_ERROR:
-                    error_msg = f"[X-RAY] ❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
+                    error_msg = f"[X-RAY] âŒ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
                 # Backoff on server load or rate limits
                 if ret_code in [BybitRetCode.RATE_LIMIT_REACHED, BybitRetCode.SERVICE_UNAVAILABLE]: 
-                    logger.warning(f"[X-RAY] ⚠️ Bybit System Load/Rate Limit (Code: {ret_code}). Backing off...")
+                    logger.warning(f"[X-RAY] âš ï¸ Bybit System Load/Rate Limit (Code: {ret_code}). Backing off...")
                     await asyncio.sleep(2.0)
                     continue
                 
@@ -151,13 +151,13 @@ class BybitUnifiedExecutor:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
                         self._banned_innovation_zones.add(symbol_banned)
-                    raise ValueError(f"[X-RAY] 🚫 110126 INNOVATION ZONE BLOCK: {symbol_banned} banned from matrix.")
+                    raise ValueError(f"[X-RAY] ðŸš« 110126 INNOVATION ZONE BLOCK: {symbol_banned} banned from matrix.")
 
                 if "10002 Parameter Fault" in error_str:
                     raise ValueError(error_str)
                     
                 if attempt == 2:
-                    logger.error(f"[X-RAY] ❌ Bybit API call failed after 3 attempts: {error_str}")
+                    logger.error(f"[X-RAY] âŒ Bybit API call failed after 3 attempts: {error_str}")
                     raise Exception(error_str)
                 await asyncio.sleep(1.0)
 
@@ -167,7 +167,7 @@ class BybitUnifiedExecutor:
 
     async def get_wallet_balance_usdt(self) -> float:
         """
-        🚀 True Intelligent Equity Parsing.
+        ðŸš€ True Intelligent Equity Parsing.
         Calculates absolute Total Equity (Cash + Unrealized PnL), completely ignoring 
         Initial Margin locks. Prevents the "Margin Illusion" from triggering false drawdowns.
         """
@@ -210,7 +210,7 @@ class BybitUnifiedExecutor:
 
     async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:
         """
-        🚀 Smart Leverage Caching with Error Guards.
+        ðŸš€ Smart Leverage Caching with Error Guards.
         Only sends API updates when leverage differs from current exchange state.
         Uses structured integer return codes.
         """
@@ -241,7 +241,7 @@ class BybitUnifiedExecutor:
             )
             
             self._leverage_cache[symbol] = target_leverage
-            logger.info(f"[X-RAY] ⚙️ AUTO-SCALED LEVERAGE: {symbol} is now set to {target_leverage}x")
+            logger.info(f"[X-RAY] âš™ï¸ AUTO-SCALED LEVERAGE: {symbol} is now set to {target_leverage}x")
             return True
             
         except Exception as e:
@@ -262,7 +262,7 @@ class BybitUnifiedExecutor:
                         symbol=symbol
                     )
                     max_allowed = int(float(info["result"]["list"][0]["leverageFilter"]["maxLeverage"]))
-                    logger.warning(f"[X-RAY] ⚠️ Risk Cap hit for {symbol}. Auto-clamping leverage from {target_leverage}x to {max_allowed}x.")
+                    logger.warning(f"[X-RAY] âš ï¸ Risk Cap hit for {symbol}. Auto-clamping leverage from {target_leverage}x to {max_allowed}x.")
                     
                     await self._safe_api_call(
                         self.client.set_leverage,
@@ -277,12 +277,12 @@ class BybitUnifiedExecutor:
                     logger.error(f"[X-RAY] Leverage auto-clamping failed for {symbol}.")
                     return False
                     
-            logger.error(f"[X-RAY] ❌ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
+            logger.error(f"[X-RAY] âŒ Failed to synchronize leverage matrix for {symbol}: {error_msg}")
             return False
 
     async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        🚀 V61.4 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
+        ðŸš€ V1.0 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
         Calculates Volatility-Adjusted Spread Coefficient AND enforces a minimum
         Top-of-Book Depth Floor ($250 USD) to reject paper-thin, sweep-prone coins.
         Automatically filters out Innovation Zone blocks.
@@ -304,7 +304,7 @@ class BybitUnifiedExecutor:
                 # 1. Broad Universe & Innovation Zone Filters
                 if not symbol.endswith("USDT"): continue
                 if any(b in symbol for b in banned_keywords): continue
-                if symbol in self._banned_innovation_zones: continue # 🚀 V61.4 Innovation Zone Ban
+                if symbol in self._banned_innovation_zones: continue # ðŸš€ V1.0 Innovation Zone Ban
                     
                 turnover = float(t.get("turnover24h", 0.0) or 0.0)
                 bid = float(t.get("bid1Price", 0.0) or 0.0)
@@ -322,7 +322,7 @@ class BybitUnifiedExecutor:
                 # 3. Dead Market Filter (Requires > 2.0% daily variance to justify trading)
                 if volatility_bps < 200.0: continue
                 
-                # 4. 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
+                # 4. ðŸ§¬ THE VASC MATH (Volatility-Adjusted Spread Cap)
                 dynamic_spread_cap_bps = max(5.0, volatility_bps * 0.015)
                 
                 # Calculate live spread
@@ -332,7 +332,7 @@ class BybitUnifiedExecutor:
                 if live_spread_bps > dynamic_spread_cap_bps: 
                     continue 
                 
-                # 5. 🛡️ V61.3 TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
+                # 5. ðŸ›¡ï¸ V1.0 TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
                 bid_size = float(t.get("bid1Size", 0.0) or 0.0)
                 ask_size = float(t.get("ask1Size", 0.0) or 0.0)
                 top_depth_usd = min(bid * bid_size, ask * ask_size)
@@ -354,10 +354,10 @@ class BybitUnifiedExecutor:
             valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             
-            logger.info(f"[X-RAY] 📡 NEURAL VASC RADAR DISCOVERED {len(top_symbols)} QUALIFIED LIQUID NODES.")
+            logger.info(f"[X-RAY] ðŸ“¡ NEURAL VASC RADAR DISCOVERED {len(top_symbols)} QUALIFIED LIQUID NODES.")
             return top_symbols if top_symbols else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             
         except Exception as e:
-            logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
+            logger.error(f"[X-RAY] âŒ Failed to fetch global market tickers: {e}")
             # Failsafe fallback 
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]

@@ -1,5 +1,5 @@
-"""
-💎 V95.0 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
+﻿"""
+ðŸ’Ž V1.0 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
 ----------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
@@ -32,14 +32,14 @@ class MemoryBank:
         key = os.environ.get("SUPABASE_KEY")
         
         if not url or not key:
-            logger.critical("❌ DB CONFIGURATION FAULT: SUPABASE_URL or SUPABASE_KEY environment variables missing.")
+            logger.critical("âŒ DB CONFIGURATION FAULT: SUPABASE_URL or SUPABASE_KEY environment variables missing.")
             raise ValueError("Missing Supabase credentials in environment variables.")
             
         try:
             self.supabase: Client = create_client(url, key)
-            logger.info("🛰️ CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
+            logger.info("ðŸ›°ï¸ CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
         except Exception as e:
-            logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
+            logger.critical(f"âŒ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
             raise
 
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
@@ -113,7 +113,7 @@ class MemoryBank:
 
         try:
             self._safe_execute(self.supabase.table("quantitative_ledger").insert(payload))
-            label = "🦇 SHADOW" if is_shadow else "💾 CORE"
+            label = "ðŸ¦‡ SHADOW" if is_shadow else "ðŸ’¾ CORE"
             logger.info(f"[X-RAY] {label} LEDGER COMMIT // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
         except Exception as e:
             raise Exception(f"Database insert failed: {e}")
@@ -161,11 +161,11 @@ class MemoryBank:
                 )
                 
                 if update_res and update_res.data:
-                    logger.info(f"[X-RAY] 🎯 ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
+                    logger.info(f"[X-RAY] ðŸŽ¯ ATTRIBUTION MATCHED & VERIFIED // Signal {signal_id[:8]}... updated with PnL: ${net_pnl:.4f} | Mode: {update_payload['execution_mode']}")
                 else:
-                    logger.error(f"[X-RAY] ❌ VERIFICATION FAILED: Ledger rejected update for signal {signal_id}")
+                    logger.error(f"[X-RAY] âŒ VERIFICATION FAILED: Ledger rejected update for signal {signal_id}")
             else:
-                logger.warning(f"[X-RAY] ⚠️ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
+                logger.warning(f"[X-RAY] âš ï¸ Live execution completed but no initial signal found in ledger for ID: {signal_id}")
                 
         except Exception as e:
             raise Exception(f"Database update failed: {e}")
@@ -308,7 +308,7 @@ class MemoryBank:
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
                     self._safe_execute(self.supabase.table("quantitative_ledger").upsert(chunk))
-                logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Vectorized traversal settled {len(update_batch)} predictive ledger paths.")
+                logger.info(f"[X-RAY] ðŸ“Š GHOST FORENSICS: Vectorized traversal settled {len(update_batch)} predictive ledger paths.")
                 
             return resolved_count
 
@@ -377,7 +377,7 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V95.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
+        ðŸš€ V1.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
         Upgraded to cluster based on Log-MLOFI, Volume Multiplier, and Micro-Spread.
         Matches current multi-dimensional conditions against historical outcomes 
         to determine execution viability.
@@ -421,7 +421,7 @@ class MemoryBank:
             if len(historical_data) < k_neighbors:
                 is_armed_default = promo_eval["should_promote"]
                 if is_armed_default:
-                    logger.info(f"[X-RAY] 🦇 SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
+                    logger.info(f"[X-RAY] ðŸ¦‡ SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
                 return {
                     "bayesian_edge": 0.50, 
                     "is_armed": is_armed_default, 
@@ -477,7 +477,7 @@ class MemoryBank:
             
             promotion_event = "STABLE"
             if promo_eval["should_promote"]:
-                logger.info(f"[X-RAY] 🦇 SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
+                logger.info(f"[X-RAY] ðŸ¦‡ SHADOW ASCENSION // {target_symbol} promoted to Live Status! ({promo_eval['reason']})")
                 promotion_event = "PROMOTED_FROM_SHADOW"
             elif promo_eval["should_demote"]:
                 promotion_event = "DEMOTED_TO_SHADOW"

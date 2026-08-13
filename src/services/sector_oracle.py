@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: SECTOR EIGENVECTOR ORACLE
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: SECTOR EIGENVECTOR ORACLE
 -------------------------------------------------
 Tracks cross-asset sector impulse propagation using Dynamic SVD Decomposition.
 Extracts the Principal Component (PC1) of a given asset cluster to determine 
@@ -76,7 +76,7 @@ class SectorEigenOracle:
         R_norm = (R - np.mean(R, axis=1, keepdims=True)) / stds
 
         try:
-            # 🚀 SINGULAR VALUE DECOMPOSITION (SVD)
+            # ðŸš€ SINGULAR VALUE DECOMPOSITION (SVD)
             # U: Left-singular vectors, S: Singular values, Vt: Right-singular vectors
             U, S, Vt = np.linalg.svd(R_norm, full_matrices=False)
             
@@ -90,7 +90,7 @@ class SectorEigenOracle:
             if len(target_rets) < 20:
                 return 0.0, 0.0
 
-            # 🚀 LAGGED PEARSON CORRELATION
+            # ðŸš€ LAGGED PEARSON CORRELATION
             with np.errstate(divide='ignore', invalid='ignore'):
                 corr = float(np.corrcoef(sector_lagged, target_rets)[0, 1])
 

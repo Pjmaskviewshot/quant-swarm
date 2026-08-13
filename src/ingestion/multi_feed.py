@@ -1,5 +1,5 @@
-"""
-🌌 V58.0 TITANIUM APEX: DECOUPLED L2 INGESTION LAYER
+﻿"""
+ðŸŒŒ V1.0 TITANIUM APEX: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,
 Subscription Chunking (10-arg limit compliance), Pure JSON Pings,
@@ -26,7 +26,7 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V58.0 TITANIUM APEX: DECOUPLED INGESTION LAYER
+    ðŸš€ V1.0 TITANIUM APEX: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
     from downstream processing via a high-capacity asynchronous FIFO queue.
     Upgraded with C-level list comprehensions for Orderbook deserialization.
@@ -70,11 +70,11 @@ class HighVelocityMultiFeed:
 
     async def _data_consumer_worker(self):
         """
-        🚀 DEDICATED CONSUMER
+        ðŸš€ DEDICATED CONSUMER
         Pulls from the high-speed FIFO queue and executes callbacks sequentially.
         Maintains strict chronological L2/L3 ordering without blocking network socket reading.
         """
-        logger.info("[X-RAY] ⚡ V58.0 Decoupled Data Consumer Worker ONLINE.")
+        logger.info("[X-RAY] âš¡ V1.0 Decoupled Data Consumer Worker ONLINE.")
         while self.is_running:
             try:
                 payload_type, payload_data = await self.ingestion_queue.get()
@@ -94,11 +94,11 @@ class HighVelocityMultiFeed:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[X-RAY] ❌ Consumer worker failed to process payload: {e}", exc_info=True)
+                logger.error(f"[X-RAY] âŒ Consumer worker failed to process payload: {e}", exc_info=True)
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
         """
-        🚀 V58.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
+        ðŸš€ V1.0 OMNI-SWARM DYNAMIC HOT-SWAPPING
         Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
         without needing to tear down the entire multiplexer connection.
         """
@@ -127,20 +127,20 @@ class HighVelocityMultiFeed:
             # Clean up local sequence memory for dropped coin
             self.orderbook_sequences.pop(drop_symbol, None)
             
-            logger.info(f"[X-RAY] 🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
+            logger.info(f"[X-RAY] ðŸ”„ Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
         except Exception as e:
-            logger.error(f"[X-RAY] ❌ Hot-swap socket injection failed: {e}")
+            logger.error(f"[X-RAY] âŒ Hot-swap socket injection failed: {e}")
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V58.0 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
+        ðŸš€ V1.0 ISOLATED SNAPSHOT RESYNC (Seamless REST Bridging)
         Immediately fetches a REST snapshot and injects it into the high-speed queue 
         when sequence gaps occur, preventing downstream MLOFI corruption.
         """
         if not self.active_ws or self.active_ws.closed:
             return
             
-        logger.warning(f"[X-RAY] 🔄 Requesting isolated snapshot resync for {symbol}...")
+        logger.warning(f"[X-RAY] ðŸ”„ Requesting isolated snapshot resync for {symbol}...")
         self.orderbook_sequences.pop(symbol, None)
         
         try:
@@ -164,7 +164,7 @@ class HighVelocityMultiFeed:
                                 "ts": int(data.get("ts", time.time() * 1000))
                             }))
                         except asyncio.QueueFull:
-                            logger.debug("[X-RAY] ⚠️ Ingestion queue full during REST resync. Load shedding snapshot.")
+                            logger.debug("[X-RAY] âš ï¸ Ingestion queue full during REST resync. Load shedding snapshot.")
 
                         # Re-anchor sequence state to the fresh REST snapshot
                         self.orderbook_sequences[symbol] = int(data.get("u", 0))
@@ -175,11 +175,11 @@ class HighVelocityMultiFeed:
             await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
             await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
         except Exception as e:
-            logger.error(f"[X-RAY] ❌ Isolated resync request failed for {symbol}: {e}")
+            logger.error(f"[X-RAY] âŒ Isolated resync request failed for {symbol}: {e}")
 
     def _fast_float_parse_book(self, levels: list) -> list:
         """
-        🚀 V58.0 UPGRADE: Pre-parses string lists into float arrays using 
+        ðŸš€ V1.0 UPGRADE: Pre-parses string lists into float arrays using 
         C-optimized list comprehensions to save downstream CPU cycles.
         """
         try:
@@ -216,7 +216,7 @@ class HighVelocityMultiFeed:
             self.orderbook_sequences.clear()
             
             try:
-                logger.info(f"[X-RAY] 📡 Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
+                logger.info(f"[X-RAY] ðŸ“¡ Opening high-speed multiplexed socket interface channel at: {self.ws_url}")
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(self.ws_url) as ws:
                         
@@ -231,7 +231,7 @@ class HighVelocityMultiFeed:
                                     try:
                                         await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
                                         if time.time() - self.last_msg_timestamp > 45.0:
-                                            logger.error("[X-RAY] 🚨 WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
+                                            logger.error("[X-RAY] ðŸš¨ WATCHDOG TRIGGERED: Silent flatline detected (No data for >45s). Severing zombie connection.")
                                             await ws.close()
                                             break
                                     except Exception as e:
@@ -249,7 +249,7 @@ class HighVelocityMultiFeed:
                             await ws.send_json({"op": "subscribe", "args": chunk})
                             await asyncio.sleep(0.05) # Prevent connection flooding
                             
-                        logger.info(f"[X-RAY] ✅ Successfully multiplexed topics (chunked) for tracking matrix: {len(self.basket)} nodes.")
+                        logger.info(f"[X-RAY] âœ… Successfully multiplexed topics (chunked) for tracking matrix: {len(self.basket)} nodes.")
 
                         async for msg in ws:
                             self.last_msg_timestamp = time.time()
@@ -283,7 +283,7 @@ class HighVelocityMultiFeed:
                                             # ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
-                                                    logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating seamless REST resync.")
+                                                    logger.critical(f"[X-RAY] âŒ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating seamless REST resync.")
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue # Skip processing this broken delta
                                                     
@@ -297,7 +297,7 @@ class HighVelocityMultiFeed:
                                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding orderbook tick.")
+                                            logger.debug("[X-RAY] âš ï¸ Ingestion queue full. Shedding orderbook tick.")
                                             
                                     elif topic.startswith("publicTrade"):
                                         symbol = topic.split(".")[-1]
@@ -312,13 +312,13 @@ class HighVelocityMultiFeed:
                                             try:
                                                 self.ingestion_queue.put_nowait(("trade", tick_payload))
                                             except asyncio.QueueFull:
-                                                logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding trade tick.")
+                                                logger.debug("[X-RAY] âš ï¸ Ingestion queue full. Shedding trade tick.")
                                                 
                                     elif topic.startswith("tickers"):
                                         try:
                                             self.ingestion_queue.put_nowait(("tickers", data))
                                         except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding tickers tick.")
+                                            logger.debug("[X-RAY] âš ï¸ Ingestion queue full. Shedding tickers tick.")
                                             
                                     elif topic.startswith("kline"):
                                         try:
@@ -326,10 +326,10 @@ class HighVelocityMultiFeed:
                                                 "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding kline tick.")
+                                            logger.debug("[X-RAY] âš ï¸ Ingestion queue full. Shedding kline tick.")
 
                                 except Exception as e:
-                                    logger.error(f"[X-RAY] 🚨 OVERLOAD OR ROUTING ERROR: {e}")
+                                    logger.error(f"[X-RAY] ðŸš¨ OVERLOAD OR ROUTING ERROR: {e}")
                                             
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
@@ -338,13 +338,13 @@ class HighVelocityMultiFeed:
                             watchdog_task.cancel()
                         
             except Exception as e:
-                logger.error(f"[X-RAY] ❌ Critical connection failure caught in multiplex ingestion loop: {e}", exc_info=True)
+                logger.error(f"[X-RAY] âŒ Critical connection failure caught in multiplex ingestion loop: {e}", exc_info=True)
                 
             if not self.is_running:
                 break
                 
             self.active_ws = None
-            logger.warning(f"[X-RAY] ⚠️ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
+            logger.warning(f"[X-RAY] âš ï¸ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
 
@@ -354,7 +354,7 @@ class HighVelocityMultiFeed:
     def terminate_all_feeds(self):
         """Performs structural teardown actions across active streaming context pipelines."""
         self.is_running = False
-        logger.warning("[X-RAY] 🛑 Terminating multiplexed ingestion pipelines cleanly.")
+        logger.warning("[X-RAY] ðŸ›‘ Terminating multiplexed ingestion pipelines cleanly.")
         
         for task in list(self._active_tasks):
             if not task.done():

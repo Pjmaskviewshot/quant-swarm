@@ -1,8 +1,8 @@
-"""
-🌌 V61.1 APEX NEURAL BACKTESTER
+﻿"""
+ðŸŒŒ V1.0 APEX NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V61.1 L2-tick engine and cannot simulate true Order Flow Imbalance.
+of the live V1.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
 Upgraded with Stationarized Log-MLOFI approximations, 1D Kalman Filtered HMMs,
 Neural Exit Matrix Simulations (Snap-Traps & Absorption Ejections), 
 and EV-to-Spread Multipiers (3x).
@@ -69,11 +69,11 @@ def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
     return out[-target:]
 
 def fetch_aligned_data(symbol: str, days: int) -> Tuple[List[Dict], List[Dict]]:
-    print(f"📡 Fetching target asset 1-Minute Data ({symbol})...")
+    print(f"ðŸ“¡ Fetching target asset 1-Minute Data ({symbol})...")
     target_candles = fetch_klines_1m(symbol, days)
     if symbol == "BTCUSDT": return target_candles, target_candles
         
-    print("📡 Fetching global BTC 1-Minute lead-lag context...")
+    print("ðŸ“¡ Fetching global BTC 1-Minute lead-lag context...")
     btc_raw = fetch_klines_1m("BTCUSDT", days)
     btc_dict = {c['ts']: c for c in btc_raw}
     aligned_btc = []
@@ -385,7 +385,7 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
-        # V58.0: LOG-MLOFI PROXY
+        # V1.0: LOG-MLOFI PROXY
         vol_step = c_prev['volume']
         log_vol_step = math.log1p(vol_step)
         price_step = (c_prev['close'] - c_prev_prev['close'])
@@ -609,7 +609,7 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 net_edge_bps = net_ev_pct * 10000.0
                 
-                # 🚀 V61.1 EV-TO-SPREAD GATE: Edge must be 3x the spread cost
+                # ðŸš€ V1.0 EV-TO-SPREAD GATE: Edge must be 3x the spread cost
                 if net_edge_bps < (spread_cost * 10000.0 * 3.0):
                     continue
 
@@ -643,7 +643,7 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         
                         r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                         
-                        # 🧬 V61.1 SIMULATED NEURAL MATRIX PROXIES
+                        # ðŸ§¬ V1.0 SIMULATED NEURAL MATRIX PROXIES
                         c_prev_j = target_candles[j-1]
                         ret_j = (c_j - c_prev_j["close"]) / (c_prev_j["close"] + 1e-9)
                         norm_vol_j = target_candles[j]["volume"] / (vol_ewma + 1e-9)
@@ -832,7 +832,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V61.1 APEX NEURAL Walk-Forward Validation (5 Folds)...")
+    print("\nâ³ Running V1.0 APEX NEURAL Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -885,13 +885,13 @@ if __name__ == "__main__":
     parser.add_argument("--optimize", action="store_true")
     args = parser.parse_args()
 
-    print(f"📥 Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
+    print(f"ðŸ“¥ Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
     t_cand, b_cand = fetch_aligned_data(args.symbol, args.days)
-    print(f"✅ Matrix synchronized. ({len(t_cand)} true 1m blocks)")
+    print(f"âœ… Matrix synchronized. ({len(t_cand)} true 1m blocks)")
 
     if args.optimize:
         best_params = parameter_sweep(t_cand, b_cand, args.symbol)
-        print("\n🏆 Top 5 Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
+        print("\nðŸ† Top 5 Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
         for i, res in enumerate(best_params, 1):
             print(f" {i}. RR: {res['RR']} | SL ATR: {res['ATR']} "
                   f"--> Avg Sharpe: {res['OOS_Avg_Sharpe']:.2f} | Min Fold Sharpe: {res['Min_Fold_Sharpe']:.2f}")
@@ -901,7 +901,7 @@ if __name__ == "__main__":
             best = best_params[0]
             with open("params.json", "w") as f:
                 json.dump({"rr_ratio": best["RR"], "sl_atr_mult": best["ATR"]}, f)
-            print("💾 Saved most robust parameters to params.json for live engine sync.")
+            print("ðŸ’¾ Saved most robust parameters to params.json for live engine sync.")
             
     else:
         split = int(len(t_cand) * 0.6)
@@ -909,7 +909,7 @@ if __name__ == "__main__":
 
         test = run_v61_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V61.1 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V1.0 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

@@ -1,5 +1,5 @@
-"""
-💎 V58.0 TITANIUM APEX: MICRO-PRICE ABSORPTION & EXHAUSTION GUARD
+﻿"""
+ðŸ’Ž V1.0 TITANIUM APEX: MICRO-PRICE ABSORPTION & EXHAUSTION GUARD
 -----------------------------------------------------------------
 Tracks continuous micro-price acceleration vs. aggressor trade flow divergence.
 Triggers an immediate Limit-IOC exit when heavy aggressor buying/selling is 
@@ -78,7 +78,7 @@ class MicroAbsorptionGuard:
         self.absorption_score = 0.0
 
         # =====================================================================
-        # 🟢 BUY POSITION ABSORPTION GUARD
+        # ðŸŸ¢ BUY POSITION ABSORPTION GUARD
         # Scenario: We are LONG. Aggressors are buying heavily (recent_q > 0), 
         # but the price is decelerating rapidly (accel < 0). A sell wall is absorbing them.
         # =====================================================================
@@ -89,7 +89,7 @@ class MicroAbsorptionGuard:
                 
                 if self.absorption_score > 2.0:
                     logger.warning(
-                        f"[X-RAY] 🧱 ABSORPTION WALL HIT // {symbol} | "
+                        f"[X-RAY] ðŸ§± ABSORPTION WALL HIT // {symbol} | "
                         f"Heavy Buy Flow Absorbed. Score: {self.absorption_score:.2f} | Accel: {self.current_accel:.5f}"
                     )
                     return {
@@ -99,7 +99,7 @@ class MicroAbsorptionGuard:
                     }
 
         # =====================================================================
-        # 🔴 SELL POSITION ABSORPTION GUARD
+        # ðŸ”´ SELL POSITION ABSORPTION GUARD
         # Scenario: We are SHORT. Aggressors are selling heavily (recent_q < 0), 
         # but the price is accelerating upwards (accel > 0). A buy wall is absorbing them.
         # =====================================================================
@@ -110,7 +110,7 @@ class MicroAbsorptionGuard:
                 
                 if self.absorption_score > 2.0:
                     logger.warning(
-                        f"[X-RAY] 🧱 ABSORPTION WALL HIT // {symbol} | "
+                        f"[X-RAY] ðŸ§± ABSORPTION WALL HIT // {symbol} | "
                         f"Heavy Sell Flow Absorbed. Score: {self.absorption_score:.2f} | Accel: {self.current_accel:.5f}"
                     )
                     return {

@@ -1,8 +1,8 @@
-"""
-🏛️ V68.0 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
+﻿"""
+ðŸ›ï¸ V1.0 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
 -----------------------------------------------------------------
-Features Recalibrated Conviction Gates, Net EV Edge Multipliers,
-O(1) Heap Deduplication, and Quantization Loss Ceilings.
+Features Momentum Spread Overrides, Corrected Leverage Math,
+Strict 3% Small Account Risk Caps, and O(1) Heap Deduplication.
 """
 
 import time
@@ -17,7 +17,7 @@ from typing import Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.AUCTION_ENGINE")
 
-# 🚀 SYNCHRONIZED: Structured Bybit Error Codes
+# ðŸš€ SYNCHRONIZED: Structured Bybit Error Codes
 class BybitRetCode:
     SUCCESS = 0
     PARAMETER_ERROR = 10002          # Invalid request parameter
@@ -50,7 +50,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V68.0 DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("ðŸ›ï¸ V1.0 DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -77,13 +77,13 @@ class CapitalAuctionEngine:
                     item = heapq.heappop(self.core.auction_queue)
                     _, _, sym, _, payload = item
                     
-                    # 🚀 V68.0 O(1) HEAP DEDUPLICATION PURGE
+                    # ðŸš€ V1.0 O(1) HEAP DEDUPLICATION PURGE
                     if hasattr(self.core, 'auction_queue_symbols') and sym in self.core.auction_queue_symbols:
                         self.core.auction_queue_symbols.remove(sym)
                     
                     # 1. Latency/Staleness Check
                     if now - payload["timestamp"] > 3.0: 
-                        logger.debug(f"[X-RAY] 🗑️ Signal for {sym} expired in queue (Latency > 3.0s).")
+                        logger.debug(f"[X-RAY] ðŸ—‘ï¸ Signal for {sym} expired in queue (Latency > 3.0s).")
                         continue
                         
                     # 2. Micro-Lock Guard (Absorption Wall Isolation)
@@ -95,10 +95,10 @@ class CapitalAuctionEngine:
                     impulse = sector_state.get("impulse_score", 0.0)
                     
                     if payload["action"] == "BUY" and impulse < -0.40:
-                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} BUY blocked by negative Sector Eigenvector ({impulse:.2f}).")
+                        logger.debug(f"[X-RAY] ðŸ›‘ SECTOR VETO // {sym} BUY blocked by negative Sector Eigenvector ({impulse:.2f}).")
                         continue
                     if payload["action"] == "SELL" and impulse > 0.40:
-                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} SELL blocked by positive Sector Eigenvector ({impulse:.2f}).")
+                        logger.debug(f"[X-RAY] ðŸ›‘ SECTOR VETO // {sym} SELL blocked by positive Sector Eigenvector ({impulse:.2f}).")
                         continue
 
                     valid_candidates.append(item)
@@ -133,7 +133,7 @@ class CapitalAuctionEngine:
                 if top_symbol in self.core.active_positions_map:
                     continue
                     
-                # 🚀 ASYMMETRIC MICRO-PRICE DRIFT GUARD
+                # ðŸš€ ASYMMETRIC MICRO-PRICE DRIFT GUARD
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
                 if current_ob and current_ob.get("best_bid", 0) > 0:
                     stat_engine = self.core.stat_engines.get(top_symbol)
@@ -152,7 +152,7 @@ class CapitalAuctionEngine:
                     
                     # Reject if it ran away by >40 bps, or dumped/spiked by >100 bps (potential cascade)
                     if drift_pct > 0.0040 or drift_pct < -0.0100: 
-                        logger.warning(f"[X-RAY] 🚫 AUCTION DISCARD // {top_symbol} Micro-Price drifted {drift_pct*10000:.1f} bps. Aborting.")
+                        logger.warning(f"[X-RAY] ðŸš« AUCTION DISCARD // {top_symbol} Micro-Price drifted {drift_pct*10000:.1f} bps. Aborting.")
                         continue
 
                 # Provisional Scale-Aware Check
@@ -164,14 +164,14 @@ class CapitalAuctionEngine:
                 )
 
                 if not is_safe:
-                    logger.warning(f"[X-RAY] 🛡️ PORTFOLIO RISK GATE REJECTED // {top_symbol}: {risk_reason}")
+                    logger.warning(f"[X-RAY] ðŸ›¡ï¸ PORTFOLIO RISK GATE REJECTED // {top_symbol}: {risk_reason}")
                     continue
 
                 # Lock the asset to prevent duplicate concurrent triggers ATOMICALLY
                 self.core.active_positions_map[top_symbol] = top_payload["action"]
             
             logger.critical(
-                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                f"ðŸ›ï¸ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
                 f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
                 f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
             )
@@ -187,13 +187,13 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V68.0 Universal Execution Engine. 
-        Patched with Dynamic EV Kelly Sizing and Quantization-Aware Micro-Loss Caps.
+        V1.0 Universal Execution Engine. 
+        Patched with Momentum Spread Overrides, Corrected Leverage Math, and Strict Micro-Loss Caps.
         """
         try:
             # Duplicate Daemon Check
             if symbol in self.core.daemon_tasks and not self.core.daemon_tasks[symbol].done():
-                logger.warning(f"[X-RAY] 🚫 Lifecycle daemon already active for {symbol}. Aborting duplicate.")
+                logger.warning(f"[X-RAY] ðŸš« Lifecycle daemon already active for {symbol}. Aborting duplicate.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
@@ -209,7 +209,7 @@ class CapitalAuctionEngine:
 
             # Hard stop if balance physically cannot cover fees
             if available_balance < 3.0: 
-                logger.warning(f"[X-RAY] 🚫 MARGIN EXHAUSTED // {symbol}: Balance (${available_balance:.2f}) below operational threshold.")
+                logger.warning(f"[X-RAY] ðŸš« MARGIN EXHAUSTED // {symbol}: Balance (${available_balance:.2f}) below operational threshold.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
@@ -226,31 +226,35 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🚀 V68.0 DYNAMIC EV KELLY EVALUATION
+            # 4. ðŸš€ V1.0 DYNAMIC EV KELLY EVALUATION WITH MOMENTUM OVERRIDE
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
                 confidence, 
                 net_edge_bps=edge_bps, 
                 current_balance=available_balance
             )
             
+            # ðŸ”¥ MOMENTUM SPREAD OVERRIDE: Prevent wide spreads during sweeps from blocking trades
+            if fractional_risk <= 0.0 and abs(vol_z) >= 2.0:
+                fractional_risk = max(0.01, self.core.risk_vault.max_single_position_risk_pct)
+                logger.info(f"[X-RAY] ðŸŒŠ MOMENTUM SPREAD OVERRIDE // {symbol} EV is negative due to spread widening, but Volatility is {vol_z:.2f}Ïƒ. Forcing Execution.")
+
             if fractional_risk <= 0.0:
-                logger.info(f"[X-RAY] 🚫 DYNAMIC EV REJECT // {symbol} Conviction/EV below threshold. Aborting.")
+                logger.info(f"[X-RAY] ðŸš« DYNAMIC EV REJECT // {symbol} Conviction/EV below threshold. Aborting.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 5. 🚀 V68.0 QUANTIZATION LOSS CAP & POSITION SIZING
+            # 5. ðŸš€ V1.0 QUANTIZATION LOSS CAP & POSITION SIZING
             if available_balance < 50.0:
                 # MICRO-ACCOUNT MODE: Hard lock to exchange minimum.
                 target_notional = exchange_min_notional
                 actual_dollar_risk = target_notional * sl_distance_pct
+                actual_risk_pct = (actual_dollar_risk / available_balance) * 100.0
                 
-                # Hard max risk cap to prevent rapid micro-account depletion
-                max_micro_loss_ceiling = max(1.20, available_balance * 0.10) 
-                
-                if actual_dollar_risk > max_micro_loss_ceiling:
+                # Hard max risk cap to prevent rapid micro-account depletion (Strict 3.0%)
+                if actual_risk_pct > 3.0:
                     logger.warning(
-                        f"[X-RAY] 🛑 QUANTIZATION LOSS OVERFLOW // {symbol} Risk (${actual_dollar_risk:.2f}) "
-                        f"> Micro Ceiling (${max_micro_loss_ceiling:.2f}). Aborting."
+                        f"[X-RAY] ðŸ›‘ SMALL ACCOUNT SAFETY BLOCK // {symbol} Risk (${actual_dollar_risk:.2f} | {actual_risk_pct:.1f}%) "
+                        f"> 3.0% Micro Ceiling. Aborting to protect equity."
                     )
                     async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                     return
@@ -259,7 +263,7 @@ class CapitalAuctionEngine:
                 raw_notional = (available_balance * fractional_risk) / sl_distance_pct
                 target_notional = max(exchange_min_notional, min(raw_notional, available_balance * 0.25))
 
-            # 🛡️ Safe Math.Floor Position Sizing Calculation
+            # ðŸ›¡ï¸ Safe Math.Floor Position Sizing Calculation
             safe_qty = target_notional / current_price
             stepped_qty = math.floor(safe_qty / qty_step) * qty_step
 
@@ -275,9 +279,11 @@ class CapitalAuctionEngine:
 
             trade_risk_dollars = target_notional * sl_distance_pct
 
-            # Determine Target Leverage dynamically based on risk constraints
-            margin_target = max(1.0, target_notional / 3.0)
-            target_leverage = int(max(2, min(5, math.ceil(target_notional / margin_target))))
+            # ðŸš€ V1.0 DYNAMIC RISK-BASED LEVERAGE
+            # Leverage is derived strictly from Stop Loss distance to prevent liquidation clusters.
+            # Safe leverage is effectively half the reciprocal of the stop loss distance.
+            safe_max_lev = math.floor(0.5 / (sl_distance_pct + 1e-9))
+            target_leverage = int(max(2, min(10, safe_max_lev)))
 
             # 6. Target Price Calculus & Formatting (Wide Initial Brackets)
             tp_distance = sl_distance * dynamic_rr_ratio 
@@ -294,7 +300,7 @@ class CapitalAuctionEngine:
             initial_sl_price = float(align_price(raw_sl))
             target_tp_price = float(align_price(raw_tp))
 
-            logger.info(f"[X-RAY] 🌉 DYNAMIC EV ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
+            logger.info(f"[X-RAY] ðŸŒ‰ DYNAMIC EV ENGAGED // {direction} {symbol} | Notional: ${target_notional:.2f} | Lev: {target_leverage}x | Risk: ${trade_risk_dollars:.2f}")
 
             feature_engine = self.core.feature_engines.get(symbol)
             current_depth = feature_engine.get_orderbook_snapshot() if feature_engine and hasattr(feature_engine, 'get_orderbook_snapshot') else {"bids": [[current_price, 1]], "asks": [[current_price, 1]]}
@@ -309,7 +315,7 @@ class CapitalAuctionEngine:
                 execution_success = False
                 
                 if not levels:
-                    logger.warning(f"[X-RAY] 🚫 PAPER L2 REJECT // {symbol} Empty orderbook.")
+                    logger.warning(f"[X-RAY] ðŸš« PAPER L2 REJECT // {symbol} Empty orderbook.")
                 else:
                     for price_str, vol_str in levels:
                         level_price = float(price_str)
@@ -360,11 +366,11 @@ class CapitalAuctionEngine:
                     ret_code = getattr(ex, "ret_code", None) or getattr(ex, "code", None)
 
                     if ret_code in [BybitRetCode.SYSTEM_MAINTENANCE, BybitRetCode.SERVICE_UNAVAILABLE] or any(code in err_str for code in ["10004", "10016", "500"]):
-                        logger.critical(f"🚨 BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
+                        logger.critical(f"ðŸš¨ BYBIT SYSTEM MAINTENANCE DETECTED ({err_str}). Tripping 180s System Pause.")
                         async with self.core.circuit_breaker_lock:
                             self.core.circuit_breakers["GLOBAL_MAINTENANCE"] = time.time() + 180.0
                     elif ret_code in [BybitRetCode.INSUFFICIENT_BALANCE, BybitRetCode.QTY_OUT_OF_BOUNDS] or any(code in err_str for code in ["110007", "not enough", "10001"]):
-                        logger.warning(f"[X-RAY] ⚠️ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
+                        logger.warning(f"[X-RAY] âš ï¸ EXCHANGE REJECTION // Skipping {symbol}: {err_str}")
                     else:
                         logger.error(f"[X-RAY] Execution error for {symbol}: {err_str}", exc_info=True)
                     
@@ -372,7 +378,7 @@ class CapitalAuctionEngine:
                     return
 
             if not execution_success: 
-                logger.warning(f"[X-RAY] 🚫 SOR ABORT // Smart Order Router failed to fill {symbol}.")
+                logger.warning(f"[X-RAY] ðŸš« SOR ABORT // Smart Order Router failed to fill {symbol}.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return 
                 
@@ -384,7 +390,7 @@ class CapitalAuctionEngine:
                     actual_filled_notional = actual_qty_filled * current_price
                     
                     if actual_filled_notional <= 0:
-                        logger.warning(f"[X-RAY] 👻 PHANTOM FILL // SOR reported success but Bybit shows 0 position for {symbol}.")
+                        logger.warning(f"[X-RAY] ðŸ‘» PHANTOM FILL // SOR reported success but Bybit shows 0 position for {symbol}.")
                         async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                         return
                 except Exception as e:
@@ -411,7 +417,7 @@ class CapitalAuctionEngine:
                     target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio
                 )
             )
-            logger.info(f"🛡️ GUARDIAN DAEMON SPAWNED // Managing position lifecycle for {symbol}.")
+            logger.info(f"ðŸ›¡ï¸ GUARDIAN DAEMON SPAWNED // Managing position lifecycle for {symbol}.")
             
         except Exception as e:
             logger.error(f"[X-RAY] Critical failure in execute_statistical_signal for {symbol}: {e}", exc_info=True)
@@ -421,12 +427,12 @@ class CapitalAuctionEngine:
                 if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
                     qty = float(pos_list[0]["size"])
                     side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
-                    logger.critical(f"🛑 ORPHAN GUARD ACTIVATED // Liquidating {symbol}.")
+                    logger.critical(f"ðŸ›‘ ORPHAN GUARD ACTIVATED // Liquidating {symbol}.")
                     await self.core.executor.safe_call(
                         self.core.executor.client.place_order, category="linear", symbol=symbol, side=side, 
                         orderType="Market", qty=str(qty), timeInForce="IOC", reduceOnly=True
                     )
             except Exception as flatten_err:
-                logger.error(f"[X-RAY] 💀 FATAL: Orphan flatten failed for {symbol}: {flatten_err}")
+                logger.error(f"[X-RAY] ðŸ’€ FATAL: Orphan flatten failed for {symbol}: {flatten_err}")
                 
             async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
