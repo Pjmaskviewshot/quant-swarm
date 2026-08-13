@@ -1,9 +1,9 @@
 ﻿"""
-🏛️ V4.1 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
+🏛️ V4.2 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
 -----------------------------------------------------------------
-Eradicated the rogue Momentum Override loop. The engine now strictly 
-enforces EV and Conviction floors from the Alpha Fusion matrix.
-Features Dynamic Stop Compression for Micro-Accounts.
+Eradicated 50/50 Zero-Variance phantom trades. 
+Conviction Floor (52%) enforced pre-auction. 
+Dynamic EV execution and Safe RiskVault mapping restored.
 """
 
 import time
@@ -51,7 +51,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V4.1 DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V4.2 DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -84,7 +84,6 @@ class CapitalAuctionEngine:
                     
                     # 1. Latency/Staleness Check
                     if now - payload["timestamp"] > 3.0: 
-                        logger.debug(f"[X-RAY] 🗑️ Signal for {sym} expired in queue (Latency > 3.0s).")
                         continue
                         
                     # 2. Micro-Lock Guard (Absorption Wall Isolation)
@@ -96,10 +95,13 @@ class CapitalAuctionEngine:
                     impulse = sector_state.get("impulse_score", 0.0)
                     
                     if payload["action"] == "BUY" and impulse < -0.40:
-                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} BUY blocked by negative Sector Eigenvector ({impulse:.2f}).")
                         continue
                     if payload["action"] == "SELL" and impulse > 0.40:
-                        logger.debug(f"[X-RAY] 🛑 SECTOR VETO // {sym} SELL blocked by positive Sector Eigenvector ({impulse:.2f}).")
+                        continue
+                        
+                    # 🚀 V4.2 PRE-AUCTION CONVICTION FLOOR
+                    # Slaughters 50.00% Zero-Variance Phantom Trades before they log.
+                    if payload.get("prob_success", 0.0) < 0.52:
                         continue
 
                     valid_candidates.append(item)
@@ -188,16 +190,10 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V4.1 Universal Execution Engine. 
+        V4.2 Universal Execution Engine. 
         Enforces Alpha Fusion EV math strictly. Implements Dynamic Stop Compression.
         """
         try:
-            # 🚀 V4.1 STRICT CONVICTION FLOOR: Silently eradicate 50/50 noise trades
-            if confidence < 0.52:
-                logger.debug(f"[X-RAY] 🚫 WEAK CONVICTION // {symbol} Prob: {confidence:.2%}. Silently discarding noise.")
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                return
-
             # Duplicate Daemon Check
             if symbol in self.core.daemon_tasks and not self.core.daemon_tasks[symbol].done():
                 logger.warning(f"[X-RAY] 🚫 Lifecycle daemon already active for {symbol}. Aborting duplicate.")
@@ -233,20 +229,20 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🚀 V4.1 STRICT EV KELLY EVALUATION
+            # 4. 🚀 V4.2 STRICT EV KELLY EVALUATION
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
                 confidence, 
                 net_edge_bps=edge_bps, 
                 current_balance=available_balance
             )
 
-            # 🔪 THE OVERRIDE IS GONE. If Kelly says EV is zero or negative, WE DO NOT TRADE.
+            # 🔪 If Kelly says EV is zero or negative, WE DO NOT TRADE.
             if fractional_risk <= 0.0:
                 logger.info(f"[X-RAY] 🚫 EV REJECT // {symbol} EV is negative or Conviction too low. Aborting.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 5. 🚀 V4.1 DYNAMIC STOP COMPRESSION & POSITION SIZING
+            # 5. 🚀 V4.2 DYNAMIC STOP COMPRESSION & POSITION SIZING
             if available_balance < 50.0:
                 # MICRO-ACCOUNT MODE: Lock to exchange minimum, but compress stop loss to fit 2.5% risk
                 target_notional = exchange_min_notional
@@ -286,7 +282,7 @@ class CapitalAuctionEngine:
 
             trade_risk_dollars = target_notional * sl_distance_pct
 
-            # 🚀 V4.1 DYNAMIC RISK-BASED LEVERAGE
+            # 🚀 V4.2 DYNAMIC RISK-BASED LEVERAGE
             # Leverage is derived strictly from Stop Loss distance to prevent liquidation clusters.
             safe_max_lev = math.floor(0.5 / (sl_distance_pct + 1e-9))
             target_leverage = int(max(2, min(10, safe_max_lev)))

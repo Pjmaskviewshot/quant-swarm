@@ -1,5 +1,5 @@
 ﻿"""
-ðŸ’Ž V1.0 TITANIUM APEX: MICROSTRUCTURE MACHINE LEARNING MODELS
+💎 V1.0 TITANIUM APEX: MICROSTRUCTURE MACHINE LEARNING MODELS
 --------------------------------------------------------------
 Houses the Adaptive Session Clock, Permutation Entropy calculators, 
 and the Recursive Least Squares (RLS) Online Learning Engine.
@@ -276,7 +276,7 @@ class ContinuousMicrostructureEngine:
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         """
-        ðŸš€ V1.0 TITANIUM APEX: MACRO FEATURE EXTRACTION
+        🚀 V1.0 TITANIUM APEX: MACRO FEATURE EXTRACTION
         Ingests the Log-MLOFI, Hawkes intensity, and Sector SVD Eigenvector impulse,
         orthogonalizes them via Online Gram-Schmidt, and queries the dual-weight RLS matrices.
         """
