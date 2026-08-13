@@ -1,8 +1,9 @@
 ﻿"""
-🏛️ V4.0 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
+🏛️ V4.1 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
 -----------------------------------------------------------------
-Restored operational throughput. Safe RiskVault attribute access,
-Dynamic EV execution, and safe momentum overrides.
+Eradicated the rogue Momentum Override loop. The engine now strictly 
+enforces EV and Conviction floors from the Alpha Fusion matrix.
+Features Dynamic Stop Compression for Micro-Accounts.
 """
 
 import time
@@ -50,7 +51,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V4.0 DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V4.1 DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -187,10 +188,16 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V4.0 Universal Execution Engine. 
-        Patched with Momentum Spread Overrides, Corrected Leverage Math, and Safe Risk Fallbacks.
+        V4.1 Universal Execution Engine. 
+        Enforces Alpha Fusion EV math strictly. Implements Dynamic Stop Compression.
         """
         try:
+            # 🚀 V4.1 STRICT CONVICTION FLOOR: Silently eradicate 50/50 noise trades
+            if confidence < 0.52:
+                logger.debug(f"[X-RAY] 🚫 WEAK CONVICTION // {symbol} Prob: {confidence:.2%}. Silently discarding noise.")
+                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                return
+
             # Duplicate Daemon Check
             if symbol in self.core.daemon_tasks and not self.core.daemon_tasks[symbol].done():
                 logger.warning(f"[X-RAY] 🚫 Lifecycle daemon already active for {symbol}. Aborting duplicate.")
@@ -213,7 +220,7 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 2. Base Volatility Parameters (Broad bounds, FSM manages precise trail)
+            # 2. Base Volatility Parameters
             sl_atr_mult = max(2.5, self.core.live_params.get("sl_atr_mult", 2.5))
             sl_distance = max(atr * sl_atr_mult, current_price * 0.025) 
             sl_distance_pct = sl_distance / current_price
@@ -226,43 +233,38 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🚀 V4.0 DYNAMIC EV KELLY EVALUATION WITH MOMENTUM OVERRIDE
+            # 4. 🚀 V4.1 STRICT EV KELLY EVALUATION
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
                 confidence, 
                 net_edge_bps=edge_bps, 
                 current_balance=available_balance
             )
-            
-            # 🛡️ SAFE FALLBACK: Catch attribute name mismatches in RiskVault
-            safe_max_risk = getattr(
-                self.core.risk_vault, 'max_single_position_risk_pct',
-                getattr(self.core.risk_vault, 'max_risk_pct', 0.015)
-            )
 
-            # 🔥 MOMENTUM SPREAD OVERRIDE: Prevent wide spreads during sweeps from blocking trades
-            if fractional_risk <= 0.0 and abs(vol_z) >= 1.5:
-                fractional_risk = max(0.01, safe_max_risk)
-                logger.info(f"[X-RAY] 🌊 MOMENTUM SPREAD OVERRIDE // {symbol} EV is negative due to spread widening, but Volatility is {vol_z:.2f}σ. Forcing Execution.")
-
+            # 🔪 THE OVERRIDE IS GONE. If Kelly says EV is zero or negative, WE DO NOT TRADE.
             if fractional_risk <= 0.0:
-                logger.info(f"[X-RAY] 🚫 DYNAMIC EV REJECT // {symbol} Conviction/EV below threshold. Aborting.")
+                logger.info(f"[X-RAY] 🚫 EV REJECT // {symbol} EV is negative or Conviction too low. Aborting.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 5. 🚀 V4.0 QUANTIZATION LOSS CAP & POSITION SIZING
+            # 5. 🚀 V4.1 DYNAMIC STOP COMPRESSION & POSITION SIZING
             if available_balance < 50.0:
-                # MICRO-ACCOUNT MODE: Hard lock to exchange minimum.
+                # MICRO-ACCOUNT MODE: Lock to exchange minimum, but compress stop loss to fit 2.5% risk
                 target_notional = exchange_min_notional
                 actual_dollar_risk = target_notional * sl_distance_pct
                 actual_risk_pct = (actual_dollar_risk / available_balance) * 100.0
                 
-                if actual_risk_pct > 5.0:
-                    logger.warning(
-                        f"[X-RAY] 🛑 MICRO-ACCOUNT BLOCK // {symbol} requires ${actual_dollar_risk:.2f} risk ({actual_risk_pct:.1f}% of balance). "
-                        f"Cap is 5.0%. Aborting."
+                if actual_risk_pct > 3.0:
+                    target_risk_dollars = available_balance * 0.025  # Force 2.5% max risk
+                    compressed_sl_pct = target_risk_dollars / (target_notional + 1e-9)
+                    compressed_sl_pct = max(0.012, compressed_sl_pct)  # Safety floor at 1.2% distance
+                    
+                    sl_distance_pct = compressed_sl_pct
+                    sl_distance = sl_distance_pct * current_price
+                    
+                    logger.info(
+                        f"[X-RAY] 🛠️ DYNAMIC STOP COMPRESSION // {symbol} | "
+                        f"Compressed SL to {compressed_sl_pct*100:.2f}% to fit order safely."
                     )
-                    async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                    return
             else:
                 # INSTITUTIONAL SWARM MODE: Continuous Half-Kelly
                 raw_notional = (available_balance * fractional_risk) / sl_distance_pct
@@ -284,7 +286,7 @@ class CapitalAuctionEngine:
 
             trade_risk_dollars = target_notional * sl_distance_pct
 
-            # 🚀 V4.0 DYNAMIC RISK-BASED LEVERAGE
+            # 🚀 V4.1 DYNAMIC RISK-BASED LEVERAGE
             # Leverage is derived strictly from Stop Loss distance to prevent liquidation clusters.
             safe_max_lev = math.floor(0.5 / (sl_distance_pct + 1e-9))
             target_leverage = int(max(2, min(10, safe_max_lev)))
