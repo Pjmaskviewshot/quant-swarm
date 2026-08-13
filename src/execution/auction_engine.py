@@ -1,9 +1,8 @@
 ﻿"""
-🏛️ V1.1 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
+🏛️ V4.0 APEX HYPERION: DYNAMIC EV AUCTION ENGINE
 -----------------------------------------------------------------
-Restored operational throughput. 5.0% Risk Cap for Micro Accounts,
-Loosened Kelly Momentum Overrides, Corrected Leverage Math, 
-and transparent abort logging.
+Restored operational throughput. Safe RiskVault attribute access,
+Dynamic EV execution, and safe momentum overrides.
 """
 
 import time
@@ -51,7 +50,7 @@ class CapitalAuctionEngine:
         The infinite polling loop that monitors the global priority heap.
         Only the highest expected Sharpe signals are evaluated and executed.
         """
-        logger.info("🏛️ V1.1 DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V4.0 DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.5) 
@@ -188,8 +187,8 @@ class CapitalAuctionEngine:
 
     async def execute_statistical_signal(self, symbol: str, direction: str, current_price: float, confidence: float, dna_stats: dict, atr: float, regime: str, edge_bps: float, vol_z: float, vol_mult: float, payload_features: dict = None, elasticity: Any = None, dynamic_rr_ratio: float = 2.0):
         """
-        V1.1 Universal Execution Engine. 
-        Patched with Momentum Spread Overrides, Corrected Leverage Math, and 5.0% Micro-Loss Caps.
+        V4.0 Universal Execution Engine. 
+        Patched with Momentum Spread Overrides, Corrected Leverage Math, and Safe Risk Fallbacks.
         """
         try:
             # Duplicate Daemon Check
@@ -227,17 +226,22 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
-            # 4. 🚀 V1.1 DYNAMIC EV KELLY EVALUATION WITH MOMENTUM OVERRIDE
+            # 4. 🚀 V4.0 DYNAMIC EV KELLY EVALUATION WITH MOMENTUM OVERRIDE
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
                 confidence, 
                 net_edge_bps=edge_bps, 
                 current_balance=available_balance
             )
             
+            # 🛡️ SAFE FALLBACK: Catch attribute name mismatches in RiskVault
+            safe_max_risk = getattr(
+                self.core.risk_vault, 'max_single_position_risk_pct',
+                getattr(self.core.risk_vault, 'max_risk_pct', 0.015)
+            )
+
             # 🔥 MOMENTUM SPREAD OVERRIDE: Prevent wide spreads during sweeps from blocking trades
-            # Lowered threshold to 1.5 sigma to catch more trends
             if fractional_risk <= 0.0 and abs(vol_z) >= 1.5:
-                fractional_risk = max(0.01, self.core.risk_vault.max_single_position_risk_pct)
+                fractional_risk = max(0.01, safe_max_risk)
                 logger.info(f"[X-RAY] 🌊 MOMENTUM SPREAD OVERRIDE // {symbol} EV is negative due to spread widening, but Volatility is {vol_z:.2f}σ. Forcing Execution.")
 
             if fractional_risk <= 0.0:
@@ -245,14 +249,13 @@ class CapitalAuctionEngine:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
-            # 5. 🚀 V1.1 QUANTIZATION LOSS CAP & POSITION SIZING
+            # 5. 🚀 V4.0 QUANTIZATION LOSS CAP & POSITION SIZING
             if available_balance < 50.0:
                 # MICRO-ACCOUNT MODE: Hard lock to exchange minimum.
                 target_notional = exchange_min_notional
                 actual_dollar_risk = target_notional * sl_distance_pct
                 actual_risk_pct = (actual_dollar_risk / available_balance) * 100.0
                 
-                # V1.1: Raised Micro-Account cap from 3.0% to 5.0% so the bot can breathe
                 if actual_risk_pct > 5.0:
                     logger.warning(
                         f"[X-RAY] 🛑 MICRO-ACCOUNT BLOCK // {symbol} requires ${actual_dollar_risk:.2f} risk ({actual_risk_pct:.1f}% of balance). "
@@ -281,7 +284,7 @@ class CapitalAuctionEngine:
 
             trade_risk_dollars = target_notional * sl_distance_pct
 
-            # 🚀 V1.1 DYNAMIC RISK-BASED LEVERAGE
+            # 🚀 V4.0 DYNAMIC RISK-BASED LEVERAGE
             # Leverage is derived strictly from Stop Loss distance to prevent liquidation clusters.
             safe_max_lev = math.floor(0.5 / (sl_distance_pct + 1e-9))
             target_leverage = int(max(2, min(10, safe_max_lev)))

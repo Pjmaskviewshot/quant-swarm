@@ -1,9 +1,8 @@
 ﻿"""
-💎 V4.0 ALPHA FUSION ENGINE (FORMERLY ENTRY MATRIX)
+💎 V4.0 ALPHA FUSION ENGINE
 -------------------------------------------------------------------------
-Abolishes arbitrary "veto gates". Fuses Microstructure acceleration, 
-Orderbook Convexity, and Macro-Flow alignment directly into the signal's 
-base probability. The system now trades purely on unified Expected Value (EV).
+Fuses microstructure acceleration, orderbook convexity, and macro flows 
+directly into the base probability model. Abolishes arbitrary veto gates.
 """
 
 import math
@@ -73,8 +72,8 @@ class QuantumEntryMatrix:
     ) -> Dict[str, Any]:
         """
         🚀 UNIFIED PROBABILITY FUSION
-        Instead of gating the trade, this organically scales the probability of success
-        up or down based on supporting order book and macro evidence.
+        Organically scales the probability of success up or down based on supporting 
+        order book and macro evidence without hard blocking.
         """
         if len(self.mlofi_acceleration) < 15 or len(self.convexity_history) < 15:
             return {"fused_prob": raw_prob, "execution_weight": 1.0, "reason": "CALIBRATING_BUFFERS"}
@@ -87,8 +86,8 @@ class QuantumEntryMatrix:
         macro_composite = (btc_z * 0.6) + (eth_z * 0.4)
 
         if intended_action == "BUY":
-            if macro_composite > 1.5: prob_modifier *= 1.15   # Strong tailwind
-            elif macro_composite < -1.5: prob_modifier *= 0.60  # Severe headwind (slashes probability)
+            if macro_composite > 1.5: prob_modifier *= 1.15
+            elif macro_composite < -1.5: prob_modifier *= 0.60
         elif intended_action == "SELL":
             if macro_composite < -1.5: prob_modifier *= 1.15
             elif macro_composite > 1.5: prob_modifier *= 0.60
@@ -115,13 +114,10 @@ class QuantumEntryMatrix:
             if convexity_percentile < 0.30: prob_modifier *= 1.10
             elif convexity_percentile > 0.70: prob_modifier *= 0.85
 
-        # 🚀 Final Fused Probability (Clamped between 5% and 95%)
+        # Final Fused Probability (Clamped between 5% and 95%)
         fused_prob = min(0.95, max(0.05, raw_prob * prob_modifier))
-        
-        # Execution weight maps directly to the confidence of the modifier
         execution_weight = min(2.0, max(0.5, prob_modifier))
         
-        # Only log to the terminal if it's a massive setup
         if prob_modifier > 1.2:
             logger.info(f"🔥 ALPHA FUSION SURGE // {symbol} {intended_action} | Raw Prob: {raw_prob:.2%} -> Fused Prob: {fused_prob:.2%} (Mod: {prob_modifier:.2f}x)")
 
