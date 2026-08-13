@@ -1,9 +1,9 @@
 ﻿"""
-💎 V2.0 ADAPTIVE CORE: ZERO-DISCARD ENGINE
+💎 V4.0 ALPHA FUSION CORE: EXPECTED VALUE ENGINE
 ------------------------------------------------------------------------
-Operates exclusively on real-time microsecond order flow, strict 
-binary percentile filtering, and non-stationary Tensor-Prime anomalies.
-Features V2.0 Dynamic Stop Compression to eliminate small-account discards.
+Abolishes heuristic gates. Fuses macro flows and orderbook convexity 
+directly into the base probability model. Trades purely on unified EV.
+Includes Stop Compression for small accounts and disabled Yield Harvester.
 """
 
 import os
@@ -62,7 +62,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V2.0_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V4.0_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +73,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V2.0 ADAPTIVE MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V4.0 ALPHA FUSION MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -490,8 +490,8 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                # Sanitize telegram versions to V2.0
-                report = report.replace("V1.0 APEX", "V2.0 APEX")
+                # Sanitize telegram versions to V4.0
+                report = report.replace("V1.0 APEX", "V4.0 APEX").replace("V2.0 APEX", "V4.0 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -648,43 +648,40 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 V2.0 TENSOR-PRIME MANIFOLD & SNIPER GATE
-                entry_matrix = self.entry_matrices.get(symbol)
+                # 🚀 V4.0 UNIFIED ALPHA FUSION
+                fusion_engine = self.entry_matrices.get(symbol)
                 exec_weight = 1.0
-                if entry_matrix:
+                if fusion_engine:
                     btc_eng = self.stat_engines.get("BTCUSDT")
                     eth_eng = self.stat_engines.get("ETHUSDT")
                     
                     btc_ofi = getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0
                     eth_ofi = getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
                     
-                    entry_matrix.update_macro_flows(
+                    fusion_engine.update_macro_flows(
                         asset_ofi_z=stat_engine.ofi_fast_z,
                         btc_ofi_z=btc_ofi,
                         eth_ofi_z=eth_ofi
                     )
-                    entry_matrix.update_mlofi_state(stat_engine.ofi_fast_z)
+                    fusion_engine.update_mlofi_state(stat_engine.ofi_fast_z)
 
                     bids_raw = ob.get("bids", [])
                     asks_raw = ob.get("asks", [])
-                    htf_bias = feature_engine.get_htf_trend_bias(price) if feature_engine and hasattr(feature_engine, 'get_htf_trend_bias') else 0.0
                     
-                    alpha_verdict = entry_matrix.evaluate_entry_alpha(
+                    # Fuse orderbook and macro data directly into the win-probability
+                    fusion_verdict = fusion_engine.fuse_signal_probability(
                         symbol=symbol,
                         raw_prob=prob_success,
                         intended_action=action,
                         bids=bids_raw,
-                        asks=asks_raw,
-                        htf_bias=htf_bias
+                        asks=asks_raw
                     )
                     
-                    # 🛑 THE SNIPER GATE: Silently drop noise. 
-                    if not alpha_verdict.get("approved", False):
-                        return
-                        
-                    exec_weight = alpha_verdict.get("execution_weight", 1.0)
+                    # 🧠 CORE UPGRADE: Organically unified probability. No arbitrary rejections.
+                    prob_success = fusion_verdict.get("fused_prob", prob_success)
+                    exec_weight = fusion_verdict.get("execution_weight", 1.0)
                 else:
-                    return # Require matrix approval
+                    return # Require fusion engine data to proceed
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 action = structural_verdict.get("action", action)
@@ -724,7 +721,7 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                # 🚀 V2.0 ADAPTIVE MICRO-ACCOUNT SIZING (Zero Discards)
+                # 🚀 V4.0 ADAPTIVE MICRO-ACCOUNT SIZING
                 if available_balance < 50.0 and actual_risk_pct > 3.0:
                     target_risk_dollars = available_balance * 0.025  # Force 2.5% max risk
                     compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
@@ -763,8 +760,8 @@ class DistributedQuantEngine:
                             "log_mlofi_z": stat_engine.ofi_fast_z, 
                             "liquidity_density_ratio": vol_mult, 
                             "bid_ask_spread": spread_cost, 
-                            "reasoning": structural_verdict.get("reasoning", "CONTINUOUS_MANIFOLD_ALPHA"), 
-                            "ai_verdict": "V2.0_ADAPTIVE_EXECUTION"
+                            "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
+                            "ai_verdict": "V4.0_ALPHA_FUSION"
                         },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
@@ -939,7 +936,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V2.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V4.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -954,7 +951,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V2.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V4.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1009,7 +1006,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V2.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V4.0 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1614,8 +1611,8 @@ class DistributedQuantEngine:
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
             self.auction_engine.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon,
-            self.run_crowded_trade_oracle,
-            self.yield_engine.run_yield_scanner_daemon 
+            self.run_crowded_trade_oracle
+            # self.yield_engine.run_yield_scanner_daemon 
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
 
