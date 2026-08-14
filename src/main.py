@@ -1,9 +1,10 @@
 ﻿"""
-💎 V4.0 ALPHA FUSION CORE: EXPECTED VALUE ENGINE
+💎 V4.2 ALPHA FUSION CORE: EXPECTED VALUE ENGINE
 ------------------------------------------------------------------------
 Abolishes heuristic gates. Fuses macro flows and orderbook convexity 
 directly into the base probability model. Trades purely on unified EV.
-Includes Stop Compression for small accounts and disabled Yield Harvester.
+Includes Stop Compression for small accounts, disabled Yield Harvester, 
+and strict 52% pre-auction conviction filtering.
 """
 
 import os
@@ -62,7 +63,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V4.0_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V4.2_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -73,7 +74,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V4.0 ALPHA FUSION MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V4.2 ALPHA FUSION MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -490,8 +491,8 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                # Sanitize telegram versions to V4.0
-                report = report.replace("V1.0 APEX", "V4.0 APEX").replace("V2.0 APEX", "V4.0 APEX")
+                # Sanitize telegram versions to V4.2
+                report = report.replace("V1.0 APEX", "V4.2 APEX").replace("V2.0 APEX", "V4.2 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -648,7 +649,7 @@ class DistributedQuantEngine:
                 
                 action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                 
-                # 🚀 V4.0 UNIFIED ALPHA FUSION
+                # 🚀 V4.2 UNIFIED ALPHA FUSION
                 fusion_engine = self.entry_matrices.get(symbol)
                 exec_weight = 1.0
                 if fusion_engine:
@@ -682,6 +683,10 @@ class DistributedQuantEngine:
                     exec_weight = fusion_verdict.get("execution_weight", 1.0)
                 else:
                     return # Require fusion engine data to proceed
+
+                # 🚀 V4.2 PRE-FILTER FLOOR: Drop 50.00% zero-variance warmup noise instantly
+                if prob_success < 0.52:
+                    return
 
                 structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
                 action = structural_verdict.get("action", action)
@@ -721,7 +726,7 @@ class DistributedQuantEngine:
                 actual_risk_dollars = actual_notional * sl_dist_pct
                 actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
-                # 🚀 V4.0 ADAPTIVE MICRO-ACCOUNT SIZING
+                # 🚀 V4.2 ADAPTIVE MICRO-ACCOUNT SIZING
                 if available_balance < 50.0 and actual_risk_pct > 3.0:
                     target_risk_dollars = available_balance * 0.025  # Force 2.5% max risk
                     compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
@@ -761,7 +766,7 @@ class DistributedQuantEngine:
                             "liquidity_density_ratio": vol_mult, 
                             "bid_ask_spread": spread_cost, 
                             "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
-                            "ai_verdict": "V4.0_ALPHA_FUSION"
+                            "ai_verdict": "V4.2_ALPHA_FUSION"
                         },
                         "elasticity": self.elasticity_engines.get(symbol),
                         "dynamic_rr": dynamic_rr_ratio 
@@ -936,7 +941,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V4.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V4.2 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -951,7 +956,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V4.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V4.2 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1006,7 +1011,7 @@ class DistributedQuantEngine:
 
 
     # ==============================================================================
-    # 🚀 V4.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V4.2 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1480,7 +1485,7 @@ class DistributedQuantEngine:
                         current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
                         await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
                 except Exception as e2: logger.error(f"[X-RAY] Emergency FSM flatten failed for {symbol}: {e2}", exc_info=True)
-                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                async with self.core.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 self.risk_vault.update_position_ledger(symbol, 0.0)
             finally:
                 self.active_contexts.pop(symbol, None)

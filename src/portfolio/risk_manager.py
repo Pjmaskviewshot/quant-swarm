@@ -1,9 +1,9 @@
 ﻿"""
-💎 V4.0 TENSOR-PRIME: STRUCTURAL DYNAMICS RISK VAULT
+💎 V4.3 TENSOR-PRIME: STRUCTURAL DYNAMICS RISK VAULT
 ------------------------------------------------------------
 Features Natural Slot Allocation (Max 5, bounded strictly by margin math),
-Recalibrated Sigmoidal Conviction Gates, Net Expected Value (EV) Edge Multipliers,
-and Organic Leveraged Heat Caps (1.8x Multiplier).
+Recalibrated Sigmoidal Conviction Gates for Micro-Accounts, Net Expected 
+Value (EV) Edge Multipliers, and Organic Leveraged Heat Caps (1.8x Multiplier).
 
 CRITICAL FIX: Mathematical stability enforced. Eradicated silent exception 
 swallowing and implemented strict NaN/Inf sanitization for EVT Tail Risk 
@@ -119,20 +119,20 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V4.0 RECALIBRATED SIGMOIDAL THRESHOLD
-        Sub-$20 balance requires ~57.5% base win probability.
-        High Net EV (>140 bps) further lowers required conviction by up to 2.0%.
+        🚀 V4.3 MICRO-CALIBRATED CONVICTION THRESHOLD
+        Sets a flat 51.8% base conviction floor for micro-accounts.
+        Allows high-frequency order flow edges to pass Kelly sizing safely.
         """
         if math.isnan(balance) or math.isinf(balance):
             balance = 12.0
             
-        sigmoid = 1.0 / (1.0 + math.exp((balance - 30.0) / 7.0))
-        base_threshold = 0.525 + (0.060 * sigmoid)  
+        # Micro-calibrated base floor (51.8%)
+        base_threshold = 0.518
         
-        # High Expected Value (EV) Discount
-        ev_discount = min(0.020, max(0.0, (net_edge_bps - 100.0) / 5000.0))
+        # High Net Expected Value (EV) Discount (up to 1.0% discount for sharp edges)
+        ev_discount = min(0.010, max(0.0, (net_edge_bps - 40.0) / 5000.0))
         
-        return max(0.515, base_threshold - ev_discount)
+        return max(0.508, base_threshold - ev_discount)
 
     def get_max_allowed_slots(self, balance: float) -> int:
         """
@@ -144,9 +144,9 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
         """
-        🧬 V4.0 DYNAMIC EV-CONFLUENCE SIZING
+        🧬 V4.3 DYNAMIC EV-CONFLUENCE SIZING
         """
-        # 1. Sigmoidal EV Conviction Check
+        # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if base_confidence < min_required_conviction:
             return 0.0  # Rejected by Dynamic EV Gate
@@ -154,7 +154,7 @@ class InstitutionalRiskVault:
         # 2. Hybrid Allocation Sizing
         total_trades = len(self.outcomes_history)
         if total_trades < 10:
-            raw_kelly = 0.010 
+            raw_kelly = 0.012 
         else:
             p = float(np.mean(self.outcomes_history))
             p_win = max(0.01, min(0.99, p)) 
