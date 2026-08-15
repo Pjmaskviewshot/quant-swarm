@@ -1,9 +1,10 @@
 ﻿"""
-💎 V1.0 TITANIUM APEX: MICROSTRUCTURE MACHINE LEARNING MODELS
+💎 V5.1 TITANIUM APEX: MULTI-SCALE PREDICTIVE ENGINE
 --------------------------------------------------------------
-Houses the Adaptive Session Clock, Permutation Entropy calculators, 
-and the Recursive Least Squares (RLS) Online Learning Engine.
-Fully backward and forward compatible with main.py state handlers.
+Features:
+- Inverted Entropy-Adaptive Forgetting Factor (Fast adaptation during chaos)
+- Asymmetric Bivariate Hawkes Kernels (Liquidations & Panics)
+- 4D Online Gram-Schmidt Orthogonalization (OFI, Hawkes, Meso, Sector)
 """
 
 import math
@@ -16,6 +17,7 @@ from itertools import permutations
 from typing import Tuple, Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.MICRO_MODELS")
+
 
 class AdaptiveSessionClock:
     """
@@ -41,20 +43,21 @@ class AdaptiveSessionClock:
 
 class ClusterWarmStartRLS:
     @staticmethod
-    def get_cluster_priors(symbol: str):
+    def get_cluster_priors(symbol: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # 🚀 UPGRADED: 4-Dimensional Priors (OFI, Hawkes, Meso-Trend, Sector)
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-            w_trend = np.array([0.45, 0.35, 0.20])
-            w_range = np.array([0.20, 0.35, 0.45])
+            w_trend = np.array([0.35, 0.25, 0.30, 0.10])
+            w_range = np.array([0.15, 0.25, 0.40, 0.20])
             p_scale = 1.0
         elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-            w_trend = np.array([0.40, 0.40, 0.20])
-            w_range = np.array([0.20, 0.40, 0.40])
+            w_trend = np.array([0.30, 0.30, 0.30, 0.10])
+            w_range = np.array([0.20, 0.30, 0.30, 0.20])
             p_scale = 2.0
         else:
-            w_trend = np.array([0.35, 0.35, 0.30])
-            w_range = np.array([0.30, 0.35, 0.35])
+            w_trend = np.array([0.25, 0.25, 0.35, 0.15])
+            w_range = np.array([0.25, 0.25, 0.25, 0.25])
             p_scale = 0.5 
-        return w_trend, w_range, np.eye(3) * p_scale
+        return w_trend, w_range, np.eye(4) * p_scale
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
@@ -76,21 +79,29 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 
 class ContinuousMicrostructureEngine:
-    def __init__(self, symbol: str = "GENERIC", memory_depth=500):
+    def __init__(self, symbol: str = "GENERIC", memory_depth=1000):
         self.symbol = symbol
         
-        # Orderbook State Tracking
+        # 1. Orderbook State Tracking
         self.prev_bid, self.prev_bid_size, self.prev_ask, self.prev_ask_size = 0.0, 0.0, 0.0, 0.0
         self.ofi_fast_ewma, self.ofi_fast_ewmvar, self.ofi_fast_z = 0.0, 1.0, 0.0
         self.ofi_slow_ewma, self.ofi_slow_ewmvar, self.ofi_slow_z = 0.0, 1.0, 0.0
-        self.micro_price_skew, self.true_micro_price = 0.0, 0.0
+        self.true_micro_price = 0.0
         
-        # Hawkes Trade Intensity State
-        self.last_trade_time, self.hawkes_pressure_state = 0.0, 0.0
+        # 2. Asymmetric Hawkes State Tracking
+        self.last_trade_time = 0.0
+        self.hawkes_buy_state = 0.0
+        self.hawkes_sell_state = 0.0
         self.hawkes_ewma, self.hawkes_ewmvar, self.hawkes_z = 0.0, 1.0, 0.0
         self.hawkes_velocity, self.hawkes_acceleration = 0.0, 0.0
         self.hawkes_z_prev, self.hawkes_v_prev = 0.0, 0.0
         
+        # 3. Meso-Trend Structural Momentum (1m/5m proxy)
+        self.tick_prices = deque(maxlen=2000)
+        self.meso_fast_ema = None
+        self.meso_slow_ema = None
+        self.meso_momentum_z = 0.0
+
         # VPIN & Variance State
         self.vpin_z = 0.0
         self.prices = deque(maxlen=memory_depth)
@@ -102,11 +113,11 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
-        # Gram-Schmidt Covariance State Initialization
-        self.gs_cov_11, self.gs_cov_22, self.gs_cov_33 = 1.0, 1.0, 1.0
-        self.gs_cov_21, self.gs_cov_31, self.gs_cov_32 = 0.0, 0.0, 0.0
+        # 🚀 4x4 Gram-Schmidt Covariance State Initialization
+        self.gs_cov = np.eye(4)
         self.gs_alpha = 0.02
         
+        # 🚀 4D RLS Matrices
         w_t, w_r, P_init = ClusterWarmStartRLS.get_cluster_priors(symbol)
         self.weights_trending, self.weights_ranging = w_t, w_r
         self.P_trending, self.P_ranging = P_init.copy(), P_init.copy()
@@ -116,10 +127,8 @@ class ContinuousMicrostructureEngine:
         self.prediction_buffer = deque(maxlen=50000)
         self.historical_probs = deque(maxlen=2000) 
         self.rls_updates, self.ewma_mse = 100, 0.25 
-        
-        self._last_log_time = {}
 
-    def get_dynamic_decays(self):
+    def get_dynamic_decays(self) -> Tuple[float, float, float]:
         vol_scalar = min(1.0, max(0.0, self.inst_variance * 5000.0))
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (self.kaufman_er * 0.05), 0.05, 0.35)
         return alpha_fast, alpha_fast / 5.0, np.clip(1.0 + (vol_scalar * 4.0), 1.0, 5.0)
@@ -152,15 +161,27 @@ class ContinuousMicrostructureEngine:
         self.ofi_slow_ewmvar = (1 - alpha_slow) * self.ofi_slow_ewmvar + alpha_slow * (delta_W - self.ofi_slow_ewma)**2
         self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
         
-        current_mid = (best_bid + best_ask) / 2.0
         self.true_micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
-        if current_mid > 0:
-            self.micro_price_skew = ((self.true_micro_price - current_mid) / (current_mid + 1e-9)) * 10000.0
 
     def update_trades(self, price: float, volume: float = 0.0, is_buy: bool = True, current_time: float = 0.0):
-        """Processes executed market trades to update Hawkes pressure, volatility, and return history."""
+        """Processes executed market trades to update Asymmetric Hawkes pressure, volatility, and Meso-Trend."""
         if current_time == 0.0:
             current_time = time.time()
+
+        # 🚀 Meso-Trend Structural Computation
+        self.tick_prices.append(price)
+        alpha_meso_fast = 2.0 / (51.0)
+        alpha_meso_slow = 2.0 / (301.0)
+        
+        if self.meso_fast_ema is None:
+            self.meso_fast_ema = price
+            self.meso_slow_ema = price
+        else:
+            self.meso_fast_ema = (price - self.meso_fast_ema) * alpha_meso_fast + self.meso_fast_ema
+            self.meso_slow_ema = (price - self.meso_slow_ema) * alpha_meso_slow + self.meso_slow_ema
+            
+        trend_divergence = (self.meso_fast_ema - self.meso_slow_ema) / (self.meso_slow_ema + 1e-9)
+        self.meso_momentum_z = trend_divergence / (math.sqrt(self.inst_variance) + 1e-9)
 
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
@@ -179,21 +200,26 @@ class ContinuousMicrostructureEngine:
                 
             self.last_price_time = current_time
 
-        # Hawkes Intensity Calculation
-        alpha_fast, alpha_slow, hawkes_decay = self.get_dynamic_decays()
-        volume_signed = volume if is_buy else -volume
+        # 🚀 ASYMMETRIC HAWKES CASCADE CALCULUS
+        alpha_fast, alpha_slow, decay_base = self.get_dynamic_decays()
         
         if self.last_trade_time > 0:
             dt = current_time - self.last_trade_time
-            self.hawkes_pressure_state = self.hawkes_pressure_state * math.exp(-hawkes_decay * max(0.0, dt)) + volume_signed
-        else:
-            self.hawkes_pressure_state = volume_signed
+            # Panics (Sells) linger longer; FOMO (Buys) decays faster.
+            self.hawkes_buy_state *= math.exp(-decay_base * 1.2 * max(0.0, dt))
+            self.hawkes_sell_state *= math.exp(-decay_base * 0.7 * max(0.0, dt))
             
+        if is_buy:
+            self.hawkes_buy_state += volume * 0.50
+        else:
+            self.hawkes_sell_state += volume * 0.85 # Stronger downside impact
+
+        composite_pressure = self.hawkes_buy_state - self.hawkes_sell_state
         self.last_trade_time = current_time
         
-        self.hawkes_ewma = (1 - alpha_fast) * self.hawkes_ewma + alpha_fast * self.hawkes_pressure_state
-        self.hawkes_ewmvar = (1 - alpha_slow) * self.hawkes_ewmvar + alpha_slow * (self.hawkes_pressure_state - self.hawkes_ewma)**2
-        self.hawkes_z = (self.hawkes_pressure_state - self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9)
+        self.hawkes_ewma = (1 - alpha_fast) * self.hawkes_ewma + alpha_fast * composite_pressure
+        self.hawkes_ewmvar = (1 - alpha_slow) * self.hawkes_ewmvar + alpha_slow * (composite_pressure - self.hawkes_ewma)**2
+        self.hawkes_z = (composite_pressure - self.hawkes_ewma) / (math.sqrt(self.hawkes_ewmvar) + 1e-9)
 
         self.hawkes_velocity = self.hawkes_z - self.hawkes_z_prev
         self.hawkes_acceleration = self.hawkes_velocity - self.hawkes_v_prev
@@ -219,11 +245,15 @@ class ContinuousMicrostructureEngine:
                     error = y_target - old_p_up 
                     
                     self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
+                    
+                    # Reshape to 4x1 vector for matrix operations
                     x = features_array.reshape(-1, 1)
                     
-                    dynamic_lambda = max(0.990, min(0.9995, 0.990 + (self.shannon_entropy * 0.0095)))
+                    # 🚀 INVERTED ENTROPY SCALING: Higher chaos -> Smaller lambda -> Faster model adaptation
+                    entropy_norm = min(1.0, max(0.0, self.shannon_entropy))
+                    dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
                     
-                    # Trending Matrix Update
+                    # Trending Matrix Update (4x4)
                     P_x_t = self.P_trending @ x
                     den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
                     K_t = P_x_t / den_t
@@ -232,11 +262,11 @@ class ContinuousMicrostructureEngine:
                     
                     trace_t = np.trace(self.P_trending)
                     if trace_t > 1000.0: 
-                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(3) * 1e-3)
+                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(4) * 1e-3)
                     else: 
-                        self.P_trending += np.eye(3) * 1e-3
+                        self.P_trending += np.eye(4) * 1e-3
                     
-                    # Ranging Matrix Update
+                    # Ranging Matrix Update (4x4)
                     P_x_r = self.P_ranging @ x
                     den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
                     K_r = P_x_r / den_r
@@ -245,21 +275,21 @@ class ContinuousMicrostructureEngine:
                     
                     trace_r = np.trace(self.P_ranging)
                     if trace_r > 1000.0: 
-                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(3) * 1e-3)
+                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(4) * 1e-3)
                     else: 
-                        self.P_ranging += np.eye(3) * 1e-3
+                        self.P_ranging += np.eye(4) * 1e-3
                     
                     # Enforce Matrix Symmetry
-                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(3) * 1e-6)
-                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(3) * 1e-6)
+                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(4) * 1e-6)
+                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(4) * 1e-6)
                     self.rls_updates += 1
 
                     # Adaptive Regularization
                     if self.ewma_mse > 0.40:
                         if trace_t < (self.p_scale_init * 1.5):
-                            self.P_trending += np.eye(3) * (self.p_scale_init * 0.5)
+                            self.P_trending += np.eye(4) * (self.p_scale_init * 0.5)
                         if trace_r < (self.p_scale_init * 1.5):
-                            self.P_ranging += np.eye(3) * (self.p_scale_init * 0.5)
+                            self.P_ranging += np.eye(4) * (self.p_scale_init * 0.5)
 
     def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
         """Dynamically clamps signal confidence bounds based on current HMM regime."""
@@ -276,9 +306,9 @@ class ContinuousMicrostructureEngine:
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         """
-        🚀 V1.0 TITANIUM APEX: MACRO FEATURE EXTRACTION
-        Ingests the Log-MLOFI, Hawkes intensity, and Sector SVD Eigenvector impulse,
-        orthogonalizes them via Online Gram-Schmidt, and queries the dual-weight RLS matrices.
+        🚀 V5.1 TITANIUM APEX: 4D MACRO FEATURE EXTRACTION
+        Ingests Log-MLOFI, Hawkes, Meso-Momentum, and Sector Impulse,
+        orthogonalizes via Online Gram-Schmidt, and queries the RLS matrices.
         """
         # 1. Update rolling environment metrics
         if len(self.log_returns) > 10:
@@ -292,40 +322,27 @@ class ContinuousMicrostructureEngine:
         # Process asynchronous SGD updates
         self._process_rls_feedback_loop(exchange_timestamp, current_price)
 
-        # 2. ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        f1 = log_mlofi_z
-        f2 = hawkes_z
-        f3 = sector_impulse
-        
-        self.gs_cov_11 = (1 - self.gs_alpha) * self.gs_cov_11 + self.gs_alpha * (f1 * f1)
-        self.gs_cov_21 = (1 - self.gs_alpha) * self.gs_cov_21 + self.gs_alpha * (f2 * f1)
-        
-        beta_21 = self.gs_cov_21 / (self.gs_cov_11 + 1e-9)
-        f2_ortho = f2 - (beta_21 * f1)
-        self.gs_cov_22 = (1 - self.gs_alpha) * self.gs_cov_22 + self.gs_alpha * (f2_ortho * f2_ortho)
-        
-        self.gs_cov_31 = (1 - self.gs_alpha) * self.gs_cov_31 + self.gs_alpha * (f3 * f1)
-        self.gs_cov_32 = (1 - self.gs_alpha) * self.gs_cov_32 + self.gs_alpha * (f3 * f2_ortho)
-        
-        beta_31 = self.gs_cov_31 / (self.gs_cov_11 + 1e-9)
-        beta_32 = self.gs_cov_32 / (self.gs_cov_22 + 1e-9)
-        f3_ortho = f3 - (beta_31 * f1) - (beta_32 * f2_ortho)
-        self.gs_cov_33 = (1 - self.gs_alpha) * self.gs_cov_33 + self.gs_alpha * (f3_ortho * f3_ortho)
-        
-        f1_norm = f1 / (math.sqrt(self.gs_cov_11) + 1e-9)
-        f2_norm = f2_ortho / (math.sqrt(self.gs_cov_22) + 1e-9)
-        f3_norm = f3_ortho / (math.sqrt(self.gs_cov_33) + 1e-9)
+        # 2. ONLINE GRAM-SCHMIDT ORTHOGONALIZATION (4-Dimensional)
+        raw_vec = np.array([
+            log_mlofi_z,
+            hawkes_z,
+            self.meso_momentum_z,
+            sector_impulse
+        ], dtype=float)
 
-        features = np.clip(np.array([
-            f1_norm / 3.0,
-            f2_norm / 3.0,
-            f3_norm / 3.0
-        ]), -1.0, 1.0)
+        v = raw_vec.copy()
+        for i in range(4):
+            for j in range(i):
+                proj = (np.dot(raw_vec, self.gs_cov[:, j])) / (self.gs_cov[j, j] + 1e-9)
+                v[i] -= proj * self.gs_cov[i, j]
+            self.gs_cov[i, i] = (1 - self.gs_alpha) * self.gs_cov[i, i] + self.gs_alpha * (v[i] ** 2)
+
+        features = np.clip(v / (np.sqrt(np.diag(self.gs_cov)) + 1e-9) / 4.0, -1.0, 1.0)
 
         # 3. KAUFMAN-ATTENDED SIGMOID PREDICTION
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 3 
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
 
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (self.kaufman_er - 0.35)))
         logit_fused = (r_blend * np.dot(self.weights_trending, attended_features)) + ((1.0 - r_blend) * np.dot(self.weights_ranging, attended_features))

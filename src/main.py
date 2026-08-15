@@ -1,10 +1,12 @@
 ﻿"""
-💎 V4.2 ALPHA FUSION CORE: EXPECTED VALUE ENGINE
+💎 V5.1 ALPHA FUSION CORE: EXPECTED VALUE ENGINE (AUDITED)
 ------------------------------------------------------------------------
 Abolishes heuristic gates. Fuses macro flows and orderbook convexity 
 directly into the base probability model. Trades purely on unified EV.
-Includes Stop Compression for small accounts, disabled Yield Harvester, 
-and strict 52% pre-auction conviction filtering.
+
+Upgraded with 500ms Fast State Invariant Reconciliation, 
+Decoupled FSM Polling, Symbol-Level Mutability Locks, 
+and Strict Adverse Selection Hard Vetoes.
 """
 
 import os
@@ -39,6 +41,7 @@ from core.memory import MemoryBank
 from core.edge_gate import MicrostructureEdgeGate
 from core.micro_elasticity import MicroElasticityEngine 
 from core.quantum_entry import QuantumEntryMatrix  
+from core.intelligent_exit import IntelligentExitEngine
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.vpin_clock import VolumeSynchronizedClock 
 from features.omni_scanner import GlobalOmniScanner   
@@ -63,7 +66,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V4.2_MATRIX")
+logger = logging.getLogger("QUANT_CORE.V5.1_MATRIX")
 
 
 class DistributedQuantEngine:
@@ -74,7 +77,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V4.2 ALPHA FUSION MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V5.1 ALPHA FUSION MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -119,9 +122,11 @@ class DistributedQuantEngine:
         
         self.screener_memory, self.screener_metrics, self.orderbook_snapshots, self.ram_dna_cache = {}, {}, {}, {}
         self.volatility_baseline: Dict[str, float] = {}
-        self.portfolio_state_lock = asyncio.Lock()
-        self.active_positions_map: Dict[str, str] = {}  
         
+        # 🚀 STRICT ASYNC MUTATION LOCKS
+        self.portfolio_state_lock = asyncio.Lock()
+        
+        self.active_positions_map: Dict[str, str] = {}  
         self.symbol_locks, self.eval_semaphores, self.daemon_tasks, self.last_eval_time = {}, {}, {}, {}
         self._active_tasks = set()
         
@@ -136,7 +141,6 @@ class DistributedQuantEngine:
         self.last_socket_reconnect = 0.0 
         self.funding_rates, self.open_interests, self.spread_history = {}, {}, {}
         
-        # 🚀 Sub-10ms Event Contexts Map
         self.active_contexts: Dict[str, dict] = {}
         
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
@@ -425,6 +429,39 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"[X-RAY] Crowded-Trade Oracle fault: {e}", exc_info=True)
             await asyncio.sleep(120) 
 
+    async def run_fast_state_invariant_reconciliation(self):
+        """
+        🚀 500ms FAST STATE RECONCILIATION DAEMON
+        Maintains mathematical invariant: If Bybit position size == 0, 
+        internal state MUST be SETTLED and unlocked immediately.
+        """
+        logger.info("🛡️ 500ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                pos_response = await self.executor.safe_call(
+                    self.executor.client.get_positions, category="linear", settleCoin="USDT"
+                )
+                if pos_response.get("retCode") != 0:
+                    continue
+
+                active_on_exchange = {
+                    p["symbol"]: float(p.get("size", 0.0))
+                    for p in pos_response.get("result", {}).get("list", [])
+                    if float(p.get("size", 0.0)) > 0
+                }
+
+                async with self.portfolio_state_lock:
+                    for tracked_sym in list(self.active_positions_map.keys()):
+                        if tracked_sym not in active_on_exchange:
+                            if not (daemon := self.daemon_tasks.get(tracked_sym)) or daemon.done():
+                                logger.warning(f"[X-RAY] 🧹 INVARIANT ENFORCED: Purging desynchronized lock for {tracked_sym}")
+                                self.active_positions_map.pop(tracked_sym, None)
+                                self.risk_vault.update_position_ledger(tracked_sym, 0.0)
+
+            except Exception as e:
+                logger.debug(f"[X-RAY] Fast invariant sync tick bypassed: {e}")
+
     async def run_system_heartbeat(self):
         start_time = time.time()
         loop_counter = 0
@@ -491,8 +528,7 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                # Sanitize telegram versions to V4.2
-                report = report.replace("V1.0 APEX", "V4.2 APEX").replace("V2.0 APEX", "V4.2 APEX")
+                report = report.replace("V1.0 APEX", "V5.1 APEX").replace("V2.0 APEX", "V5.1 APEX").replace("V4.2 APEX", "V5.1 APEX").replace("V5.0 APEX", "V5.1 APEX")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -502,53 +538,55 @@ class DistributedQuantEngine:
         bids, asks = depth_data.get("b", []), depth_data.get("a", [])
         is_snapshot = depth_data.get("type") == "snapshot"
         
-        feature_engine = self.feature_engines.get(symbol)
-        if feature_engine:
-            feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
-            book_metrics = feature_engine.get_book_depth_metrics()
-            if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
-                best_bid, best_ask = book_metrics["top_bid"], book_metrics["top_ask"]
-                top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
-                top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
-                
-                if best_bid > 0 and best_ask > best_bid:
-                    self.orderbook_snapshots[symbol] = {
-                        "best_bid": best_bid, "bid_size": top_bid_size, 
-                        "best_ask": best_ask, "ask_size": top_ask_size, 
-                        "bids": bids, "asks": asks
-                    }
+        # 🚀 STRICT ASYNC MUTATION LOCKS: Avoid FSM daemon reading mid-update
+        async with self.symbol_locks[symbol]:
+            feature_engine = self.feature_engines.get(symbol)
+            if feature_engine:
+                feature_engine.push_orderbook_tick(bids, asks, is_snapshot=is_snapshot)
+                book_metrics = feature_engine.get_book_depth_metrics()
+                if book_metrics and "top_bid" in book_metrics and "top_ask" in book_metrics:
+                    best_bid, best_ask = book_metrics["top_bid"], book_metrics["top_ask"]
+                    top_bid_size = float(bids[0][1]) if bids else (book_metrics.get("bid_depth_10", 10.0) / 10.0)
+                    top_ask_size = float(asks[0][1]) if asks else (book_metrics.get("ask_depth_10", 10.0) / 10.0)
                     
-                    stat_engine = self.stat_engines.get(symbol)
-                    now, spread_val = time.time(), (best_ask - best_bid) / (best_bid + 1e-9)
-                    
-                    if (spread_hist := self.spread_history.get(symbol)) is not None:
-                        spread_hist.append(spread_val)
-                        async with self.circuit_breaker_lock:
-                            med_spread = np.median(spread_hist) if len(spread_hist) >= 10 else spread_val
-                            
-                            if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
-                                self.circuit_breakers[symbol] = 0.0
-                            
-                            spread_mult_cap = 6.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 8.0
-                            min_spread_floor = 0.0030 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0080
-                            
-                            if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
-                                self.circuit_breakers[symbol] = now + 5.0
-                    
-                    if stat_engine: 
-                        stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
+                    if best_bid > 0 and best_ask > best_bid:
+                        self.orderbook_snapshots[symbol] = {
+                            "best_bid": best_bid, "bid_size": top_bid_size, 
+                            "best_ask": best_ask, "ask_size": top_ask_size, 
+                            "bids": bids, "asks": asks
+                        }
                         
-                    if (elasticity := self.elasticity_engines.get(symbol)) and stat_engine:
-                        elasticity.update_depth_state(
-                            best_bid, top_bid_size, best_ask, top_ask_size, 
-                            stat_engine.ofi_fast_z, float(depth_data.get("ts", time.time() * 1000)) / 1000.0
-                        )
+                        stat_engine = self.stat_engines.get(symbol)
+                        now, spread_val = time.time(), (best_ask - best_bid) / (best_bid + 1e-9)
+                        
+                        if (spread_hist := self.spread_history.get(symbol)) is not None:
+                            spread_hist.append(spread_val)
+                            async with self.circuit_breaker_lock:
+                                med_spread = np.median(spread_hist) if len(spread_hist) >= 10 else spread_val
+                                
+                                if self.circuit_breakers.get(symbol, 0.0) > now and spread_val <= med_spread * 1.5:
+                                    self.circuit_breakers[symbol] = 0.0
+                                
+                                spread_mult_cap = 6.0 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 8.0
+                                min_spread_floor = 0.0030 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 0.0080
+                                
+                                if spread_val > med_spread * spread_mult_cap and spread_val > min_spread_floor:
+                                    self.circuit_breakers[symbol] = now + 5.0
+                        
+                        if stat_engine: 
+                            stat_engine.update_orderbook_pressure(best_bid, top_bid_size, best_ask, top_ask_size)
+                            
+                        if (elasticity := self.elasticity_engines.get(symbol)) and stat_engine:
+                            elasticity.update_depth_state(
+                                best_bid, top_bid_size, best_ask, top_ask_size, 
+                                stat_engine.ofi_fast_z, float(depth_data.get("ts", time.time() * 1000)) / 1000.0
+                            )
 
-            if (edge_gate := self.edge_gates.get(symbol)) and bids and asks:
-                try:
-                    f_bids, f_asks = feature_engine.get_deep_book_floats()
-                    edge_gate.update_orderbook_state(symbol, f_bids, f_asks, (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0)
-                except Exception as e: logger.debug(f"[X-RAY] Edge gate update error for {symbol}: {e}")
+                if (edge_gate := self.edge_gates.get(symbol)) and bids and asks:
+                    try:
+                        f_bids, f_asks = feature_engine.get_deep_book_floats()
+                        edge_gate.update_orderbook_state(symbol, f_bids, f_asks, (book_metrics["top_bid"] + book_metrics["top_ask"]) / 2.0)
+                    except Exception as e: logger.debug(f"[X-RAY] Edge gate update error for {symbol}: {e}")
 
     async def handle_incoming_trade(self, trade_data: Dict[str, Any]):
         symbol = trade_data.get("symbol")
@@ -561,225 +599,239 @@ class DistributedQuantEngine:
         volume, is_buy = float(trade_data.get("size", 0.0)), (str(trade_data.get("side", "")).upper() == "BUY")
         exchange_timestamp = float(trade_data.get("timestamp", now * 1000)) / 1000.0
         
-        stat_engine = self.stat_engines.get(symbol)
-        feature_engine = self.feature_engines.get(symbol)
-        clock = self.vpin_clocks.get(symbol)
+        # 🚀 STRICT ASYNC MUTATION LOCKS
+        async with self.symbol_locks[symbol]:
+            stat_engine = self.stat_engines.get(symbol)
+            feature_engine = self.feature_engines.get(symbol)
+            clock = self.vpin_clocks.get(symbol)
+            
+            if symbol in self.active_contexts:
+                ctx = self.active_contexts[symbol]
+                ctx["latest_tick_price"] = price
+                # REMOVED FATAL TICK EVENT: The daemon now safely polls exactly once per second
+                
+                self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
+                if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
+                if feature_engine: feature_engine.push_trade_tick([trade_data])
+                
+                if stat_engine and clock:
+                    stat_engine.update_trades(price, exchange_timestamp)
+                    self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
+                    clock.process_tick(price, volume, not is_buy)
+                return
 
-        if symbol in self.active_contexts:
-            ctx = self.active_contexts[symbol]
-            ctx["latest_tick_price"] = price
-            ctx["tick_event"].set()
-            
-            self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
-            if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
-            if feature_engine: feature_engine.push_trade_tick([trade_data])
-            
-            if stat_engine and clock:
+            inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
+            dynamic_cooldown_seconds = max(5.0, min(30.0, 15.0 / (inst_var * 1000.0 + 1e-9))) 
+            regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
+            if regime == "TRENDING":
+                dynamic_cooldown_seconds = 2.0  
+
+            last_trade_time = self.last_eval_time.get(symbol + "_last_trade", 0.0)
+            if now - last_trade_time < dynamic_cooldown_seconds:
+                return
+
+        async def _eval_gate():
+            async with self.circuit_breaker_lock:
+                if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
+                
+            if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
+
+            try:
+                self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
+                if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
+                if feature_engine: feature_engine.push_trade_tick([trade_data])
+
+                if not stat_engine or not clock: return
+                
                 stat_engine.update_trades(price, exchange_timestamp)
                 self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
-                clock.process_tick(price, volume, not is_buy)
-            return
-
-        inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
-        dynamic_cooldown_seconds = max(5.0, min(30.0, 15.0 / (inst_var * 1000.0 + 1e-9))) 
-        regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
-        if regime == "TRENDING":
-            dynamic_cooldown_seconds = 2.0  
-
-        last_trade_time = self.last_eval_time.get(symbol + "_last_trade", 0.0)
-        if now - last_trade_time < dynamic_cooldown_seconds:
-            return
-
-        async with self.circuit_breaker_lock:
-            if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
-            
-        if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
-
-        try:
-            self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
-            if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
-            if feature_engine: feature_engine.push_trade_tick([trade_data])
-
-            if not stat_engine or not clock: return
-            
-            stat_engine.update_trades(price, exchange_timestamp)
-            self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
-            
-            manifests = clock.process_tick(price, volume, not is_buy)
-            valid_manifests = [m for m in manifests if m.get("valid")]
-            vol_z = stat_engine.hawkes_z if stat_engine else 0.0
-            
-            if valid_manifests: 
-                vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
-                stat_engine.vpin_z = vpin_z
-            elif clock.vpin_history:
-                hist = np.array(list(clock.vpin_history)[-200:])
-                if len(hist) >= 20 and np.std(hist) > 0:
-                    vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
+                
+                manifests = clock.process_tick(price, volume, not is_buy)
+                valid_manifests = [m for m in manifests if m.get("valid")]
+                vol_z = stat_engine.hawkes_z if stat_engine else 0.0
+                
+                if valid_manifests: 
+                    vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
                     stat_engine.vpin_z = vpin_z
+                elif clock.vpin_history:
+                    hist = np.array(list(clock.vpin_history)[-200:])
+                    if len(hist) >= 20 and np.std(hist) > 0:
+                        vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
+                        stat_engine.vpin_z = vpin_z
+                    else: vpin_z = 0.0
                 else: vpin_z = 0.0
-            else: vpin_z = 0.0
-        
-            if now - self.last_eval_time.get(symbol, 0.0) < (0.05 if abs(vpin_z) > 1.0 else 0.2): return
-            self.last_eval_time[symbol] = now
             
-            ob = self.orderbook_snapshots.get(symbol)
-            if not ob or "bid_size" not in ob: return
-            spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
-            vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
-            
-            async with self.eval_semaphores[symbol]:
-                raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
-                atr = raw_atr if raw_atr > 0 else price * 0.005
+                if now - self.last_eval_time.get(symbol, 0.0) < (0.05 if abs(vpin_z) > 1.0 else 0.2): return
+                self.last_eval_time[symbol] = now
                 
-                sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
-                sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.020)
-                dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
-                tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
+                ob = self.orderbook_snapshots.get(symbol)
+                if not ob or "bid_size" not in ob: return
+                spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
+                vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
                 
-                sgd_state = stat_engine.extract_statistical_state(
-                    current_price=price, 
-                    log_mlofi_z=stat_engine.ofi_fast_z, 
-                    hawkes_z=stat_engine.hawkes_z, 
-                    sector_impulse=self.tensor_oracle.compute_lead_lag_signal(symbol), 
-                    sl_dist_pct=sl_dist_pct, 
-                    tp_dist_pct=tp_dist_pct, 
-                    exchange_timestamp=exchange_timestamp
-                )
+                # 🛑 HARD VETOES: The "Zero-Veto" philosophy is dead.
+                if spread_cost > 0.0050: # Spread > 50 bps (100 bps for microcaps)
+                    if symbol not in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] and spread_cost <= 0.0100:
+                        pass # Allow slightly wider spread for alts
+                    else:
+                        logger.warning(f"🛑 HARD VETO // {symbol} Spread too toxic ({spread_cost*10000:.1f} bps).")
+                        return
                 
-                action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
-                
-                # 🚀 V4.2 UNIFIED ALPHA FUSION
-                fusion_engine = self.entry_matrices.get(symbol)
-                exec_weight = 1.0
-                if fusion_engine:
-                    btc_eng = self.stat_engines.get("BTCUSDT")
-                    eth_eng = self.stat_engines.get("ETHUSDT")
-                    
-                    btc_ofi = getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0
-                    eth_ofi = getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
-                    
-                    fusion_engine.update_macro_flows(
-                        asset_ofi_z=stat_engine.ofi_fast_z,
-                        btc_ofi_z=btc_ofi,
-                        eth_ofi_z=eth_ofi
-                    )
-                    fusion_engine.update_mlofi_state(stat_engine.ofi_fast_z)
-
-                    bids_raw = ob.get("bids", [])
-                    asks_raw = ob.get("asks", [])
-                    
-                    # Fuse orderbook and macro data directly into the win-probability
-                    fusion_verdict = fusion_engine.fuse_signal_probability(
-                        symbol=symbol,
-                        raw_prob=prob_success,
-                        intended_action=action,
-                        bids=bids_raw,
-                        asks=asks_raw
-                    )
-                    
-                    # 🧠 CORE UPGRADE: Organically unified probability. No arbitrary rejections.
-                    prob_success = fusion_verdict.get("fused_prob", prob_success)
-                    exec_weight = fusion_verdict.get("execution_weight", 1.0)
-                else:
-                    return # Require fusion engine data to proceed
-
-                # 🚀 V4.2 PRE-FILTER FLOOR: Drop 50.00% zero-variance warmup noise instantly
-                if prob_success < 0.52:
+                if abs(vpin_z) > 3.0:
+                    logger.warning(f"🛑 HARD VETO // {symbol} Extreme toxic flow detected (VPIN Z: {vpin_z:.2f}).")
                     return
-
-                structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
-                action = structural_verdict.get("action", action)
-                edge_weight = structural_verdict.get("edge_weight", 1.0)
-                prob_success = min(0.95, prob_success * edge_weight)
-
-                routing_mode = structural_verdict.get("routing", "STANDARD")
-                prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
-
-                async with self.portfolio_state_lock: 
-                    dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
-
-                if action == "BUY":
-                    bbo_depth_qty = float(ob.get("ask_size", 1.0))
-                else:
-                    bbo_depth_qty = float(ob.get("bid_size", 1.0))
                 
-                max_qty_by_depth = bbo_depth_qty * 0.50
-
-                max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
-                calculated_qty = (max_notional * exec_weight) / price
-                
-                min_qty = self.hardware_min_qty.get(symbol, 1.0)
-                if calculated_qty < min_qty:
-                    calculated_qty = min_qty
+                async with self.eval_semaphores[symbol]:
+                    raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
+                    atr = raw_atr if raw_atr > 0 else price * 0.005
                     
-                if calculated_qty > max_qty_by_depth:
-                    calculated_qty = max_qty_by_depth
-                
-                actual_notional = calculated_qty * price
-                try: 
-                    raw_balance = await self.executor.get_wallet_balance_usdt()
-                    available_balance = max(1.0, raw_balance) 
-                except Exception: 
-                    available_balance = 12.90
-                
-                actual_risk_dollars = actual_notional * sl_dist_pct
-                actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
-
-                # 🚀 V4.2 ADAPTIVE MICRO-ACCOUNT SIZING
-                if available_balance < 50.0 and actual_risk_pct > 3.0:
-                    target_risk_dollars = available_balance * 0.025  # Force 2.5% max risk
-                    compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
-                    compressed_sl_pct = max(0.012, compressed_sl_pct)  # Floor at 1.2% distance
-                    
-                    # Back-calculate ATR so downstream engine reconstructs the compressed SL
                     sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
-                    atr = (compressed_sl_pct * price) / sl_atr_mult
+                    sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.020)
+                    dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
+                    tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                     
-                    # Re-calculate Net EV with the newly compressed tight stop
-                    tp_dist_pct = compressed_sl_pct * dynamic_rr_ratio
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * compressed_sl_pct) - (spread_cost * 0.5)
-
-                    logger.info(
-                        f"[X-RAY] 🛠️ DYNAMIC STOP COMPRESSION // {symbol} | "
-                        f"Compressed SL to {compressed_sl_pct*100:.2f}% to fit order safely."
+                    sgd_state = stat_engine.extract_statistical_state(
+                        current_price=price, 
+                        log_mlofi_z=stat_engine.ofi_fast_z, 
+                        hawkes_z=stat_engine.hawkes_z, 
+                        sector_impulse=self.tensor_oracle.compute_lead_lag_signal(symbol), 
+                        sl_dist_pct=sl_dist_pct, 
+                        tp_dist_pct=tp_dist_pct, 
+                        exchange_timestamp=exchange_timestamp
                     )
-                elif actual_risk_pct > 2.0 and available_balance >= 50.0:
-                    # Standard logic for larger accounts
-                    calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9)
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
-                else:
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
+                    
+                    action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
+                    
+                    # 🚀 V5.1 UNIFIED ALPHA FUSION
+                    fusion_engine = self.entry_matrices.get(symbol)
+                    exec_weight = 1.0
+                    if fusion_engine:
+                        btc_eng = self.stat_engines.get("BTCUSDT")
+                        eth_eng = self.stat_engines.get("ETHUSDT")
+                        
+                        btc_ofi = getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0
+                        eth_ofi = getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
+                        
+                        fusion_engine.update_macro_flows(
+                            asset_ofi_z=stat_engine.ofi_fast_z,
+                            btc_ofi_z=btc_ofi,
+                            eth_ofi_z=eth_ofi
+                        )
+                        fusion_engine.update_mlofi_state(stat_engine.ofi_fast_z)
 
-                try:
-                    payload = {
-                        "symbol": symbol, "action": action, "price": price, 
-                        "prob_success": prob_success, "dna_stats": dna_stats, 
-                        "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
-                        "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
-                        "payload_features": {
-                            "symbol": symbol, 
-                            "market_regime": regime, 
-                            "virtual_sl": sgd_state["virtual_sl"], 
-                            "virtual_tp": sgd_state["virtual_tp"], 
-                            "log_mlofi_z": stat_engine.ofi_fast_z, 
-                            "liquidity_density_ratio": vol_mult, 
-                            "bid_ask_spread": spread_cost, 
-                            "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
-                            "ai_verdict": "V4.2_ALPHA_FUSION"
-                        },
-                        "elasticity": self.elasticity_engines.get(symbol),
-                        "dynamic_rr": dynamic_rr_ratio 
-                    }
-                    heap_id = self.auction_engine.get_next_heap_id()
-                    async with self.auction_lock: 
-                        if symbol not in self.auction_queue_symbols:
-                            heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
-                            self.auction_queue_symbols.add(symbol)
-                            self.last_eval_time[symbol + "_last_trade"] = time.time()
-                except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
-                
-        except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
+                        bids_raw = ob.get("bids", [])
+                        asks_raw = ob.get("asks", [])
+                        
+                        fusion_verdict = fusion_engine.fuse_signal_probability(
+                            symbol=symbol,
+                            raw_prob=prob_success,
+                            intended_action=action,
+                            bids=bids_raw,
+                            asks=asks_raw
+                        )
+                        
+                        prob_success = fusion_verdict.get("fused_prob", prob_success)
+                        exec_weight = fusion_verdict.get("execution_weight", 1.0)
+                    else:
+                        return # Require fusion engine data to proceed
+
+                    if prob_success < 0.515:
+                        return
+
+                    structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
+                    action = structural_verdict.get("action", action)
+                    edge_weight = structural_verdict.get("edge_weight", 1.0)
+                    
+                    if edge_weight == 0.0:
+                        return # Edge gate issued a HARD VETO
+                        
+                    prob_success = min(0.95, prob_success * edge_weight)
+
+                    routing_mode = structural_verdict.get("routing", "STANDARD")
+                    prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
+
+                    async with self.portfolio_state_lock: 
+                        dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+
+                    if action == "BUY":
+                        bbo_depth_qty = float(ob.get("ask_size", 1.0))
+                    else:
+                        bbo_depth_qty = float(ob.get("bid_size", 1.0))
+                    
+                    max_qty_by_depth = bbo_depth_qty * 0.50
+
+                    max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
+                    calculated_qty = (max_notional * exec_weight) / price
+                    
+                    min_qty = self.hardware_min_qty.get(symbol, 1.0)
+                    if calculated_qty < min_qty:
+                        calculated_qty = min_qty
+                        
+                    if calculated_qty > max_qty_by_depth:
+                        calculated_qty = max_qty_by_depth
+                    
+                    actual_notional = calculated_qty * price
+                    try: 
+                        raw_balance = await self.executor.get_wallet_balance_usdt()
+                        available_balance = max(1.0, raw_balance) 
+                    except Exception: 
+                        available_balance = 12.90
+                    
+                    actual_risk_dollars = actual_notional * sl_dist_pct
+                    actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
+
+                    if available_balance < 50.0 and actual_risk_pct > 3.0:
+                        target_risk_dollars = available_balance * 0.025  
+                        compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
+                        compressed_sl_pct = max(0.010, compressed_sl_pct)  
+                        
+                        sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
+                        atr = (compressed_sl_pct * price) / sl_atr_mult
+                        
+                        tp_dist_pct = compressed_sl_pct * dynamic_rr_ratio
+                        net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * compressed_sl_pct) - (spread_cost * 0.5)
+
+                        logger.info(
+                            f"[X-RAY] 🛠️ DYNAMIC STOP COMPRESSION // {symbol} | "
+                            f"Compressed SL to {compressed_sl_pct*100:.2f}% to fit order safely."
+                        )
+                    elif actual_risk_pct > 2.0 and available_balance >= 50.0:
+                        calculated_qty = (available_balance * 0.02) / (price * sl_dist_pct + 1e-9)
+                        net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
+                    else:
+                        net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
+
+                    try:
+                        payload = {
+                            "symbol": symbol, "action": action, "price": price, 
+                            "prob_success": prob_success, "dna_stats": dna_stats, 
+                            "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
+                            "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
+                            "payload_features": {
+                                "symbol": symbol, 
+                                "market_regime": regime, 
+                                "virtual_sl": sgd_state["virtual_sl"], 
+                                "virtual_tp": sgd_state["virtual_tp"], 
+                                "log_mlofi_z": stat_engine.ofi_fast_z, 
+                                "liquidity_density_ratio": vol_mult, 
+                                "bid_ask_spread": spread_cost, 
+                                "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
+                                "ai_verdict": "V5.1_ALPHA_FUSION"
+                            },
+                            "elasticity": self.elasticity_engines.get(symbol),
+                            "dynamic_rr": dynamic_rr_ratio 
+                        }
+                        heap_id = self.auction_engine.get_next_heap_id()
+                        async with self.auction_lock: 
+                            if symbol not in self.auction_queue_symbols:
+                                heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
+                                self.auction_queue_symbols.add(symbol)
+                                self.last_eval_time[symbol + "_last_trade"] = time.time()
+                    except Exception as ex_payload: logger.error(f"[X-RAY] Failed to build auction payload for {symbol}: {ex_payload}", exc_info=True)
+                    
+            except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
+
+        self.track_task(_eval_gate())
 
     async def log_to_wal_async(self, action_type: str, args: list):
         async with self.wal_lock:
@@ -941,7 +993,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V4.2 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V5.1 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -956,7 +1008,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V4.2 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V5.1 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1009,9 +1061,8 @@ class DistributedQuantEngine:
                                 self.risk_vault.update_position_ledger(symbol, 0.0)
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
-
     # ==============================================================================
-    # 🚀 V4.2 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V5.1 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1068,102 +1119,13 @@ class DistributedQuantEngine:
         return "ACTIVE_MONITORING"
 
     async def _state_monitor_escapes(self, ctx: dict) -> str:
-        is_buy, symbol, safe_c_price = ctx["is_buy"], ctx["symbol"], ctx["safe_c_price"]
-        
-        stat_engine = ctx["stat_engine"]
-        cvd_z = getattr(stat_engine, 'ofi_fast_z', 0.0) if stat_engine else 0.0
-        hawkes_z = getattr(stat_engine, 'hawkes_z', 0.0) if stat_engine else 0.0
-        
-        r_multiple = ctx["r_multiple"]
-        current_r = ctx["current_r"]
-        regime = ctx.get("regime", "TRENDING")
-        vol_mult = ctx.get("vol_mult", 1.0)
-        
-        hist = ctx.get("kinetic_history", {})
-        accel_z, ask_refill_z, bid_refill_z, recent_dislocation, composite_macro_cov = 0.0, 0.0, 0.0, 0.0, 0.0
-        
-        if hist and len(hist["cvd"]) >= 5:
-            cvd_arr = np.array(hist["cvd"])
-            cvd_vel = np.diff(cvd_arr)
-            if len(cvd_vel) > 1:
-                cvd_accel = np.diff(cvd_vel)
-                accel_std = np.std(cvd_accel) + 1e-9
-                accel_z = np.mean(cvd_accel[-3:]) / accel_std
-            
-            ask_refill_arr = np.array(hist["ask_refill"])
-            bid_refill_arr = np.array(hist["bid_refill"])
-            ask_refill_z = (ask_refill_arr[-1] - np.mean(ask_refill_arr)) / (np.std(ask_refill_arr) + 1e-9)
-            bid_refill_z = (bid_refill_arr[-1] - np.mean(bid_refill_arr)) / (np.std(bid_refill_arr) + 1e-9)
-            
-            recent_dislocation = np.mean(list(hist["micro_dislocation"])[-3:])
-            
-            btc_arr = np.array(hist["btc_cvd"])
-            eth_arr = np.array(hist["eth_cvd"])
-            if np.std(cvd_arr) > 0:
-                if np.std(btc_arr) > 0: macro_btc_cov = np.cov(btc_arr, cvd_arr)[0][1] / (np.std(btc_arr) * np.std(cvd_arr) + 1e-9)
-                else: macro_btc_cov = 0.0
-                if np.std(eth_arr) > 0: macro_eth_cov = np.cov(eth_arr, cvd_arr)[0][1] / (np.std(eth_arr) * np.std(cvd_arr) + 1e-9)
-                else: macro_eth_cov = 0.0
-                composite_macro_cov = (macro_btc_cov * 0.6) + (macro_eth_cov * 0.4)
-
-        ctx["flow_alignment"] = cvd_z if is_buy else -cvd_z
-        ctx["accel_z"] = accel_z
-
-        if is_buy:
-            if accel_z < -2.0 and ask_refill_z > 2.0 and recent_dislocation < -1.5:
-                logger.critical(f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} BUY momentum scientifically dead. (Flow Z: {accel_z:.2f}σ, Ask Refill: {ask_refill_z:.2f}σ).")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-            if composite_macro_cov < -0.70:
-                logger.critical(f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-pump. BTC/ETH Composite collapsing (Cov: {composite_macro_cov:.2f}).")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-        else:
-            if accel_z > 2.0 and bid_refill_z > 2.0 and recent_dislocation > 1.5:
-                logger.critical(f"[X-RAY] 🛑 OMNI-KINETIC EJECTION // {symbol} SELL momentum scientifically dead. (Flow Z: {accel_z:.2f}σ, Bid Refill: {bid_refill_z:.2f}σ).")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-            if composite_macro_cov > 0.70:
-                logger.critical(f"[X-RAY] 🛑 MACRO TENSOR EJECTION // {symbol} Localized fake-dump. BTC/ETH Composite surging (Cov: {composite_macro_cov:.2f}).")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-
-        if r_multiple >= 0.40:
-            retracement_ratio = (r_multiple - current_r) / (r_multiple + 1e-9)
-            max_retrace = 0.25 if regime == "MEAN_REVERTING" else 0.35
-            if retracement_ratio >= max_retrace:
-                logger.warning(
-                    f"⚡ WICK SNIPER EJECTION // {symbol} Dropped {retracement_ratio*100:.0f}% from peak of +{r_multiple:.2f}R. "
-                    f"Securing wick gains before full reversal."
-                )
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-
-        if regime == "MEAN_REVERTING":
-            dynamic_harvest_r = max(0.40, min(1.00, 0.60 * vol_mult))
-            if current_r >= dynamic_harvest_r:
-                logger.critical(f"💰 RANGE HARVEST // {symbol} Captured +{current_r:.2f}R. Exiting before reversal.")
-                await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-                return "ESCAPED"
-
-        if current_r <= -0.30:
-            logger.critical(
-                f"🛑 ADVERSE PRICE DRIFT INVALIDATION // {symbol} Price drifted to {current_r:.2f}R. "
-                f"Cutting trade early before Hard SL."
-            )
-            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
+        """Invokes the Intelligent Exit Engine to detect wall evaporation and climax exhaustions."""
+        should_exit, reason = IntelligentExitEngine.evaluate_microstructure_exit(ctx)
+        if should_exit:
+            logger.critical(f"🛑 INTELLIGENT EXIT TRIGGERED // {ctx['symbol']} -> {reason}. Escaping cleanly.")
+            await self._execute_emergency_escape(ctx["symbol"], ctx["safe_c_price"], ctx["actual_qty_filled"], ctx["is_buy"])
             return "ESCAPED"
-
-        inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
-        alpha_h = max(0.01, abs(hawkes_z) * 0.3)
-        beta_h = max(0.1, 1.0 / (inst_var * 1000.0 + 1e-9))
-        branching_ratio = alpha_h / beta_h
-
-        if branching_ratio >= 1.25 and ((is_buy and cvd_z < -3.0) or (not is_buy and cvd_z > 3.0)):
-            logger.critical(f"🛑 CASCADE BREAKDOWN EJECTION // {symbol} Severe volatility cascade (η={branching_ratio:.2f}). Escaping.")
-            await self._execute_emergency_escape(symbol, safe_c_price, ctx["actual_qty_filled"], is_buy)
-            return "ESCAPED"
-
+            
         return "CONTINUE"
 
     async def _state_execute_scale_outs(self, ctx: dict) -> str:
@@ -1216,70 +1178,19 @@ class DistributedQuantEngine:
         return "CONTINUE"
 
     async def _state_manage_trailing_stops(self, ctx: dict):
-        symbol, safe_c_price, is_buy = ctx["symbol"], ctx["safe_c_price"], ctx["is_buy"]
-        r_mult = ctx["r_multiple"]
-        current_r = ctx["current_r"]
+        """Applies adaptive volatility-surface trailing stops."""
+        new_sl = IntelligentExitEngine.compute_dynamic_trailing_stop(ctx)
         
-        vol_mult = ctx.get("vol_mult", 1.0)
-        
-        live_atr = ctx["feature_engine"].get_computed_atr() if ctx["feature_engine"] and hasattr(ctx["feature_engine"], 'get_computed_atr') else (safe_c_price * 0.005)
-        live_atr = live_atr if live_atr > 0 else (safe_c_price * 0.005)
-
-        flow_alignment = ctx.get("flow_alignment", 0.0)
-        dynamic_trail_mult = max(0.5, min(2.5, 1.2 + (flow_alignment * 0.4)))
-
-        new_sl_val = ctx["current_sl"]
-        
-        if r_mult >= 1.0:
-            trail_dist = live_atr * dynamic_trail_mult
-            raw_sl = (ctx["max_favorable_price"] - trail_dist) if is_buy else (ctx["max_favorable_price"] + trail_dist)
-            new_sl_val = max(ctx["current_sl"], raw_sl) if is_buy else min(ctx["current_sl"], raw_sl)
-            
-        dynamic_be_threshold = max(0.20, min(0.80, 0.30 * vol_mult))
-        
-        if flow_alignment > 1.5:
-            dynamic_be_threshold += 0.20 
-            
-        if r_mult >= dynamic_be_threshold:
-            be_plus_fees = (ctx["actual_entry"] + (ctx["actual_entry"] * 0.0020)) if is_buy else (ctx["actual_entry"] - (ctx["actual_entry"] * 0.0020))
-            new_sl_val = max(ctx["current_sl"], be_plus_fees) if is_buy else min(ctx["current_sl"], be_plus_fees)
-
-        if current_r < 0 and live_atr < (ctx["atr"] * 0.7):
-            compressed_sl = (ctx["actual_entry"] - (ctx["initial_risk"] * 0.40)) if is_buy else (ctx["actual_entry"] + (ctx["initial_risk"] * 0.40))
-            new_sl_val = max(ctx["current_sl"], compressed_sl) if is_buy else min(ctx["current_sl"], compressed_sl)
-
-        if (is_buy and new_sl_val > ctx["current_sl"]) or (not is_buy and new_sl_val < ctx["current_sl"]):
-            ctx["current_sl"] = new_sl_val
+        if (ctx["is_buy"] and new_sl > ctx["current_sl"]) or (not ctx["is_buy"] and new_sl < ctx["current_sl"]):
+            ctx["current_sl"] = new_sl
             ctx["requires_sl_update"] = True
-
-        tp_proximity_r = abs(ctx["current_tp"] - safe_c_price) / (ctx["initial_risk"] + 1e-9)
-        if tp_proximity_r < 0.8:
-            expanded_tp = ctx["current_tp"] + (ctx["initial_risk"] * 2.5) if is_buy else ctx["current_tp"] - (ctx["initial_risk"] * 2.5)
-            ctx["current_tp"] = expanded_tp
-            ctx["requires_tp_update"] = True
-
-        if (ctx["requires_sl_update"] or ctx["requires_tp_update"]) and (ctx["now"] - ctx["last_api_update_time"] >= 4.0):
-            ob = self.orderbook_snapshots.get(symbol, {})
-            spread = (ob.get("best_ask", safe_c_price) - ob.get("best_bid", safe_c_price)) / safe_c_price if ob.get("best_bid", 0) > 0 else 0.0005
-            min_distance = max(live_atr * 0.5, safe_c_price * 0.005, spread * 2.0 * safe_c_price) 
             
-            if is_buy:
-                ctx["current_sl"] = min(ctx["current_sl"], safe_c_price - min_distance)
-                ctx["current_tp"] = max(ctx["current_tp"], safe_c_price + min_distance)
-                if ctx["current_tp"] <= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 1.02
-            else:
-                ctx["current_sl"] = max(ctx["current_sl"], safe_c_price + min_distance)
-                ctx["current_tp"] = min(ctx["current_tp"], safe_c_price - min_distance)
-                if ctx["current_tp"] >= ctx["current_sl"]: ctx["current_tp"] = ctx["current_sl"] * 0.98
-
-            new_sl_str = self._align_price(symbol, ctx["current_sl"])
-            new_tp_str = self._align_price(symbol, ctx["current_tp"])
-
-            if new_sl_str != ctx["last_sent_sl_str"] or new_tp_str != ctx["last_sent_tp_str"]:
-                if await self._amend_trailing_stop(symbol, ctx["current_sl"], ctx["current_tp"]):
+        if ctx.get("requires_sl_update") and (ctx["now"] - ctx.get("last_api_update_time", 0.0) >= 3.0):
+            new_sl_str = self._align_price(ctx["symbol"], ctx["current_sl"])
+            if new_sl_str != ctx.get("last_sent_sl_str"):
+                if await self._amend_trailing_stop(ctx["symbol"], ctx["current_sl"], ctx["current_tp"]):
                     ctx["last_api_update_time"] = ctx["now"]
                     ctx["last_sent_sl_str"] = new_sl_str
-                    ctx["last_sent_tp_str"] = new_tp_str
 
     async def _state_settle_trade(self, ctx: dict):
         symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
@@ -1315,6 +1226,10 @@ class DistributedQuantEngine:
             exit_slip = ((exit_price - trigger_price) / (trigger_price + 1e-9)) * 10000.0
             
         slippage_bps = entry_slip + exit_slip
+        
+        # 🚀 SAFE CLAMP: Prevent Bybit API bugs from returning -4000+ bps
+        slippage_bps = max(-500.0, min(500.0, slippage_bps))
+        
         ctx["exec_details"]["tca_entry_slippage_bps"] = entry_slip
         ctx["exec_details"]["tca_exit_slippage_bps"] = exit_slip
         ctx["exec_details"]["tca_total_slippage_bps"] = slippage_bps
@@ -1342,11 +1257,11 @@ class DistributedQuantEngine:
             ctx = {
                 "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
                 "current_price": current_price, "atr": atr, "target_leverage": target_leverage, 
-                "arrival_price": current_price,
+                "arrival_price": risk_matrix.get("arrival_price", current_price),
                 "regime": market_regime, "dynamic_rr_ratio": dynamic_rr_ratio, "realigned_sl": realigned_sl, 
                 "realigned_tp": realigned_tp, "daemon_start_time": time.time(),
                 "actual_qty_filled": risk_matrix.get("size", 1.0),
-                "pofe_consecutive_ticks": 0, "api_check_counter": 0, "last_api_update_time": time.time(),
+                "last_api_update_time": time.time(),
                 "r_t1": round(max(1.0, dynamic_rr_ratio * 0.5), 2),
                 "r_t2": round(max(1.5, dynamic_rr_ratio * 0.8), 2),
                 "r_t3": round(max(2.2, dynamic_rr_ratio * 1.2), 2),
@@ -1354,29 +1269,24 @@ class DistributedQuantEngine:
                 "stat_engine": self.stat_engines.get(symbol),
                 "feature_engine": self.feature_engines.get(symbol),
                 "kinetic_history": {
-                    "cvd": deque(maxlen=20),
-                    "ask_refill": deque(maxlen=20),
-                    "bid_refill": deque(maxlen=20),
-                    "micro_dislocation": deque(maxlen=20),
-                    "btc_cvd": deque(maxlen=20),
-                    "eth_cvd": deque(maxlen=20)
+                    "cvd": deque(maxlen=20), "ask_refill": deque(maxlen=20), "bid_refill": deque(maxlen=20),
+                    "micro_dislocation": deque(maxlen=20), "btc_cvd": deque(maxlen=20), "eth_cvd": deque(maxlen=20)
                 },
                 "last_ob": {},
-                "tick_event": asyncio.Event(),
                 "latest_tick_price": current_price,
                 "exit_trigger_price": current_price
             }
             if historical_favorable_price: ctx["historical_favorable_price"] = historical_favorable_price
-            
             ctx["scaled_levels"] = {ctx["r_t1"]: False, ctx["r_t2"]: False, ctx["r_t3"]: False}
 
-            self.active_contexts[symbol] = ctx
+            # 🚀 LOCK PROTECTED CONTEXT INJECTION
+            async with self.portfolio_state_lock:
+                self.active_contexts[symbol] = ctx
 
             if self.test_mode:
-                self.active_contexts.pop(symbol, None)
-                await asyncio.sleep(60)
-                self.log_to_wal_sync("settlement", [signal_id, 0.0, 0.0, "PAPER_TIMEOUT", ctx["exec_details"]])
-                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                async with self.portfolio_state_lock: 
+                    self.active_contexts.pop(symbol, None)
+                    self.active_positions_map.pop(symbol, None)
                 return
 
             try:
@@ -1386,83 +1296,42 @@ class DistributedQuantEngine:
                     async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                     return
                 
-                # 🚀 TWO-PHASE COMMIT: Promote PENDING_RESERVE to active direction
                 async with self.portfolio_state_lock: 
                     self.active_positions_map[symbol] = direction
                 
                 state = await self._state_initialize_stops(ctx)
-                
-                try: 
-                    ctx["available_balance"] = await self.executor.get_wallet_balance_usdt()
-                except Exception: 
-                    ctx["available_balance"] = 12.90
                     
                 while state == "ACTIVE_MONITORING":
-                    try:
-                        await asyncio.wait_for(ctx["tick_event"].wait(), timeout=1.0)
-                        ctx["tick_event"].clear()
-                    except asyncio.TimeoutError:
-                        pass
+                    # 🚀 DECOUPLED POLLING: Wakes up exactly once per second, ignoring WS noise.
+                    await asyncio.sleep(1.0)
                         
                     current_price = ctx["latest_tick_price"]
                 
                     ob = self.orderbook_snapshots.get(symbol, {})
                     best_bid = ob.get("best_bid", current_price)
                     best_ask = ob.get("best_ask", current_price)
-                    bid_v = ob.get("bid_size", 1.0)
-                    ask_v = ob.get("ask_size", 1.0)
                     
                     ctx["safe_c_price"] = best_bid if ctx["is_buy"] else best_ask
                     if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0: 
                         ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
                         
                     ctx["now"] = time.time()
-                    ctx["api_check_counter"] += 1
                     ctx["time_in_mins"] = (ctx["now"] - ctx["daemon_start_time"]) / 60.0
                     
                     ctx["requires_sl_update"] = False
-                    ctx["requires_tp_update"] = False
                     ctx["vol_mult"] = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
 
-                    micro_price = (best_bid * ask_v + best_ask * bid_v) / (bid_v + ask_v + 1e-9)
-                    mid_price = (best_bid + best_ask) / 2.0
-                    dislocation_bps = ((micro_price - mid_price) / (mid_price + 1e-9)) * 10000.0
-                    ctx["kinetic_history"]["micro_dislocation"].append(dislocation_bps)
-                    
-                    current_cvd = getattr(ctx["stat_engine"], 'ofi_fast_z', 0.0)
-                    ctx["kinetic_history"]["cvd"].append(current_cvd)
-                    
-                    prev_ask_v = ctx["last_ob"].get("ask_size", ask_v)
-                    prev_bid_v = ctx["last_ob"].get("bid_size", bid_v)
-                    ctx["kinetic_history"]["ask_refill"].append(max(0.0, ask_v - prev_ask_v))
-                    ctx["kinetic_history"]["bid_refill"].append(max(0.0, bid_v - prev_bid_v))
-                    ctx["last_ob"] = {"ask_size": ask_v, "bid_size": bid_v}
-                    
-                    btc_engine = self.stat_engines.get("BTCUSDT")
-                    eth_engine = self.stat_engines.get("ETHUSDT")
-                    ctx["kinetic_history"]["btc_cvd"].append(getattr(btc_engine, 'ofi_fast_z', 0.0) if btc_engine else 0.0)
-                    ctx["kinetic_history"]["eth_cvd"].append(getattr(eth_engine, 'ofi_fast_z', 0.0) if eth_engine else 0.0)
-                    
-                    if ctx["api_check_counter"] >= 30:
-                        ctx["api_check_counter"] = 0
-                        try:
-                            pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                            pos_list = pos_res.get("result", {}).get("list", [])
-                            if (not pos_list) or float(pos_list[0].get("size", 0.0)) == 0.0: break 
-                        except Exception: pass
-
+                    # Update Tracking Variables
                     if ctx["safe_c_price"] != current_price:
                         if ctx["is_buy"] and ctx["safe_c_price"] > ctx["max_favorable_price"]: 
                             ctx["max_favorable_price"] = ctx["safe_c_price"]
-                            if ctx["safe_c_price"] > ctx["highest_since_entry"]: ctx["highest_since_entry"] = ctx["safe_c_price"]
                         elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx["max_favorable_price"]: 
                             ctx["max_favorable_price"] = ctx["safe_c_price"]
-                            if ctx["safe_c_price"] < ctx["lowest_since_entry"]: ctx["lowest_since_entry"] = ctx["safe_c_price"]
                         
                     ctx["r_multiple"] = (ctx["max_favorable_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["max_favorable_price"]) / (ctx["initial_risk"] + 1e-9)
                     ctx["current_r"] = (ctx["safe_c_price"] - ctx["actual_entry"]) / (ctx["initial_risk"] + 1e-9) if ctx["is_buy"] else (ctx["actual_entry"] - ctx["safe_c_price"]) / (ctx["initial_risk"] + 1e-9)
-                    ctx["hawkes_z"] = getattr(ctx["stat_engine"], 'hawkes_z', getattr(ctx["stat_engine"], 'vpin_z', 0.0))
                     
+                    # Exit Evaluations
                     if await self._state_monitor_escapes(ctx) == "ESCAPED":
                         ctx["exit_trigger_price"] = current_price
                         break
@@ -1476,19 +1345,11 @@ class DistributedQuantEngine:
 
             except Exception as e:
                 logger.error(f"[X-RAY] FSM Position daemon critical fault for {symbol}: {e}", exc_info=True)
-                try:
-                    pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                    pos_list = pos_res.get("result", {}).get("list", [])
-                    if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
-                        qty = float(pos_list[0]["size"])
-                        side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
-                        current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
-                        await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
-                except Exception as e2: logger.error(f"[X-RAY] Emergency FSM flatten failed for {symbol}: {e2}", exc_info=True)
-                async with self.core.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
                 self.risk_vault.update_position_ledger(symbol, 0.0)
             finally:
-                self.active_contexts.pop(symbol, None)
+                async with self.portfolio_state_lock:
+                    self.active_contexts.pop(symbol, None)
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
@@ -1616,7 +1477,8 @@ class DistributedQuantEngine:
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
             self.auction_engine.run_global_capital_auction_worker, self.run_omni_swarm_director,            
             self.run_exchange_state_reconciliation_daemon,
-            self.run_crowded_trade_oracle
+            self.run_crowded_trade_oracle,
+            self.run_fast_state_invariant_reconciliation
             # self.yield_engine.run_yield_scanner_daemon 
         ]
         await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)

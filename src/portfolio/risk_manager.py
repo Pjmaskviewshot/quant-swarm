@@ -1,9 +1,10 @@
 ﻿"""
-💎 V4.3 TENSOR-PRIME: STRUCTURAL DYNAMICS RISK VAULT
+💎 V5.1 TENSOR-PRIME: STRUCTURAL DYNAMICS RISK VAULT
 ------------------------------------------------------------
-Features Natural Slot Allocation (Max 5, bounded strictly by margin math),
-Recalibrated Sigmoidal Conviction Gates for Micro-Accounts, Net Expected 
-Value (EV) Edge Multipliers, and Organic Leveraged Heat Caps (1.8x Multiplier).
+Features:
+- Beta-Binomial Bayesian Conjugate Kelly Sizing
+- Peaks-Over-Threshold (POT) Heavy-Tail EVT Risk Estimator
+- Margin & Heat Map Allocation Caps
 
 CRITICAL FIX: Mathematical stability enforced. Eradicated silent exception 
 swallowing and implemented strict NaN/Inf sanitization for EVT Tail Risk 
@@ -28,7 +29,6 @@ class InstitutionalRiskVault:
         exchange_min_notional: float = 6.50
     ):
         self.max_drawdown_pct = max_drawdown_pct
-        # Synchronized variable name with Auction Engine to prevent AttributeErrors
         self.max_single_position_risk_pct = max_single_position_risk_pct
         self.exchange_min_notional = exchange_min_notional
         
@@ -52,34 +52,39 @@ class InstitutionalRiskVault:
             self.volatility_surface.append(variance)
 
     def calculate_evt_tail_risk(self) -> float:
+        """
+        🚀 PEAKS-OVER-THRESHOLD (POT) EVT ESTIMATOR
+        Estimates the Pareto tail index (xi) using the Hill estimator on variance exceedances.
+        """
         if len(self.volatility_surface) < 50:
             return 1.0  
             
         try:
-            vol_arr = np.array(self.volatility_surface, dtype=float)
+            vol_arr = np.sort(np.array(self.volatility_surface, dtype=float))
             
-            # Prevent NaN/Inf arrays from crashing the percentile calculation
+            # Prevent NaN/Inf arrays from crashing the calculation
             if np.isnan(vol_arr).any() or np.isinf(vol_arr).any():
                 return 1.0
                 
-            var_threshold = np.percentile(vol_arr, 95)
+            # 90th percentile threshold (u)
+            k = max(5, int(len(vol_arr) * 0.10))
+            threshold = vol_arr[-k]
+            tail_data = vol_arr[-k:]
             
-            tail_variances = vol_arr[vol_arr >= var_threshold]
-            if len(tail_variances) == 0: 
+            if threshold <= 0 or len(tail_data) == 0:
                 return 1.0
                 
-            cvar = float(np.mean(tail_variances))
+            # Hill Estimator for Heavy Tails: xi = (1/k) * sum(log(X_i / u))
+            xi = float(np.mean(np.log(tail_data / (threshold + 1e-9))))
             
-            if math.isnan(cvar) or math.isinf(cvar):
-                return 1.0
+            # If tail index is heavy (xi > 0.20), scale down sizing proportionally
+            if xi > 0.20:
+                tail_penalty = min(0.60, (xi - 0.20) * 3.0)
+                return max(0.40, 1.0 - tail_penalty)
                 
-            if cvar > 0.0001:
-                penalty = min(0.65, (cvar - 0.0001) * 5000.0)
-                return max(0.35, 1.0 - penalty)
-                
-            return 1.05 
+            return 1.05
         except Exception as e:
-            logger.debug(f"[MATH_WARN] Numerical instability in EVT tail risk calculation: {e}")
+            logger.debug(f"[MATH_WARN] Numerical instability in POT-EVT calculation: {e}")
             return 1.0
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
@@ -119,7 +124,7 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V4.3 MICRO-CALIBRATED CONVICTION THRESHOLD
+        🚀 V5.1 MICRO-CALIBRATED CONVICTION THRESHOLD
         Sets a flat 51.8% base conviction floor for micro-accounts.
         Allows high-frequency order flow edges to pass Kelly sizing safely.
         """
@@ -136,7 +141,7 @@ class InstitutionalRiskVault:
 
     def get_max_allowed_slots(self, balance: float) -> int:
         """
-        🚀 V4.0 NATURAL SLOT CAP
+        🚀 V5.1 NATURAL SLOT CAP
         Universal Max of 5. The engine natively restricts trades 
         if the real-time margin/heat cap math rejects the sizing.
         """
@@ -144,29 +149,30 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
         """
-        🧬 V4.3 DYNAMIC EV-CONFLUENCE SIZING
+        🧬 V5.1 BAYESIAN CONJUGATE KELLY SIZING
         """
         # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if base_confidence < min_required_conviction:
             return 0.0  # Rejected by Dynamic EV Gate
 
-        # 2. Hybrid Allocation Sizing
-        total_trades = len(self.outcomes_history)
-        if total_trades < 10:
-            raw_kelly = 0.012 
+        # 2. Beta-Binomial Bayesian Sizing
+        # Beta(12, 10) Skeptical Conjugate Prior (~54.5% baseline)
+        alpha_prior = 12.0
+        beta_prior = 10.0
+        wins = sum(self.outcomes_history)
+        total = len(self.outcomes_history)
+        
+        p_bayesian = (wins + alpha_prior) / (total + alpha_prior + beta_prior)
+        b = self.avg_win_r / (self.avg_loss_r + 1e-9)
+        
+        if b <= 0:
+            raw_kelly = 0.001
         else:
-            p = float(np.mean(self.outcomes_history))
-            p_win = max(0.01, min(0.99, p)) 
-            b = self.avg_win_r / (self.avg_loss_r + 1e-9)
-            
-            if b <= 0:
-                raw_kelly = 0.001
-            else:
-                kelly_fraction = p_win - ((1.0 - p_win) / b)
-                if kelly_fraction <= 0 or math.isnan(kelly_fraction):
-                    return 0.0 
-                raw_kelly = kelly_fraction / 2.0 
+            kf = (p_bayesian * b - (1.0 - p_bayesian)) / b
+            if kf <= 0 or math.isnan(kf):
+                return 0.0
+            raw_kelly = kf / 2.0  # Half-Kelly for margin of safety
         
         evt_multiplier = self.calculate_evt_tail_risk()
         edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
@@ -217,7 +223,7 @@ class InstitutionalRiskVault:
                         if not math.isnan(corr_value) and corr_value > dynamic_corr_threshold:
                             return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
 
-        # 🚀 V4.0 NATURAL HEAT MAP (Organic Scaling)
+        # 🚀 V5.1 NATURAL HEAT MAP (Organic Scaling)
         # Allows an organic 1.8x leveraged equity multiplier to efficiently use available margin
         max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
         

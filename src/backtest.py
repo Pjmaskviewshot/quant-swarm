@@ -1,11 +1,10 @@
 ﻿"""
-ðŸŒŒ V1.0 APEX NEURAL BACKTESTER
+🌌 V5.0 APEX NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V1.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Upgraded with Stationarized Log-MLOFI approximations, 1D Kalman Filtered HMMs,
-Neural Exit Matrix Simulations (Snap-Traps & Absorption Ejections), 
-and EV-to-Spread Multipiers (3x).
+of the live V5.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
+Upgraded with 4D Feature Tensors (OFI, Hawkes, Meso-Trend, Macro), 
+1D Kalman Filtered HMMs, and V5.0 Intelligent Microstructure Exits.
 """
 
 import argparse
@@ -39,7 +38,7 @@ class AdaptiveSessionClock:
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
         if routing_mode == "MAKER_ONLY":
-            return 0.00001  # Relaxed EV floor for backtesting
+            return 0.00001  # Relaxed EV floor for maker limit orders
         return 0.00002      # Relaxed EV floor for taker orders
 
 
@@ -69,11 +68,11 @@ def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
     return out[-target:]
 
 def fetch_aligned_data(symbol: str, days: int) -> Tuple[List[Dict], List[Dict]]:
-    print(f"ðŸ“¡ Fetching target asset 1-Minute Data ({symbol})...")
+    print(f"📡 Fetching target asset 1-Minute Data ({symbol})...")
     target_candles = fetch_klines_1m(symbol, days)
     if symbol == "BTCUSDT": return target_candles, target_candles
         
-    print("ðŸ“¡ Fetching global BTC 1-Minute lead-lag context...")
+    print("📡 Fetching global BTC 1-Minute lead-lag context...")
     btc_raw = fetch_klines_1m("BTCUSDT", days)
     btc_dict = {c['ts']: c for c in btc_raw}
     aligned_btc = []
@@ -94,22 +93,22 @@ class Params:
     leverage: float = 3.0            
 
 def get_cluster_priors(symbol: str):
+    # 🚀 V5.0 4D PRIORS (OFI, Hawkes, Meso-Trend, Sector)
     if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-        w_trend = np.array([0.45, 0.35, 0.20])
-        w_range = np.array([0.20, 0.35, 0.45])
+        w_trend = np.array([0.40, 0.30, 0.20, 0.10])
+        w_range = np.array([0.15, 0.25, 0.35, 0.25])
         p_scale = 1.0
     elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR", "APT"]):
-        w_trend = np.array([0.40, 0.40, 0.20])
-        w_range = np.array([0.20, 0.40, 0.40])
-        p_scale = 2.0
+        w_trend = np.array([0.35, 0.35, 0.20, 0.10])
+        w_range = np.array([0.20, 0.30, 0.30, 0.20])
+        p_scale = 1.5
     else:
-        w_trend = np.array([0.35, 0.35, 0.30])
-        w_range = np.array([0.30, 0.35, 0.35])
-        p_scale = 0.5 
-    return w_trend, w_range, np.eye(3) * p_scale
+        w_trend = np.array([0.30, 0.30, 0.25, 0.15])
+        w_range = np.array([0.25, 0.25, 0.25, 0.25])
+        p_scale = 0.8 
+    return w_trend, w_range, np.eye(4) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
-    """Bounded correlation damping and threshold tuning."""
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
     aligned_b, aligned_a = [], []
     
@@ -160,7 +159,6 @@ def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
     return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
 
 def _apply_kalman_smoothing(prices: np.ndarray) -> np.ndarray:
-    """1D Kalman Filter for Regime Smoothing."""
     if len(prices) < 2: return prices
     n = len(prices)
     filtered = np.zeros(n)
@@ -272,7 +270,7 @@ def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
     mse_penalty = min(0.08, mse * 0.3)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -281,6 +279,10 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     hawkes_mean, hawkes_var, hawkes_z = 0.0, 1.0, 0.0
     hawkes_velocity, hawkes_acceleration = 0.0, 0.0
     hawkes_z_prev, hawkes_v_prev = 0.0, 0.0
+    
+    meso_fast_ema = None
+    meso_slow_ema = None
+    meso_momentum_z = 0.0
     
     vol_ewma = 0.0
     amihud_history = deque(maxlen=100)
@@ -301,9 +303,8 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     vol_history = deque(maxlen=1000)
     synthetic_vpin_z = 0.0
     
-    # Gram-Schmidt Covariance State Initialization
-    gs_cov_11, gs_cov_22, gs_cov_33 = 1.0, 1.0, 1.0
-    gs_cov_21, gs_cov_31, gs_cov_32 = 0.0, 0.0, 0.0
+    # 4D Gram-Schmidt Initialization
+    gs_cov = np.eye(4)
     gs_alpha = 0.02
 
     w_t, w_r, P_init = get_cluster_priors(symbol)
@@ -353,6 +354,16 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             shannon_entropy = compute_permutation_entropy(list(log_returns)[-20:])
             entropy_history.append(shannon_entropy) 
 
+        # 🚀 Meso-Momentum Wavelet (Backtest Proxy)
+        a_fast = 2.0 / (51.0)
+        a_slow = 2.0 / (301.0)
+        if meso_fast_ema is None:
+            meso_fast_ema, meso_slow_ema = sim_price, sim_price
+        else:
+            meso_fast_ema = (sim_price - meso_fast_ema) * a_fast + meso_fast_ema
+            meso_slow_ema = (sim_price - meso_slow_ema) * a_slow + meso_slow_ema
+        meso_momentum_z = ((meso_fast_ema - meso_slow_ema) / meso_slow_ema) / (math.sqrt(inst_variance) + 1e-9)
+
         vol_notional = c_prev['volume'] * c_prev['close']
         vol_history.append(vol_notional)
         
@@ -385,7 +396,6 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
-        # V1.0: LOG-MLOFI PROXY
         vol_step = c_prev['volume']
         log_vol_step = math.log1p(vol_step)
         price_step = (c_prev['close'] - c_prev_prev['close'])
@@ -399,7 +409,6 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (mlofi_step - ofi_slow_mean)**2
         ofi_slow_z = (mlofi_step - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
         
-        # HAWKES NORMALIZED VOLUME
         vol_ewma = (1 - 0.05) * vol_ewma + 0.05 * vol_step if vol_ewma > 0 else vol_step
         normalized_volume = vol_step / (vol_ewma + 1e-9)
         volume_mark = math.log1p(max(0.0, normalized_volume))
@@ -418,40 +427,21 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        f1 = ofi_fast_z
-        f2 = hawkes_z
-        f3 = tensor_alpha
-        
-        gs_cov_11 = (1 - gs_alpha) * gs_cov_11 + gs_alpha * (f1 * f1)
-        gs_cov_21 = (1 - gs_alpha) * gs_cov_21 + gs_alpha * (f2 * f1)
-        
-        beta_21 = gs_cov_21 / (gs_cov_11 + 1e-9)
-        f2_ortho = f2 - (beta_21 * f1)
-        gs_cov_22 = (1 - gs_alpha) * gs_cov_22 + gs_alpha * (f2_ortho * f2_ortho)
-        
-        gs_cov_31 = (1 - gs_alpha) * gs_cov_31 + gs_alpha * (f3 * f1)
-        gs_cov_32 = (1 - gs_alpha) * gs_cov_32 + gs_alpha * (f3 * f2_ortho)
-        
-        beta_31 = gs_cov_31 / (gs_cov_11 + 1e-9)
-        beta_32 = gs_cov_32 / (gs_cov_22 + 1e-9)
-        f3_ortho = f3 - (beta_31 * f1) - (beta_32 * f2_ortho)
-        gs_cov_33 = (1 - gs_alpha) * gs_cov_33 + gs_alpha * (f3_ortho * f3_ortho)
-        
-        f1_norm = f1 / (math.sqrt(gs_cov_11) + 1e-9)
-        f2_norm = f2_ortho / (math.sqrt(gs_cov_22) + 1e-9)
-        f3_norm = f3_ortho / (math.sqrt(gs_cov_33) + 1e-9)
+        # 🚀 4D ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
+        raw_vec = np.array([ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha], dtype=float)
+        v = raw_vec.copy()
+        for v_i in range(4):
+            for v_j in range(v_i):
+                proj = (np.dot(raw_vec, gs_cov[:, v_j])) / (gs_cov[v_j, v_j] + 1e-9)
+                v[v_i] -= proj * gs_cov[v_i, v_j]
+            gs_cov[v_i, v_i] = (1 - gs_alpha) * gs_cov[v_i, v_i] + gs_alpha * (v[v_i] ** 2)
 
-        features = np.clip(np.array([
-            f1_norm / 3.0,
-            f2_norm / 3.0,
-            f3_norm / 3.0
-        ]), -1.0, 1.0)
+        features = np.clip(v / (np.sqrt(np.diag(gs_cov)) + 1e-9) / 4.0, -1.0, 1.0)
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
         feature_magnitudes = np.abs(features)
         exp_f = np.exp(feature_magnitudes / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 3
+        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
         
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (er - 0.35)))
 
@@ -488,7 +478,7 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         error_scaler = 1.0 + max(0.0, (ewma_mse - 0.25) * 0.5)
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-        dynamic_gate = max(0.50, min(dynamic_ceiling, raw_gate))
+        dynamic_gate = max(0.515, min(dynamic_ceiling, raw_gate))  # 🚀 V5.0 Conviction Floor
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
@@ -514,20 +504,22 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     if rolling_mse > 0.35 or np.trace(P_trending) > 1000.0:
                         trace_t = np.trace(P_trending)
                         trace_r = np.trace(P_ranging)
-                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(3) * 1e-3
-                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(3) * 1e-3
+                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(4) * 1e-3
+                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(4) * 1e-3
                         validation_buffer.clear()
                         continue
 
                 x_feat = old_features.reshape(-1, 1)
                 dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))
                 
+                # Trending Matrix Update (4x4)
                 P_x_t = P_trending @ x_feat
                 den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
                 K_t = P_x_t / den_t
                 weights_trending = weights_trending + (K_t.flatten() * error * old_r_blend)
                 P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
                 
+                # Ranging Matrix Update (4x4)
                 P_x_r = P_ranging @ x_feat
                 den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
                 K_r = P_x_r / den_r
@@ -540,12 +532,8 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
         t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
         skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
-        if t_imb_z < -2.5 and abs(skew) < 1.0: 
-            action_dir = "BUY"
-            prob_success = max(prob_success, 0.55)
-        elif t_imb_z > 2.5 and abs(skew) < 1.0: 
-            action_dir = "SELL"
-            prob_success = max(prob_success, 0.55)
+        
+        # Override rules removed to trust EV 
         
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         atr_proxy = vol_sigma * sim_price
@@ -609,10 +597,6 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                 net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost if routing_mode != "MAKER_ONLY" else -spread_cost * 0.2) - taker_fee_pct
                 net_edge_bps = net_ev_pct * 10000.0
                 
-                # ðŸš€ V1.0 EV-TO-SPREAD GATE: Edge must be 3x the spread cost
-                if net_edge_bps < (spread_cost * 10000.0 * 3.0):
-                    continue
-
                 if net_ev_pct > ev_floor:  
                     entry = c['open'] 
                     initial_risk = sl_dist_pct * entry
@@ -631,8 +615,6 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     pnl_accum = 0.0
                     position_size = 1.0
                     
-                    pofe_consecutive_ticks = 0
-                    
                     for j in range(i + 1, min(i + 300, len(target_candles))): 
                         bars_held = j - i
                         h, l = target_candles[j]["high"], target_candles[j]["low"]
@@ -642,46 +624,39 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         elif action_dir == "SELL" and l < max_favorable_price: max_favorable_price = l
                         
                         r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
+                        current_r = (c_j - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - c_j) / (initial_risk + 1e-9)
                         
-                        # ðŸ§¬ V1.0 SIMULATED NEURAL MATRIX PROXIES
+                        # 🚀 V5.0 INTELLIGENT EXITS
                         c_prev_j = target_candles[j-1]
-                        ret_j = (c_j - c_prev_j["close"]) / (c_prev_j["close"] + 1e-9)
                         norm_vol_j = target_candles[j]["volume"] / (vol_ewma + 1e-9)
-                        hawkes_z_j = math.log1p(max(0.0, norm_vol_j)) * 1.5
-                        cvd_z_j = np.sign(ret_j) * hawkes_z_j * 1.2
+                        hawkes_z_j = math.log1p(max(0.0, norm_vol_j)) * 1.5 * np.sign(c_j - c_prev_j["close"])
                         
-                        # 1. HIDDEN ABSORPTION EJECTION (OOS / Fakeout Killer)
-                        if (action_dir == "BUY" and hawkes_z_j > 2.0 and cvd_z_j < -2.5) or (action_dir == "SELL" and hawkes_z_j > 2.0 and cvd_z_j > 2.5):
-                            pofe_consecutive_ticks += 1
-                            if pofe_consecutive_ticks >= 2: # 2 mins in backtester equivalent
-                                outcome, exit_price = "ABSORPTION_EJECT", c_j
+                        # 1. HAWKES CLIMAX EXHAUSTION
+                        if r_multiple >= 0.75:
+                            if action_dir == "BUY" and hawkes_z_j < -2.8:
+                                outcome, exit_price = "HAWKES_CLIMAX", c_j
                                 break
-                        else:
-                            pofe_consecutive_ticks = 0
+                            elif action_dir == "SELL" and hawkes_z_j > 2.8:
+                                outcome, exit_price = "HAWKES_CLIMAX", c_j
+                                break
                                 
-                        # 2. HAWKES-DECAY TIME STOP
-                        if bars_held > 4.0 and r_multiple < 0.2:
-                            if hawkes_z_j < -1.0 and inst_variance < 0.00005:
-                                outcome, exit_price = "DECAY_EXIT", c_j
+                        # 2. PROFIT RETRACEMENT GUARD
+                        if r_multiple >= 1.20:
+                            retrace_pct = (r_multiple - current_r) / (r_multiple + 1e-9)
+                            if retrace_pct >= 0.30:
+                                outcome, exit_price = "PROFIT_RETRACEMENT", c_j
                                 break
 
-                        # 3. ELASTIC DIVERGENCE SNAP-TRAP
-                        if r_multiple >= 1.2:
-                            flow_divergence = (action_dir == "BUY" and cvd_z_j < -1.5) or (action_dir == "SELL" and cvd_z_j > 1.5)
-                            if flow_divergence:
-                                snap_price = c_j * 0.9995 if action_dir == "BUY" else c_j * 1.0005
-                                if (action_dir == "BUY" and snap_price > current_sl) or (action_dir == "SELL" and snap_price < current_sl):
-                                    current_sl = snap_price
-
-                        # 4. PARABOLIC CASCADE SQUEEZE
-                        if r_multiple >= 2.0 and hawkes_z_j > 3.0 and abs(cvd_z_j) > 2.5:
-                            outcome, exit_price = "PARABOLIC_SQUEEZE", c_j
-                            break
-
-                        if r_multiple >= 0.4 and current_sl == realigned_sl:
-                            sub_1r_sl = (max_favorable_price - (initial_risk * 0.5)) if action_dir == "BUY" else (max_favorable_price + (initial_risk * 0.5))
-                            if (action_dir == "BUY" and sub_1r_sl > current_sl) or (action_dir == "SELL" and sub_1r_sl < current_sl):
-                                current_sl = sub_1r_sl
+                        # 3. VOLATILITY TRAILING RATCHET
+                        if r_multiple >= 0.60:
+                            fee_buffer = entry * 0.0015
+                            be_price = (entry + fee_buffer) if action_dir == "BUY" else (entry - fee_buffer)
+                            current_sl = max(current_sl, be_price) if action_dir == "BUY" else min(current_sl, be_price)
+                            
+                        if r_multiple >= 1.0:
+                            vol_buffer = max(atr_proxy * 1.2, entry * math.sqrt(inst_variance) * 1.5)
+                            tight_trail = max_favorable_price - vol_buffer if action_dir == "BUY" else max_favorable_price + vol_buffer
+                            current_sl = max(current_sl, tight_trail) if action_dir == "BUY" else min(current_sl, tight_trail)
 
                         for target_r, flag in scaled_levels.items():
                             if r_multiple >= target_r and not flag:
@@ -692,33 +667,6 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                                 position_size -= (position_size * portion)
                                 scaled_levels[target_r] = True
 
-                        time_in_mins = bars_held
-                        vol_ratio = (initial_risk / p.sl_atr_mult) / entry
-                        dynamic_grace_period = max(15.0, min(60.0, 1.0 / (vol_ratio * 100 + 1e-9)))
-                        
-                        if r_multiple < 0.5 and time_in_mins > dynamic_grace_period:
-                            theta_decay = max(0.4, 1.0 - ((time_in_mins - dynamic_grace_period) * 0.010))
-                        else:
-                            theta_decay = 1.0
-                            
-                        hawkes_scalar = 1.0 + (0.35 * math.log1p(max(0.0, hawkes_z_j)))
-                        raw_trail_dist = max((initial_risk / p.sl_atr_mult) * hawkes_scalar * theta_decay, entry * 0.003)
-                        
-                        if r_multiple < 1.0:
-                            current_sl = max(current_sl, realigned_sl) if action_dir == "BUY" else min(current_sl, realigned_sl)
-                        else:
-                            raw_sl = (max_favorable_price - raw_trail_dist) if action_dir == "BUY" else (max_favorable_price + raw_trail_dist)
-                            be_plus = (entry + entry * 0.002) if action_dir == "BUY" else (entry - entry * 0.002)
-                            if action_dir == "BUY": current_sl = max(raw_sl, be_plus)
-                            else: current_sl = min(raw_sl, be_plus)
-
-                        momentum_stretch = max(0.0, hawkes_z_j * 0.6) if regime == "TRENDING" else 0.0
-                        if hawkes_z_j < -1.5 and r_multiple > 1.0:
-                            momentum_stretch -= 0.5 
-                        
-                        target_rr = min(6.0, dynamic_rr_ratio + momentum_stretch + (max(0.0, r_multiple - 1.0) * 0.3))
-                        current_tp = entry + (initial_risk * target_rr) if action_dir == "BUY" else entry - (initial_risk * target_rr)
-                        
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
                         
@@ -736,7 +684,7 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     holding_hours = bars_held / 60.0
                     funding_drag = FUNDING_PER_8H * (holding_hours / 8)
                     
-                    if outcome in ["ABSORPTION_EJECT", "DECAY_EXIT", "PARABOLIC_SQUEEZE"]:
+                    if outcome in ["HAWKES_CLIMAX", "PROFIT_RETRACEMENT"]:
                         max_slippage = 0.0015 if any(m in symbol for m in ["BTC", "ETH", "SOL"]) else 0.0035
                         slippage_penalty = max_slippage
                         applied_fee = TAKER_FEE * 2 
@@ -748,14 +696,15 @@ def run_v61_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
                         applied_fee = TAKER_FEE * 2
                     
+                    # Simulated Stop Compression limit to 2.5% max risk
                     base_fraction = max(0.002, kelly_f / 2.0)
                     cvar_penalty = calculate_rolling_cvar(variance_history)
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
                     
-                    fractional_risk = max(0.002, min(0.015, base_fraction * cvar_penalty * edge_factor))
+                    fractional_risk = max(0.002, min(0.025, base_fraction * cvar_penalty * edge_factor))
                     
                     net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
-                    net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.015)
+                    net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.025)
 
                     trades.append({
                         "i": i, "direction": action_dir, "regime": regime,
@@ -832,7 +781,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\nâ³ Running V1.0 APEX NEURAL Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V5.0 APEX NEURAL Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -854,7 +803,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v61_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v50_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -885,13 +834,13 @@ if __name__ == "__main__":
     parser.add_argument("--optimize", action="store_true")
     args = parser.parse_args()
 
-    print(f"ðŸ“¥ Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
+    print(f"📥 Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
     t_cand, b_cand = fetch_aligned_data(args.symbol, args.days)
-    print(f"âœ… Matrix synchronized. ({len(t_cand)} true 1m blocks)")
+    print(f"✅ Matrix synchronized. ({len(t_cand)} true 1m blocks)")
 
     if args.optimize:
         best_params = parameter_sweep(t_cand, b_cand, args.symbol)
-        print("\nðŸ† Top 5 Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
+        print("\n🏆 Top 5 Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
         for i, res in enumerate(best_params, 1):
             print(f" {i}. RR: {res['RR']} | SL ATR: {res['ATR']} "
                   f"--> Avg Sharpe: {res['OOS_Avg_Sharpe']:.2f} | Min Fold Sharpe: {res['Min_Fold_Sharpe']:.2f}")
@@ -901,15 +850,15 @@ if __name__ == "__main__":
             best = best_params[0]
             with open("params.json", "w") as f:
                 json.dump({"rr_ratio": best["RR"], "sl_atr_mult": best["ATR"]}, f)
-            print("ðŸ’¾ Saved most robust parameters to params.json for live engine sync.")
+            print("💾 Saved most robust parameters to params.json for live engine sync.")
             
     else:
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v61_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v50_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V1.0 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V5.0 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")
