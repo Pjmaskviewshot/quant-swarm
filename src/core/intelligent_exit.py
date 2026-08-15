@@ -1,8 +1,14 @@
 """
-🎯 V5.0 INTELLIGENT EXIT & HARVEST ENGINE
------------------------------------------------------------------
-Operates on Level-2 Liquidity Wall Evaporation, Hawkes Climax Exits,
-and Volatility-Surface Trailing Stops to optimize trade lifecycles.
+💎 V6.0 QUANTUM TRAJECTORY ORACLE: CONTINUOUS MICROSTRUCTURE STOPPING ENGINE
+-----------------------------------------------------------------------------
+Abolishes static R-multiple heuristics. Evaluates the live stochastic trajectory 
+of active positions in real-time from t_0 entry.
+
+Features:
+- Optimal Stopping Formulation (EV Drift Inversion)
+- Hawkes Excitation Velocity Exhaustion
+- Passive Iceberg Absorption / OFI Divergence Detection
+- Micro-Price Elasticity Collapse Guards
 """
 
 import math
@@ -10,93 +16,122 @@ import time
 import logging
 import numpy as np
 from collections import deque
-from typing import Dict, Any, Tuple
+from typing import Tuple, Dict, Any
 
-logger = logging.getLogger("QUANT_CORE.INTELLIGENT_EXIT")
+logger = logging.getLogger("QUANT_CORE.TRAJECTORY_EXIT")
 
 
 class IntelligentExitEngine:
-    def __init__(self):
-        pass
+    """
+    Continuous Trajectory Stopping Engine:
+    Evaluates whether the active trade's underlying micro-alpha vector is still expanding 
+    or has mathematically exhausted its forward expected value.
+    """
 
     @staticmethod
     def evaluate_microstructure_exit(ctx: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        Evaluates real-time Level-2 depth, Hawkes acceleration, and Macro Flow
-        to determine if the position should exit immediately.
+        Calculates the real-time optimal stopping probability based on 
+        live order flow exhaustion, hidden liquidity absorption, and micro-drift.
         """
         is_buy = ctx["is_buy"]
-        symbol = ctx["symbol"]
-        r_mult = ctx.get("r_multiple", 0.0)
         current_r = ctx.get("current_r", 0.0)
+        max_r = ctx.get("r_multiple", 0.0)
+        hawkes_z = ctx.get("hawkes_z", 0.0)
         
         stat_engine = ctx.get("stat_engine")
-        if not stat_engine:
-            return False, "NO_STAT_ENGINE"
+        feature_engine = ctx.get("feature_engine")
+        
+        # Extract live microstructure dynamics
+        ofi_z = getattr(stat_engine, "ofi_fast_z", 0.0) if stat_engine else 0.0
+        inst_var = getattr(stat_engine, "inst_variance", 1e-6) if stat_engine else 1e-6
+        
+        # 1. 🧠 ICEBERG ABSORPTION DIVERGENCE (Whale Absorption Detection)
+        # Price is at/near peak, but aggressive trade flow (OFI) has completely flipped against us.
+        if current_r > 0.30:
+            if is_buy and ofi_z < -2.2:
+                # Buyers hitting the bid / massive passive seller blocking the offer
+                return True, f"ICEBERG_ABSORPTION_DETECTED (OFI Z: {ofi_z:.2f} | R: +{current_r:.2f})"
+            elif not is_buy and ofi_z > 2.2:
+                # Sellers hitting the ask / massive passive buyer blocking the bid
+                return True, f"ICEBERG_ABSORPTION_DETECTED (OFI Z: {ofi_z:.2f} | R: +{current_r:.2f})"
 
-        # 1. LIQUIDITY WALL EVAPORATION CHECK
-        hist = ctx.get("kinetic_history", {})
-        if hist and len(hist.get("bid_refill", [])) >= 5:
+        # 2. ⚡ HAWKES EXCITATION EXHAUSTION (Kinetic Momentum Burnout)
+        # The predatory market sweep that pushed the trade into profit has hit velocity zero.
+        if current_r > 0.40:
+            if is_buy and hawkes_z < -2.5:
+                return True, f"HAWKES_VELOCITY_BURNOUT (Sell Sweep Inversion Z: {hawkes_z:.2f})"
+            elif not is_buy and hawkes_z > 2.5:
+                return True, f"HAWKES_VELOCITY_BURNOUT (Buy Sweep Inversion Z: {hawkes_z:.2f})"
+
+        # 3. 📉 CONTINUOUS OPTIMAL STOPPING DRIFT INVERSION (Hamilton-Jacobi-Bellman)
+        # Calculates if the forward expected drift of the trade has turned negative
+        if current_r > 0.20:
+            # Directional alpha drift per second
+            alpha_drift = (ofi_z * 0.00015) if is_buy else (-ofi_z * 0.00015)
+            # Volatility penalty (variance drag)
+            vol_penalty = math.sqrt(inst_var) * 1.5
+            
+            # Forward EV Drift
+            forward_ev_drift = alpha_drift - vol_penalty
+            
+            # If the trade has gained profit and forward drift becomes negative with decay
+            if forward_ev_drift < -0.0008 and (max_r - current_r) > 0.15:
+                return True, f"EV_DRIFT_INVERSION (Drift: {forward_ev_drift*10000:.1f} bps | Peak R: +{max_r:.2f})"
+
+        # 4. 🛑 L2 BOOK-WALL DISLOCATION COLLAPSE
+        last_ob = ctx.get("last_ob", {})
+        ask_v = last_ob.get("ask_size", 1.0)
+        bid_v = last_ob.get("bid_size", 1.0)
+        
+        if current_r > 0.25:
             if is_buy:
-                # If ask resistance is swelling while bid support evaporated
-                recent_bids = list(hist["bid_refill"])[-3:]
-                recent_asks = list(hist["ask_refill"])[-3:]
-                if sum(recent_asks) > (sum(recent_bids) * 3.5 + 1e-6) and current_r > 0.30:
-                    logger.critical(f"[X-RAY] 🧱 ORDERBOOK WALL EVAPORATION // {symbol} Bid support collapsed. Securing gains.")
-                    return True, "BID_WALL_EVAPORATED"
+                book_ratio = bid_v / (ask_v + 1e-9)
+                if book_ratio < 0.12:  # 88% of supporting bids vanished
+                    return True, f"LIQUIDITY_FOUNDATION_COLLAPSE (Bid Depth: {book_ratio*100:.1f}%)"
             else:
-                recent_bids = list(hist["bid_refill"])[-3:]
-                recent_asks = list(hist["ask_refill"])[-3:]
-                if sum(recent_bids) > (sum(recent_asks) * 3.5 + 1e-6) and current_r > 0.30:
-                    logger.critical(f"[X-RAY] 🧱 ORDERBOOK WALL EVAPORATION // {symbol} Ask support collapsed. Securing gains.")
-                    return True, "ASK_WALL_EVAPORATED"
-
-        # 2. HAWKES CLIMAX EXHAUSTION (Peak Wick Sniping)
-        hawkes_z = getattr(stat_engine, "hawkes_z", 0.0)
-        if r_mult >= 0.75:
-            # Trade was up significantly, but momentum hit a volume exhaustion wall
-            if is_buy and hawkes_z < -2.8:
-                logger.critical(f"[X-RAY] ⚡ HAWKES EXHAUSTION // {symbol} Peak buy sweep exhausted ({hawkes_z:.2f}σ). Cashing out.")
-                return True, "HAWKES_CLIMAX_EXHAUSTION"
-            elif not is_buy and hawkes_z > 2.8:
-                logger.critical(f"[X-RAY] ⚡ HAWKES EXHAUSTION // {symbol} Peak sell sweep exhausted ({hawkes_z:.2f}σ). Cashing out.")
-                return True, "HAWKES_CLIMAX_EXHAUSTION"
-
-        # 3. PROFIT RETRACEMENT GUARD (Dynamic Wick Protector)
-        if r_mult >= 1.20:
-            retrace_pct = (r_mult - current_r) / (r_mult + 1e-9)
-            if retrace_pct >= 0.30:
-                logger.warning(f"[X-RAY] 💰 PROFIT RETRACEMENT // {symbol} Retraced 30% from peak of +{r_mult:.2f}R. Banking remainder.")
-                return True, "PROFIT_RETRACEMENT_FLOOR"
+                book_ratio = ask_v / (bid_v + 1e-9)
+                if book_ratio < 0.12:  # 88% of supporting asks vanished
+                    return True, f"LIQUIDITY_FOUNDATION_COLLAPSE (Ask Depth: {book_ratio*100:.1f}%)"
 
         return False, "HOLD"
 
     @staticmethod
     def compute_dynamic_trailing_stop(ctx: Dict[str, Any]) -> float:
         """
-        Computes an adaptive stop level anchored to Instantaneous Variance and Micro-Structure Support.
+        Dynamically calculates the stop price based on the volatility manifold 
+        and micro-price variance rather than static tick distances.
         """
         is_buy = ctx["is_buy"]
-        current_sl = ctx["current_sl"]
-        entry_price = ctx["actual_entry"]
-        max_price = ctx.get("max_favorable_price", entry_price)
-        r_mult = ctx.get("r_multiple", 0.0)
-        
-        stat_engine = ctx.get("stat_engine")
-        inst_var = getattr(stat_engine, "inst_variance", 0.001)
-        vol_buffer = max(ctx["atr"] * 1.2, entry_price * math.sqrt(inst_var) * 1.5)
-        
+        entry = ctx["actual_entry"]
+        risk = ctx["initial_risk"]
+        max_p = ctx["max_favorable_price"]
+        current_p = ctx.get("safe_c_price", entry)
+        current_r = ctx.get("current_r", 0.0)
+        max_r = ctx.get("r_multiple", 0.0)
+        current_sl = ctx.get("current_sl", entry)
+
         new_sl = current_sl
-        
-        # 1. Break-Even + Exchange Fee Lock at +0.6R
-        if r_mult >= 0.60:
-            fee_buffer = entry_price * 0.0015
-            be_price = (entry_price + fee_buffer) if is_buy else (entry_price - fee_buffer)
+
+        # Dynamic Volatility Envelope
+        stat_engine = ctx.get("stat_engine")
+        inst_var = getattr(stat_engine, "inst_variance", 1e-5) if stat_engine else 1e-5
+        vol_buffer = max(ctx.get("atr", risk) * 0.8, entry * math.sqrt(inst_var) * 2.0)
+
+        # 1. Continuous Variance-Adjusted Break-Even Ratchet
+        # Activates dynamically as soon as the trade clears the round-trip fee hurdle
+        fee_hurdle_r = (entry * 0.0016) / (risk + 1e-9)
+        if max_r > fee_hurdle_r:
+            be_price = entry * 1.0015 if is_buy else entry * 0.9985
             new_sl = max(new_sl, be_price) if is_buy else min(new_sl, be_price)
 
-        # 2. Structural Profit Ratchet at +1.0R and beyond
-        if r_mult >= 1.0:
-            tight_trail = max_price - vol_buffer if is_buy else max_price + vol_buffer
-            new_sl = max(new_sl, tight_trail) if is_buy else min(new_sl, tight_trail)
+        # 2. Continuous Parabolic Surface Trail
+        # As max_r expands, the volatility buffer contracts non-linearly
+        if max_r > 0.80:
+            compression_factor = max(0.25, 1.0 / (1.0 + (max_r * 0.5)))
+            dynamic_trailing_dist = vol_buffer * compression_factor
+            
+            trail_price = max_p - dynamic_trailing_dist if is_buy else max_p + dynamic_trailing_dist
+            new_sl = max(new_sl, trail_price) if is_buy else min(new_sl, trail_price)
 
         return new_sl

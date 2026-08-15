@@ -1,10 +1,12 @@
 ﻿"""
-ðŸ’Ž V1.0 TITANIUM APEX: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
+💎 V5.1 TENSOR-PRIME: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
 -------------------------------------------------------------
 Computes real-time cross-asset impulse propagation (BTC/ETH/SOL -> Alts).
 Uses Millisecond-Precise Event-Time Backward Pointer Alignment to eradicate 
-Look-Ahead Bias in sub-second real-time. Bounded correlation dampening 
-prevents false alpha triggers during un-correlated altcoin divergence.
+Look-Ahead Bias in sub-second real-time. 
+
+Upgraded with Bounded Correlation Dampening and Zero-Variance Hardening 
+to prevent false alpha triggers during un-correlated altcoin divergence.
 """
 
 import math
@@ -18,7 +20,7 @@ logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
     """
-    ðŸš€ V1.0 APEX: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
+    🚀 V5.1 TENSOR-PRIME: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
     Tracks real-time impulse propagation vectors from primary market anchors 
     (BTC, ETH, SOL) to target altcoins without future-data leakage.
     """
@@ -56,7 +58,7 @@ class CrossAssetTensorOracle:
 
     def compute_lead_lag_signal(self, target_symbol: str, benchmark_symbol: str = "BTCUSDT") -> float:
         """
-        ðŸš€ V1.0 UPGRADE: Sub-Second Asynchronous Pointer Alignment.
+        🚀 V5.1 UPGRADE: Sub-Second Asynchronous Pointer Alignment.
         Calculates cross-covariance tensor using exact millisecond timestamps.
         Strictly maps Benchmark[t-1] to Alt[t] to guarantee zero look-ahead bias.
         
@@ -95,22 +97,30 @@ class CrossAssetTensorOracle:
                 prev_lagged_bench_price = benchmark_ticks[bench_idx - 2][1]
             
             if lagged_bench_price is not None and prev_lagged_bench_price is not None:
-                try:
-                    alt_ret = math.log(alt_price / (prev_alt_price + 1e-9))
-                    bench_ret = math.log(lagged_bench_price / (prev_lagged_bench_price + 1e-9))
-                    
-                    aligned_alt.append(alt_ret)
-                    aligned_benchmark.append(bench_ret)
-                except ValueError:
-                    continue
+                if prev_alt_price > 0 and prev_lagged_bench_price > 0:
+                    try:
+                        alt_ret = math.log(alt_price / prev_alt_price)
+                        bench_ret = math.log(lagged_bench_price / prev_lagged_bench_price)
+                        
+                        aligned_alt.append(alt_ret)
+                        aligned_benchmark.append(bench_ret)
+                    except ValueError:
+                        continue
                 
         if len(aligned_alt) < 20:
             return 0.0
 
-        # Compute true lagged Pearson correlation (Guarded against Zero-Variance)
+        bench_arr = np.array(aligned_benchmark, dtype=float)
+        alt_arr = np.array(aligned_alt, dtype=float)
+
+        # 🚀 V5.1 ZERO-VARIANCE GUARD: Prevent NaN correlation matrices
+        if np.std(bench_arr) == 0 or np.std(alt_arr) == 0:
+            return 0.0
+
+        # Compute true lagged Pearson correlation
         try:
             with np.errstate(divide='ignore', invalid='ignore'):
-                correlation = float(np.corrcoef(aligned_benchmark, aligned_alt)[0, 1])
+                correlation = float(np.corrcoef(bench_arr, alt_arr)[0, 1])
                 
             if np.isnan(correlation):
                 return 0.0
@@ -118,9 +128,9 @@ class CrossAssetTensorOracle:
             return 0.0
             
         # Compute leading momentum vector from Benchmark
-        bench_momentum = float(np.mean(aligned_benchmark[-10:]))
+        bench_momentum = float(np.mean(bench_arr[-10:]))
         
-        # ðŸš€ V1.0 NOISE FILTER: Require minimum correlation threshold (0.45)
+        # 🛡️ V5.1 NOISE FILTER: Require minimum correlation threshold (0.45)
         if abs(bench_momentum) > 0.00015 and correlation > 0.45:
             # Bound alpha signal between -1.0 and +1.0
             alpha_signal = math.copysign(min(1.0, abs(correlation)), bench_momentum)
@@ -130,7 +140,7 @@ class CrossAssetTensorOracle:
             if now - self._last_log_time.get(target_symbol, 0.0) > 60.0:
                 direction = "BULLISH" if alpha_signal > 0 else "BEARISH"
                 logger.info(
-                    f"[X-RAY] ðŸŒŒ TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
+                    f"[X-RAY] 🌌 TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
                     f"{direction} wave. Correlation: {correlation:.2f} | Momentum: {bench_momentum*10000:.1f} bps"
                 )
                 self._last_log_time[target_symbol] = now

@@ -1,13 +1,11 @@
 ﻿"""
-ðŸ’Ž V1.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
+💎 V5.1 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
 -------------------------------------------------------------------------
-Computes EWMA-smoothed Orderbook Elasticity (Î»_OB) and Micro-Price Variance.
-Integrates with the Stationarized Log-MLOFI engine to provide stable volatility 
-scalars for the Hawkes-Elastic Micro-Chandelier Trailing Stop.
-Optimized with NumPy zero-allocation iterators and strict L2 sanity guards.
+Computes EWMA-smoothed Orderbook Elasticity (λ_OB), Micro-Price Variance,
+and Deterministic Liquidity Absorption Modeling.
 
-CRITICAL FIX: Removed silent exception swallowing. Explicitly catches and 
-logs floating-point anomalies to prevent NaN/Inf propagation across the pipeline.
+Integrates with the Stationarized Log-MLOFI engine to provide stable volatility 
+scalars and simulates exact L2 book-walking slippage prior to routing.
 """
 
 import math
@@ -15,16 +13,16 @@ import time
 import numpy as np
 import logging
 from collections import deque
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, List, Optional
 
 logger = logging.getLogger("QUANT_CORE.MICRO_ELASTICITY")
 
 class MicroElasticityEngine:
     """
-    ðŸš€ V1.0 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
+    🚀 V5.1 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
     Maps the "stretchiness" of the orderbook. High elasticity means the book is 
     hollow and vulnerable to toxic sweeps. Low elasticity means it's dense and safe.
-    Upgraded with EWMA smoothing for stable Chandelier SL trailing.
+    Upgraded with Deterministic Liquidity Absorption Modeling.
     """
     def __init__(self, window_ticks: int = 100):
         self.window_ticks = window_ticks
@@ -40,14 +38,72 @@ class MicroElasticityEngine:
         
         # Rolling Elasticity & Variance Metrics
         self.instant_variance = 1e-8
-        self.orderbook_elasticity = 1.0  # EWMA Smoothed Î»_OB
+        self.orderbook_elasticity = 1.0  # EWMA Smoothed λ_OB
+
+    def calculate_exact_slippage_elasticity(self, target_qty: float, side: str, depth_snapshot: Dict[str, List[List[float]]], current_mid: float) -> Dict[str, float]:
+        """
+        🚀 V5.1 DETERMINISTIC LIQUIDITY ABSORPTION MODELING
+        Virtually walks the L2 orderbook to calculate the exact execution cost 
+        and the power-law absorption curve of the resting liquidity.
+        """
+        if not depth_snapshot or "bids" not in depth_snapshot or "asks" not in depth_snapshot:
+            return {"expected_slippage_bps": 999.0, "absorption_ratio": 1.0, "cleared_levels": 0}
+
+        levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
+        if not levels: 
+            return {"expected_slippage_bps": 999.0, "absorption_ratio": 1.0, "cleared_levels": 0}
+
+        accumulated_qty = 0.0
+        accumulated_cost = 0.0
+        levels_consumed = 0
+
+        for level in levels:
+            try:
+                p = float(level[0])
+                v = float(level[1])
+                needed = target_qty - accumulated_qty
+                levels_consumed += 1
+                
+                if v >= needed:
+                    accumulated_cost += (needed * p)
+                    accumulated_qty += needed
+                    break
+                else:
+                    accumulated_cost += (v * p)
+                    accumulated_qty += v
+            except (IndexError, ValueError, TypeError):
+                continue
+
+        if accumulated_qty < target_qty or accumulated_qty <= 0:
+            return {"expected_slippage_bps": 999.0, "absorption_ratio": 1.0, "cleared_levels": levels_consumed}
+
+        avg_expected_price = accumulated_cost / accumulated_qty
+        
+        if side.upper() == "BUY":
+            slippage_bps = ((avg_expected_price - current_mid) / current_mid) * 10000.0
+        else:
+            slippage_bps = ((current_mid - avg_expected_price) / current_mid) * 10000.0
+
+        slippage_bps = max(0.0, slippage_bps)
+        
+        # Calculate Power-Law Absorption Ratio (How fast liquidity thins out deeper in the book)
+        # Ratio > 1.0 means book becomes denser (safer). Ratio < 1.0 means book is hollowing out (toxic).
+        top_level_vol = float(levels[0][1]) if levels else 1e-9
+        avg_vol_per_level = accumulated_qty / max(1, levels_consumed)
+        absorption_ratio = avg_vol_per_level / (top_level_vol + 1e-9)
+
+        return {
+            "expected_slippage_bps": slippage_bps,
+            "absorption_ratio": float(np.clip(absorption_ratio, 0.1, 5.0)),
+            "cleared_levels": levels_consumed
+        }
 
     def update_depth_state(self, best_bid: float, bid_qty: float, best_ask: float, ask_qty: float, log_mlofi_z: float, timestamp: float) -> dict:
         """
         Calculates Micro-Price, Real-Time Variance, and EWMA Orderbook Elasticity on every L2 tick.
         Protected against ZeroDivision, crossed books, and high-frequency memory allocation spikes.
         """
-        # ðŸš€ SANITY PRECONDITION: Reject crossed, zero, or invalid orderbook states
+        # 🚀 SANITY PRECONDITION: Reject crossed, zero, or invalid orderbook states
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask or bid_qty <= 0 or ask_qty <= 0:
             return {
                 "micro_price": self.micro_prices[-1] if self.micro_prices else 0.0,
@@ -69,12 +125,12 @@ class MicroElasticityEngine:
                 log_ret = math.log(micro_price / self.micro_prices[-1])
                 self.log_returns.append(log_ret)
                 
-                # ðŸš€ OPTIMIZATION: Zero allocation iteration for high-frequency variance calculation
+                # 🚀 OPTIMIZATION: Zero allocation iteration for high-frequency variance calculation
                 if len(self.log_returns) >= 10:
                     log_rets_arr = np.fromiter(self.log_returns, dtype=float, count=len(self.log_returns))
                     self.instant_variance = float(np.var(log_rets_arr[-20:]) + 1e-9)
                 
-                # 2. Compute EWMA Orderbook Elasticity (Î»_OB)
+                # 2. Compute EWMA Orderbook Elasticity (λ_OB)
                 # Calculates price movement per unit of Log-MLOFI Z-Score aggression
                 price_delta_bps = abs((micro_price - self.micro_prices[-1]) / self.micro_prices[-1]) * 10000.0
                 raw_elasticity = price_delta_bps / (abs(log_mlofi_z) + 1.0)
@@ -84,7 +140,7 @@ class MicroElasticityEngine:
                 self.orderbook_elasticity = (alpha * raw_elasticity) + ((1.0 - alpha) * self.orderbook_elasticity)
                 
             except Exception as e:
-                # ðŸš€ CRITICAL FIX: Eliminate silent failure and NaN/Inf propagation
+                # 🚀 CRITICAL FIX: Eliminate silent failure and NaN/Inf propagation
                 logger.debug(f"[MATH_WARN] Numerical instability in MicroElasticityEngine: {e}")
 
         self.micro_prices.append(micro_price)
@@ -107,7 +163,7 @@ class MicroElasticityEngine:
 
     def compute_dynamic_micro_brackets(self, current_price: float, side: str, risk_multiplier: float = 1.5) -> Tuple[float, float]:
         """
-        ðŸš€ V1.0 NANO-BRACKETING (Fallback/Initialization): 
+        🚀 V5.1 NANO-BRACKETING (Fallback/Initialization): 
         Computes standard SL and TP distances mathematically derived from sub-second 
         Micro-Price Volatility and EWMA Elasticity. (Note: Live execution dynamically 
         overrides this with the Hawkes-Elastic Chandelier in main.py).
@@ -131,7 +187,7 @@ class MicroElasticityEngine:
 
     def is_adverse_selection_imminent(self, side: str, depth_metrics: dict, symbol: str = "UNKNOWN") -> bool:
         """
-        âš¡ V1.0 ANTI-ADVERSE SELECTION X-RAY GUARD
+        ⚡ V5.1 ANTI-ADVERSE SELECTION X-RAY GUARD
         Evaluates whether an active PostOnly order is about to be toxically filled.
         Returns True if the order book is collapsing rapidly toward our maker peg.
         """
@@ -143,11 +199,11 @@ class MicroElasticityEngine:
         
         if side.upper() == "BUY":
             if bid_depletion_rate > 3.0 and self.orderbook_elasticity > elasticity_threshold:
-                logger.warning(f"[X-RAY] ðŸ›¡ï¸ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
+                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Bid Sweep Detected! Aborting Maker Peg.")
                 return True
         else:
             if ask_depletion_rate > 3.0 and self.orderbook_elasticity > elasticity_threshold:
-                logger.warning(f"[X-RAY] ðŸ›¡ï¸ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
+                logger.warning(f"[X-RAY] 🛡️ ADVERSE SELECTION GUARD // {symbol} Toxic Ask Sweep Detected! Aborting Maker Peg.")
                 return True
                 
         return False

@@ -4,8 +4,8 @@
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent
 Exits into an execution pipeline with Zero-Discard Stop Compression.
 
-Upgraded with True Implementation Shortfall (IS) Tracking and Atomic 
-Routing unpacks for precise TCA (Transaction Cost Analysis).
+Upgraded with True Implementation Shortfall (IS) Tracking, Atomic 
+Routing unpacks, and X-Ray Rejection Telemetry.
 """
 
 import time
@@ -37,10 +37,19 @@ class CapitalAuctionEngine:
     def __init__(self, core_engine):
         self.core = core_engine
         self._heap_counter = 0
+        self._last_rejection_log = {}
 
     def get_next_heap_id(self) -> int:
         self._heap_counter += 1
         return self._heap_counter
+
+    def _throttled_reject_log(self, symbol: str, reason: str):
+        """Prevents the terminal from being spammed by the same rejection reason."""
+        now = time.time()
+        log_key = f"{symbol}_{reason}"
+        if now - self._last_rejection_log.get(log_key, 0.0) > 15.0:
+            logger.warning(f"[X-RAY] 🚫 AUCTION REJECT // {symbol}: {reason}")
+            self._last_rejection_log[log_key] = now
 
     async def run_global_capital_auction_worker(self):
         logger.info("🏛️ V5.1 DYNAMIC EV AUCTION ENGINE ONLINE.")
@@ -78,15 +87,18 @@ class CapitalAuctionEngine:
                     if self.core.fsm.is_asset_locked(sym):
                         continue
                         
-                    sector_state = self.core.fsm.get_sector_state(sym)
-                    impulse = sector_state.get("impulse_score", 0.0)
+                    try:
+                        sector_state = self.core.fsm.get_sector_state(sym)
+                        impulse = sector_state.get("impulse_score", 0.0)
+                    except Exception:
+                        impulse = 0.0
                     
                     if payload["action"] == "BUY" and impulse < -0.40:
                         continue
                     if payload["action"] == "SELL" and impulse > 0.40:
                         continue
                         
-                    # 🚀 V5.1 CONVICTION FLOOR: Synchronized with Micro-Account Risk Vault
+                    # 🚀 V5.1 CONVICTION FLOOR
                     if payload.get("prob_success", 0.0) < 0.515:
                         continue
 
@@ -134,7 +146,9 @@ class CapitalAuctionEngine:
                     else:
                         drift_pct = (signal_price - live_price) / signal_price
                     
-                    if drift_pct > 0.0050 or drift_pct < -0.0100: 
+                    # 🚀 FIXED: Widened from 50 bps to 150 bps to prevent Altcoin micro-skew rejections
+                    if drift_pct > 0.0150 or drift_pct < -0.0150: 
+                        self._throttled_reject_log(top_symbol, f"Micro-Price drifted {drift_pct*10000:.1f} bps from signal.")
                         continue
 
                 provisional_notional = max(6.50, current_bal * 0.35)
@@ -145,6 +159,7 @@ class CapitalAuctionEngine:
                 )
 
                 if not is_safe:
+                    self._throttled_reject_log(top_symbol, f"Risk Vault Veto: {risk_reason}")
                     continue
 
                 self.core.active_positions_map[top_symbol] = top_payload["action"]
@@ -217,8 +232,8 @@ class CapitalAuctionEngine:
                 current_balance=available_balance
             )
 
-            # 🔪 Pure Mathematical Execution: No overrides. Negative EV dies here.
             if fractional_risk <= 0.0:
+                logger.warning(f"[X-RAY] 🚫 EV REJECT // {symbol} EV is negative or Kelly returned 0.0.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
                 return
 
