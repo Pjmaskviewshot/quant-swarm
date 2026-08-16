@@ -68,8 +68,8 @@ class PositionExitState:
     thesis_inv_cov: np.ndarray  
     
     # DEFAULT FIELDS SECOND
-    # LEVEL 0: Physical Exchange Reality
     actual_qty: float = 0.0 
+    base_qty: float = 0.0  # Safeguard for base quantity tracking
     
     profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
@@ -342,7 +342,7 @@ class IntelligentExitEngine:
             
         # LEVEL 4 & 5: Defender (MC) & Stochastic Optimizer (q*)
         ofi_z = current_thesis.features[0]
-        aligned_ofi = ofi_z if is_buy else -ofi_z
+        aligned_ofi =ofi_z if is_buy else -ofi_z
         p_cont = max(0.05, min(0.95, 0.50 + (aligned_ofi * 0.15)))
         
         # Deterministic seed based on price to prevent flip-flopping MC paths
@@ -368,7 +368,7 @@ class IntelligentExitEngine:
             
         limit_p = last_ob.get("best_bid", price) if state.exit_side == "SELL" else last_ob.get("best_ask", price)
         if urgency == "AGGRESSIVE":
-            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0005
+            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0002
 
         log_str = (
             f"\n╔══════════════════════════════════════╗\n"
@@ -437,7 +437,7 @@ class ExecutionGovernorFSM:
                 state.execution_state = "REPRICE"
                 
         elif state.execution_state in ["REPRICE", "MARKET"]:
-            res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=state.exit_side, orderType="Market", qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
+            res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=symbol, side=state.exit_side, orderType="Market", qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
             state.execution_state = "SYNC"
             return True
                 
