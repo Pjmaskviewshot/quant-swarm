@@ -68,8 +68,8 @@ class PositionExitState:
     thesis_inv_cov: np.ndarray  
     
     # DEFAULT FIELDS SECOND
-    # LEVEL 0: Physical Exchange Reality
     actual_qty: float = 0.0 
+    base_qty: float = 0.0  # Safeguard for base quantity tracking
     
     profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
@@ -87,6 +87,7 @@ class ExitDecision:
     target_q: float
     urgency: str
     limit_price: float
+    exchange_ts_price: float
     reason: str
     log_output: str
 
@@ -308,14 +309,14 @@ class IntelligentExitEngine:
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
         # LEVEL 0: Physical Exchange Sync
         if state.execution_state == "SYNC":
-            return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, "AWAITING_EXCHANGE_SYNC", "[LEVEL 0: SYNC REQUIRED]")
+            return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, 0.0, "AWAITING_EXCHANGE_SYNC", "[LEVEL 0: SYNC REQUIRED]")
 
         is_buy = ctx["is_buy"]
         price = ctx.get("safe_c_price", state.entry_price)
         total_qty = state.actual_qty  # TRUE reality, not assumed q*
         
         if total_qty <= 0:
-            return ExitDecision("HOLD", 0.0, "NONE", price, "ZERO_POSITION", "[GHOST POSITION]")
+            return ExitDecision("HOLD", 0.0, "NONE", price, 0.0, "ZERO_POSITION", "[GHOST POSITION]")
             
         stat = ctx.get("stat_engine")
         inst_var = getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
@@ -327,18 +328,18 @@ class IntelligentExitEngine:
         # LEVEL 1: Portfolio Commander
         pf_override, pf_reason = PortfolioCommander.evaluate(ctx)
         if pf_override:
-            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, pf_reason, "[PORTFOLIO KILL SWITCH]")
+            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, 0.0, pf_reason, "[PORTFOLIO KILL SWITCH]")
             
         # LEVEL 2: Emergency Assassin
         ass_override, ass_reason, ood_prob, hazard_rate = EmergencyAssassin.evaluate(ctx, state, current_thesis)
         if ass_override:
-            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, ass_reason, "[ASSASSIN THESIS DESTRUCTION]")
+            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, 0.0, ass_reason, "[ASSASSIN THESIS DESTRUCTION]")
             
         # LEVEL 3: Profit Governor
         prof_override, prof_target_q, prof_reason = ProfitGovernor.evaluate(ctx, state, ood_prob, hazard_rate)
         if prof_override:
             urgency = "MARKET" if prof_target_q == 0.0 else "AGGRESSIVE"
-            return ExitDecision("EXIT" if prof_target_q == 0.0 else "REDUCE", prof_target_q, urgency, price, prof_reason, "[PROFIT DEFENDER VETO]")
+            return ExitDecision("EXIT" if prof_target_q == 0.0 else "REDUCE", prof_target_q, urgency, price, 0.0, prof_reason, "[PROFIT DEFENDER VETO]")
             
         # LEVEL 4 & 5: Defender (MC) & Stochastic Optimizer (q*)
         ofi_z = current_thesis.features[0]
@@ -368,7 +369,7 @@ class IntelligentExitEngine:
             
         limit_p = last_ob.get("best_bid", price) if state.exit_side == "SELL" else last_ob.get("best_ask", price)
         if urgency == "AGGRESSIVE":
-            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0005
+            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0002
 
         log_str = (
             f"\n╔══════════════════════════════════════╗\n"
@@ -387,7 +388,7 @@ class IntelligentExitEngine:
             f"╚══════════════════════════════════════╝\n"
         )
         
-        return ExitDecision(action, optimal_q, urgency, limit_p, f"Q_OPT_{optimal_q:.2f}", log_str)
+        return ExitDecision(action, optimal_q, urgency, limit_p, state.profit_state.peak_price, f"Q_OPT_{optimal_q:.2f}", log_str)
 
 
 # =====================================================================
@@ -400,7 +401,7 @@ class ExecutionGovernorFSM:
     OBSERVE -> POSTED -> MONITOR -> REPRICE -> MARKET -> SYNC -> OBSERVE
     """
     @staticmethod
-    async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor: Any) -> bool:
+    async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor:Any) -> bool:
         if decision.action == "HOLD":
             return False
             
