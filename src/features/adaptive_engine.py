@@ -1,5 +1,5 @@
 ﻿"""
-ðŸ’Ž V1.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
+💎 V6.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
@@ -40,7 +40,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # ðŸš€ HMM STATE PRIORS & TRANSITIONS
+        # 🚀 HMM STATE PRIORS & TRANSITIONS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -79,7 +79,7 @@ class AdaptiveFeatureEngine:
 
     def _apply_kalman_smoothing(self, prices: np.ndarray) -> np.ndarray:
         """
-        ðŸš€ 1D Kalman Filter
+        🚀 1D Kalman Filter
         Strips high-frequency microstructure noise from the raw price feed.
         Ensures the HMM evaluates the true macro-trend rather than reacting to chop.
         """
@@ -166,8 +166,8 @@ class AdaptiveFeatureEngine:
                     
                 log_emissions[i] = log_emission
                 
-            # ðŸš€ CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
-            prior = np.dot(self.transition_matrix, self.state_probs)
+            # 🚀 CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
+            prior = np.dot(self.state_probs, self.transition_matrix)
             prior_log = np.log(prior + 1e-9)
             
             unnormalized_log_posterior = log_emissions + prior_log
@@ -180,7 +180,7 @@ class AdaptiveFeatureEngine:
             
             now = time.time()
             if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
-                logger.info(f"[X-RAY] ðŸŒŒ HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
+                logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
                 self.last_detected_regime = detected_regime
                 self._last_log_time = now
             
@@ -378,17 +378,25 @@ class AdaptiveFeatureEngine:
     def get_book_depth_metrics(self) -> Dict[str, float]:
         snapshot = self._cached_floats
         if not snapshot["bids"] or not snapshot["asks"]:
-            return {}
+            mid = self.prices[-1] if self.prices else 1.0
+            return {"top_bid": mid * 0.9999, "top_ask": mid * 1.0001, "bid_depth_10": 10.0, "ask_depth_10": 10.0}
+
+        try:
+            top_bid = float(snapshot["bids"][0][0])
+            top_ask = float(snapshot["asks"][0][0])
+            bid_d10 = sum(float(level[1]) for level in snapshot["bids"])
+            ask_d10 = sum(float(level[1]) for level in snapshot["asks"])
+
+            total_depth = bid_d10 + ask_d10
             
-        bid_depth = sum(level[1] for level in snapshot["bids"])
-        ask_depth = sum(level[1] for level in snapshot["asks"])
-        total_depth = bid_depth + ask_depth
-        
-        return {
-            "bid_depth_10": float(bid_depth),
-            "ask_depth_10": float(ask_depth),
-            "total_depth_10": float(total_depth),
-            "depth_imbalance": float((bid_depth - ask_depth) / (total_depth + 1e-9)),
-            "top_bid": float(snapshot["bids"][0][0]),
-            "top_ask": float(snapshot["asks"][0][0])
-        }
+            return {
+                "top_bid": top_bid,
+                "top_ask": top_ask,
+                "bid_depth_10": bid_d10,
+                "ask_depth_10": ask_d10,
+                "total_depth_10": total_depth,
+                "depth_imbalance": (bid_d10 - ask_d10) / (total_depth + 1e-9)
+            }
+        except (IndexError, ValueError, TypeError):
+            mid = self.prices[-1] if self.prices else 1.0
+            return {"top_bid": mid * 0.9999, "top_ask": mid * 1.0001, "bid_depth_10": 10.0, "ask_depth_10": 10.0}
