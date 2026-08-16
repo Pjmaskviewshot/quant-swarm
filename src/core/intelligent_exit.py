@@ -58,17 +58,18 @@ class ProfitProtectionState:
 @dataclass
 class PositionExitState:
     """PERSISTENT state object living in the main FSM."""
+    # NON-DEFAULT FIELDS FIRST
     position_id: str
     entry_time: float
     entry_price: float
     exit_side: str
     entry_balance: float
-    
-    # LEVEL 0: Physical Exchange Reality
-    actual_qty: float = 0.0 
-    
     entry_thesis: ThesisVector
     thesis_inv_cov: np.ndarray  
+    
+    # DEFAULT FIELDS SECOND
+    # LEVEL 0: Physical Exchange Reality
+    actual_qty: float = 0.0 
     
     profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
@@ -306,7 +307,6 @@ class IntelligentExitEngine:
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
         # LEVEL 0: Physical Exchange Sync
-        # If the state machine doesn't know the actual exchange position, VETO evaluation.
         if state.execution_state == "SYNC":
             return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, "AWAITING_EXCHANGE_SYNC", "[LEVEL 0: SYNC REQUIRED]")
 
@@ -391,7 +391,7 @@ class IntelligentExitEngine:
 
 
 # =====================================================================
-# LEVEL 0 & 6: EXCHANGE RECONCILER & EXECUTION FSM
+# 6. STATEFUL EXECUTION GOVERNOR FSM
 # =====================================================================
 
 class ExecutionGovernorFSM:
@@ -401,38 +401,13 @@ class ExecutionGovernorFSM:
     """
     @staticmethod
     async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor: Any) -> bool:
-        symbol = ctx["symbol"]
-        
-        # =======================================================
-        # LEVEL 0: SYNC STATE (Physical Verification)
-        # =======================================================
-        if state.execution_state == "SYNC":
-            try:
-                pos_res = await executor.safe_call(executor.client.get_positions, category="linear", symbol=symbol)
-                p_list = pos_res.get("result", {}).get("list", [])
-                
-                if p_list:
-                    actual_qty = float(p_list[0].get("size", 0.0))
-                    state.actual_qty = actual_qty
-                    state.q_retained = actual_qty / max(state.base_qty, 1e-9)
-                else:
-                    state.actual_qty = 0.0
-                    state.q_retained = 0.0 
-                    
-                state.execution_state = "OBSERVE"
-                return True 
-            except Exception as e:
-                logger.error(f"[APEX SYNC] Exchange sync failed for {symbol}: {e}")
-                return False
-
-        # =======================================================
-        # NORMAL EXECUTION ROUTING
-        # =======================================================
         if decision.action == "HOLD":
             return False
             
+        symbol = ctx["symbol"]
         current_actual_qty = state.actual_qty 
-        target_retained_qty = state.base_qty * decision.target_q
+        
+        target_retained_qty = current_actual_qty * decision.target_q
         qty_to_close = current_actual_qty - target_retained_qty
         
         if qty_to_close <= 0:
