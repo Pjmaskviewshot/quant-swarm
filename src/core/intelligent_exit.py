@@ -68,8 +68,8 @@ class PositionExitState:
     thesis_inv_cov: np.ndarray  
     
     # DEFAULT FIELDS SECOND
+    # LEVEL 0: Physical Exchange Reality
     actual_qty: float = 0.0 
-    base_qty: float = 0.0  # Safeguard for base quantity tracking
     
     profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
@@ -368,7 +368,7 @@ class IntelligentExitEngine:
             
         limit_p = last_ob.get("best_bid", price) if state.exit_side == "SELL" else last_ob.get("best_ask", price)
         if urgency == "AGGRESSIVE":
-            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0002
+            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0005
 
         log_str = (
             f"\n╔══════════════════════════════════════╗\n"
