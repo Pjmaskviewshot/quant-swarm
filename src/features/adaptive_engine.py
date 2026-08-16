@@ -5,8 +5,8 @@ Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
 micro-whipsaws and stabilize order routing decisions. 
 
-CRITICAL FIX: Standardized Markov transition mechanics (Removed matrix 
-transpose corruption) to enforce true forward-probability state evolution.
+CRITICAL FIX: Fully initialized price buffers, self.prices deque, 
+and safe fallback in get_book_depth_metrics to prevent AttributeError crashes.
 """
 
 import math
@@ -19,6 +19,7 @@ from typing import Dict, Any, Tuple, List
 
 logger = logging.getLogger("QUANT_CORE.ADAPTIVE_ENGINE")
 
+
 class AdaptiveFeatureEngine:
     def __init__(self, memory_window_short: int = 500, memory_window_long: int = 1800):
         self.local_bids: Dict[float, float] = {}
@@ -28,6 +29,8 @@ class AdaptiveFeatureEngine:
         self._cached_floats: Dict[str, List[List[float]]] = {"bids": [], "asks": []}
 
         self.tfi_history = deque(maxlen=memory_window_short)
+        self.prices = deque(maxlen=memory_window_long)
+        self.volumes = deque(maxlen=memory_window_long)
         
         self.timeframes = {
             "1": deque(maxlen=200), 
@@ -50,14 +53,14 @@ class AdaptiveFeatureEngine:
             "LIQUIDITY_VACUUM"
         ]
         
-        self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+        self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
         self.transition_matrix = np.array([
             [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
             [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
             [0.10, 0.10, 0.70, 0.05, 0.05], # From CHOP
             [0.05, 0.05, 0.05, 0.80, 0.05], # From MEAN_REVERTING
             [0.05, 0.05, 0.15, 0.05, 0.70]  # From VACUUM
-        ])
+        ], dtype=np.float64)
         
         self.last_detected_regime = "UNKNOWN"
         self._last_log_time = 0.0
@@ -73,7 +76,7 @@ class AdaptiveFeatureEngine:
             self.local_asks = dict(top_asks)
 
     def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
-        """Computes ln(P) to completely eliminate float underflow when multiplying."""
+        """Computes ln(P) to eliminate float underflow when multiplying probabilities."""
         var = float(std)**2 + 1e-9
         return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
 
@@ -81,7 +84,6 @@ class AdaptiveFeatureEngine:
         """
         🚀 1D Kalman Filter
         Strips high-frequency microstructure noise from the raw price feed.
-        Ensures the HMM evaluates the true macro-trend rather than reacting to chop.
         """
         if len(prices) < 2:
             return prices
@@ -89,8 +91,6 @@ class AdaptiveFeatureEngine:
         n = len(prices)
         filtered = np.zeros(n)
         
-        # Q: Process noise covariance (Flexibility of the true state)
-        # R: Measurement noise covariance (Adaptive to recent asset variance)
         Q = 1e-5
         R = np.var(prices) * 0.05 + 1e-9 
         
@@ -98,11 +98,9 @@ class AdaptiveFeatureEngine:
         P = 1.0
         
         for i in range(n):
-            # Time Update (Predict)
             x_pred = x_hat
             P_pred = P + Q
             
-            # Measurement Update (Correct)
             K = P_pred / (P_pred + R)
             x_hat = x_pred + K * (prices[i] - x_pred)
             P = (1 - K) * P_pred
@@ -112,23 +110,22 @@ class AdaptiveFeatureEngine:
         return filtered
 
     def detect_market_regime(self) -> str:
-        """
-        Dynamically Calibrated HMM (Look-ahead bias eliminated).
-        Now protected against flip-flopping via Kalman-smoothed price ingestion.
-        """
+        """Dynamically Calibrated HMM without look-ahead bias."""
         if len(self.timeframes["5"]) >= 100:
             candles = list(self.timeframes["5"])[-100:]
         elif len(self.timeframes["1"]) >= 100:
             candles = list(self.timeframes["1"])[-100:]
         elif len(self.timeframes["5"]) >= 20: 
             candles = list(self.timeframes["5"])[-20:]
+        elif len(self.prices) >= 20:
+            raw_p = np.array(list(self.prices)[-60:])
+            return "TRENDING" if abs(raw_p[-1] - raw_p[0]) > np.std(raw_p) * 2 else "RANGING"
         else:
             return "MEAN_REVERTING" 
 
         raw_closes = np.array([float(c["close"]) for c in candles])
         volumes = np.array([float(c["volume"]) for c in candles])
         
-        # Filter raw prices to stabilize HMM transition state
         closes = self._apply_kalman_smoothing(raw_closes)
         
         try:
@@ -166,7 +163,6 @@ class AdaptiveFeatureEngine:
                     
                 log_emissions[i] = log_emission
                 
-            # 🚀 CRITICAL FIX: Removed .T transpose to correctly evolve the Markov Chain
             prior = np.dot(self.state_probs, self.transition_matrix)
             prior_log = np.log(prior + 1e-9)
             
@@ -180,19 +176,17 @@ class AdaptiveFeatureEngine:
             
             now = time.time()
             if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
-                logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // Matrix mathematically transitioned to: {detected_regime}")
+                logger.info(f"[X-RAY] 🌌 HMM REGIME SHIFT // State transitioned to: {detected_regime}")
                 self.last_detected_regime = detected_regime
                 self._last_log_time = now
             
             if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"]:
                 return "TRENDING"
-            elif detected_regime in ["HIGH_VOL_CHOP", "MEAN_REVERTING", "LIQUIDITY_VACUUM"]:
+            else:
                 return "RANGING"
-                
-            return "RANGING"
 
         except Exception as e:
-            logger.debug(f"[X-RAY] HMM Regime detection variance absorbed: {e}")
+            logger.debug(f"[X-RAY] HMM Regime detection fallback: {e}")
             return "MEAN_REVERTING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
@@ -203,12 +197,18 @@ class AdaptiveFeatureEngine:
         sell_vol = 0.0
 
         for trade in trades:
-            side = trade.get("side", trade.get("S")) 
+            side = trade.get("side", trade.get("S", "")) 
             qty = float(trade.get("size", trade.get("v", 0.0)))
+            p = float(trade.get("price", trade.get("p", 0.0)))
             
-            if side == "Buy":
+            if p > 0:
+                self.prices.append(p)
+                self.volumes.append(qty)
+                self._latest_mid = p
+
+            if str(side).upper() == "BUY":
                 buy_vol += qty
-            elif side == "Sell":
+            elif str(side).upper() == "SELL":
                 sell_vol += qty
 
         tfi = (buy_vol - sell_vol) / ((buy_vol + sell_vol) + 1e-9)
@@ -252,6 +252,7 @@ class AdaptiveFeatureEngine:
                     
                     if best_bid_price < best_ask_price:
                         self._latest_mid = (best_bid_price + best_ask_price) / 2.0
+                        self.prices.append(self._latest_mid)
                     
                     self._cached_snapshot = {
                         "bids": [[str(p), str(s)] for p, s in best_bids],
@@ -272,6 +273,9 @@ class AdaptiveFeatureEngine:
             self.timeframes[tf_key].append({
                 "open": open_p, "high": high_p, "low": low_p, "close": close_p, "volume": volume
             })
+        if close_p > 0:
+            self.prices.append(close_p)
+            self._latest_mid = close_p
 
     def extract_multi_timeframe_momentum(self) -> Dict[str, float]:
         momentum_matrix = {}
@@ -289,7 +293,6 @@ class AdaptiveFeatureEngine:
     def get_htf_trend_bias(self, current_price: float) -> float:
         bias = 0.0
         
-        # Calculate 4-Hour (240m) Trend Bias
         if len(self.timeframes["240"]) >= 10:
             candles_4h = list(self.timeframes["240"])
             closes_4h = np.array([float(c["close"]) for c in candles_4h])
@@ -302,9 +305,8 @@ class AdaptiveFeatureEngine:
             atr_4h = self.get_computed_atr(period=min(14, len(candles_4h)))
             if atr_4h > 0:
                 bias_4h = np.clip((current_price - ema_4h) / atr_4h, -1.0, 1.0)
-                bias += (bias_4h * 0.6)  # 4H carries 60% weight
+                bias += (bias_4h * 0.6)
                 
-        # Calculate 1-Hour (60m) Trend Bias
         if len(self.timeframes["60"]) >= 20:
             candles_1h = list(self.timeframes["60"])
             closes_1h = np.array([float(c["close"]) for c in candles_1h])
@@ -317,7 +319,7 @@ class AdaptiveFeatureEngine:
             atr_1h = self.get_computed_atr(period=min(14, len(candles_1h)))
             if atr_1h > 0:
                 bias_1h = np.clip((current_price - ema_1h) / atr_1h, -1.0, 1.0)
-                bias += (bias_1h * 0.4)  # 1H carries 40% weight
+                bias += (bias_1h * 0.4)
                 
         return np.clip(bias, -1.0, 1.0)
 
@@ -336,7 +338,9 @@ class AdaptiveFeatureEngine:
         return np.clip(dynamic_rr, 1.2, 3.2)
 
     def get_latest_mid(self) -> float:
-        return getattr(self, '_latest_mid', 0.0)
+        if self._latest_mid > 0:
+            return self._latest_mid
+        return self.prices[-1] if self.prices else 0.0
 
     def get_latest_tfi(self) -> float:
         return self.tfi_history[-1] if self.tfi_history else 0.0
@@ -352,6 +356,8 @@ class AdaptiveFeatureEngine:
             candles = list(self.timeframes["5"])
         elif len(self.timeframes["1"]) >= period + 1:
             candles = list(self.timeframes["1"])
+        elif len(self.prices) >= period + 1:
+            return float(np.std(list(self.prices)[-period:]) * 1.5)
         else:
             return 0.0
 
@@ -377,26 +383,39 @@ class AdaptiveFeatureEngine:
 
     def get_book_depth_metrics(self) -> Dict[str, float]:
         snapshot = self._cached_floats
+        fallback_mid = self._latest_mid if self._latest_mid > 0 else (self.prices[-1] if self.prices else 1.0)
+        
         if not snapshot["bids"] or not snapshot["asks"]:
-            mid = self.prices[-1] if self.prices else 1.0
-            return {"top_bid": mid * 0.9999, "top_ask": mid * 1.0001, "bid_depth_10": 10.0, "ask_depth_10": 10.0}
+            return {
+                "top_bid": fallback_mid * 0.9999, 
+                "top_ask": fallback_mid * 1.0001, 
+                "bid_depth_10": 10.0, 
+                "ask_depth_10": 10.0,
+                "total_depth_10": 20.0,
+                "depth_imbalance": 0.0
+            }
 
         try:
             top_bid = float(snapshot["bids"][0][0])
             top_ask = float(snapshot["asks"][0][0])
             bid_d10 = sum(float(level[1]) for level in snapshot["bids"])
             ask_d10 = sum(float(level[1]) for level in snapshot["asks"])
-
             total_depth = bid_d10 + ask_d10
             
             return {
                 "top_bid": top_bid,
                 "top_ask": top_ask,
-                "bid_depth_10": bid_d10,
-                "ask_depth_10": ask_d10,
-                "total_depth_10": total_depth,
-                "depth_imbalance": (bid_d10 - ask_d10) / (total_depth + 1e-9)
+                "bid_depth_10": float(bid_d10),
+                "ask_depth_10": float(ask_d10),
+                "total_depth_10": float(total_depth),
+                "depth_imbalance": float((bid_d10 - ask_d10) / (total_depth + 1e-9))
             }
         except (IndexError, ValueError, TypeError):
-            mid = self.prices[-1] if self.prices else 1.0
-            return {"top_bid": mid * 0.9999, "top_ask": mid * 1.0001, "bid_depth_10": 10.0, "ask_depth_10": 10.0}
+            return {
+                "top_bid": fallback_mid * 0.9999, 
+                "top_ask": fallback_mid * 1.0001, 
+                "bid_depth_10": 10.0, 
+                "ask_depth_10": 10.0,
+                "total_depth_10": 20.0,
+                "depth_imbalance": 0.0
+            }
