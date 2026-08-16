@@ -342,7 +342,7 @@ class IntelligentExitEngine:
             
         # LEVEL 4 & 5: Defender (MC) & Stochastic Optimizer (q*)
         ofi_z = current_thesis.features[0]
-        aligned_ofi =ofi_z if is_buy else -ofi_z
+        aligned_ofi = ofi_z if is_buy else -ofi_z
         p_cont = max(0.05, min(0.95, 0.50 + (aligned_ofi * 0.15)))
         
         # Deterministic seed based on price to prevent flip-flopping MC paths
@@ -437,7 +437,7 @@ class ExecutionGovernorFSM:
                 state.execution_state = "REPRICE"
                 
         elif state.execution_state in ["REPRICE", "MARKET"]:
-            res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=symbol, side=state.exit_side, orderType="Market", qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
+            res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=state.exit_side, orderType="Market", qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
             state.execution_state = "SYNC"
             return True
                 
