@@ -1,12 +1,12 @@
 ﻿"""
-💎 V12.0 APEX OMEGA: EXPECTED VALUE ENGINE (PRODUCTION)
+💎 V13.0 APEX OMEGA: EXPECTED VALUE ENGINE (PRODUCTION)
 ------------------------------------------------------------------------
 Abolishes heuristic gates. Fuses macro flows and orderbook convexity 
 directly into the base probability model. Trades purely on unified EV.
 
-Upgraded with APEX OMEGA: Continuous Optimal Stopping, Mahalanobis 
-Distribution Shift Detection, True Survival/Hazard functions, and 
-Stateful Execution Governance.
+Upgraded with APEX OMEGA V13: Capital-Preservation Stochastic Control, 
+Mahalanobis Distribution Shift Detection, Portfolio Commander, 
+Profit Defender, and Stateful Execution Governance.
 """
 
 import os
@@ -66,7 +66,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V12_APEX")
+logger = logging.getLogger("QUANT_CORE.V13_APEX")
 
 
 class DistributedQuantEngine:
@@ -77,7 +77,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V12.0 APEX OMEGA MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V13.0 APEX OMEGA MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -329,7 +329,7 @@ class DistributedQuantEngine:
 
     async def _execute_verified_position_close(self, symbol: str, is_buy: bool, current_qty: float) -> bool:
         """
-        🚀 V12.0: Executes an emergency/market exit with deterministic exchange state confirmation.
+        🚀 V13.0: Executes an emergency/market exit with deterministic exchange state confirmation.
         """
         side = "Sell" if is_buy else "Buy"
         logger.critical(f"[X-RAY] 🚀 INITIATING VERIFIED CLOSE // {symbol} | Closing {current_qty} units.")
@@ -528,7 +528,7 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                report = report.replace("V1.0 APEX", "V12.0 APEX").replace("V6.0 APEX", "V12.0 APEX")
+                report = report.replace("V1.0 APEX", "V13.0 APEX OMEGA").replace("V12.0 APEX", "V13.0 APEX OMEGA").replace("V6.0 APEX", "V13.0 APEX OMEGA")
                 self.track_task(self._safe_telegram_dispatch(report, is_html=True))
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -809,7 +809,7 @@ class DistributedQuantEngine:
                                 "liquidity_density_ratio": vol_mult, 
                                 "bid_ask_spread": spread_cost, 
                                 "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
-                                "ai_verdict": "V12.0_APEX_OMEGA"
+                                "ai_verdict": "V13.0_APEX_OMEGA"
                             },
                             "elasticity": self.elasticity_engines.get(symbol),
                             "dynamic_rr": dynamic_rr_ratio 
@@ -986,7 +986,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V12.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V13.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -1001,7 +1001,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V12.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V13.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1055,7 +1055,7 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
     # ==============================================================================
-    # 🚀 V12.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V13.0 EVENT-DRIVEN LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1084,42 +1084,6 @@ class DistributedQuantEngine:
         try: await self.executor.safe_call(self.executor.client.cancel_all_orders, category="linear", symbol=ctx["symbol"])
         except Exception: pass
         return "ABORT"
-
-    async def _execute_verified_position_close(self, symbol: str, is_buy: bool, current_qty: float) -> bool:
-        side = "Sell" if is_buy else "Buy"
-        logger.critical(f"[X-RAY] 🚀 INITIATING VERIFIED CLOSE // {symbol} | Closing {current_qty} units.")
-        
-        res = await self.executor.safe_call(
-            self.executor.client.place_order,
-            category="linear", symbol=symbol,
-            side=side, orderType="Market",
-            qty=str(current_qty), timeInForce="IOC", reduceOnly=True
-        )
-        
-        if res.get("retCode") != 0:
-            logger.error(f"[X-RAY] ❌ Close order rejected by Bybit: {res.get('retMsg')}")
-            return False
-
-        for attempt in range(8):
-            await asyncio.sleep(0.4)
-            pos_res = await self.executor.safe_call(
-                self.executor.client.get_positions,
-                category="linear", symbol=symbol
-            )
-            pos_list = pos_res.get("result", {}).get("list", [])
-            remaining = float(pos_list[0].get("size", 0.0)) if pos_list else 0.0
-            
-            if remaining <= 0.0:
-                logger.critical(f"[X-RAY] ✅ POSITION CLOSED & VERIFIED // {symbol} is Flat (0.0000 units).")
-                return True
-            else:
-                logger.warning(f"[X-RAY] ⏳ Awaiting fill confirmation ({attempt+1}/8)... Remaining: {remaining}")
-
-        return False
-
-    async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_buy: bool) -> bool:
-        """Fallback escape if verified close fails."""
-        return await self._execute_verified_position_close(symbol, is_buy, qty)
 
     async def _state_settle_trade(self, ctx: dict):
         symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
@@ -1193,29 +1157,43 @@ class DistributedQuantEngine:
         self.risk_vault.update_position_ledger(symbol, 0.0)
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
-        
+
         from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ThesisVector
-        
+
         async with self.execution_semaphore:
             ctx = {
                 "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
-                "current_price": current_price, "atr": atr, "target_leverage": target_leverage, 
+                "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
                 "arrival_price": risk_matrix.get("arrival_price", current_price),
                 "regime": market_regime, "daemon_start_time": time.time(),
                 "actual_qty_filled": risk_matrix.get("size", 1.0),
                 "stat_engine": self.stat_engines.get(symbol),
                 "last_ob": {},
                 "latest_tick_price": current_price,
+                "current_vault_balance": self.global_state_cache.get("current_vault_balance", 12.0),
+                "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
+                "active_positions_count": len(self.active_positions_map)
             }
-            
-            # 🚀 INITIALIZE PERSISTENT APEX OMEGA STATE
+
+            # 1. 🛡️ WAIT FOR PHYSICAL ENTRY CONFIRMATION FIRST
+            loop_state = await self._state_verify_entry(ctx)
+            if loop_state == "ABORT":
+                self.risk_vault.update_position_ledger(symbol, 0.0)
+                async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
+                self.exit_states.pop(symbol, None)
+                return
+
+            async with self.portfolio_state_lock:
+                self.active_positions_map[symbol] = direction
+
+            # 2. 🚀 INITIALIZE PERSISTENT APEX OMEGA STATE WITH VERIFIED DATA
             if symbol not in self.exit_states:
                 stat = self.stat_engines.get(symbol)
                 ob = self.orderbook_snapshots.get(symbol, {})
                 bid = max(ob.get("bid_size", 1.0), 1e-9)
                 ask = max(ob.get("ask_size", 1.0), 1e-9)
                 depth_ratio = bid / ask if direction == "BUY" else ask / bid
-                
+
                 entry_thesis = ThesisVector(features=np.array([
                     getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0,
                     getattr(stat, "hawkes_z", 0.0) if stat else 0.0,
@@ -1223,87 +1201,90 @@ class DistributedQuantEngine:
                     depth_ratio,
                     getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
                 ]))
-                
+
                 self.exit_states[symbol] = PositionExitState(
                     position_id=signal_id,
                     entry_time=time.time(),
-                    entry_price=current_price,
+                    entry_price=ctx["actual_entry"],
                     exit_side="Sell" if direction == "BUY" else "Buy",
+                    entry_balance=ctx["current_vault_balance"], # Used for Profit Lock
+                    base_qty=ctx["actual_qty_filled"],          # Crucial for exchange sync
                     entry_thesis=entry_thesis,
-                    thesis_inv_cov=np.eye(5)  # Identity matrix placeholder until empirical DB calibration
+                    thesis_inv_cov=np.eye(5)  # Identity matrix until empirical calibration
                 )
-                
+
             state = self.exit_states[symbol]
 
-            # 🚀 LOCK PROTECTED CONTEXT INJECTION
+            # LOCK PROTECTED CONTEXT INJECTION
             async with self.portfolio_state_lock:
                 self.active_contexts[symbol] = ctx
 
             if self.test_mode:
-                async with self.portfolio_state_lock: 
+                async with self.portfolio_state_lock:
                     self.active_contexts.pop(symbol, None)
                     self.active_positions_map.pop(symbol, None)
                 self.exit_states.pop(symbol, None)
                 return
 
             try:
-                loop_state = await self._state_verify_entry(ctx)
-                if loop_state == "ABORT":
-                    self.risk_vault.update_position_ledger(symbol, 0.0)
-                    async with self.portfolio_state_lock: self.active_positions_map.pop(symbol, None)
-                    self.exit_states.pop(symbol, None)
-                    return
-                
-                async with self.portfolio_state_lock: 
-                    self.active_positions_map[symbol] = direction
-                
-                # Setup initial hard stop-loss on exchange purely as a disaster disconnect failsafe.
-                # All active management is now done by APEX OMEGA.
+                # 3. SETUP DISASTER PROTECTIVE STOP (Deep Failsafe)
                 actual_sl_distance = max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.5), ctx["actual_entry"] * 0.025)
                 fail_sl = ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance
-                fail_tp = ctx["actual_entry"] + (actual_sl_distance * dynamic_rr_ratio) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * dynamic_rr_ratio)
+                fail_tp = ctx["actual_entry"] + (actual_sl_distance * dynamic_rr_ratio * 3.0) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * dynamic_rr_ratio * 3.0)
                 await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
-                
+
                 loop_state = "ACTIVE_MONITORING"
-                    
+
                 while loop_state == "ACTIVE_MONITORING":
-                    # 🚀 DECOUPLED POLLING: Wakes up exactly once per second.
                     await asyncio.sleep(1.0)
-                        
+
                     current_price = ctx["latest_tick_price"]
-                
+
                     ob = self.orderbook_snapshots.get(symbol, {})
                     best_bid = ob.get("best_bid", current_price)
                     best_ask = ob.get("best_ask", current_price)
-                    
+
                     ctx["safe_c_price"] = best_bid if ctx["is_buy"] else best_ask
-                    if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0: 
+                    if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0:
                         ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
-                        
+
                     ctx["now"] = time.time()
-                    
-                    # Update Tracking Variables
-                    if ctx["safe_c_price"] != current_price:
-                        if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0): 
-                            ctx["max_favorable_price"] = ctx["safe_c_price"]
-                        elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0): 
-                            ctx["max_favorable_price"] = ctx["safe_c_price"]
-                            
+
+                    # Live Portfolio Injection for the Commander
+                    ctx["current_vault_balance"] = self.global_state_cache.get("current_vault_balance", ctx["current_vault_balance"])
+                    ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
+                    ctx["active_positions_count"] = len(self.active_positions_map)
                     ctx["last_ob"] = ob
-                        
+
+                    # Update High Watermark (MFE)
+                    if ctx["safe_c_price"] != current_price:
+                        if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0):
+                            ctx["max_favorable_price"] = ctx["safe_c_price"]
+                        elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0):
+                            ctx["max_favorable_price"] = ctx["safe_c_price"]
+
                     # =================================================================
-                    # ⚔️ APEX OMEGA MASTER EVALUATION
+                    # ⚔️ APEX OMEGA V13 MASTER EVALUATION
                     # =================================================================
-                    if not self.test_mode:
-                        decision = IntelligentExitEngine.evaluate(ctx, state)
-                        
-                        if decision.action in ["EXIT", "REDUCE", "EMERGENCY"]:
-                            success = await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
-                            
-                            if success and state.q_retained <= 0.05:
-                                ctx["exit_trigger_price"] = current_price
-                                break
-                    
+                    decision = IntelligentExitEngine.evaluate(ctx, state)
+
+                    # Update Exchange Native Trailing Stop if Profit Defender demands it
+                    if decision.exchange_ts_price and decision.exchange_ts_price > 0:
+                        if ctx["is_buy"] and decision.exchange_ts_price > fail_sl:
+                            fail_sl = decision.exchange_ts_price
+                            await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+                        elif not ctx["is_buy"] and decision.exchange_ts_price < fail_sl:
+                            fail_sl = decision.exchange_ts_price
+                            await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+
+                    # Execution routing
+                    await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
+
+                    # 🛑 TRUE EXIT CONDITION
+                    if state.q_retained <= 0.01 and state.execution_state == "OBSERVE":
+                        ctx["exit_trigger_price"] = current_price
+                        break
+
                 await self._state_settle_trade(ctx)
 
             except Exception as e:

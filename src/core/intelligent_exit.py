@@ -1,13 +1,15 @@
 """
-💎 APEX OMEGA: CALIBRATION-READY ADVERSARIAL STOCHASTIC CONTROL
+💎 APEX OMEGA V13: THE HIERARCHY (PORTFOLIO & PROFIT DEFENDER)
 -----------------------------------------------------------------------
-Stateful, Counterfactual Optimal-Stopping Engine.
-Features:
-- Counterfactual Trajectory Simulator (Monte Carlo CVaR95 / CVaR99).
-- Defender vs. Assassin Architecture.
-- Genuine OOD Probability via Chi-Square CDF on Mahalanobis Distance.
-- Empirical Hazard Rate Function Framework.
-- True Execution FSM (Awaits physical exchange fills, no hallucinated state).
+Stateful, Hierarchical Optimal-Stopping Engine.
+Architecture Pipeline:
+LEVEL 0: Exchange Reality (Physical Sync & Reconciliation)
+LEVEL 1: Portfolio Commander (Systemic Kill Switch)
+LEVEL 2: Catastrophic Protection (Assassin / OOD / Hazard)
+LEVEL 3: Profit Governor (State Machine / MFE / Giveback / Velocity)
+LEVEL 4: Defender (Deterministically Seeded Monte Carlo CVaR)
+LEVEL 5: Continuous Optimizer (q*)
+LEVEL 6: Execution FSM (Observe -> Post -> Escalate -> Sync)
 """
 
 import math
@@ -17,7 +19,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 from scipy.stats import chi2
 from dataclasses import dataclass, field
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple
 
 logger = logging.getLogger("QUANT_CORE.APEX_OMEGA")
 
@@ -27,14 +29,9 @@ logger = logging.getLogger("QUANT_CORE.APEX_OMEGA")
 
 @dataclass
 class ThesisVector:
-    """5-Dimensional representation of the market state [OFI, Hawkes, Momentum, Depth, Volatility]."""
     features: np.ndarray  
     
     def mahalanobis_distance(self, other: 'ThesisVector', inv_cov_matrix: np.ndarray) -> float:
-        """
-        True statistical distance accounting for feature covariance.
-        D_M = sqrt((x - mu)^T * Sigma^-1 * (x - mu))
-        """
         delta = self.features - other.features
         try:
             distance_sq = np.dot(np.dot(delta.T, inv_cov_matrix), delta)
@@ -43,23 +40,45 @@ class ThesisVector:
             return 0.0
 
 @dataclass
+class ProfitProtectionState:
+    """Independent Profit Memory & Velocity Tracker."""
+    state_id: str = "UNPROFITABLE" # UNPROFITABLE, PROFIT_FORMING, PROFIT_ARMED, PROFIT_LOCKED, GIVEBACK_WARNING, GIVEBACK_EXIT
+    
+    peak_pnl: float = 0.0
+    peak_price: float = 0.0
+    locked_pnl: float = -999999.0
+    
+    mfe: float = 0.0
+    mae: float = 0.0
+    
+    last_pnl: float = 0.0
+    last_pnl_time: float = field(default_factory=time.time)
+    pnl_velocity: float = 0.0  # dpnl/dt
+
+@dataclass
 class PositionExitState:
     """PERSISTENT state object living in the main FSM."""
     position_id: str
     entry_time: float
     entry_price: float
     exit_side: str
+    entry_balance: float
+    
+    # LEVEL 0: Physical Exchange Reality
+    actual_qty: float = 0.0 
     
     entry_thesis: ThesisVector
-    thesis_inv_cov: np.ndarray  # Historical inverse covariance matrix
+    thesis_inv_cov: np.ndarray  
     
+    profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
+    q_retained: float = 1.0  # Mathematical intent
     
     # Execution FSM
-    execution_state: str = "OBSERVE" 
+    execution_state: str = "SYNC" # ALWAYS start by verifying reality
     exec_order_id: str = ""
     exec_post_time: float = 0.0
-    target_q: float = 1.0  # Intent tracking (actual q is derived from exchange sync)
+    target_q: float = 1.0
 
 @dataclass
 class ExitDecision:
@@ -72,169 +91,200 @@ class ExitDecision:
 
 
 # =====================================================================
-# 2. ADVERSARIAL MODELS (ASSASSIN) & REGIME SHIFT
+# LEVEL 1 & 2: PORTFOLIO COMMANDER & ASSASSIN
 # =====================================================================
 
-class RegimeChangeDetector:
-    """Evaluates if the statistical process generating the market has broken."""
+class PortfolioCommander:
     @staticmethod
-    def calculate_ood_probability(current_thesis: ThesisVector, state: PositionExitState) -> float:
+    def evaluate(ctx: Dict[str, Any]) -> Tuple[bool, str]:
+        """Portfolio-level kill switch."""
+        portfolio_dd = ctx.get("drawdown_pct", 0.0)
+        live_count = ctx.get("active_positions_count", 1)
+        
+        if portfolio_dd > 0.10:
+            return True, f"SYSTEMIC_DRAWDOWN_FLATTEN ({portfolio_dd*100:.1f}%)"
+        if portfolio_dd > 0.06 and live_count > 4:
+            return True, f"PORTFOLIO_CORRELATION_REDUCTION (DD: {portfolio_dd*100:.1f}% | {live_count} Pos)"
+            
+        return False, "SAFE"
+
+class EmergencyAssassin:
+    @staticmethod
+    def evaluate(ctx: Dict[str, Any], state: PositionExitState, current_thesis: ThesisVector) -> Tuple[bool, str, float, float]:
+        """Kills positions when the statistical thesis or regime collapses."""
         d_m = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         
-        # Genuine Out-Of-Distribution probability using Chi-Square CDF
-        # Features: OFI, Hawkes, Momentum, Depth, Volatility -> 5 degrees of freedom
+        # True OOD Upper-Tail Probability
         d2 = d_m ** 2
         try:
-            ood_prob = chi2.cdf(d2, df=5)
-            return float(np.clip(ood_prob, 0.0, 1.0))
+            ood_prob = float(np.clip(1.0 - chi2.cdf(d2, df=5), 0.0, 1.0))
         except Exception:
-            return 0.5
-
-
-class EmpiricalHazardModel:
-    """State-dependent empirical hazard calculation h(t|X_t)."""
-    @staticmethod
-    def calculate_hazard(ctx: Dict[str, Any], time_in_trade: float) -> float:
-        """
-        Calculates the instantaneous risk of failure.
-        [REQUIRES CALIBRATION]: Currently uses a linear combination of normalized 
-        stressors rather than a hardcoded Weibull assumption.
-        """
+            ood_prob = 0.5
+            
+        time_held = max(0.1, time.time() - state.entry_time)
         stat = ctx.get("stat_engine")
-        is_buy = ctx["is_buy"]
-        
         ofi = getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0
-        aligned_ofi = ofi if is_buy else -ofi
+        aligned_ofi = ofi if ctx["is_buy"] else -ofi
         
-        # Stress features
         flow_stress = max(0.0, -aligned_ofi / 3.0)
-        time_stress = min(1.0, time_in_trade / 3600.0) # Normalizes to 1 hr horizon
+        time_stress = min(1.0, time_held / 3600.0)
+        hazard_rate = float(np.clip((0.6 * flow_stress) + (0.4 * time_stress), 0.0, 1.0))
         
-        # Simulated empirical hazard weights (to be replaced by trained log-hazard model)
-        h_t = (0.6 * flow_stress) + (0.4 * time_stress)
-        return float(np.clip(h_t, 0.0, 1.0))
+        if ood_prob > 0.85:
+            return True, f"REGIME_OOD_COLLAPSE ({ood_prob:.2f})", ood_prob, hazard_rate
+        if hazard_rate > 0.70:
+            return True, f"CRITICAL_HAZARD ({hazard_rate:.2f})", ood_prob, hazard_rate
+            
+        return False, "SAFE", ood_prob, hazard_rate
 
 
 # =====================================================================
-# 3. COUNTERFACTUAL TRAJECTORY SIMULATOR (DEFENDER)
+# LEVEL 3: THE PROFIT GOVERNOR
+# =====================================================================
+
+class ProfitGovernor:
+    @staticmethod
+    def evaluate(ctx: Dict[str, Any], state: PositionExitState, ood_prob: float, hazard_rate: float) -> Tuple[bool, float, str]:
+        """
+        The Non-Negotiable Capital Preservation Layer.
+        Tracks MFE/MAE, PnL velocity, and manages the Profit State Machine.
+        Returns: (override_active, target_q, reason)
+        """
+        p_state = state.profit_state
+        is_buy = ctx["is_buy"]
+        price = ctx.get("safe_c_price", state.entry_price)
+        qty = state.actual_qty 
+        
+        if qty <= 0: return False, 1.0, "SAFE"
+            
+        current_pnl = (price - state.entry_price) * qty if is_buy else (state.entry_price - price) * qty
+        
+        # 1. Update MFE / MAE
+        if current_pnl > p_state.peak_pnl:
+            p_state.peak_pnl = current_pnl
+            p_state.peak_price = price
+            p_state.mfe = max(p_state.mfe, current_pnl)
+        if current_pnl < 0:
+            p_state.mae = min(p_state.mae, current_pnl)
+            
+        # 2. PnL Velocity (dpnl/dt)
+        now = time.time()
+        dt = max(now - p_state.last_pnl_time, 0.001)
+        p_state.pnl_velocity = (current_pnl - p_state.last_pnl) / dt
+        p_state.last_pnl = current_pnl
+        p_state.last_pnl_time = now
+        
+        # 3. Dynamic Thresholds (Calibrated to account equity)
+        equity = max(ctx.get("current_vault_balance", state.entry_balance), 1.0)
+        activation_pnl = equity * 0.01  # 1% account gain arms the system
+        lock_pnl = equity * 0.03        # 3% account gain locks aggressive floor
+        fee_hurdle = state.entry_price * qty * 0.0015 
+        
+        # 4. PROFIT STATE MACHINE
+        if p_state.state_id == "UNPROFITABLE":
+            if current_pnl > fee_hurdle:
+                p_state.state_id = "PROFIT_FORMING"
+                
+        elif p_state.state_id == "PROFIT_FORMING":
+            if current_pnl > activation_pnl:
+                p_state.state_id = "PROFIT_ARMED"
+                p_state.locked_pnl = fee_hurdle # Lock breakeven
+            elif current_pnl < 0:
+                p_state.state_id = "UNPROFITABLE"
+                
+        elif p_state.state_id == "PROFIT_ARMED":
+            if current_pnl > lock_pnl:
+                p_state.state_id = "PROFIT_LOCKED"
+                p_state.locked_pnl = p_state.peak_pnl * 0.50
+                
+            giveback_pct = (p_state.peak_pnl - current_pnl) / max(p_state.peak_pnl, 1e-9)
+            if giveback_pct > 0.40 or current_pnl <= p_state.locked_pnl:
+                p_state.state_id = "GIVEBACK_EXIT"
+                
+        elif p_state.state_id == "PROFIT_LOCKED":
+            p_state.locked_pnl = max(p_state.locked_pnl, p_state.peak_pnl * 0.60)
+            
+            giveback_pct = (p_state.peak_pnl - current_pnl) / max(p_state.peak_pnl, 1e-9)
+            
+            # Velocity & OOD sensitive giveback
+            max_giveback = 0.25
+            if ood_prob > 0.50 or p_state.pnl_velocity < 0:
+                max_giveback = 0.15
+                p_state.state_id = "GIVEBACK_WARNING"
+                
+            if giveback_pct > max_giveback or current_pnl <= p_state.locked_pnl:
+                p_state.state_id = "GIVEBACK_EXIT"
+                
+        elif p_state.state_id == "GIVEBACK_WARNING":
+            if p_state.pnl_velocity > 0 and current_pnl > p_state.locked_pnl:
+                p_state.state_id = "PROFIT_LOCKED" # Recovered
+            elif current_pnl <= p_state.locked_pnl:
+                p_state.state_id = "GIVEBACK_EXIT"
+                
+        # 5. EXECUTE GOVERNOR VETO
+        if p_state.state_id == "GIVEBACK_EXIT":
+            return True, 0.0, f"PROFIT_DEFENDER_EXIT (Locked: ${p_state.locked_pnl:.2f} | Peak: ${p_state.peak_pnl:.2f})"
+            
+        # Optional Reduction Veto
+        if p_state.state_id == "GIVEBACK_WARNING":
+            return True, 0.50, f"GIVEBACK_WARNING_REDUCE (Vel: ${p_state.pnl_velocity:.2f}/s)"
+            
+        return False, 1.0, "PROFIT_SAFE"
+
+
+# =====================================================================
+# LEVEL 4 & 5: DEFENDER (MC) & OPTIMIZER (q*)
 # =====================================================================
 
 class CounterfactualTrajectorySimulator:
-    """Generates Monte Carlo paths to calculate true CVaR95 and CVaR99."""
-    
     @staticmethod
-    def simulate_distributions(sigma_eff: float, p_cont: float, p_rev: float, ood_prob: float, n_paths: int = 2000) -> Tuple[float, float, float]:
-        """
-        Simulates 2000 price paths using a Jump-Diffusion approximation driven 
-        by empirical probabilities and OOD regime shift risk.
-        """
-        # 1. Base Gaussian Paths (Continuation vs Reversal mass)
-        # We model the expected return based on the continuation probability edge
+    def simulate(sigma_eff: float, p_cont: float, p_rev: float, ood_prob: float, seed_val: int, n_paths: int = 1500) -> Tuple[float, float, float]:
+        """Deterministically seeded Monte Carlo to prevent evaluation jitter."""
+        rng = np.random.RandomState(seed_val)
+        
         expected_drift = sigma_eff * 1.5 * (p_cont - p_rev)
-        base_paths = np.random.normal(loc=expected_drift, scale=sigma_eff, size=n_paths)
+        base_paths = rng.normal(loc=expected_drift, scale=sigma_eff, size=n_paths)
         
-        # 2. Tail / Jump Events (Liquidity Vacuum, Regime Flips)
-        # The higher the OOD probability, the more likely extreme adverse jumps occur.
-        jump_probability = ood_prob * 0.15 
-        jumps = np.random.uniform(low=0.0, high=1.0, size=n_paths)
+        jumps = rng.uniform(0.0, 1.0, size=n_paths)
+        jump_mask = jumps < (ood_prob * 0.15)
+        base_paths[jump_mask] -= rng.uniform(3.0, 6.0, size=np.sum(jump_mask)) * sigma_eff
         
-        # Apply catastrophic adverse jumps (-3 to -6 sigma) to affected paths
-        jump_mask = jumps < jump_probability
-        base_paths[jump_mask] -= np.random.uniform(3.0, 6.0, size=np.sum(jump_mask)) * sigma_eff
-        
-        # Sort paths to find terminal wealth distribution percentiles
         sorted_paths = np.sort(base_paths)
-        
-        # Calculate Risk Metrics
         ev = float(np.mean(sorted_paths))
-        
-        # VaR indices
-        idx_95 = int(n_paths * 0.05)
-        idx_99 = int(n_paths * 0.01)
-        
-        # True CVaR (Expected Shortfall): Mean of losses worse than VaR
-        cvar_95 = float(np.mean(sorted_paths[:idx_95]))
-        cvar_99 = float(np.mean(sorted_paths[:idx_99]))
+        cvar_95 = float(np.mean(sorted_paths[:int(n_paths * 0.05)]))
+        cvar_99 = float(np.mean(sorted_paths[:int(n_paths * 0.01)]))
         
         return ev, cvar_95, cvar_99
 
-
-# =====================================================================
-# 4. ROBUST STOCHASTIC CONTROL (q-OPTIMIZATION)
-# =====================================================================
-
-class ExecutionCostEngine:
+class RobustStochasticController:
     @staticmethod
-    def get_friction(price: float, qty_exiting: float, last_ob: Dict[str, Any], sigma_eff: float, is_aggressive: bool, exit_side: str) -> float:
-        if qty_exiting <= 0: return 0.0
+    def _utility_function(q: float, gross_pnl: float, scenario_ev: float, cvar_95: float, cvar_99: float, sigma_eff: float, ood_prob: float, price: float, total_qty: float, last_ob: Dict[str, Any], exit_side: str) -> float:
+        qty_exiting = total_qty * (1.0 - q)
         
-        fee_bps = 5.5 if is_aggressive else 2.0
+        fee_bps = 5.5
         depth_key = "bid_depth_10" if exit_side == "SELL" else "ask_depth_10"
         available_depth = last_ob.get(depth_key, 1.0)
-        
         impact_ratio = min(1.0, qty_exiting / max(available_depth, 1e-9))
         market_impact_bps = (impact_ratio * 20.0) * (1.0 + (sigma_eff / price * 50.0))
         
-        total_bps = fee_bps + market_impact_bps
-        return price * (total_bps / 10000.0)
-
-class RobustStochasticController:
-    """Solves q* = argmax U(q) continuously."""
-    
-    @staticmethod
-    def _utility_function(
-        q: float, 
-        gross_pnl: float, 
-        scenario_ev: float, 
-        cvar_95: float, 
-        cvar_99: float, 
-        sigma_eff: float,
-        ood_prob: float,
-        price: float,
-        total_qty: float,
-        last_ob: Dict[str, Any],
-        exit_side: str
-    ) -> float:
-        
-        qty_exiting = total_qty * (1.0 - q)
-        
-        # 1. Execution Cost (Dynamic friction feeding back into optimization)
-        cost_pts = ExecutionCostEngine.get_friction(price, qty_exiting, last_ob, sigma_eff, is_aggressive=True, exit_side=exit_side)
+        cost_pts = price * ((fee_bps + market_impact_bps) / 10000.0)
         ev_exit = (gross_pnl * (1.0 - q)) - cost_pts if qty_exiting > 0 else 0.0
-        
-        # 2. Retained Future Value
         ev_retain = (gross_pnl * q) + (scenario_ev * q)
         
-        # 3. Robust Optimization Penalties
-        lambda_1 = 0.3  # CVaR95 aversion
-        lambda_2 = 0.5  # CVaR99 aversion
-        lambda_3 = 1.0 * ood_prob  # Uncertainty / Model failure aversion
-        
-        risk_penalty = (lambda_1 * abs(min(0, cvar_95)) * q) + \
-                       (lambda_2 * abs(min(0, cvar_99)) * q) + \
-                       (lambda_3 * sigma_eff * q)
-                       
-        opportunity_cost = 0.0005 * price * q # Assumed baseline alternative EV
+        risk_penalty = (0.3 * abs(min(0, cvar_95)) * q) + (0.5 * abs(min(0, cvar_99)) * q) + (ood_prob * sigma_eff * q)
+        opportunity_cost = 0.0005 * price * q 
         
         u_q = (ev_exit + ev_retain) - risk_penalty - opportunity_cost
-        return -u_q # Minimize negative utility for scipy
+        return -u_q 
 
     @staticmethod
-    def solve_q(
-        gross_pnl: float, scenario_ev: float, cvar_95: float, cvar_99: float, 
-        sigma_eff: float, ood_prob: float, price: float, total_qty: float, last_ob: Dict[str, Any], exit_side: str
-    ) -> float:
-        res = minimize_scalar(
-            RobustStochasticController._utility_function,
-            bounds=(0.0, 1.0),
-            args=(gross_pnl, scenario_ev, cvar_95, cvar_99, sigma_eff, ood_prob, price, total_qty, last_ob, exit_side),
-            method='bounded'
-        )
+    def solve_q(gross_pnl: float, scenario_ev: float, cvar_95: float, cvar_99: float, sigma_eff: float, ood_prob: float, price: float, total_qty: float, last_ob: Dict[str, Any], exit_side: str) -> float:
+        res = minimize_scalar(RobustStochasticController._utility_function, bounds=(0.0, 1.0), args=(gross_pnl, scenario_ev, cvar_95, cvar_99, sigma_eff, ood_prob, price, total_qty, last_ob, exit_side), method='bounded')
         return float(res.x) if res.success else 1.0
 
 
 # =====================================================================
-# 5. APEX OMEGA MASTER ORACLE
+# THE APEX OMEGA MASTER ORACLE
 # =====================================================================
 
 class IntelligentExitEngine:
@@ -250,57 +300,67 @@ class IntelligentExitEngine:
         return ThesisVector(np.array([
             getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0,
             getattr(stat, "hawkes_z", 0.0) if stat else 0.0,
-            0.0, # Momentum
-            depth_ratio,
-            getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
+            0.0, depth_ratio, getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
         ]))
 
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
+        # LEVEL 0: Physical Exchange Sync
+        # If the state machine doesn't know the actual exchange position, VETO evaluation.
+        if state.execution_state == "SYNC":
+            return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, "AWAITING_EXCHANGE_SYNC", "[LEVEL 0: SYNC REQUIRED]")
+
         is_buy = ctx["is_buy"]
         price = ctx.get("safe_c_price", state.entry_price)
+        total_qty = state.actual_qty  # TRUE reality, not assumed q*
         
-        # QTY is now explicitly derived from the context (physical exchange state), not an internal hallucination.
-        total_qty = ctx.get("actual_qty_filled", 1.0) 
-        
+        if total_qty <= 0:
+            return ExitDecision("HOLD", 0.0, "NONE", price, "ZERO_POSITION", "[GHOST POSITION]")
+            
         stat = ctx.get("stat_engine")
         inst_var = getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
         sigma_eff = price * math.sqrt(max(inst_var, 1e-12)) * 1.5 
         
         gross_pnl = (price - state.entry_price) if is_buy else (state.entry_price - price)
-        
-        # 1. Regime Shift & Model Failure (OOD) - The Assassin Model
         current_thesis = IntelligentExitEngine._extract_thesis(ctx)
-        ood_prob = RegimeChangeDetector.calculate_ood_probability(current_thesis, state)
         
-        # 2. Hazard Rate Evolution
-        time_held = max(0.1, time.time() - state.entry_time)
-        hazard_rate = EmpiricalHazardModel.calculate_hazard(ctx, time_held)
-        
-        # 3. First-Passage Probability Approximation (Walk-forward placeholder)
+        # LEVEL 1: Portfolio Commander
+        pf_override, pf_reason = PortfolioCommander.evaluate(ctx)
+        if pf_override:
+            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, pf_reason, "[PORTFOLIO KILL SWITCH]")
+            
+        # LEVEL 2: Emergency Assassin
+        ass_override, ass_reason, ood_prob, hazard_rate = EmergencyAssassin.evaluate(ctx, state, current_thesis)
+        if ass_override:
+            return ExitDecision("EMERGENCY", 0.0, "MARKET", price, ass_reason, "[ASSASSIN THESIS DESTRUCTION]")
+            
+        # LEVEL 3: Profit Governor
+        prof_override, prof_target_q, prof_reason = ProfitGovernor.evaluate(ctx, state, ood_prob, hazard_rate)
+        if prof_override:
+            urgency = "MARKET" if prof_target_q == 0.0 else "AGGRESSIVE"
+            return ExitDecision("EXIT" if prof_target_q == 0.0 else "REDUCE", prof_target_q, urgency, price, prof_reason, "[PROFIT DEFENDER VETO]")
+            
+        # LEVEL 4 & 5: Defender (MC) & Stochastic Optimizer (q*)
         ofi_z = current_thesis.features[0]
         aligned_ofi = ofi_z if is_buy else -ofi_z
         p_cont = max(0.05, min(0.95, 0.50 + (aligned_ofi * 0.15)))
-        p_rev = 1.0 - p_cont
         
-        # 4. Counterfactual Monte Carlo Trajectories - The Defender Model
-        ev_future, cvar_95, cvar_99 = CounterfactualTrajectorySimulator.simulate_distributions(sigma_eff, p_cont, p_rev, ood_prob, n_paths=2000)
+        # Deterministic seed based on price to prevent flip-flopping MC paths
+        seed_val = int(price * 100) % (2**32 - 1)
+        ev_fut, cvar_95, cvar_99 = CounterfactualTrajectorySimulator.simulate(sigma_eff, p_cont, 1.0 - p_cont, ood_prob, seed_val)
         
-        # 5. Robust Stochastic Control (q*)
         last_ob = ctx.get("last_ob", {})
-        
-        optimal_q = RobustStochasticController.solve_q(
-            gross_pnl, ev_future, cvar_95, cvar_99, sigma_eff, ood_prob, price, total_qty, last_ob, state.exit_side
+        q_opt_raw = RobustStochasticController.solve_q(
+            gross_pnl, ev_fut, cvar_95, cvar_99, sigma_eff, ood_prob, price, total_qty, last_ob, state.exit_side
         )
         
-        # 6. Execution Urgency & Routing Logic
-        if ood_prob > 0.85 or hazard_rate > 0.60:
-            urgency = "MARKET"
-            action = "EMERGENCY"
-            optimal_q = 0.0
-        elif optimal_q < 0.95:
+        # Final q* is bounded by the Profit Governor's ceiling
+        optimal_q = min(q_opt_raw, prof_target_q)
+
+        # LEVEL 6: Execution Routing
+        if optimal_q < 0.95:
             action = "EXIT" if optimal_q < 0.05 else "REDUCE"
-            spread_bps = abs(last_ob.get("best_ask", price) - last_ob.get("best_bid", price)) / price * 10000.0
+            spread_bps = abs(last_ob.get("best_ask", price) - last_ob.get("best_bid", price)) / max(price, 1e-9) * 10000.0
             urgency = "AGGRESSIVE" if spread_bps < 3.0 else "PASSIVE"
         else:
             action = "HOLD"
@@ -310,16 +370,15 @@ class IntelligentExitEngine:
         if urgency == "AGGRESSIVE":
             limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0005
 
-        # 7. Terminal Log Generation
         log_str = (
             f"\n╔══════════════════════════════════════╗\n"
-            f"║ APEX OMEGA DECISION                  ║\n"
+            f"║ APEX OMEGA V13: PROFIT DEFENDER      ║\n"
             f"╠══════════════════════════════════════╣\n"
-            f"║ Distribution Shift       {ood_prob:.3f}       ║\n"
-            f"║ Hazard Rate              {hazard_rate:.3f}       ║\n"
-            f"║ MC True EV              {ev_future/sigma_eff:+.2f}σ        ║\n"
-            f"║ MC True CVaR95          {cvar_95/sigma_eff:+.2f}σ        ║\n"
-            f"║ MC True CVaR99          {cvar_99/sigma_eff:+.2f}σ        ║\n"
+            f"║ Profit State             {state.profit_state.state_id:<12}║\n"
+            f"║ Peak PnL                ${state.profit_state.peak_pnl:+.2f}       ║\n"
+            f"║ PnL Velocity (dpnl/dt)  ${state.profit_state.pnl_velocity:+.3f}/s    ║\n"
+            f"║ OOD Anomaly Shift        {ood_prob:.3f}       ║\n"
+            f"║ True CVaR95             {cvar_95/max(sigma_eff, 1e-9):+.2f}σ        ║\n"
             f"╠══════════════════════════════════════╣\n"
             f"║ OPTIMAL q*               {optimal_q:.3f}       ║\n"
             f"║ ACTUAL POS               {total_qty:.4f}       ║\n"
@@ -332,23 +391,48 @@ class IntelligentExitEngine:
 
 
 # =====================================================================
-# 6. STATEFUL EXECUTION GOVERNOR FSM
+# LEVEL 0 & 6: EXCHANGE RECONCILER & EXECUTION FSM
 # =====================================================================
 
 class ExecutionGovernorFSM:
     """
-    OBSERVE -> POST -> MONITOR -> REPRICE -> MARKET
+    Physical mapping:
+    OBSERVE -> POSTED -> MONITOR -> REPRICE -> MARKET -> SYNC -> OBSERVE
     """
     @staticmethod
     async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor: Any) -> bool:
+        symbol = ctx["symbol"]
+        
+        # =======================================================
+        # LEVEL 0: SYNC STATE (Physical Verification)
+        # =======================================================
+        if state.execution_state == "SYNC":
+            try:
+                pos_res = await executor.safe_call(executor.client.get_positions, category="linear", symbol=symbol)
+                p_list = pos_res.get("result", {}).get("list", [])
+                
+                if p_list:
+                    actual_qty = float(p_list[0].get("size", 0.0))
+                    state.actual_qty = actual_qty
+                    state.q_retained = actual_qty / max(state.base_qty, 1e-9)
+                else:
+                    state.actual_qty = 0.0
+                    state.q_retained = 0.0 
+                    
+                state.execution_state = "OBSERVE"
+                return True 
+            except Exception as e:
+                logger.error(f"[APEX SYNC] Exchange sync failed for {symbol}: {e}")
+                return False
+
+        # =======================================================
+        # NORMAL EXECUTION ROUTING
+        # =======================================================
         if decision.action == "HOLD":
             return False
             
-        symbol = ctx["symbol"]
-        current_actual_qty = ctx.get("actual_qty_filled", 0.0) 
-        
-        # The math dictates how much we WANT to have remaining (target_q * current_actual_qty)
-        target_retained_qty = current_actual_qty * decision.target_q
+        current_actual_qty = state.actual_qty 
+        target_retained_qty = state.base_qty * decision.target_q
         qty_to_close = current_actual_qty - target_retained_qty
         
         if qty_to_close <= 0:
@@ -359,7 +443,7 @@ class ExecutionGovernorFSM:
         
         if state.execution_state == "OBSERVE":
             logger.critical(decision.log_output)
-            state.target_q = decision.target_q # Update intent, wait for exchange confirmation to confirm reality
+            state.target_q = decision.target_q 
             
             if decision.urgency == "PASSIVE":
                 res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=state.exit_side, orderType="Limit", price=str(decision.limit_price), qty=str(qty_to_close), timeInForce="PostOnly", reduceOnly=True)
@@ -369,11 +453,8 @@ class ExecutionGovernorFSM:
                     state.exec_post_time = time.time()
             elif decision.urgency == "AGGRESSIVE":
                 res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=state.exit_side, orderType="Limit", price=str(decision.limit_price), qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
-                if res.get("retCode") == 0:
-                    state.execution_state = "AWAITING_EXCHANGE_SYNC"
-                    return True
-                else:
-                    state.execution_state = "MARKET" # IOC missed, escalate
+                state.execution_state = "SYNC"
+                return True
                     
         elif state.execution_state == "MONITOR":
             if time.time() - state.exec_post_time > 5.0:
@@ -382,8 +463,7 @@ class ExecutionGovernorFSM:
                 
         elif state.execution_state in ["REPRICE", "MARKET"]:
             res = await executor.safe_call(executor.client.place_order, category="linear", symbol=symbol, side=state.exit_side, orderType="Market", qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True)
-            if res.get("retCode") == 0:
-                state.execution_state = "AWAITING_EXCHANGE_SYNC"
-                return True
+            state.execution_state = "SYNC"
+            return True
                 
         return False
