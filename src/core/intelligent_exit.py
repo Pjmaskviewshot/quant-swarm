@@ -5,8 +5,8 @@ Stateful, Hierarchical Optimal-Stopping Engine.
 Architecture Pipeline:
 LEVEL 0: Exchange Reality (Physical Sync & Reconciliation)
 LEVEL 1: Portfolio Commander (Systemic Kill Switch)
-LEVEL 2: Catastrophic Protection (Assassin / OOD / Hazard)
-LEVEL 3: Profit Governor (State Machine / MFE / Giveback / Velocity)
+LEVEL 2: Catastrophic Protection (Assassin / OOD / Hazard / Time-Decay)
+LEVEL 3: Profit Governor (State Machine / MFE / Giveback / Parabolic Trail)
 LEVEL 4: Defender (Deterministically Seeded Monte Carlo CVaR)
 LEVEL 5: Continuous Optimizer (q*)
 LEVEL 6: Execution FSM (Observe -> Post -> Escalate -> Sync)
@@ -42,7 +42,7 @@ class ThesisVector:
 @dataclass
 class ProfitProtectionState:
     """Independent Profit Memory & Velocity Tracker."""
-    state_id: str = "UNPROFITABLE" # UNPROFITABLE, PROFIT_FORMING, PROFIT_ARMED, PROFIT_LOCKED, GIVEBACK_WARNING, GIVEBACK_EXIT
+    state_id: str = "UNPROFITABLE" # UNPROFITABLE, PROFIT_FORMING, PROFIT_ARMED, PROFIT_LOCKED, PARABOLIC_TRAIL, GIVEBACK_WARNING, GIVEBACK_EXIT
     
     peak_pnl: float = 0.0
     peak_price: float = 0.0
@@ -113,7 +113,7 @@ class PortfolioCommander:
 class EmergencyAssassin:
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState, current_thesis: ThesisVector) -> Tuple[bool, str, float, float]:
-        """Kills positions when the statistical thesis or regime collapses."""
+        """Kills positions when the statistical thesis, regime, or time utility collapses."""
         d_m = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         
         # True OOD Upper-Tail Probability
@@ -124,6 +124,8 @@ class EmergencyAssassin:
             ood_prob = 0.5
             
         time_held = max(0.1, time.time() - state.entry_time)
+        time_held_mins = time_held / 60.0
+        
         stat = ctx.get("stat_engine")
         ofi = getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0
         aligned_ofi = ofi if ctx["is_buy"] else -ofi
@@ -132,9 +134,17 @@ class EmergencyAssassin:
         time_stress = min(1.0, time_held / 3600.0)
         hazard_rate = float(np.clip((0.6 * flow_stress) + (0.4 * time_stress), 0.0, 1.0))
         
+        # Current PnL check for Time-Decay Assassin
+        price = ctx.get("safe_c_price", state.entry_price)
+        current_pnl = (price - state.entry_price) * state.actual_qty if ctx["is_buy"] else (state.entry_price - price) * state.actual_qty
+        
+        # 🚀 UPGRADE: Time-Decay Cut. If we are losing money for > 45 mins and flow is against us, kill it.
+        if current_pnl < 0 and time_held_mins > 45.0 and hazard_rate > 0.50:
+            return True, f"TIME_DECAY_HAZARD ({time_held_mins:.1f}m held, cutting bad trade)", ood_prob, hazard_rate
+
         if ood_prob > 0.85:
             return True, f"REGIME_OOD_COLLAPSE ({ood_prob:.2f})", ood_prob, hazard_rate
-        if hazard_rate > 0.70:
+        if hazard_rate > 0.75:
             return True, f"CRITICAL_HAZARD ({hazard_rate:.2f})", ood_prob, hazard_rate
             
         return False, "SAFE", ood_prob, hazard_rate
@@ -180,6 +190,7 @@ class ProfitGovernor:
         equity = max(ctx.get("current_vault_balance", state.entry_balance), 1.0)
         activation_pnl = equity * 0.01  # 1% account gain arms the system
         lock_pnl = equity * 0.03        # 3% account gain locks aggressive floor
+        parabolic_pnl = equity * 0.05   # 🚀 UPGRADE: 5% account gain triggers Parabolic Suffocation
         fee_hurdle = state.entry_price * qty * 0.0015 
         
         # 4. PROFIT STATE MACHINE
@@ -204,17 +215,28 @@ class ProfitGovernor:
                 p_state.state_id = "GIVEBACK_EXIT"
                 
         elif p_state.state_id == "PROFIT_LOCKED":
-            p_state.locked_pnl = max(p_state.locked_pnl, p_state.peak_pnl * 0.60)
+            # 🚀 UPGRADE: Parabolic Trailing
+            if current_pnl > parabolic_pnl:
+                p_state.state_id = "PARABOLIC_TRAIL"
+                p_state.locked_pnl = max(p_state.locked_pnl, p_state.peak_pnl * 0.85)
+            else:
+                p_state.locked_pnl = max(p_state.locked_pnl, p_state.peak_pnl * 0.60)
             
             giveback_pct = (p_state.peak_pnl - current_pnl) / max(p_state.peak_pnl, 1e-9)
-            
-            # Velocity & OOD sensitive giveback
             max_giveback = 0.25
             if ood_prob > 0.50 or p_state.pnl_velocity < 0:
                 max_giveback = 0.15
                 p_state.state_id = "GIVEBACK_WARNING"
                 
             if giveback_pct > max_giveback or current_pnl <= p_state.locked_pnl:
+                p_state.state_id = "GIVEBACK_EXIT"
+
+        elif p_state.state_id == "PARABOLIC_TRAIL":
+            # Highly aggressive suffocation for massive pumps
+            p_state.locked_pnl = max(p_state.locked_pnl, p_state.peak_pnl * 0.85)
+            giveback_pct = (p_state.peak_pnl - current_pnl) / max(p_state.peak_pnl, 1e-9)
+            
+            if giveback_pct > 0.15 or current_pnl <= p_state.locked_pnl:
                 p_state.state_id = "GIVEBACK_EXIT"
                 
         elif p_state.state_id == "GIVEBACK_WARNING":
@@ -313,7 +335,7 @@ class IntelligentExitEngine:
 
         is_buy = ctx["is_buy"]
         price = ctx.get("safe_c_price", state.entry_price)
-        total_qty = state.actual_qty  # TRUE reality, not assumed q*
+        total_qty = state.actual_qty  
         
         if total_qty <= 0:
             return ExitDecision("HOLD", 0.0, "NONE", price, 0.0, "ZERO_POSITION", "[GHOST POSITION]")
@@ -346,7 +368,6 @@ class IntelligentExitEngine:
         aligned_ofi = ofi_z if is_buy else -ofi_z
         p_cont = max(0.05, min(0.95, 0.50 + (aligned_ofi * 0.15)))
         
-        # Deterministic seed based on price to prevent flip-flopping MC paths
         seed_val = int(price * 100) % (2**32 - 1)
         ev_fut, cvar_95, cvar_99 = CounterfactualTrajectorySimulator.simulate(sigma_eff, p_cont, 1.0 - p_cont, ood_prob, seed_val)
         
@@ -355,7 +376,6 @@ class IntelligentExitEngine:
             gross_pnl, ev_fut, cvar_95, cvar_99, sigma_eff, ood_prob, price, total_qty, last_ob, state.exit_side
         )
         
-        # Final q* is bounded by the Profit Governor's ceiling
         optimal_q = min(q_opt_raw, prof_target_q)
 
         # LEVEL 6: Execution Routing
@@ -369,7 +389,15 @@ class IntelligentExitEngine:
             
         limit_p = last_ob.get("best_bid", price) if state.exit_side == "SELL" else last_ob.get("best_ask", price)
         if urgency == "AGGRESSIVE":
-            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0002
+            limit_p = limit_p * 0.9995 if state.exit_side == "SELL" else limit_p * 1.0005
+
+        # 🚀 UPGRADE: Calculate Exact Trailing Stop Coordinates for Bybit
+        trailing_stop_price = 0.0
+        if state.profit_state.locked_pnl > 0 and total_qty > 0:
+            if is_buy:
+                trailing_stop_price = state.entry_price + (state.profit_state.locked_pnl / total_qty)
+            else:
+                trailing_stop_price = state.entry_price - (state.profit_state.locked_pnl / total_qty)
 
         log_str = (
             f"\n╔══════════════════════════════════════╗\n"
@@ -388,7 +416,7 @@ class IntelligentExitEngine:
             f"╚══════════════════════════════════════╝\n"
         )
         
-        return ExitDecision(action, optimal_q, urgency, limit_p, state.profit_state.peak_price, f"Q_OPT_{optimal_q:.2f}", log_str)
+        return ExitDecision(action, optimal_q, urgency, limit_p, trailing_stop_price, f"Q_OPT_{optimal_q:.2f}", log_str)
 
 
 # =====================================================================
@@ -401,7 +429,7 @@ class ExecutionGovernorFSM:
     OBSERVE -> POSTED -> MONITOR -> REPRICE -> MARKET -> SYNC -> OBSERVE
     """
     @staticmethod
-    async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor:Any) -> bool:
+    async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor: Any) -> bool:
         if decision.action == "HOLD":
             return False
             
