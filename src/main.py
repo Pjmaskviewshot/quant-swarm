@@ -288,10 +288,11 @@ class DistributedQuantEngine:
                 self.hardware_min_qty[sym] = float(item.get("lotSizeFilter", {}).get("minOrderQty", "1.0"))
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
-    async def _get_max_affordable_notional(self, sl_dist_pct: float = 0.025) -> float:
+    # 🚀 REFACTORED: Completely synchronous to prevent task bottlenecking
+    def _get_max_affordable_notional(self, sl_dist_pct: float = 0.025) -> float:
         try:
-            raw_balance = await self._get_true_equity_usdt()
-            equity = max(1.0, raw_balance)
+            raw_balance = self.global_state_cache.get("current_vault_balance", 12.90)
+            equity = max(1.0, float(raw_balance))
         except Exception:
             equity = 12.00
 
@@ -667,7 +668,7 @@ class DistributedQuantEngine:
                         logger.warning(f"🛑 HARD VETO // {symbol} Spread too toxic ({spread_cost*10000:.1f} bps).")
                         return
                 
-                if abs(vpin_z) > 3.5: # 🚀 Relaxed from 3.0
+                if abs(vpin_z) > 3.5: 
                     logger.warning(f"🛑 HARD VETO // {symbol} Extreme toxic flow detected (VPIN Z: {vpin_z:.2f}).")
                     return
                 
@@ -749,31 +750,28 @@ class DistributedQuantEngine:
                     
                     max_qty_by_depth = bbo_depth_qty * 0.50
 
-                    max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
+                    # 🚀 FAST RAM CACHE ONLY - NO AWAIT
+                    max_notional = self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
                     calculated_qty = (max_notional * exec_weight) / price
                     
                     try: 
-                        raw_balance = await self.executor.get_wallet_balance_usdt()
-                        available_balance = max(1.0, raw_balance) 
+                        raw_balance = self.global_state_cache.get("current_vault_balance", 12.90)
+                        available_balance = max(1.0, float(raw_balance)) 
                     except Exception: 
                         available_balance = 12.90
 
-                    # 🚀 V13 MICRO-ACCOUNT CLAMPING FIX
-                    # Ensure requested notional NEVER exceeds 95% of physical equity to pass Risk Vault Heat Cap
                     max_permitted_notional = available_balance * 0.95
                     if (calculated_qty * price) > max_permitted_notional:
                         calculated_qty = max_permitted_notional / price
 
                     min_qty = self.hardware_min_qty.get(symbol, 1.0)
                     if calculated_qty < min_qty:
-                        # Account cannot afford the exchange minimum lot size for this asset
                         return
                         
                     if calculated_qty > max_qty_by_depth:
                         calculated_qty = max_qty_by_depth
                     
                     actual_notional = calculated_qty * price
-                    
                     actual_risk_dollars = actual_notional * sl_dist_pct
                     actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
 
@@ -947,7 +945,8 @@ class DistributedQuantEngine:
                         spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
                         
                         if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 4.0:
-                            max_notional = await self._get_max_affordable_notional()
+                            # 🚀 FAST RAM CACHE ONLY - NO AWAIT
+                            max_notional = self._get_max_affordable_notional()
                             if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
                                 async with self.portfolio_state_lock:
                                     if dead_sym in self.asset_basket: self.asset_basket.remove(dead_sym)
