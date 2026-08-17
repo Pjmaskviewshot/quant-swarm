@@ -123,7 +123,7 @@ class DistributedQuantEngine:
         self.screener_memory, self.screener_metrics, self.orderbook_snapshots, self.ram_dna_cache = {}, {}, {}, {}
         self.volatility_baseline: Dict[str, float] = {}
         
-        # 🚀 STRICT ASYNC MUTATION LOCKS
+        # STRICT ASYNC MUTATION LOCKS
         self.portfolio_state_lock = asyncio.Lock()
         
         self.active_positions_map: Dict[str, str] = {}  
@@ -143,7 +143,7 @@ class DistributedQuantEngine:
         
         self.active_contexts: Dict[str, dict] = {}
         
-        # 🚀 APEX PERSISTENT STATE STORE
+        # APEX PERSISTENT STATE STORE
         self.exit_states: Dict[str, Any] = {}
         
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
@@ -328,9 +328,6 @@ class DistributedQuantEngine:
             return False
 
     async def _execute_verified_position_close(self, symbol: str, is_buy: bool, current_qty: float) -> bool:
-        """
-        🚀 V13.0: Executes an emergency/market exit with deterministic exchange state confirmation.
-        """
         side = "Sell" if is_buy else "Buy"
         logger.critical(f"[X-RAY] 🚀 INITIATING VERIFIED CLOSE // {symbol} | Closing {current_qty} units.")
         
@@ -430,11 +427,6 @@ class DistributedQuantEngine:
             await asyncio.sleep(120) 
 
     async def run_fast_state_invariant_reconciliation(self):
-        """
-        🚀 500ms FAST STATE RECONCILIATION DAEMON
-        Maintains mathematical invariant: If Bybit position size == 0, 
-        internal state MUST be SETTLED and unlocked immediately.
-        """
         logger.info("🛡️ 500ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
         while True:
             await asyncio.sleep(0.5)
@@ -675,7 +667,7 @@ class DistributedQuantEngine:
                         logger.warning(f"🛑 HARD VETO // {symbol} Spread too toxic ({spread_cost*10000:.1f} bps).")
                         return
                 
-                if abs(vpin_z) > 3.0:
+                if abs(vpin_z) > 3.5: # 🚀 Relaxed from 3.0
                     logger.warning(f"🛑 HARD VETO // {symbol} Extreme toxic flow detected (VPIN Z: {vpin_z:.2f}).")
                     return
                 
@@ -760,19 +752,27 @@ class DistributedQuantEngine:
                     max_notional = await self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
                     calculated_qty = (max_notional * exec_weight) / price
                     
-                    min_qty = self.hardware_min_qty.get(symbol, 1.0)
-                    if calculated_qty < min_qty:
-                        calculated_qty = min_qty
-                        
-                    if calculated_qty > max_qty_by_depth:
-                        calculated_qty = max_qty_by_depth
-                    
-                    actual_notional = calculated_qty * price
                     try: 
                         raw_balance = await self.executor.get_wallet_balance_usdt()
                         available_balance = max(1.0, raw_balance) 
                     except Exception: 
                         available_balance = 12.90
+
+                    # 🚀 V13 MICRO-ACCOUNT CLAMPING FIX
+                    # Ensure requested notional NEVER exceeds 95% of physical equity to pass Risk Vault Heat Cap
+                    max_permitted_notional = available_balance * 0.95
+                    if (calculated_qty * price) > max_permitted_notional:
+                        calculated_qty = max_permitted_notional / price
+
+                    min_qty = self.hardware_min_qty.get(symbol, 1.0)
+                    if calculated_qty < min_qty:
+                        # Account cannot afford the exchange minimum lot size for this asset
+                        return
+                        
+                    if calculated_qty > max_qty_by_depth:
+                        calculated_qty = max_qty_by_depth
+                    
+                    actual_notional = calculated_qty * price
                     
                     actual_risk_dollars = actual_notional * sl_dist_pct
                     actual_risk_pct = (actual_risk_dollars / (available_balance + 1e-9)) * 100.0
@@ -800,6 +800,8 @@ class DistributedQuantEngine:
                             "prob_success": prob_success, "dna_stats": dna_stats, 
                             "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
                             "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
+                            "target_leverage": 10.0,
+                            "actual_notional": actual_notional,
                             "payload_features": {
                                 "symbol": symbol, 
                                 "market_regime": regime, 
