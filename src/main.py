@@ -750,7 +750,6 @@ class DistributedQuantEngine:
                     
                     max_qty_by_depth = bbo_depth_qty * 0.50
 
-                    # 🚀 FAST RAM CACHE ONLY - NO AWAIT
                     max_notional = self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
                     calculated_qty = (max_notional * exec_weight) / price
                     
@@ -1269,14 +1268,18 @@ class DistributedQuantEngine:
                     # =================================================================
                     decision = IntelligentExitEngine.evaluate(ctx, state)
 
-                    # Update Exchange Native Trailing Stop if Profit Defender demands it
-                    if decision.exchange_ts_price and decision.exchange_ts_price > 0:
-                        if ctx["is_buy"] and decision.exchange_ts_price > fail_sl:
-                            fail_sl = decision.exchange_ts_price
-                            await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
-                        elif not ctx["is_buy"] and decision.exchange_ts_price < fail_sl:
-                            fail_sl = decision.exchange_ts_price
-                            await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+                    # 🛡️ DYNAMIC PROFIT LOCK RECONCILIATION
+                    if state.profit_state.locked_pnl > 0 and ctx["actual_qty_filled"] > 0:
+                        if ctx["is_buy"]:
+                            protected_price = ctx["actual_entry"] + (state.profit_state.locked_pnl / ctx["actual_qty_filled"])
+                            if fail_sl < protected_price < current_price:
+                                fail_sl = protected_price
+                                await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+                        else:
+                            protected_price = ctx["actual_entry"] - (state.profit_state.locked_pnl / ctx["actual_qty_filled"])
+                            if fail_sl > protected_price > current_price:
+                                fail_sl = protected_price
+                                await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
 
                     # Execution routing
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
