@@ -288,7 +288,6 @@ class DistributedQuantEngine:
                 self.hardware_min_qty[sym] = float(item.get("lotSizeFilter", {}).get("minOrderQty", "1.0"))
         except Exception as e: logger.error(f"[X-RAY] Failed fetching exchange info: {e}", exc_info=True)
 
-    # 🚀 REFACTORED: Completely synchronous to prevent task bottlenecking
     def _get_max_affordable_notional(self, sl_dist_pct: float = 0.025) -> float:
         try:
             raw_balance = self.global_state_cache.get("current_vault_balance", 12.90)
@@ -597,19 +596,21 @@ class DistributedQuantEngine:
             stat_engine = self.stat_engines.get(symbol)
             feature_engine = self.feature_engines.get(symbol)
             clock = self.vpin_clocks.get(symbol)
+
+            # 1. 🚀 SYNCHRONOUS DATA INGESTION: Always update statistical arrays inline to prevent data loss
+            self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
+            if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
+            if feature_engine: feature_engine.push_trade_tick([trade_data])
             
+            manifests = []
+            if stat_engine and clock:
+                stat_engine.update_trades(price, exchange_timestamp)
+                self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
+                manifests = clock.process_tick(price, volume, not is_buy)
+                
             if symbol in self.active_contexts:
                 ctx = self.active_contexts[symbol]
                 ctx["latest_tick_price"] = price
-                
-                self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
-                if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
-                if feature_engine: feature_engine.push_trade_tick([trade_data])
-                
-                if stat_engine and clock:
-                    stat_engine.update_trades(price, exchange_timestamp)
-                    self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
-                    clock.process_tick(price, volume, not is_buy)
                 return
 
             inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
@@ -622,24 +623,22 @@ class DistributedQuantEngine:
             if now - last_trade_time < dynamic_cooldown_seconds:
                 return
 
-        async def _eval_gate():
+        # 2. 🚀 TASK LIMIT PROTECTOR: Prevent Event Loop Overload
+        # Synchronously throttle the creation of heavy async evaluation tasks to max 5 per second.
+        if now - self.last_eval_time.get(symbol + "_eval_throttle", 0.0) < 0.2:
+            return  
+        self.last_eval_time[symbol + "_eval_throttle"] = now
+
+        async def _eval_gate(m_snapshot):
             async with self.circuit_breaker_lock:
                 if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
                 
             if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
 
             try:
-                self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
-                if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
-                if feature_engine: feature_engine.push_trade_tick([trade_data])
-
                 if not stat_engine or not clock: return
                 
-                stat_engine.update_trades(price, exchange_timestamp)
-                self.risk_vault.push_microstructure_variance(stat_engine.inst_variance)
-                
-                manifests = clock.process_tick(price, volume, not is_buy)
-                valid_manifests = [m for m in manifests if m.get("valid")]
+                valid_manifests = [m for m in m_snapshot if m.get("valid")]
                 vol_z = stat_engine.hawkes_z if stat_engine else 0.0
                 
                 if valid_manifests: 
@@ -653,9 +652,6 @@ class DistributedQuantEngine:
                     else: vpin_z = 0.0
                 else: vpin_z = 0.0
             
-                if now - self.last_eval_time.get(symbol, 0.0) < (0.05 if abs(vpin_z) > 1.0 else 0.2): return
-                self.last_eval_time[symbol] = now
-                
                 ob = self.orderbook_snapshots.get(symbol)
                 if not ob or "bid_size" not in ob: return
                 spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
@@ -823,7 +819,7 @@ class DistributedQuantEngine:
                     
             except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}", exc_info=True)
 
-        self.track_task(_eval_gate())
+        self.track_task(_eval_gate(manifests))
 
     async def log_to_wal_async(self, action_type: str, args: list):
         async with self.wal_lock:
@@ -944,7 +940,6 @@ class DistributedQuantEngine:
                         spread_bps = ((ask - bid) / bid) * 10000.0 if bid > 0 else 999.0
                         
                         if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 4.0:
-                            # 🚀 FAST RAM CACHE ONLY - NO AWAIT
                             max_notional = self._get_max_affordable_notional()
                             if (self.hardware_min_qty.get(hot_sym, 1.0) * bid) <= max_notional:
                                 async with self.portfolio_state_lock:
@@ -1269,16 +1264,14 @@ class DistributedQuantEngine:
                     decision = IntelligentExitEngine.evaluate(ctx, state)
 
                     # 🛡️ DYNAMIC PROFIT LOCK RECONCILIATION
-                    if state.profit_state.locked_pnl > 0 and ctx["actual_qty_filled"] > 0:
+                    if decision.exchange_ts_price and decision.exchange_ts_price > 0:
                         if ctx["is_buy"]:
-                            protected_price = ctx["actual_entry"] + (state.profit_state.locked_pnl / ctx["actual_qty_filled"])
-                            if fail_sl < protected_price < current_price:
-                                fail_sl = protected_price
+                            if fail_sl < decision.exchange_ts_price < current_price:
+                                fail_sl = decision.exchange_ts_price
                                 await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
                         else:
-                            protected_price = ctx["actual_entry"] - (state.profit_state.locked_pnl / ctx["actual_qty_filled"])
-                            if fail_sl > protected_price > current_price:
-                                fail_sl = protected_price
+                            if fail_sl > decision.exchange_ts_price > current_price:
+                                fail_sl = decision.exchange_ts_price
                                 await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
 
                     # Execution routing
