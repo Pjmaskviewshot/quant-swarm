@@ -292,6 +292,14 @@ class DistributedQuantEngine:
         except asyncio.QueueFull:
             logger.warning("[X-RAY] ⚠️ Telegram queue full. Dropping telemetry to preserve HFT event loop.")
 
+    def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
+        """
+        🚀 BACKWARD-COMPATIBILITY ALIAS: 
+        Routes legacy calls from auction_engine or other modules directly into 
+        the non-blocking telegram telemetry queue.
+        """
+        self._safe_telegram_dispatch_sync(message, is_html, message_type)
+
     async def run_telegram_worker(self):
         """Asynchronous worker that drains the Telegram queue without blocking the hot path."""
         logger.info("📡 TELEGRAM WORKER ONLINE: Non-blocking telemetry active.")
@@ -513,7 +521,6 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 await self._save_sgd_state()
                 
-                # 🚀 HOOKED UP: Live Risk Parity Correlation Matrix Update
                 try:
                     price_histories = {}
                     for sym, mem in self.screener_memory.items():
@@ -714,7 +721,6 @@ class DistributedQuantEngine:
                 spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
                 vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
                 
-                # 🚀 DYNAMIC SPREAD LIMITS
                 vol_sigma = math.sqrt(getattr(stat_engine, "inst_variance", 1e-6))
                 max_allowable_spread = max(0.0030, vol_sigma * 1.5)
                 if spread_cost > max_allowable_spread:
@@ -1432,7 +1438,7 @@ class DistributedQuantEngine:
                         c_close = float(k[4])
                         if sym not in self.screener_memory:
                             self.screener_memory[sym] = {"prices": deque(maxlen=1440), "highs": deque(maxlen=150), "lows": deque(maxlen=150), "volumes": deque(maxlen=1440), "last_update_time": 0.0}
-                        self.screener_memory[symbol]["prices"].append(c_close)
+                        self.screener_memory[sym]["prices"].append(c_close)
             except Exception as e:
                 logger.debug(f"[X-RAY] Pre-seed failed for {sym}: {e}")
         logger.info("✅ Correlation matrix pre-seeded successfully.")
