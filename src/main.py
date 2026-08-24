@@ -482,9 +482,10 @@ class DistributedQuantEngine:
             await asyncio.sleep(120) 
 
     async def run_fast_state_invariant_reconciliation(self):
-        logger.info("🛡️ 2000ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
+        logger.info("🛡️ 5000ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
         while True:
-            await asyncio.sleep(2.0)
+            # 🚀 UPGRADED: Slowed from 2.0s to 5.0s to prevent Bybit API bans
+            await asyncio.sleep(5.0)
             try:
                 pos_response = await self.executor.safe_call(
                     self.executor.client.get_positions, category="linear", settleCoin="USDT"
@@ -521,11 +522,12 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 await self._save_sgd_state()
                 
+                # 🚀 UPGRADED: Expanded correlation lookback to 240 bars (60 hours) for statistical validity
                 try:
                     price_histories = {}
                     for sym, mem in self.screener_memory.items():
-                        if len(mem.get("prices", [])) >= 30:
-                            price_histories[sym] = list(mem["prices"])[-30:]
+                        if len(mem.get("prices", [])) >= 240:
+                            price_histories[sym] = list(mem["prices"])[-240:]
                     if price_histories:
                         self.risk_vault.update_correlation_matrix(price_histories)
                 except Exception as e:
@@ -939,8 +941,9 @@ class DistributedQuantEngine:
                         async with aiosqlite.connect(self.wal_db_path) as db:
                             await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
                             await db.commit()
-                    except asyncio.TimeoutError: break 
-                    except Exception as e: logger.error(f"[X-RAY] WAL processing error for item {item_id}: {e}", exc_info=True)
+                    except (asyncio.TimeoutError, Exception) as e:
+                        logger.debug(f"[X-RAY] WAL cloud sync postponed for item {item_id}: {e}")
+                        break
             except Exception as e: logger.error(f"[X-RAY] WAL Worker Loop Error: {e}", exc_info=True)
             await asyncio.sleep(1.0)
 

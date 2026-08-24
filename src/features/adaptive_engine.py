@@ -1,5 +1,5 @@
 """
-💎 V14.1 TITANIUM APEX: ADAPTIVE FEATURE ENGINE
+💎 V15.1 TITANIUM APEX: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
@@ -13,7 +13,6 @@ import math
 import time
 import numpy as np
 import logging
-import heapq
 from collections import deque
 from typing import Dict, Any, Tuple, List
 
@@ -43,7 +42,7 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
 
         # ====================================================================
-        # 🚀 HMM STATE PRIORS & TRANSITIONS
+        # 🚀 HMM STATE PRIORS
         # ====================================================================
         self.regimes = [
             "TRENDING_BULL", 
@@ -54,6 +53,8 @@ class AdaptiveFeatureEngine:
         ]
         
         self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
+        
+        # Base matrix (now dynamically updated during evaluation)
         self.transition_matrix = np.array([
             [0.75, 0.05, 0.10, 0.08, 0.02], # From BULL
             [0.05, 0.75, 0.10, 0.08, 0.02], # From BEAR
@@ -66,14 +67,14 @@ class AdaptiveFeatureEngine:
         self._last_log_time = 0.0
 
     def _prune_book(self):
-        """Memory Leak Prevention: Truncates deep out-of-the-money liquidity levels."""
-        if len(self.local_bids) > 1000:
-            top_bids = heapq.nlargest(500, self.local_bids.items(), key=lambda x: x[0])
-            self.local_bids = dict(top_bids)
+        """Memory Leak Prevention: Batched threshold pruning to prevent event-loop freezing."""
+        if len(self.local_bids) > 1500:
+            sorted_bids = sorted(self.local_bids.keys(), reverse=True)[:500]
+            self.local_bids = {p: self.local_bids[p] for p in sorted_bids}
             
-        if len(self.local_asks) > 1000:
-            top_asks = heapq.nsmallest(500, self.local_asks.items(), key=lambda x: x[0])
-            self.local_asks = dict(top_asks)
+        if len(self.local_asks) > 1500:
+            sorted_asks = sorted(self.local_asks.keys())[:500]
+            self.local_asks = {p: self.local_asks[p] for p in sorted_asks}
 
     def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
         """Computes ln(P) to eliminate float underflow when multiplying probabilities."""
@@ -165,8 +166,18 @@ class AdaptiveFeatureEngine:
                     log_emission += math.log(2.0) 
                     
                 log_emissions[i] = log_emission
+
+            # 🚀 DYNAMIC TRANSITION MATRIX: Adapts to Market Chaos
+            # Low ER (choppy) lowers persistence, high ER (trending) raises persistence
+            base_diag = 0.75
+            chaos_penalty = max(0.0, 0.4 - er) 
+            dynamic_diag = max(0.40, min(0.90, base_diag - chaos_penalty))
+            off_diag = (1.0 - dynamic_diag) / 4.0
+            
+            dynamic_transition = np.full((5, 5), off_diag, dtype=np.float64)
+            np.fill_diagonal(dynamic_transition, dynamic_diag)
                 
-            prior = np.dot(self.state_probs, self.transition_matrix)
+            prior = np.dot(self.state_probs, dynamic_transition)
             prior_log = np.log(prior + 1e-9)
             
             unnormalized_log_posterior = log_emissions + prior_log
@@ -246,8 +257,8 @@ class AdaptiveFeatureEngine:
             self._prune_book()
 
             if self.local_bids and self.local_asks:
-                best_bids = heapq.nlargest(10, self.local_bids.items(), key=lambda x: x[0])
-                best_asks = heapq.nsmallest(10, self.local_asks.items(), key=lambda x: x[0])
+                best_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)[:10]
+                best_asks = sorted(self.local_asks.items(), key=lambda x: x[0])[:10]
 
                 if best_bids and best_asks:
                     best_bid_price = best_bids[0][0]

@@ -1,5 +1,5 @@
 """
-💎 APEX OMEGA V15: DETERMINISTIC HIERARCHY & KINETIC TP COMPRESSOR
+💎 V15.1 APEX OMEGA: DETERMINISTIC HIERARCHY & KINETIC TP COMPRESSOR
 -----------------------------------------------------------------------
 Stateful, Hierarchical Optimal-Stopping Engine.
 Architecture Pipeline:
@@ -239,6 +239,10 @@ class KineticTPCompressor:
     🚀 LEVEL 3.5: SELF-AWARE MOMENTUM FRONT-RUNNER
     Dynamically yanks the Take Profit coordinate down into current price if 
     microstructure order flow violently reverses while holding deep profits.
+    
+    [MATH NOTE]: The composite_momentum weights (0.45, 0.40, 0.15) are calibrated 
+    heuristics favoring immediate L3 structural decay (OFI/Hawkes) over longer-term 
+    price momentum (Meso), maximizing sensitivity to HFT execution sweeps.
     """
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState, current_thesis: ThesisVector) -> Tuple[bool, float, str, float]:
@@ -298,6 +302,13 @@ class KineticTPCompressor:
 class AnalyticalJumpRiskEngine:
     @staticmethod
     def compute_analytical_cvar(sigma_eff: float, p_cont: float, p_ood: float, alpha_95: float = 0.05, alpha_99: float = 0.01) -> Tuple[float, float, float]:
+        """
+        Computes conditional value at risk under a modified Merton Jump-Diffusion assumption.
+        
+        [MATH NOTE]: The final returned cvar_95 and cvar_99 are logically sign-flipped 
+        (producing a positive number for a negative tail risk). This positive penalty 
+        is structurally necessary for consistent subtraction in the L5 Optimizer formula.
+        """
         drift_cont = sigma_eff * 1.5 * (2.0 * p_cont - 1.0)
         jump_prob = float(np.clip(p_ood * 0.15, 0.0, 0.50))
 
@@ -312,6 +323,7 @@ class AnalyticalJumpRiskEngine:
         z_95 = norm.ppf(alpha_95)
         z_99 = norm.ppf(alpha_99)
 
+        # Sign-inversion creates positive risk penalty integer for the optimizer subtraction
         cvar_95 = -(total_ev - (sigma_total * (norm.pdf(z_95) / max(alpha_95, 1e-9))))
         cvar_99 = -(total_ev - (sigma_total * (norm.pdf(z_99) / max(alpha_99, 1e-9))))
 
