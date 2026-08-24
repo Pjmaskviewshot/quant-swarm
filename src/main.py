@@ -371,7 +371,6 @@ class DistributedQuantEngine:
         side = "Sell" if is_buy else "Buy"
         logger.critical(f"[X-RAY] 🚀 INITIATING VERIFIED CLOSE // {symbol} | Closing {current_qty} units.")
         
-        # 🚀 AUDIT FIX: Institutional-grade Decimal formatting based on exchange tick limits
         try:
             qty_step = self.hardware_min_qty.get(symbol, 0.1)
             precision = max(0, abs(int(math.floor(math.log10(qty_step)))))
@@ -560,8 +559,6 @@ class DistributedQuantEngine:
                 shadow_count = len(self.shadow_basket)
 
                 report = self.telegram.format_mission_control_dashboard(uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats)
-                # 🚀 AUDIT FIX: Dashboard Branding Update
-                report = report.replace("V1.0 APEX", "V17.0 APEX TITANIUM").replace("V15.1 APEX OMEGA", "V17.0 APEX TITANIUM").replace("V16.1 APEX OMEGA", "V17.0 APEX TITANIUM")
                 self._safe_telegram_dispatch_sync(report, is_html=True)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
@@ -626,7 +623,6 @@ class DistributedQuantEngine:
         volume, is_buy = float(trade_data.get("size", 0.0)), (str(trade_data.get("side", "")).upper() == "BUY")
         exchange_timestamp = float(trade_data.get("timestamp", now * 1000)) / 1000.0
         
-        # 🚀 AUDIT FIX: Decoupled Locks. Prevent async deadlocks by not holding the symbol lock while awaiting portfolio state
         async with self.symbol_locks[symbol]:
             stat_engine = self.stat_engines.get(symbol)
             feature_engine = self.feature_engines.get(symbol)
@@ -645,7 +641,6 @@ class DistributedQuantEngine:
             inst_var = getattr(stat_engine, 'inst_variance', 0.001) if stat_engine else 0.001
             regime = feature_engine.detect_market_regime() if feature_engine else "TRENDING"
             
-        # Safely acquire portfolio lock without holding symbol lock
         async with self.portfolio_state_lock:
             if symbol in self.active_contexts:
                 self.active_contexts[symbol]["latest_tick_price"] = price
@@ -1065,7 +1060,6 @@ class DistributedQuantEngine:
                 side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
                 logger.warning(f"[X-RAY] ⚠️ Position {symbol} still has {remaining_qty} open. Force-liquidating to complete settlement.")
                 
-                # 🚀 AUDIT FIX: Decimal Quantization
                 try:
                     qty_step = ctx.get("qty_step", 0.1)
                     precision = max(0, abs(int(math.floor(math.log10(qty_step)))))
@@ -1142,7 +1136,7 @@ class DistributedQuantEngine:
                 "arrival_price": risk_matrix.get("arrival_price", current_price),
                 "regime": market_regime, "daemon_start_time": time.time(),
                 "actual_qty_filled": risk_matrix.get("size", 1.0),
-                "qty_step": self.hardware_min_qty.get(symbol, 0.1), # 🚀 Added for precision truncation
+                "qty_step": self.hardware_min_qty.get(symbol, 0.1), 
                 "stat_engine": self.stat_engines.get(symbol),
                 "last_ob": {},
                 "latest_tick_price": current_price,
@@ -1295,7 +1289,6 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.error(f"[X-RAY] FSM Position daemon critical fault for {symbol}: {e}", exc_info=True)
             finally:
-                # 🚀 AUDIT FIX: Guaranteed Memory Cleanup via `finally` block
                 async with self.portfolio_state_lock:
                     self.active_contexts.pop(symbol, None)
                     self.active_positions_map.pop(symbol, None)
@@ -1426,49 +1419,6 @@ class DistributedQuantEngine:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-class ExecutionGovernorFSM:
-    @staticmethod
-    async def manage_execution(decision: ExitDecision, state: PositionExitState, ctx: Dict[str, Any], executor: Any) -> bool:
-        if decision.action == "HOLD":
-            return False
-            
-        symbol = ctx["symbol"]
-        current_actual_qty = state.actual_qty 
-        target_retained_qty = current_actual_qty * decision.target_q
-        qty_to_close = current_actual_qty - target_retained_qty
-        
-        if qty_to_close <= 0:
-            return False
-
-        # 🚀 AUDIT FIX: Institutional Float-to-String Truncation
-        # Eliminates Bybit parameter rejections caused by floating point drift (e.g. 0.27000001)
-        try:
-            qty_step = ctx.get("qty_step", 0.1)
-            precision = max(0, abs(int(math.floor(math.log10(qty_step)))))
-            qty_str = f"{qty_to_close:.{precision}f}"
-        except Exception:
-            qty_str = str(qty_to_close)
-            
-        if decision.urgency in ["MARKET", "EMERGENCY", "AGGRESSIVE"]:
-            res = await executor.safe_call(
-                executor.client.place_order, category="linear", symbol=symbol,
-                side=state.exit_side, orderType="Market", qty=qty_str,
-                timeInForce="IOC", reduceOnly=True
-            )
-            state.execution_state = "SYNC"
-            return True
-
-        if state.execution_state == "OBSERVE":
-            res = await executor.safe_call(
-                executor.client.place_order, category="linear", symbol=symbol,
-                side=state.exit_side, orderType="Limit", price=str(decision.limit_price),
-                qty=qty_str, timeInForce="PostOnly", reduceOnly=True
-            )
-            state.execution_state = "SYNC"
-            return True
-
-        return False
 
 async def main():
     engine = DistributedQuantEngine()
