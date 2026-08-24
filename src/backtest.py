@@ -1,10 +1,10 @@
 """
-🌌 V14 TITANIUM APEX NEURAL BACKTESTER
+💎 V17.0 APEX TITANIUM OMEGA: NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V14 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Upgraded with True 4D Streaming Gram-Schmidt, Joseph-Stabilized RLS, 
-C-Vectorized Shannon Entropy, and Exact Optimization Emulation.
+of the live V17 L2-tick engine and cannot simulate true Order Flow Imbalance.
+Upgraded with True 4D Streaming Cholesky Whitening (1:1 Production Parity),
+Joseph-Stabilized RLS, C-Vectorized Shannon Entropy, and Exact Optimization Emulation.
 """
 
 import argparse
@@ -83,32 +83,31 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
         return 1.0
 
 
-class StreamingGramSchmidt4D:
-    def __init__(self, alpha: float = 0.02):
+class BacktestCholeskyWhitening:
+    """
+    🚀 V17.0 AUDIT FIX: Matches production micro_models.py streaming Cholesky whitening.
+    Replaces the flawed Gram-Schmidt orthogonalization to achieve 1:1 mathematical parity
+    between live execution and backtesting.
+    """
+    def __init__(self, n_features: int = 4, alpha: float = 0.01):
+        self.n = n_features
         self.alpha = alpha
-        self.cov_matrix = np.eye(4, dtype=np.float64) * 0.1
-        self.mean_vector = np.zeros(4, dtype=np.float64)
+        self.mean = np.zeros(n_features, dtype=np.float64)
+        self.cov = np.eye(n_features, dtype=np.float64) * 0.1
 
-    def orthogonalize(self, raw_vec: np.ndarray) -> np.ndarray:
-        delta = raw_vec - self.mean_vector
-        self.mean_vector += self.alpha * delta
-        self.cov_matrix = (1.0 - self.alpha) * self.cov_matrix + self.alpha * np.outer(delta, delta)
-        self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T) + (np.eye(4) * 1e-8)
-
-        v = raw_vec.copy()
-        basis = np.zeros((4, 4), dtype=np.float64)
+    def update_and_whiten(self, x: np.ndarray) -> np.ndarray:
+        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * x
+        diff = (x - self.mean).reshape(-1, 1)
+        self.cov = (1.0 - self.alpha) * self.cov + self.alpha * (diff @ diff.T)
         
-        for i in range(4):
-            v_i = v[i]
-            for j in range(i):
-                q_j = basis[:, j]
-                proj = np.dot(raw_vec, q_j)
-                v_i -= proj * q_j[i]
-            basis[i, i] = 1.0
-            v[i] = v_i
-
-        diag_stds = np.sqrt(np.diag(self.cov_matrix)) + 1e-9
-        return np.clip(v / (diag_stds * 3.0), -1.0, 1.0)
+        try:
+            L = np.linalg.cholesky(self.cov + np.eye(self.n) * 1e-6)
+            whitened = np.linalg.solve(L, x - self.mean)
+            # Clip outlier extremes for neural stability
+            return np.clip(whitened / 3.0, -1.0, 1.0)
+        except np.linalg.LinAlgError:
+            diag_stds = np.sqrt(np.diag(self.cov)) + 1e-9
+            return np.clip((x - self.mean) / (diag_stds * 3.0), -1.0, 1.0)
 
 
 class JosephStabilizedRLS:
@@ -341,7 +340,7 @@ def calibrate_confidence(prob: float, kaufman_er: float, shannon_entropy: float,
     mse_penalty = min(0.10, mse * 0.4)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v14_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -377,8 +376,8 @@ def run_v14_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
     w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
     
-    # Initialize V14 Streaming ML Engines
-    gs_engine = StreamingGramSchmidt4D(alpha=0.02)
+    # 🚀 AUDIT FIX: 1:1 Live Production Cholesky Whitening
+    cholesky_engine = BacktestCholeskyWhitening(n_features=4, alpha=0.02)
     rls_trending = JosephStabilizedRLS(dim=4, p_init=p_scale)
     rls_ranging = JosephStabilizedRLS(dim=4, p_init=p_scale)
     rls_trending.w = w_t.copy()
@@ -495,9 +494,9 @@ def run_v14_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # 🚀 4D ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
+        # 🚀 4D ONLINE CHOLESKY WHITENING (Production Match)
         raw_vec = np.array([ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha], dtype=np.float64)
-        features = gs_engine.orthogonalize(raw_vec)
+        features = cholesky_engine.update_and_whiten(raw_vec)
         
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - kaufman_er)))
         feature_magnitudes = np.abs(features)
@@ -807,7 +806,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V14 TITANIUM APEX Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V17.0 APEX TITANIUM OMEGA Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -829,7 +828,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v14_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v17_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -881,9 +880,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v14_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v17_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V14 TITANIUM APEX OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V17.0 APEX TITANIUM OMEGA OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

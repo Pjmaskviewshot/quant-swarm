@@ -1,8 +1,8 @@
 """
-💎 V15.1 APEX OMEGA: INSTITUTIONAL RISK VAULT
+💎 V17.0 APEX TITANIUM OMEGA: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
-- Beta-Binomial Bayesian Conjugate Kelly Sizing (2,000 Trade Memory)
+- Continuous Merton-Kelly Sizing (f* = mu / sigma^2)
 - Peaks-Over-Threshold (POT) Heavy-Tail EVT Risk Estimator
 - Margin & Heat Map Allocation Caps
 - Exact NaN/Inf Sanitization & Matrix Invertibility Guards
@@ -40,7 +40,7 @@ class InstitutionalRiskVault:
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
 
-        # 🚀 CRITICAL FIX: Expanded memory to 2000 to prevent Kelly Sample Starvation
+        # Kept for backward compatibility with legacy logging/TCA modules
         self.outcomes_history = deque(maxlen=2000) 
         self.avg_win_r = 1.5   
         self.avg_loss_r = 1.0  
@@ -123,7 +123,7 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V15 MICRO-CALIBRATED CONVICTION THRESHOLD
+        🚀 V17 MICRO-CALIBRATED CONVICTION THRESHOLD
         Sets a flat 51.8% base conviction floor for micro-accounts.
         """
         if math.isnan(balance) or math.isinf(balance):
@@ -139,38 +139,33 @@ class InstitutionalRiskVault:
         """Universal Max of 5."""
         return 5
 
-    def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0) -> float:
+    def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
         """
-        🧬 V15 BAYESIAN CONJUGATE KELLY SIZING
+        🚀 AUDIT FIX: Continuous Merton-Kelly Sizing
+        Properly sizes positions based on continuous log-returns and instantaneous variance 
+        rather than binary Win/Loss hit rates.
         """
         # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if base_confidence < min_required_conviction:
             return 0.0  # Rejected by Dynamic EV Gate
 
-        # 2. Beta-Binomial Bayesian Sizing
-        # Beta(12, 10) Skeptical Conjugate Prior (~54.5% baseline)
-        alpha_prior = 12.0
-        beta_prior = 10.0
-        wins = sum(self.outcomes_history)
-        total = len(self.outcomes_history)
+        # 2. Continuous Merton-Kelly
+        # Convert bps to decimal drift (mu)
+        mu = net_edge_bps / 10000.0
         
-        p_bayesian = (wins + alpha_prior) / (total + alpha_prior + beta_prior)
-        b = self.avg_win_r / (self.avg_loss_r + 1e-9)
+        # Floor variance to prevent division by zero in zero-tick regimes
+        sigma_sq = max(symbol_variance, 1e-8)
         
-        if b <= 0:
-            raw_kelly = 0.001
-        else:
-            kf = (p_bayesian * b - (1.0 - p_bayesian)) / b
-            if kf <= 0 or math.isnan(kf):
-                return 0.0
-            raw_kelly = kf / 2.0  # Half-Kelly for margin of safety
+        # Continuous Kelly Fraction: f* = mu / sigma^2
+        raw_kelly = mu / sigma_sq
         
+        # Half-Kelly for safety + EVT Tail Penalty + Drawdown Penalty
+        half_kelly = raw_kelly / 2.0
         evt_multiplier = self.calculate_evt_tail_risk()
-        edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
         drawdown_penalty = max(0.10, 1.0 - (self.current_drawdown_state * 3.0))
         
-        risk_adjusted_kelly = raw_kelly * evt_multiplier * edge_factor * drawdown_penalty
+        risk_adjusted_kelly = half_kelly * evt_multiplier * drawdown_penalty
         
         if math.isnan(risk_adjusted_kelly) or math.isinf(risk_adjusted_kelly):
             return 0.001
@@ -214,7 +209,7 @@ class InstitutionalRiskVault:
                         if not math.isnan(corr_value) and corr_value > dynamic_corr_threshold:
                             return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
 
-        # 🚀 V15 NATURAL HEAT MAP (Organic Scaling)
+        # 🚀 V17 NATURAL HEAT MAP (Organic Scaling)
         # Allows an organic 1.8x leveraged equity multiplier to efficiently use available margin
         max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
         total_exposure = sum(self.active_positions.values()) + new_position_notional

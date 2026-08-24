@@ -1,11 +1,12 @@
 """
-🏛️ V5.1 APEX HYPERION: DYNAMIC EV AUCTION & ROUTING ENGINE
+💎 V17.0 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
 -----------------------------------------------------------------
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent
 Exits into an execution pipeline with Zero-Discard Stop Compression.
 
-Upgraded with True Implementation Shortfall (IS) Tracking, Atomic 
-Routing unpacks, and X-Ray Rejection Telemetry.
+Upgraded with V17 Continuous Kelly Integration, Race Condition Elimination 
+(Heat Cap Reservation Guards), True Implementation Shortfall (IS) Tracking, 
+and Atomic Routing unpacks.
 """
 
 import time
@@ -52,7 +53,7 @@ class CapitalAuctionEngine:
             self._last_rejection_log[log_key] = now
 
     async def run_global_capital_auction_worker(self):
-        logger.info("🏛️ V5.1 DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V17.0 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.4) 
@@ -98,7 +99,7 @@ class CapitalAuctionEngine:
                     if payload["action"] == "SELL" and impulse > 0.40:
                         continue
                         
-                    # 🚀 V5.1 CONVICTION FLOOR
+                    # 🚀 V17 CONVICTION FLOOR
                     if payload.get("prob_success", 0.0) < 0.515:
                         continue
 
@@ -126,6 +127,7 @@ class CapitalAuctionEngine:
             except Exception:
                 current_bal = 10.0
 
+            # 🚀 AUDIT FIX: Lock state, evaluate risk, and immediately reserve capacity to prevent race conditions
             async with self.core.portfolio_state_lock:
                 if top_symbol in self.core.active_positions_map:
                     continue
@@ -146,11 +148,11 @@ class CapitalAuctionEngine:
                     else:
                         drift_pct = (signal_price - live_price) / signal_price
                     
-                    # 🚀 FIXED: Widened from 50 bps to 150 bps to prevent Altcoin micro-skew rejections
                     if drift_pct > 0.0150 or drift_pct < -0.0150: 
                         self._throttled_reject_log(top_symbol, f"Micro-Price drifted {drift_pct*10000:.1f} bps from signal.")
                         continue
 
+                # Provisional reservation hold (Will be trued-up in the execution function)
                 provisional_notional = max(6.50, current_bal * 0.35)
                 is_safe, risk_reason = self.core.risk_vault.evaluate_portfolio_safety(
                     current_balance=current_bal,
@@ -162,7 +164,11 @@ class CapitalAuctionEngine:
                     self._throttled_reject_log(top_symbol, f"Risk Vault Veto: {risk_reason}")
                     continue
 
+                # 🛡️ INSTANT HEAT CAP RESERVATION
                 self.core.active_positions_map[top_symbol] = top_payload["action"]
+            
+            # Update ledger outside portfolio lock
+            self.core.risk_vault.update_position_ledger(top_symbol, provisional_notional)
             
             logger.critical(
                 f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
@@ -197,10 +203,12 @@ class CapitalAuctionEngine:
         try:
             if confidence < 0.515:
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
                 return
 
             if symbol in self.core.daemon_tasks and not self.core.daemon_tasks[symbol].done():
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
                 return
 
             signal_id = str(uuid.uuid4())
@@ -213,6 +221,7 @@ class CapitalAuctionEngine:
 
             if available_balance < 3.0: 
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                self.core.risk_vault.update_position_ledger(symbol, 0.0)
                 return
 
             sl_atr_mult = max(2.0, self.core.live_params.get("sl_atr_mult", 2.5))
@@ -226,18 +235,24 @@ class CapitalAuctionEngine:
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
+            # 🚀 AUDIT FIX: Supply instantaneous variance to the continuous Kelly formula
+            stat_engine = self.core.stat_engines.get(symbol)
+            inst_var = getattr(stat_engine, 'inst_variance', 1e-4) if stat_engine else 1e-4
+
             fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
-                confidence, 
+                base_confidence=confidence, 
                 net_edge_bps=edge_bps, 
-                current_balance=available_balance
+                current_balance=available_balance,
+                symbol_variance=inst_var
             )
 
             if fractional_risk <= 0.0:
                 logger.warning(f"[X-RAY] 🚫 EV REJECT // {symbol} EV is negative or Kelly returned 0.0.")
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
                 return
 
-            # 🚀 DYNAMIC STOP COMPRESSION (Ensures Micro Accounts never exceed 2.5% risk)
+            # DYNAMIC STOP COMPRESSION (Ensures Micro Accounts never exceed 2.5% risk)
             if available_balance < 50.0:
                 target_notional = exchange_min_notional
                 actual_dollar_risk = target_notional * sl_distance_pct
@@ -296,7 +311,7 @@ class CapitalAuctionEngine:
                     elasticity=elasticity
                 )
                 
-                # 🚀 V5.1 Atomic Unpacking for True Implementation Shortfall Tracking
+                # Atomic Unpacking for True Implementation Shortfall Tracking
                 if isinstance(res, tuple) and len(res) >= 2:
                     execution_success = bool(res[0])
                     arrival_price = float(res[1])
@@ -309,6 +324,7 @@ class CapitalAuctionEngine:
 
             if not execution_success: 
                 async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Refund reservation
                 return 
                 
             actual_qty_filled = target_position_size
@@ -322,16 +338,18 @@ class CapitalAuctionEngine:
                 edge_bps, fractional_risk, regime, safe_features
             )
             self.core.track_task(self.core._safe_telegram_dispatch(ticket_msg, is_html=True))
+            
+            # Finalize ledger with actual filled notional
             self.core.risk_vault.update_position_ledger(symbol, actual_filled_notional)
             
-            # 🚀 Spawn the Intelligent FSM Guardian WITH Arrival Price
+            # Spawn the Intelligent FSM Guardian WITH Arrival Price
             self.core.daemon_tasks[symbol] = self.core.track_task(
                 self.core._position_lifecycle_daemon(
                     symbol, signal_id, direction, current_price, atr, 
                     {
                         "allocated_value_usdt": actual_filled_notional, 
                         "size": actual_qty_filled,
-                        "arrival_price": arrival_price  # Explicitly pass arrival price for TCA
+                        "arrival_price": arrival_price  
                     }, 
                     target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio,
                     realigned_sl=initial_sl_price
@@ -342,3 +360,4 @@ class CapitalAuctionEngine:
         except Exception as e:
             logger.error(f"[X-RAY] Critical failure in execution for {symbol}: {e}", exc_info=True)
             async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
+            self.core.risk_vault.update_position_ledger(symbol, 0.0) # Safe cleanup

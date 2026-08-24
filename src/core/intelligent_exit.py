@@ -133,7 +133,6 @@ class QuantumMicrostructurePredictor:
         current_pnl = (price - state.entry_price) * qty if is_buy else (state.entry_price - price) * qty
         
         # 1. THE VOLATILITY-STANDARDIZED EV SHIELD
-        # If the predictive statistical edge is >= +0.12 sigma, shield from noise exits.
         if ev_score_norm >= 0.12:
             return False, 1.0, "EV_SHIELD_ACTIVE", 0.0
 
@@ -151,16 +150,16 @@ class QuantumMicrostructurePredictor:
         if aligned_ofi > p_state.rolling_mlofi_peak:
             p_state.rolling_mlofi_peak = aligned_ofi
 
-        # 2. PROACTIVE HAWKES INVERSION (Adverse arrival intensity exceeds support)
+        # 2. PROACTIVE HAWKES INVERSION
         if aligned_hawkes < -2.60 and depth_ratio < 0.35:
             return True, 0.0, f"HAWKES_CASCADE_INVERSION ({aligned_hawkes:.2f}σ | Book: {depth_ratio:.2f})", price
 
-        # 3. MLOFI EXHAUSTION DIVERGENCE (Price making peak while order flow support collapses)
+        # 3. MLOFI EXHAUSTION DIVERGENCE
         ofi_divergence = p_state.rolling_mlofi_peak - aligned_ofi
         if current_pnl > (state.entry_balance * 0.015) and ofi_divergence > 2.20 and depth_ratio < 0.45:
             return True, 0.0, f"MLOFI_EXHAUSTION_DIVERGENCE (Div: {ofi_divergence:.2f}σ)", price
 
-        # 4. MAHALANOBIS THESIS DESTRUCTION (Signal invalidated in feature space)
+        # 4. MAHALANOBIS THESIS DESTRUCTION
         d_m = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         try:
             ood_prob = float(np.clip(1.0 - chi2.cdf(d_m**2, df=5), 0.0, 1.0))
@@ -170,7 +169,7 @@ class QuantumMicrostructurePredictor:
         if ood_prob > 0.92 and current_pnl < 0 and ev_score_norm < -0.05:
             return True, 0.0, f"MAHALANOBIS_OOD_DESTRUCTION (Prob: {ood_prob:.2f})", price
 
-        # 5. DYNAMIC REGIME TIME-DECAY (Patient in ranging/chop, disciplined in trends)
+        # 5. DYNAMIC REGIME TIME-DECAY
         max_holding_mins = 120.0 if regime in ["MEAN_REVERTING", "HIGH_VOL_CHOP"] else 50.0
         if time_held_mins > max_holding_mins and current_pnl < 0 and ev_score_norm <= 0.0:
             return True, 0.0, f"REGIME_TIMEOUT_EXHAUSTION ({time_held_mins:.1f}m in {regime})", price
@@ -498,11 +497,17 @@ class ExecutionGovernorFSM:
         
         if qty_to_close <= 0:
             return False
+
+        # 🚀 FIX: Institutional Float-to-String Guard. 
+        # Prevents Bybit rejection on arbitrary precision math limits (e.g. 0.27000001).
+        qty_str = f"{qty_to_close:.4f}".rstrip('0').rstrip('.')
+        if qty_str == "": 
+            qty_str = "0"
             
-        if decision.urgency in ["MARKET", "EMERGENCY"]:
+        if decision.urgency in ["MARKET", "EMERGENCY", "AGGRESSIVE"]:
             res = await executor.safe_call(
                 executor.client.place_order, category="linear", symbol=symbol,
-                side=state.exit_side, orderType="Market", qty=str(qty_to_close),
+                side=state.exit_side, orderType="Market", qty=qty_str,
                 timeInForce="IOC", reduceOnly=True
             )
             state.execution_state = "SYNC"
@@ -512,7 +517,7 @@ class ExecutionGovernorFSM:
             res = await executor.safe_call(
                 executor.client.place_order, category="linear", symbol=symbol,
                 side=state.exit_side, orderType="Limit", price=str(decision.limit_price),
-                qty=str(qty_to_close), timeInForce="IOC", reduceOnly=True
+                qty=qty_str, timeInForce="PostOnly", reduceOnly=True
             )
             state.execution_state = "SYNC"
             return True

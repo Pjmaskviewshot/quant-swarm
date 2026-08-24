@@ -1,9 +1,9 @@
 """
-💎 V1.0 TITANIUM APEX: TELEGRAM MISSION CONTROL
+💎 V17.0 APEX TITANIUM OMEGA: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,
-and institutional-grade Forensic X-Ray HTML formatters. Fully standardized
-to HTML parsing mode to eliminate formatting collisions.
+Strict HTTP Timeout Shields (Load Shedding), and institutional-grade Forensic 
+X-Ray HTML formatters. Fully standardized to HTML parsing mode to eliminate formatting collisions.
 """
 
 import os
@@ -76,7 +76,7 @@ class AsyncTelegramReporter:
         return re.sub(cleaner, '', text)
 
     async def _execute_dispatch(self, payload: Dict[str, Any], max_retries: int = 3) -> bool:
-        """Core request worker with dynamic HTTP 429 backoff support and token protection."""
+        """Core request worker with dynamic HTTP 429 backoff support, timeouts, and token protection."""
         if not self.token or not self.chat_id:
             logger.warning("Telegram credentials unpopulated. Skipping dispatch.")
             return False
@@ -85,7 +85,9 @@ class AsyncTelegramReporter:
 
         for attempt in range(max_retries):
             try:
-                async with session.post(self.base_url, json=payload) as response:
+                # 🚀 AUDIT FIX: Strict 4.0 second timeout shield.
+                # If Telegram servers hang, we drop the message and free the thread.
+                async with asyncio.wait_for(session.post(self.base_url, json=payload), timeout=4.0) as response:
                     if response.status == 200:
                         return True
 
@@ -111,6 +113,9 @@ class AsyncTelegramReporter:
 
                     logger.error(self._sanitize_error(f"Telegram remote rejection (HTTP {response.status}): {raw_err}"))
 
+            except asyncio.TimeoutError:
+                logger.debug(f"[X-RAY] ⚠️ Telegram dispatch timed out after 4.0s. Load shedding payload.")
+                break # Drop message to preserve memory and event loop health
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error(self._sanitize_error(f"❌ Telegram API permanently unreachable: {e}"))
@@ -148,7 +153,7 @@ class AsyncTelegramReporter:
         await self._message_queue.put((payload, max_retries))
 
     # ====================================================================
-    # 🚀 V1.0 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
+    # 🚀 V17.0 APEX: X-RAY FORENSIC FORMATTERS (100% HTML Standardized)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
@@ -159,7 +164,7 @@ class AsyncTelegramReporter:
         spread_bps = features.get("bid_ask_spread", 0.0) * 10000.0
         
         micro_status = "STABLE"
-        # 🚀 V1.0: Map to the new Log-MLOFI architecture
+        
         log_mlofi_z = features.get('log_mlofi_z', features.get('adaptive_obi_z', 0.0))
         reasoning = features.get('reasoning', '')
         
@@ -176,7 +181,7 @@ class AsyncTelegramReporter:
             f"• Fill Price: <code>{price:.5f}</code>\n"
             f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
             f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
-            f"🔬 <b>X-RAY DIAGNOSTICS:</b>\n"
+            f"🔬 <b>V17 X-RAY DIAGNOSTICS:</b>\n"
             f"• HMM Regime: <code>{regime}</code>\n"
             f"• Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
             f"• Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
@@ -212,7 +217,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V1.0 APEX)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V17.0 APEX TITANIUM)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
