@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V5.1 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),

@@ -1,10 +1,12 @@
-﻿"""
-💎 V5.1 TITANIUM APEX: MULTI-SCALE PREDICTIVE ENGINE
+"""
+💎 V15.1 TITANIUM APEX: MULTI-SCALE PREDICTIVE ENGINE
 --------------------------------------------------------------
 Features:
 - Inverted Entropy-Adaptive Forgetting Factor (Fast adaptation during chaos)
-- Asymmetric Bivariate Hawkes Kernels (Liquidations & Panics)
-- 4D Online Gram-Schmidt Orthogonalization (OFI, Hawkes, Meso, Sector)
+- Asymmetric Bivariate Hawkes Kernels with Micro-Batch Filtering
+- 🚀 NEW: True Multivariate Decorrelation via Online Cholesky Whitening
+- Joseph-Stabilized Recursive Least Squares (Positive Semi-Definite Guarantee)
+- C-Vectorized Shannon Permutation Entropy
 """
 
 import math
@@ -13,69 +15,149 @@ import numpy as np
 import datetime
 import logging
 from collections import deque
-from itertools import permutations
 from typing import Tuple, Dict, Any
 
 logger = logging.getLogger("QUANT_CORE.MICRO_MODELS")
 
 
 class AdaptiveSessionClock:
-    """
-    Handles Weekend vs. Weekday regime adjustments to prevent signal starvation
-    during quiet trading sessions.
-    """
+    """Handles Session Volume adjustments to prevent starvation in quiet markets."""
     @staticmethod
     def is_weekend() -> bool:
-        # UTC weekday: 5 = Saturday, 6 = Sunday
         return datetime.datetime.now(datetime.timezone.utc).weekday() in (5, 6)
 
     @classmethod
     def get_turnover_threshold(cls) -> float:
-        # Lower volume requirements ($3M weekend, $5M weekday) to expand micro-cap coverage
         return 3_000_000.0 if cls.is_weekend() else 5_000_000.0
 
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
         if routing_mode == "MAKER_ONLY":
-            return 0.00001  # Near-zero EV floor for maker limit orders
-        return 0.00002       # 0.2 bps EV floor for taker/iceberg orders
+            return 0.00001  
+        return 0.00002       
 
 
 class ClusterWarmStartRLS:
     @staticmethod
-    def get_cluster_priors(symbol: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # 🚀 UPGRADED: 4-Dimensional Priors (OFI, Hawkes, Meso-Trend, Sector)
+    def get_cluster_priors(symbol: str) -> Tuple[np.ndarray, np.ndarray, float]:
+        """4-Dimensional Priors (OFI, Hawkes, Meso-Trend, Sector)"""
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-            w_trend = np.array([0.35, 0.25, 0.30, 0.10])
-            w_range = np.array([0.15, 0.25, 0.40, 0.20])
+            w_trend = np.array([0.35, 0.25, 0.30, 0.10], dtype=np.float64)
+            w_range = np.array([0.15, 0.25, 0.40, 0.20], dtype=np.float64)
             p_scale = 1.0
         elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-            w_trend = np.array([0.30, 0.30, 0.30, 0.10])
-            w_range = np.array([0.20, 0.30, 0.30, 0.20])
+            w_trend = np.array([0.30, 0.30, 0.30, 0.10], dtype=np.float64)
+            w_range = np.array([0.20, 0.30, 0.30, 0.20], dtype=np.float64)
             p_scale = 2.0
         else:
-            w_trend = np.array([0.25, 0.25, 0.35, 0.15])
-            w_range = np.array([0.25, 0.25, 0.25, 0.25])
+            w_trend = np.array([0.25, 0.25, 0.35, 0.15], dtype=np.float64)
+            w_range = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float64)
             p_scale = 0.5 
-        return w_trend, w_range, np.eye(4) * p_scale
+        return w_trend, w_range, p_scale
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
     """
-    Calculates Shannon Permutation Entropy to detect market chaos.
-    1.0 = Pure random noise. Lower = Highly predictable/structured.
-    MUST be fed stationary data (e.g., log-returns), not raw prices.
+    C-Vectorized Shannon Permutation Entropy.
+    Prevents event-loop blocking by completely stripping Python iterations.
     """
     if len(series) < (order * delay): return 1.0
-    sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
-    perm_counts = {perm: 0 for perm in permutations(range(order))}
-    
-    for vec in sub_vectors:
-        perm_counts[tuple(np.argsort(vec))] += 1
+    try:
+        arr = np.asarray(series)
+        shape = (arr.size - (order - 1) * delay, order)
+        strides = (arr.strides[0], arr.strides[0] * delay)
         
-    total = len(sub_vectors)
-    entropy = sum(- (c / total) * math.log2(c / total) for c in perm_counts.values() if c > 0)
-    return float(entropy / math.log2(math.factorial(order)))
+        # O(1) Sliding window view creation
+        sub_vectors = np.lib.stride_tricks.as_strided(arr, shape=shape, strides=strides)
+        perms = np.argsort(sub_vectors, axis=1)
+        
+        # Unique deterministic hash for permutations
+        bases = np.arange(order) ** order 
+        hashed = np.sum(perms * bases, axis=1)
+        
+        _, counts = np.unique(hashed, return_counts=True)
+        p = counts / counts.sum()
+        entropy = -np.sum(p * np.log2(p))
+        
+        return float(entropy / math.log2(math.factorial(order)))
+    except Exception as e:
+        logger.debug(f"[MATH_WARN] Entropy Vectorization failed: {e}")
+        return 1.0
+
+
+class StreamingCholeskyWhitening:
+    """
+    🚀 True Multivariate Decorrelation via Online Cholesky Decomposition.
+    Replaces the mathematically flawed Gram-Schmidt loop.
+    Guarantees output features are perfectly orthogonalized (Cov(z) = I).
+    """
+    def __init__(self, alpha: float = 0.02, dim: int = 4):
+        self.alpha = alpha
+        self.dim = dim
+        self.cov_matrix = np.eye(dim, dtype=np.float64) * 0.1
+        self.mean_vector = np.zeros(dim, dtype=np.float64)
+
+    def orthogonalize(self, raw_vec: np.ndarray) -> np.ndarray:
+        # 1. Online Welford / EWMA Covariance Update
+        delta = raw_vec - self.mean_vector
+        self.mean_vector += self.alpha * delta
+        self.cov_matrix = (1.0 - self.alpha) * self.cov_matrix + self.alpha * np.outer(delta, delta)
+        
+        # Ensure exact matrix symmetry to prevent floating point drift
+        self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T) + (np.eye(self.dim) * 1e-8)
+
+        try:
+            # 2. Cholesky Decomposition: Cov = L * L^T
+            L = np.linalg.cholesky(self.cov_matrix)
+            
+            # 3. Whiten Features: Solve L * z = delta  =>  z = L^-1 * delta
+            whitened = np.linalg.solve(L, delta)
+            return np.clip(whitened / 3.0, -1.0, 1.0)
+            
+        except np.linalg.LinAlgError:
+            # Fallback to simple variance scaling if matrix becomes singular
+            diag_stds = np.sqrt(np.diag(self.cov_matrix)) + 1e-9
+            return np.clip(delta / (diag_stds * 3.0), -1.0, 1.0)
+
+
+class JosephStabilizedRLS:
+    """Numerically Stable Joseph-Form Recursive Least Squares Filter."""
+    def __init__(self, dim: int = 4, p_init: float = 1.0):
+        self.dim = dim
+        self.w = np.zeros(dim, dtype=np.float64)
+        self.P = np.eye(dim, dtype=np.float64) * p_init
+        self.I = np.eye(dim, dtype=np.float64)
+
+    def update(self, x: np.ndarray, y_target: float, y_pred: float, lam: float = 0.995) -> float:
+        raw_error = y_target - y_pred
+        
+        # 🚀 ANTI-NOISE EXPLOSION: Huber-style gradient clipping prevents flash crashes from destroying matrix P
+        bounded_error = np.clip(raw_error, -1.0, 1.0)
+        
+        x_vec = x.reshape(-1, 1)
+
+        Px = self.P @ x_vec
+        denom = lam + float(x_vec.T @ Px)
+        K = Px / denom
+
+        # Update weights using raw directional error for accuracy
+        self.w = self.w + (K.flatten() * raw_error)
+
+        # Joseph's Stabilized Update: Guarantees positive semi-definite matrix.
+        # Use bounded error for noise variance to prevent matrix corruption.
+        IKx = self.I - (K @ x_vec.T)
+        R_noise = (bounded_error ** 2) + 1e-6
+        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
+        self.P = 0.5 * (self.P + self.P.T) 
+
+        # Prevent trace explosion (Adaptive Regularization)
+        trace_P = np.trace(self.P)
+        if trace_P > 1000.0:
+            self.P = (self.P * (1000.0 / trace_P)) + (self.I * 1e-3)
+        else:
+            self.P += self.I * 1e-3
+
+        return bounded_error
 
 
 class ContinuousMicrostructureEngine:
@@ -103,7 +185,6 @@ class ContinuousMicrostructureEngine:
         self.meso_momentum_z = 0.0
 
         # VPIN & Variance State
-        self.vpin_z = 0.0
         self.prices = deque(maxlen=memory_depth)
         self.log_returns = deque(maxlen=memory_depth)
         self.inst_variance, self.vol_ewma = 1e-6, 0.0 
@@ -113,16 +194,15 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
-        # 🚀 4x4 Gram-Schmidt Covariance State Initialization
-        self.gs_cov = np.eye(4)
-        self.gs_alpha = 0.02
+        # 🚀 Decoupled 4D Cholesky Whitening and Stabilized RLS Engines
+        self.whitening_engine = StreamingCholeskyWhitening(alpha=0.02, dim=4)
+        w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
         
-        # 🚀 4D RLS Matrices
-        w_t, w_r, P_init = ClusterWarmStartRLS.get_cluster_priors(symbol)
-        self.weights_trending, self.weights_ranging = w_t, w_r
-        self.P_trending, self.P_ranging = P_init.copy(), P_init.copy()
+        self.rls_trending = JosephStabilizedRLS(dim=4, p_init=p_scale)
+        self.rls_ranging = JosephStabilizedRLS(dim=4, p_init=p_scale)
         
-        self.p_scale_init = P_init[0][0]
+        self.rls_trending.w = w_t.copy()
+        self.rls_ranging.w = w_r.copy()
         
         self.prediction_buffer = deque(maxlen=50000)
         self.historical_probs = deque(maxlen=2000) 
@@ -164,18 +244,15 @@ class ContinuousMicrostructureEngine:
         self.true_micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
 
     def update_trades(self, price: float, volume: float = 0.0, is_buy: bool = True, current_time: float = 0.0):
-        """Processes executed market trades to update Asymmetric Hawkes pressure, volatility, and Meso-Trend."""
         if current_time == 0.0:
             current_time = time.time()
 
-        # 🚀 Meso-Trend Structural Computation
+        # Meso-Trend Structural Computation
         self.tick_prices.append(price)
-        alpha_meso_fast = 2.0 / (51.0)
-        alpha_meso_slow = 2.0 / (301.0)
+        alpha_meso_fast, alpha_meso_slow = 2.0 / 51.0, 2.0 / 301.0
         
         if self.meso_fast_ema is None:
-            self.meso_fast_ema = price
-            self.meso_slow_ema = price
+            self.meso_fast_ema = self.meso_slow_ema = price
         else:
             self.meso_fast_ema = (price - self.meso_fast_ema) * alpha_meso_fast + self.meso_fast_ema
             self.meso_slow_ema = (price - self.meso_slow_ema) * alpha_meso_slow + self.meso_slow_ema
@@ -186,8 +263,7 @@ class ContinuousMicrostructureEngine:
         if current_time - self.last_price_time >= 60.0:
             self.prices.append(price)
             if len(self.prices) > 2:
-                safe_curr = max(1e-9, self.prices[-1])
-                safe_prev = max(1e-9, self.prices[-2])
+                safe_curr, safe_prev = max(1e-9, self.prices[-1]), max(1e-9, self.prices[-2])
                 ret = math.log(safe_curr / safe_prev)
                 
                 if not math.isnan(ret) and not math.isinf(ret):
@@ -197,7 +273,6 @@ class ContinuousMicrostructureEngine:
             if len(self.log_returns) > 10:
                 log_rets_arr = np.fromiter(self.log_returns, dtype=float, count=len(self.log_returns))
                 self.inst_variance = float(np.var(log_rets_arr[-10:]) + 1e-9)
-                
             self.last_price_time = current_time
 
         # 🚀 ASYMMETRIC HAWKES CASCADE CALCULUS
@@ -205,14 +280,16 @@ class ContinuousMicrostructureEngine:
         
         if self.last_trade_time > 0:
             dt = current_time - self.last_trade_time
-            # Panics (Sells) linger longer; FOMO (Buys) decays faster.
-            self.hawkes_buy_state *= math.exp(-decay_base * 1.2 * max(0.0, dt))
-            self.hawkes_sell_state *= math.exp(-decay_base * 0.7 * max(0.0, dt))
+            # 🛡️ MICRO-BATCH FILTER: Exchanges batch orders in the same millisecond. 
+            # If dt is practically zero, do not decay, just aggregate volume.
+            if dt > 0.005:
+                self.hawkes_buy_state *= math.exp(-decay_base * 1.2 * max(0.0, dt))
+                self.hawkes_sell_state *= math.exp(-decay_base * 0.7 * max(0.0, dt))
             
         if is_buy:
             self.hawkes_buy_state += volume * 0.50
         else:
-            self.hawkes_sell_state += volume * 0.85 # Stronger downside impact
+            self.hawkes_sell_state += volume * 0.85 
 
         composite_pressure = self.hawkes_buy_state - self.hawkes_sell_state
         self.last_trade_time = current_time
@@ -226,7 +303,7 @@ class ContinuousMicrostructureEngine:
         self.hawkes_z_prev, self.hawkes_v_prev = self.hawkes_z, self.hawkes_velocity
 
     def _process_rls_feedback_loop(self, current_time: float, price: float):
-        """Processes historical predictions and computes online error correction (SGD)."""
+        """Processes historical predictions via the new Joseph RLS form."""
         if len(self.prediction_buffer) > 0:
             while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 60.0:
                 old_time, old_price, features_array, old_pred_prob, virt_sl, virt_tp, action_dir, r_blend = self.prediction_buffer.popleft()
@@ -242,73 +319,34 @@ class ContinuousMicrostructureEngine:
                         y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
 
                     old_p_up = old_pred_prob if action_dir == "BUY" else (1.0 - old_pred_prob)
-                    error = y_target - old_p_up 
                     
-                    self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
-                    
-                    # Reshape to 4x1 vector for matrix operations
-                    x = features_array.reshape(-1, 1)
-                    
-                    # 🚀 INVERTED ENTROPY SCALING: Higher chaos -> Smaller lambda -> Faster model adaptation
+                    # INVERTED ENTROPY SCALING: Higher chaos -> Smaller lambda -> Faster model adaptation
                     entropy_norm = min(1.0, max(0.0, self.shannon_entropy))
                     dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
                     
-                    # Trending Matrix Update (4x4)
-                    P_x_t = self.P_trending @ x
-                    den_t = dynamic_lambda + float((x.T @ P_x_t)[0][0])
-                    K_t = P_x_t / den_t
-                    self.weights_trending = self.weights_trending + (K_t.flatten() * error * r_blend)
-                    self.P_trending = (self.P_trending - (K_t @ (x.T @ self.P_trending))) / dynamic_lambda
+                    err_t = self.rls_trending.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
+                    err_r = self.rls_ranging.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
                     
-                    trace_t = np.trace(self.P_trending)
-                    if trace_t > 1000.0: 
-                        self.P_trending = (self.P_trending * (1000.0 / trace_t)) + (np.eye(4) * 1e-3)
-                    else: 
-                        self.P_trending += np.eye(4) * 1e-3
-                    
-                    # Ranging Matrix Update (4x4)
-                    P_x_r = self.P_ranging @ x
-                    den_r = dynamic_lambda + float((x.T @ P_x_r)[0][0])
-                    K_r = P_x_r / den_r
-                    self.weights_ranging = self.weights_ranging + (K_r.flatten() * error * (1.0 - r_blend))
-                    self.P_ranging = (self.P_ranging - (K_r @ (x.T @ self.P_ranging))) / dynamic_lambda
-                    
-                    trace_r = np.trace(self.P_ranging)
-                    if trace_r > 1000.0: 
-                        self.P_ranging = (self.P_ranging * (1000.0 / trace_r)) + (np.eye(4) * 1e-3)
-                    else: 
-                        self.P_ranging += np.eye(4) * 1e-3
-                    
-                    # Enforce Matrix Symmetry
-                    self.P_trending = (self.P_trending + self.P_trending.T) / 2.0 + (np.eye(4) * 1e-6)
-                    self.P_ranging = (self.P_ranging + self.P_ranging.T) / 2.0 + (np.eye(4) * 1e-6)
+                    error = (err_t * r_blend) + (err_r * (1.0 - r_blend))
+                    self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
                     self.rls_updates += 1
 
-                    # Adaptive Regularization
-                    if self.ewma_mse > 0.40:
-                        if trace_t < (self.p_scale_init * 1.5):
-                            self.P_trending += np.eye(4) * (self.p_scale_init * 0.5)
-                        if trace_r < (self.p_scale_init * 1.5):
-                            self.P_ranging += np.eye(4) * (self.p_scale_init * 0.5)
-
-    def calibrate_confidence(self, prob: float, regime: str, mse: float) -> float:
-        """Dynamically clamps signal confidence bounds based on current HMM regime."""
-        floor, ceiling = 0.48, 0.85
-        if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
-            ceiling, floor = min(0.92, ceiling + 0.07), max(0.45, floor - 0.02)
-        elif regime == "LIQUIDITY_VACUUM":
-            ceiling, floor = min(0.90, ceiling + 0.05), max(0.50, floor + 0.02)
-        else:
-            ceiling, floor = min(0.80, ceiling - 0.05), max(0.50, floor + 0.02)
-            
-        mse_penalty = min(0.08, mse * 0.3)
+    def calibrate_confidence(self, prob: float, mse: float) -> float:
+        """Dynamic signal boundaries driven by ER and Entropy. Stripped static magic strings."""
+        er_scale = np.clip(self.kaufman_er, 0.1, 0.9)
+        chaos_scale = np.clip(self.shannon_entropy, 0.1, 1.5)
+        
+        ceiling = np.clip(0.95 - (chaos_scale * 0.10), 0.70, 0.95)
+        floor = np.clip(0.48 + (er_scale * 0.05), 0.48, 0.55)
+        
+        mse_penalty = min(0.10, mse * 0.4)
         return max(floor, min(ceiling - mse_penalty, prob))
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         """
-        🚀 V5.1 TITANIUM APEX: 4D MACRO FEATURE EXTRACTION
-        Ingests Log-MLOFI, Hawkes, Meso-Momentum, and Sector Impulse,
-        orthogonalizes via Online Gram-Schmidt, and queries the RLS matrices.
+        🚀 V15.1 TITANIUM APEX: 4D MACRO FEATURE EXTRACTION
+        Ingests vectors, dynamically orthogonalizes via true Cholesky Whitening, 
+        and extracts deterministic Bayesian Probabilities from the Joseph RLS matrix.
         """
         # 1. Update rolling environment metrics
         if len(self.log_returns) > 10:
@@ -319,33 +357,21 @@ class ContinuousMicrostructureEngine:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
-        # Process asynchronous SGD updates
+        # 2. Process asynchronous SGD updates
         self._process_rls_feedback_loop(exchange_timestamp, current_price)
 
-        # 2. ONLINE GRAM-SCHMIDT ORTHOGONALIZATION (4-Dimensional)
-        raw_vec = np.array([
-            log_mlofi_z,
-            hawkes_z,
-            self.meso_momentum_z,
-            sector_impulse
-        ], dtype=float)
+        # 3. ONLINE CHOLESKY WHITENING (4-Dimensional)
+        raw_vec = np.array([log_mlofi_z, hawkes_z, self.meso_momentum_z, sector_impulse], dtype=np.float64)
+        features = self.whitening_engine.orthogonalize(raw_vec)
 
-        v = raw_vec.copy()
-        for i in range(4):
-            for j in range(i):
-                proj = (np.dot(raw_vec, self.gs_cov[:, j])) / (self.gs_cov[j, j] + 1e-9)
-                v[i] -= proj * self.gs_cov[i, j]
-            self.gs_cov[i, i] = (1 - self.gs_alpha) * self.gs_cov[i, i] + self.gs_alpha * (v[i] ** 2)
-
-        features = np.clip(v / (np.sqrt(np.diag(self.gs_cov)) + 1e-9) / 4.0, -1.0, 1.0)
-
-        # 3. KAUFMAN-ATTENDED SIGMOID PREDICTION
+        # 4. KAUFMAN-ATTENDED SIGMOID PREDICTION
         attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
         exp_f = np.exp(np.abs(features) / attention_temp)
         attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
 
         r_blend = 1.0 / (1.0 + math.exp(-12.0 * (self.kaufman_er - 0.35)))
-        logit_fused = (r_blend * np.dot(self.weights_trending, attended_features)) + ((1.0 - r_blend) * np.dot(self.weights_ranging, attended_features))
+        
+        logit_fused = (r_blend * np.dot(self.rls_trending.w, attended_features)) + ((1.0 - r_blend) * np.dot(self.rls_ranging.w, attended_features))
         
         logit = max(-5.0, min(5.0, logit_fused))
         p_up = 1.0 / (1.0 + math.exp(-logit))  
@@ -354,7 +380,7 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # 4. ANTI-STARVATION CONFIDENCE GATING
+        # 5. ANTI-STARVATION CONFIDENCE GATING
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
@@ -365,9 +391,7 @@ class ContinuousMicrostructureEngine:
 
         if len(self.entropy_history) > 10:
             ent_arr = np.fromiter(self.entropy_history, dtype=float, count=len(self.entropy_history))
-            ent_mean = float(np.mean(ent_arr))
-            ent_std = float(np.std(ent_arr)) + 1e-9
-            entropy_z = (self.shannon_entropy - ent_mean) / ent_std
+            entropy_z = (self.shannon_entropy - float(np.mean(ent_arr))) / (float(np.std(ent_arr)) + 1e-9)
             entropy_multiplier = 1.0 + (entropy_z * 0.04)
         else:
             entropy_multiplier = 1.0

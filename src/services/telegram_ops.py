@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V1.0 TITANIUM APEX: TELEGRAM MISSION CONTROL
 ------------------------------------------------
 Upgraded with persistent TCP connection pooling, dynamic HTTP 429 backoff,

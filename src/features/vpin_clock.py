@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TITANIUM APEX: INSTITUTIONAL TOXICITY MONITOR
 ---------------------------------------------------------------------
 Replaces legacy VPIN and array-based Autocorrelation with a true O(1)

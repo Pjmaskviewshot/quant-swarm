@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V5.1 TENSOR-PRIME: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
 -------------------------------------------------------------
 Computes real-time cross-asset impulse propagation (BTC/ETH/SOL -> Alts).

@@ -1,12 +1,10 @@
-﻿"""
-💎 V13.0 APEX OMEGA: EXPECTED VALUE ENGINE (PRODUCTION)
+"""
+💎 V15.1 APEX OMEGA: DETERMINISTIC STATE ROUTER (PRODUCTION)
 ------------------------------------------------------------------------
-Abolishes heuristic gates. Fuses macro flows and orderbook convexity 
-directly into the base probability model. Trades purely on unified EV.
-
-Upgraded with APEX OMEGA V13: Capital-Preservation Stochastic Control, 
-Mahalanobis Distribution Shift Detection, Portfolio Commander, 
-Profit Defender, and Stateful Execution Governance.
+Eliminates stochastic execution bugs, rate-limit starvation, and swallowed
+circuit breakers. Fully couples the Bybit Smart Order Router to the 
+Closed-Form Mathematical Exit Engine, Kinetic TP Compressor, and 
+50ms HFT Event Loop.
 """
 
 import os
@@ -19,7 +17,7 @@ import time
 import math
 import asyncio
 import logging
-import uuid
+import hashlib
 import json
 import tempfile
 import datetime
@@ -66,7 +64,23 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V13_APEX")
+logger = logging.getLogger("QUANT_CORE.V15_APEX")
+
+
+async def safe_daemon_wrapper(coro_func, engine_ref):
+    """Supervises daemons and propagates system-level EmergencyShutdown signals."""
+    while not engine_ref.fsm.is_emergency_locked():
+        try:
+            await coro_func()
+        except asyncio.CancelledError:
+            break
+        except EmergencyShutdown as e:
+            logger.critical(f"[SHUTDOWN] System Kill Switch triggered inside {coro_func.__name__}: {e}")
+            engine_ref.fsm.trigger_global_emergency_lock()
+            break
+        except Exception as e:
+            logger.error(f"[DAEMON CRASH] {coro_func.__name__} faulted: {e}", exc_info=True)
+            await asyncio.sleep(2.0)
 
 
 class DistributedQuantEngine:
@@ -77,7 +91,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V13.0 APEX OMEGA MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V15.1 APEX OMEGA MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -87,7 +101,9 @@ class DistributedQuantEngine:
         self.eval_semaphore = asyncio.Semaphore(15)
         self.execution_semaphore = asyncio.Semaphore(10)
         
-        self.wal_db_path = "quant_swarm_wal.db"
+        # 🚀 PERSISTENT CLOUD STORAGE: Survives container restarts
+        storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
+        self.wal_db_path = os.path.join(storage_path, "quant_swarm_wal.db")
         self.wal_batch_queue = []
         self.wal_lock = asyncio.Lock()  
         
@@ -147,6 +163,10 @@ class DistributedQuantEngine:
         self.exit_states: Dict[str, Any] = {}
         
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
+        
+        # 🚀 NON-BLOCKING TELEMETRY QUEUE
+        self.telegram_queue = asyncio.Queue(maxsize=50)
+        
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=self.test_mode, max_workers=12)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
         self.omni_scanner = GlobalOmniScanner(self.executor)
@@ -214,13 +234,18 @@ class DistributedQuantEngine:
         state_snapshot = {}
         async with self.portfolio_state_lock:
             for sym, engine in self.stat_engines.items():
-                state_snapshot[sym] = {
-                    "weights_trending": engine.weights_trending.copy().tolist(), "weights_ranging": engine.weights_ranging.copy().tolist(),
-                    "P_trending": engine.P_trending.copy().tolist(), "P_ranging": engine.P_ranging.copy().tolist(), "rls_updates": engine.rls_updates
-                }
+                if hasattr(engine, 'rls_trending'):
+                    state_snapshot[sym] = {
+                        "weights_trending": engine.rls_trending.w.copy().tolist(), 
+                        "weights_ranging": engine.rls_ranging.w.copy().tolist(),
+                        "P_trending": engine.rls_trending.P.copy().tolist(), 
+                        "P_ranging": engine.rls_ranging.P.copy().tolist(), 
+                        "rls_updates": engine.rls_updates
+                    }
         def _write_file():
             try:
-                target_path = "sgd_state.json"
+                storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
+                target_path = os.path.join(storage_path, "sgd_state.json")
                 fd, path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(target_path)) or ".")
                 with os.fdopen(fd, 'w') as f: json.dump(state_snapshot, f)
                 os.replace(path, target_path)
@@ -229,14 +254,16 @@ class DistributedQuantEngine:
 
     def _load_sgd_state(self):
         try:
-            if not os.path.exists("sgd_state.json"): return
-            with open("sgd_state.json", "r") as f: state = json.load(f)
+            storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
+            target_path = os.path.join(storage_path, "sgd_state.json")
+            if not os.path.exists(target_path): return
+            with open(target_path, "r") as f: state = json.load(f)
             for sym, data in state.items():
-                if sym in self.stat_engines:
-                    self.stat_engines[sym].weights_trending = np.array(data.get("weights_trending", self.stat_engines[sym].weights_trending))
-                    self.stat_engines[sym].weights_ranging = np.array(data.get("weights_ranging", self.stat_engines[sym].weights_ranging))
-                    self.stat_engines[sym].P_trending = np.array(data.get("P_trending", self.stat_engines[sym].P_trending))
-                    self.stat_engines[sym].P_ranging = np.array(data.get("P_ranging", self.stat_engines[sym].P_ranging))
+                if sym in self.stat_engines and hasattr(self.stat_engines[sym], 'rls_trending'):
+                    self.stat_engines[sym].rls_trending.w = np.array(data.get("weights_trending", self.stat_engines[sym].rls_trending.w))
+                    self.stat_engines[sym].rls_ranging.w = np.array(data.get("weights_ranging", self.stat_engines[sym].rls_ranging.w))
+                    self.stat_engines[sym].rls_trending.P = np.array(data.get("P_trending", self.stat_engines[sym].rls_trending.P))
+                    self.stat_engines[sym].rls_ranging.P = np.array(data.get("P_ranging", self.stat_engines[sym].rls_ranging.P))
             logger.info("🧠 KALMAN RLS MEMORY LOADED: Recovered Covariance Tensors from disk.")
         except Exception as e: logger.debug(f"[X-RAY] Failed to load RLS state: {e}", exc_info=True)
 
@@ -258,15 +285,35 @@ class DistributedQuantEngine:
             if s not in self.last_eval_time: self.last_eval_time[s] = 0.0 
             if s not in self.orderbook_snapshots: self.orderbook_snapshots[s] = {"best_bid": 0.0, "best_ask": 0.0}
 
-    async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
+    def _safe_telegram_dispatch_sync(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
         if not os.getenv("TELEGRAM_BOT_TOKEN") or len(os.getenv("TELEGRAM_BOT_TOKEN", "")) < 5: return
         try:
-            if is_html:
-                await self.telegram.send_html_report(message)
-            else:
-                await self.telegram.log_message(message, message_type)
-        except Exception as e:
-            logger.warning(f"[X-RAY] ⚠️ Telegram queue dispatch failed: {e}")
+            self.telegram_queue.put_nowait((message, is_html, message_type))
+        except asyncio.QueueFull:
+            logger.warning("[X-RAY] ⚠️ Telegram queue full. Dropping telemetry to preserve HFT event loop.")
+
+    async def run_telegram_worker(self):
+        """Asynchronous worker that drains the Telegram queue without blocking the hot path."""
+        logger.info("📡 TELEGRAM WORKER ONLINE: Non-blocking telemetry active.")
+        while True:
+            try:
+                message, is_html, msg_type = await self.telegram_queue.get()
+                
+                if not os.getenv("TELEGRAM_BOT_TOKEN"):
+                    self.telegram_queue.task_done()
+                    continue
+
+                if is_html:
+                    await self.telegram.send_html_report(message)
+                else:
+                    await self.telegram.log_message(message, msg_type)
+                    
+                self.telegram_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Telegram dispatch failed, dropping message to preserve event loop: {e}")
+                self.telegram_queue.task_done()
 
     async def _get_true_equity_usdt(self) -> float:
         """Pulls Total Equity (Wallet Balance + Floating PnL) to match the Bybit App."""
@@ -290,22 +337,19 @@ class DistributedQuantEngine:
 
     def _get_max_affordable_notional(self, sl_dist_pct: float = 0.025) -> float:
         try:
-            raw_balance = self.global_state_cache.get("current_vault_balance", 12.90)
-            equity = max(1.0, float(raw_balance))
+            equity = max(1.0, float(self.global_state_cache.get("current_vault_balance", self.global_state_cache.get("wallet_baseline", 10.0))))
         except Exception:
-            equity = 12.00
+            equity = 10.00
 
-        max_risk_pct = 0.015
+        max_risk_pct = self.risk_vault.max_single_position_risk_pct if hasattr(self.risk_vault, 'max_single_position_risk_pct') else 0.015
         max_risk_dollars = equity * max_risk_pct
 
         sl_pct = max(0.01, sl_dist_pct)
         allowed_notional = max_risk_dollars / sl_pct
         bybit_min_notional = 6.50
 
-        if allowed_notional < bybit_min_notional:
-            if equity < 50.0:
-                return bybit_min_notional
-            return allowed_notional
+        if allowed_notional < bybit_min_notional and equity < 50.0:
+            return bybit_min_notional
 
         return min(allowed_notional, equity * 1.5)
 
@@ -392,8 +436,11 @@ class DistributedQuantEngine:
                 
                 async with self.portfolio_state_lock: self.active_positions_map[symbol] = direction
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 5}
+                
+                sig_id = hashlib.sha256(f"RECOVERY_{symbol}_{time.time()}".encode()).hexdigest()[:16]
+                
                 self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
-                    symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, 5, "RANGING", 
+                    symbol, sig_id, direction, entry_price, atr, risk_matrix, 5, "RANGING", 
                     is_recovery=True, historical_favorable_price=historical_max_favorable
                 ))
         except Exception as e: logger.error(f"[X-RAY] Failed synchronizing exchange state: {e}", exc_info=True)
@@ -427,9 +474,9 @@ class DistributedQuantEngine:
             await asyncio.sleep(120) 
 
     async def run_fast_state_invariant_reconciliation(self):
-        logger.info("🛡️ 500ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
+        logger.info("🛡️ 2000ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
         while True:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2.0)
             try:
                 pos_response = await self.executor.safe_call(
                     self.executor.client.get_positions, category="linear", settleCoin="USDT"
@@ -466,6 +513,17 @@ class DistributedQuantEngine:
                 self.global_state_cache["last_updated"] = time.time()
                 await self._save_sgd_state()
                 
+                # 🚀 HOOKED UP: Live Risk Parity Correlation Matrix Update
+                try:
+                    price_histories = {}
+                    for sym, mem in self.screener_memory.items():
+                        if len(mem.get("prices", [])) >= 30:
+                            price_histories[sym] = list(mem["prices"])[-30:]
+                    if price_histories:
+                        self.risk_vault.update_correlation_matrix(price_histories)
+                except Exception as e:
+                    logger.debug(f"[X-RAY] Correlation matrix extraction failed: {e}")
+                
                 try: 
                     current_vault_balance = await self._get_true_equity_usdt()
                 except Exception as e: 
@@ -500,7 +558,7 @@ class DistributedQuantEngine:
                 
                 if drawdown_pct >= 0.30 and len(self.active_positions_map) > 0:
                     self.fsm.trigger_global_emergency_lock()
-                    await self._safe_telegram_dispatch(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
+                    self._safe_telegram_dispatch_sync(f"🚨 <b>EMERGENCY DRAWDOWN BREAKER TRIPPED</b>\nDrawdown: {drawdown_pct:.2%}. Engine shutting down.", is_html=True)
                     raise EmergencyShutdown(f"Drawdown limit reached: {drawdown_pct:.2%}")
                 
                 filled_blocks = min(10, int(drawdown_pct * 10))
@@ -520,8 +578,8 @@ class DistributedQuantEngine:
                     uptime_hours, live_count, shadow_count, cv, actual, dd, dd_bar, execution_stats
                 )
                 
-                report = report.replace("V1.0 APEX", "V13.0 APEX OMEGA").replace("V12.0 APEX", "V13.0 APEX OMEGA").replace("V6.0 APEX", "V13.0 APEX OMEGA")
-                self.track_task(self._safe_telegram_dispatch(report, is_html=True))
+                report = report.replace("V1.0 APEX", "V15.1 APEX OMEGA").replace("V12.0 APEX", "V15.1 APEX OMEGA").replace("V13.0 APEX OMEGA", "V15.1 APEX OMEGA").replace("V14.0 APEX OMEGA", "V15.1 APEX OMEGA").replace("V15.0 APEX OMEGA", "V15.1 APEX OMEGA")
+                self._safe_telegram_dispatch_sync(report, is_html=True)
 
     async def handle_incoming_orderbook_tick(self, depth_data: Dict[str, Any]):
         symbol = depth_data.get("s")
@@ -597,7 +655,7 @@ class DistributedQuantEngine:
             feature_engine = self.feature_engines.get(symbol)
             clock = self.vpin_clocks.get(symbol)
 
-            # 1. 🚀 SYNCHRONOUS DATA INGESTION: Always update statistical arrays inline to prevent data loss
+            # 1. SYNCHRONOUS DATA INGESTION
             self.tensor_oracle.ingest_tick(symbol, price, exchange_timestamp) 
             if edge_gate := self.edge_gates.get(symbol): edge_gate.update_trade_flow(volume, is_buy)
             if feature_engine: feature_engine.push_trade_tick([trade_data])
@@ -623,8 +681,7 @@ class DistributedQuantEngine:
             if now - last_trade_time < dynamic_cooldown_seconds:
                 return
 
-        # 2. 🚀 TASK LIMIT PROTECTOR: Prevent Event Loop Overload
-        # Synchronously throttle the creation of heavy async evaluation tasks to max 5 per second.
+        # 2. TASK LIMIT PROTECTOR
         if now - self.last_eval_time.get(symbol + "_eval_throttle", 0.0) < 0.2:
             return  
         self.last_eval_time[symbol + "_eval_throttle"] = now
@@ -639,7 +696,7 @@ class DistributedQuantEngine:
                 if not stat_engine or not clock: return
                 
                 valid_manifests = [m for m in m_snapshot if m.get("valid")]
-                vol_z = stat_engine.hawkes_z if stat_engine else 0.0
+                vol_z = getattr(stat_engine, "hawkes_z", 0.0)
                 
                 if valid_manifests: 
                     vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
@@ -657,12 +714,12 @@ class DistributedQuantEngine:
                 spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
                 vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
                 
-                if spread_cost > 0.0050: 
-                    if symbol not in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] and spread_cost <= 0.0100:
-                        pass 
-                    else:
-                        logger.warning(f"🛑 HARD VETO // {symbol} Spread too toxic ({spread_cost*10000:.1f} bps).")
-                        return
+                # 🚀 DYNAMIC SPREAD LIMITS
+                vol_sigma = math.sqrt(getattr(stat_engine, "inst_variance", 1e-6))
+                max_allowable_spread = max(0.0030, vol_sigma * 1.5)
+                if spread_cost > max_allowable_spread:
+                    logger.warning(f"🛑 DYNAMIC SPREAD VETO // {symbol} Spread ({spread_cost*10000:.1f} bps) exceeds local variance threshold.")
+                    return
                 
                 if abs(vpin_z) > 3.5: 
                     logger.warning(f"🛑 HARD VETO // {symbol} Extreme toxic flow detected (VPIN Z: {vpin_z:.2f}).")
@@ -672,15 +729,17 @@ class DistributedQuantEngine:
                     raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
                     atr = raw_atr if raw_atr > 0 else price * 0.005
                     
-                    sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
-                    sl_dist_pct = max((atr * sl_atr_mult) / (price + 1e-9), 0.020)
-                    dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else self.live_params.get("rr_ratio", 2.0)
+                    er_scale = getattr(stat_engine, "kaufman_er", 0.5) if stat_engine else 0.5
+                    dynamic_sl_mult = 1.5 + 2.0 * (1.0 - er_scale)
+                    sl_dist_pct = max((atr * dynamic_sl_mult) / (price + 1e-9), 0.015)
+                    
+                    dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else (1.5 + (2.0 * er_scale**2))
                     tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
                     
                     sgd_state = stat_engine.extract_statistical_state(
                         current_price=price, 
                         log_mlofi_z=stat_engine.ofi_fast_z, 
-                        hawkes_z=stat_engine.hawkes_z, 
+                        hawkes_z=getattr(stat_engine, "hawkes_z", 0.0), 
                         sector_impulse=self.tensor_oracle.compute_lead_lag_signal(symbol), 
                         sl_dist_pct=sl_dist_pct, 
                         tp_dist_pct=tp_dist_pct, 
@@ -734,7 +793,7 @@ class DistributedQuantEngine:
                     prob_success = min(0.95, prob_success * edge_weight)
 
                     routing_mode = structural_verdict.get("routing", "STANDARD")
-                    prob_success = stat_engine.calibrate_confidence(prob_success, regime, stat_engine.ewma_mse)
+                    prob_success = stat_engine.calibrate_confidence(prob_success, stat_engine.ewma_mse)
 
                     async with self.portfolio_state_lock: 
                         dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
@@ -775,9 +834,7 @@ class DistributedQuantEngine:
                         compressed_sl_pct = target_risk_dollars / (actual_notional + 1e-9)
                         compressed_sl_pct = max(0.010, compressed_sl_pct)  
                         
-                        sl_atr_mult = max(2.0, self.live_params.get("sl_atr_mult", 2.5))
-                        atr = (compressed_sl_pct * price) / sl_atr_mult
-                        
+                        atr = (compressed_sl_pct * price) / dynamic_sl_mult
                         tp_dist_pct = compressed_sl_pct * dynamic_rr_ratio
                         net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * compressed_sl_pct) - (spread_cost * 0.5)
 
@@ -787,13 +844,17 @@ class DistributedQuantEngine:
                     else:
                         net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
 
+                    safe_leverage = math.floor(1.0 / (sl_dist_pct * 1.5))
+                    vault_max_lev = self.risk_vault.max_leverage if hasattr(self.risk_vault, 'max_leverage') else 5.0
+                    target_leverage = float(max(1.0, min(vault_max_lev, safe_leverage)))
+
                     try:
                         payload = {
                             "symbol": symbol, "action": action, "price": price, 
                             "prob_success": prob_success, "dna_stats": dna_stats, 
                             "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, 
                             "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
-                            "target_leverage": 10.0,
+                            "target_leverage": target_leverage,
                             "actual_notional": actual_notional,
                             "payload_features": {
                                 "symbol": symbol, 
@@ -804,7 +865,7 @@ class DistributedQuantEngine:
                                 "liquidity_density_ratio": vol_mult, 
                                 "bid_ask_spread": spread_cost, 
                                 "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), 
-                                "ai_verdict": "V13.0_APEX_OMEGA"
+                                "ai_verdict": "V15.1_APEX_OMEGA"
                             },
                             "elasticity": self.elasticity_engines.get(symbol),
                             "dynamic_rr": dynamic_rr_ratio 
@@ -824,7 +885,9 @@ class DistributedQuantEngine:
     async def log_to_wal_async(self, action_type: str, args: list):
         async with self.wal_lock:
             if len(self.wal_batch_queue) > 10000: self.wal_batch_queue.pop(0)
-            self.wal_batch_queue.append((str(uuid.uuid4()), action_type, json.dumps(args), time.time()))
+            
+            det_id = hashlib.sha256(f"{action_type}_{time.time()}_{len(self.wal_batch_queue)}".encode()).hexdigest()[:16]
+            self.wal_batch_queue.append((det_id, action_type, json.dumps(args), time.time()))
 
     def log_to_wal_sync(self, action_type: str, args: list):
         self.track_task(self.log_to_wal_async(action_type, args))
@@ -981,7 +1044,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V13.0 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
+            logger.info("🌌 V15.1 HYPER-SWARM REFRESH: Probing High-Velocity Matrix...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -996,7 +1059,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V13.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V15.1 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}", exc_info=True)
 
@@ -1050,7 +1113,7 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"State reconciliation failed: {e}", exc_info=True)
 
     # ==============================================================================
-    # 🚀 V13.0 EVENT-DRIVEN LIFECYCLE DAEMON
+    # 🚀 V15.1 EVENT-DRIVEN LIFECYCLE DAEMON (50ms HFT Polling)
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1083,7 +1146,6 @@ class DistributedQuantEngine:
     async def _state_settle_trade(self, ctx: dict):
         symbol, actual_entry, target_leverage = ctx["symbol"], ctx["actual_entry"], ctx["target_leverage"]
         
-        # 🚀 MANDATORY INVARIANT: Verify position is truly 0.0 on exchange before settling
         for _ in range(6):
             pos_res = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
             pos_list = pos_res.get("result", {}).get("list", [])
@@ -1145,7 +1207,7 @@ class DistributedQuantEngine:
         
         duration_mins = (time.time() - ctx["daemon_start_time"]) / 60.0
         self.log_to_wal_sync("settlement", [ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"]])
-        self.track_task(self._safe_telegram_dispatch(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=True))
+        self._safe_telegram_dispatch_sync(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=True)
 
         async with self.portfolio_state_lock: 
             self.active_positions_map.pop(symbol, None)
@@ -1170,7 +1232,6 @@ class DistributedQuantEngine:
                 "active_positions_count": len(self.active_positions_map)
             }
 
-            # 1. 🛡️ WAIT FOR PHYSICAL ENTRY CONFIRMATION FIRST
             loop_state = await self._state_verify_entry(ctx)
             if loop_state == "ABORT":
                 self.risk_vault.update_position_ledger(symbol, 0.0)
@@ -1181,7 +1242,6 @@ class DistributedQuantEngine:
             async with self.portfolio_state_lock:
                 self.active_positions_map[symbol] = direction
 
-            # 2. 🚀 INITIALIZE PERSISTENT APEX OMEGA STATE WITH VERIFIED DATA
             if symbol not in self.exit_states:
                 stat = self.stat_engines.get(symbol)
                 ob = self.orderbook_snapshots.get(symbol, {})
@@ -1192,7 +1252,7 @@ class DistributedQuantEngine:
                 entry_thesis = ThesisVector(features=np.array([
                     getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0,
                     getattr(stat, "hawkes_z", 0.0) if stat else 0.0,
-                    0.0,
+                    getattr(stat, "meso_momentum_z", 0.0) if stat else 0.0,
                     depth_ratio,
                     getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
                 ]))
@@ -1202,15 +1262,15 @@ class DistributedQuantEngine:
                     entry_time=time.time(),
                     entry_price=ctx["actual_entry"],
                     exit_side="Sell" if direction == "BUY" else "Buy",
-                    entry_balance=ctx["current_vault_balance"], # Used for Profit Lock
-                    base_qty=ctx["actual_qty_filled"],          # Crucial for exchange sync
+                    entry_balance=ctx["current_vault_balance"], 
+                    actual_qty=ctx["actual_qty_filled"],
+                    base_qty=ctx["actual_qty_filled"],          
                     entry_thesis=entry_thesis,
-                    thesis_inv_cov=np.eye(5)  # Identity matrix until empirical calibration
+                    thesis_inv_cov=np.eye(5)  
                 )
 
             state = self.exit_states[symbol]
 
-            # LOCK PROTECTED CONTEXT INJECTION
             async with self.portfolio_state_lock:
                 self.active_contexts[symbol] = ctx
 
@@ -1222,7 +1282,6 @@ class DistributedQuantEngine:
                 return
 
             try:
-                # 3. SETUP DISASTER PROTECTIVE STOP (Deep Failsafe)
                 actual_sl_distance = max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.5), ctx["actual_entry"] * 0.025)
                 fail_sl = ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance
                 fail_tp = ctx["actual_entry"] + (actual_sl_distance * dynamic_rr_ratio * 3.0) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * dynamic_rr_ratio * 3.0)
@@ -1231,9 +1290,18 @@ class DistributedQuantEngine:
                 loop_state = "ACTIVE_MONITORING"
 
                 while loop_state == "ACTIVE_MONITORING":
-                    await asyncio.sleep(1.0)
+                    # 🚀 UPGRADED: 50ms (20Hz) HFT Polling Interval for Sub-second Flash Crash Defense
+                    await asyncio.sleep(0.05)
 
                     current_price = ctx["latest_tick_price"]
+
+                    # CPU Optimization: Bypass heavy math if price hasn't ticked and we evaluated < 1s ago
+                    time_since_eval = time.time() - ctx.get("last_eval_time", 0)
+                    if current_price == ctx.get("last_eval_price") and time_since_eval < 1.0:
+                        continue
+                        
+                    ctx["last_eval_price"] = current_price
+                    ctx["last_eval_time"] = time.time()
 
                     ob = self.orderbook_snapshots.get(symbol, {})
                     best_bid = ob.get("best_bid", current_price)
@@ -1245,39 +1313,39 @@ class DistributedQuantEngine:
 
                     ctx["now"] = time.time()
 
-                    # Live Portfolio Injection for the Commander
                     ctx["current_vault_balance"] = self.global_state_cache.get("current_vault_balance", ctx["current_vault_balance"])
                     ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
                     ctx["active_positions_count"] = len(self.active_positions_map)
                     ctx["last_ob"] = ob
 
-                    # Update High Watermark (MFE)
                     if ctx["safe_c_price"] != current_price:
                         if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0):
                             ctx["max_favorable_price"] = ctx["safe_c_price"]
                         elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0):
                             ctx["max_favorable_price"] = ctx["safe_c_price"]
 
-                    # =================================================================
-                    # ⚔️ APEX OMEGA V13 MASTER EVALUATION
-                    # =================================================================
                     decision = IntelligentExitEngine.evaluate(ctx, state)
 
-                    # 🛡️ DYNAMIC PROFIT LOCK RECONCILIATION
+                    amend_required = False
                     if decision.exchange_ts_price and decision.exchange_ts_price > 0:
                         if ctx["is_buy"]:
                             if fail_sl < decision.exchange_ts_price < current_price:
                                 fail_sl = decision.exchange_ts_price
-                                await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+                                amend_required = True
                         else:
                             if fail_sl > decision.exchange_ts_price > current_price:
                                 fail_sl = decision.exchange_ts_price
-                                await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+                                amend_required = True
 
-                    # Execution routing
+                    if hasattr(decision, 'dynamic_tp_price') and decision.dynamic_tp_price > 0:
+                        fail_tp = decision.dynamic_tp_price
+                        amend_required = True
+
+                    if amend_required:
+                        await self._amend_trailing_stop(symbol, fail_sl, fail_tp)
+
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
-                    # 🛑 TRUE EXIT CONDITION
                     if state.q_retained <= 0.01 and state.execution_state == "OBSERVE":
                         ctx["exit_trigger_price"] = current_price
                         break
@@ -1350,22 +1418,6 @@ class DistributedQuantEngine:
         if hasattr(self.executor, "_api_thread_pool"): self.executor._api_thread_pool.shutdown(wait=True, cancel_futures=False)
         logger.critical("✅ MATRIX DISCONNECTED.")
 
-    async def _safe_daemon_run(self, coro_func):
-        consecutive_crashes = 0
-        while True:
-            try: 
-                await coro_func()
-                consecutive_crashes = 0  
-            except asyncio.CancelledError: break
-            except EmergencyShutdown as e:
-                logger.critical(f"[X-RAY] Emergency Shutdown Initiated: {e}")
-                raise  
-            except Exception as e:
-                consecutive_crashes += 1
-                sleep_time = min(300, 5 * (2 ** (consecutive_crashes - 1)))
-                logger.error(f"Daemon {coro_func.__name__} crashed. Restarting in {sleep_time}s: {e}", exc_info=True)
-                await asyncio.sleep(sleep_time)
-
     async def _preseed_screener_history(self):
         logger.info("⏳ Pre-seeding screener memory for correlation matrix...")
         for sym in self.asset_basket + self.shadow_basket:
@@ -1380,7 +1432,7 @@ class DistributedQuantEngine:
                         c_close = float(k[4])
                         if sym not in self.screener_memory:
                             self.screener_memory[sym] = {"prices": deque(maxlen=1440), "highs": deque(maxlen=150), "lows": deque(maxlen=150), "volumes": deque(maxlen=1440), "last_update_time": 0.0}
-                        self.screener_memory[sym]["prices"].append(c_close)
+                        self.screener_memory[symbol]["prices"].append(c_close)
             except Exception as e:
                 logger.debug(f"[X-RAY] Pre-seed failed for {sym}: {e}")
         logger.info("✅ Correlation matrix pre-seeded successfully.")
@@ -1414,6 +1466,7 @@ class DistributedQuantEngine:
         await self.run_universe_refresher()
         
         daemons = [
+            self.run_telegram_worker,
             self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, self.cleanup_stale_locks, 
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
@@ -1422,7 +1475,16 @@ class DistributedQuantEngine:
             self.run_crowded_trade_oracle,
             self.run_fast_state_invariant_reconciliation
         ]
-        await asyncio.gather(*[asyncio.create_task(self._safe_daemon_run(d)) for d in daemons], return_exceptions=True)
+        
+        tasks = [asyncio.create_task(safe_daemon_wrapper(d, self)) for d in daemons]
+        
+        while not self.fsm.is_emergency_locked():
+            await asyncio.sleep(0.5)
+            
+        logger.critical("🚨 EMERGENCY BREAKER ENGAGED. Cancelling all streaming background tasks...")
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 async def main():
     engine = DistributedQuantEngine()

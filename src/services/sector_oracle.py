@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TITANIUM APEX: SECTOR EIGENVECTOR ORACLE
 -------------------------------------------------
 Tracks cross-asset sector impulse propagation using Dynamic SVD Decomposition.

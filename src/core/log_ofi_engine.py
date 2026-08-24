@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TITANIUM APEX: STATIONARIZED LOG-MLOFI ENGINE
 -------------------------------------------------------
 Calculates Spoof-Resistant Logarithmic Order Flow Imbalance across depth levels.

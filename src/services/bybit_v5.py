@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 APEX NEURAL: PARALLELIZED UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,

@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V5.1 APEX NEURAL: MICROSTRUCTURE EDGE GATE
 -------------------------------------------------------------------------
 Enforces rigorous Adverse Selection Vetoes. 

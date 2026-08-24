@@ -1,4 +1,4 @@
-﻿"""
+"""
 âš¡ V1.0 TITANIUM APEX: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
 --------------------------------------------------------------
 Serves as the O(1) in-memory cache for macro regime analysis, Sector Eigenvector 

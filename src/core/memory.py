@@ -1,9 +1,9 @@
-﻿"""
-💎 V13.0 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
+"""
+💎 V14.1 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
 ----------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
-- Strict Sub-second Cloud Fallbacks & Graceful RAM Defaults
+- Strict Fail-Closed Cloud Resilience (Zero blind trading)
 - Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
 - Pure NumPy vectorization for shadow OHLC forensics
 - Upgraded Bayesian DNA Matrix utilizing K-Nearest Neighbors (KNN) 
@@ -377,13 +377,13 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V1.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
+        🚀 V14.1 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
         Upgraded to cluster based on Log-MLOFI, Volume Multiplier, and Micro-Spread.
         Matches current multi-dimensional conditions against historical outcomes 
         to determine execution viability.
         
         CRITICAL FIX: Fully decoupled fallback. If the cloud database drops, this
-        instantly returns a neutral RAM default instead of raising an exception.
+        instantly returns a STRICT FAIL-CLOSED veto instead of risking capital blindly.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
@@ -496,15 +496,15 @@ class MemoryBank:
             return result_payload
 
         except Exception as e:
-            logger.error(f"[X-RAY] Latent DNA matching failed (Falling back to RAM defaults): {e}")
+            logger.error(f"[X-RAY] 🛑 Latent DNA matching failed. CLOUD DISCONNECT. Falling back to FAIL-CLOSED: {e}")
             return {
-                "bayesian_edge": 0.50, 
-                "is_armed": True, # Default to safe pass-through if DB goes down, allowing entry matrix to filter
+                "bayesian_edge": 0.0, 
+                "is_armed": False, # 🔒 STRICT FAIL-CLOSED: Do not trade without DB edge verification
                 "matched_samples": 0, 
-                "cluster_win_rate": 0.50,
-                "win_rate": 0.50,
+                "cluster_win_rate": 0.0,
+                "win_rate": 0.0,
                 "shadow_sharpe": 0.0,
-                "promotion_event": "CLOUD_FAULT_FALLBACK"
+                "promotion_event": "CLOUD_FAULT_VETO"
             }
 
     def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:

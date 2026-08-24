@@ -1,4 +1,4 @@
-﻿"""
+"""
 🏛️ V5.1 APEX HYPERION: DYNAMIC EV AUCTION & ROUTING ENGINE
 -----------------------------------------------------------------
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent

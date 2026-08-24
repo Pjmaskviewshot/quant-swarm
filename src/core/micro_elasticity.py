@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V5.1 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
 -------------------------------------------------------------------------
 Computes EWMA-smoothed Orderbook Elasticity (λ_OB), Micro-Price Variance,

@@ -1,8 +1,8 @@
-﻿"""
-ðŸ’Ž V1.0 TITANIUM APEX: MISSION CONTROL UPTIME SERVER
+"""
+💎 V1.0 TITANIUM APEX: MISSION CONTROL UPTIME SERVER
 -----------------------------------------------------
 Dedicated daemonic web server for platform health checks (Render, Railway, etc).
-Upgraded to V1.0 specifications with exact uptime tracking, UTC timestamps, 
+Upgraded to V1.0 specifications with exact uptime tracking, UTC timestamps,
 and zero-blocking threading.
 """
 
@@ -23,19 +23,19 @@ START_TIME = time.time()
 @app.route('/')
 def home():
     """Default landing page for external pings."""
-    return "ðŸŸ¢ PJMASK EMPIRE | V1.0 TITANIUM APEX Quant Swarm is Online and Hunting!"
+    return "🟢 PJMASK EMPIRE | V1.0 TITANIUM APEX Quant Swarm is Online and Hunting!"
 
 @app.route('/health')
 def health_check():
     """
-    ðŸš€ V1.0 UPGRADE: Dedicated JSON Health Endpoint
-    Allows external uptime monitors (e.g., UptimeRobot, Render Health Checks) 
+    🚀 V1.0 UPGRADE: Dedicated JSON Health Endpoint
+    Allows external uptime monitors (e.g., UptimeRobot, Render Health Checks)
     to programmatically verify the engine's heartbeat.
     Now includes exact uptime tracking and UTC sync.
     """
     uptime_seconds = time.time() - START_TIME
     uptime_hours = uptime_seconds / 3600.0
-    
+
     return jsonify({
         "status": "online",
         "version": "V1.0 TITANIUM APEX",
@@ -54,13 +54,13 @@ def run():
 
 def keep_alive():
     """
-    ðŸš€ V1.0 UPGRADE: Daemonic Background Thread
+    🚀 V1.0 UPGRADE: Daemonic Background Thread
     Spins up a background thread to keep the server awake.
-    daemon=True ensures this web server does not block graceful system shutdowns 
+    daemon=True ensures this web server does not block graceful system shutdowns
     during emergency flatten sequences.
     """
     t = Thread(target=run, name="TitaniumHealthServer", daemon=True)
     t.start()
-    
+
     logger = logging.getLogger("QUANT_CORE.HEALTH")
-    logger.info("ðŸŸ¢ TITANIUM UPTIME SERVER ONLINE: Listening for external health checks.")
+    logger.info("🟢 TITANIUM UPTIME SERVER ONLINE: Listening for external health checks.")

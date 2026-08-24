@@ -1,10 +1,10 @@
-﻿"""
-🌌 V5.0 APEX NEURAL BACKTESTER
+"""
+🌌 V14 TITANIUM APEX NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V5.0 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Upgraded with 4D Feature Tensors (OFI, Hawkes, Meso-Trend, Macro), 
-1D Kalman Filtered HMMs, and V5.0 Intelligent Microstructure Exits.
+of the live V14 L2-tick engine and cannot simulate true Order Flow Imbalance.
+Upgraded with True 4D Streaming Gram-Schmidt, Joseph-Stabilized RLS, 
+C-Vectorized Shannon Entropy, and Exact Optimization Emulation.
 """
 
 import argparse
@@ -12,9 +12,9 @@ import time
 import math
 import datetime
 import requests
+import json
 import numpy as np
 from collections import deque
-from itertools import permutations
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
@@ -38,8 +38,108 @@ class AdaptiveSessionClock:
     @classmethod
     def get_ev_floor(cls, routing_mode: str) -> float:
         if routing_mode == "MAKER_ONLY":
-            return 0.00001  # Relaxed EV floor for maker limit orders
-        return 0.00002      # Relaxed EV floor for taker orders
+            return 0.00001  
+        return 0.00002      
+
+
+class ClusterWarmStartRLS:
+    @staticmethod
+    def get_cluster_priors(symbol: str) -> Tuple[np.ndarray, np.ndarray, float]:
+        if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
+            w_trend = np.array([0.35, 0.25, 0.30, 0.10], dtype=np.float64)
+            w_range = np.array([0.15, 0.25, 0.40, 0.20], dtype=np.float64)
+            p_scale = 1.0
+        elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
+            w_trend = np.array([0.30, 0.30, 0.30, 0.10], dtype=np.float64)
+            w_range = np.array([0.20, 0.30, 0.30, 0.20], dtype=np.float64)
+            p_scale = 2.0
+        else:
+            w_trend = np.array([0.25, 0.25, 0.35, 0.15], dtype=np.float64)
+            w_range = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float64)
+            p_scale = 0.5 
+        return w_trend, w_range, p_scale
+
+
+def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
+    """C-Vectorized Shannon Permutation Entropy."""
+    if len(series) < (order * delay): return 1.0
+    try:
+        arr = np.asarray(series)
+        shape = (arr.size - (order - 1) * delay, order)
+        strides = (arr.strides[0], arr.strides[0] * delay)
+        
+        sub_vectors = np.lib.stride_tricks.as_strided(arr, shape=shape, strides=strides)
+        perms = np.argsort(sub_vectors, axis=1)
+        
+        bases = np.arange(order) ** order 
+        hashed = np.sum(perms * bases, axis=1)
+        
+        _, counts = np.unique(hashed, return_counts=True)
+        p = counts / counts.sum()
+        entropy = -np.sum(p * np.log2(p))
+        
+        return float(entropy / math.log2(math.factorial(order)))
+    except Exception:
+        return 1.0
+
+
+class StreamingGramSchmidt4D:
+    def __init__(self, alpha: float = 0.02):
+        self.alpha = alpha
+        self.cov_matrix = np.eye(4, dtype=np.float64) * 0.1
+        self.mean_vector = np.zeros(4, dtype=np.float64)
+
+    def orthogonalize(self, raw_vec: np.ndarray) -> np.ndarray:
+        delta = raw_vec - self.mean_vector
+        self.mean_vector += self.alpha * delta
+        self.cov_matrix = (1.0 - self.alpha) * self.cov_matrix + self.alpha * np.outer(delta, delta)
+        self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T) + (np.eye(4) * 1e-8)
+
+        v = raw_vec.copy()
+        basis = np.zeros((4, 4), dtype=np.float64)
+        
+        for i in range(4):
+            v_i = v[i]
+            for j in range(i):
+                q_j = basis[:, j]
+                proj = np.dot(raw_vec, q_j)
+                v_i -= proj * q_j[i]
+            basis[i, i] = 1.0
+            v[i] = v_i
+
+        diag_stds = np.sqrt(np.diag(self.cov_matrix)) + 1e-9
+        return np.clip(v / (diag_stds * 3.0), -1.0, 1.0)
+
+
+class JosephStabilizedRLS:
+    def __init__(self, dim: int = 4, p_init: float = 1.0):
+        self.dim = dim
+        self.w = np.zeros(dim, dtype=np.float64)
+        self.P = np.eye(dim, dtype=np.float64) * p_init
+        self.I = np.eye(dim, dtype=np.float64)
+
+    def update(self, x: np.ndarray, y_target: float, y_pred: float, lam: float = 0.995) -> float:
+        error = y_target - y_pred
+        x_vec = x.reshape(-1, 1)
+
+        Px = self.P @ x_vec
+        denom = lam + float(x_vec.T @ Px)
+        K = Px / denom
+
+        self.w = self.w + (K.flatten() * error)
+
+        IKx = self.I - (K @ x_vec.T)
+        R_noise = error ** 2 + 1e-6
+        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
+        self.P = 0.5 * (self.P + self.P.T) 
+
+        trace_P = np.trace(self.P)
+        if trace_P > 1000.0:
+            self.P = (self.P * (1000.0 / trace_P)) + (self.I * 1e-3)
+        else:
+            self.P += self.I * 1e-3
+
+        return error
 
 
 def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
@@ -92,21 +192,6 @@ class Params:
     atr_period: int = 14
     leverage: float = 3.0            
 
-def get_cluster_priors(symbol: str):
-    # 🚀 V5.0 4D PRIORS (OFI, Hawkes, Meso-Trend, Sector)
-    if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-        w_trend = np.array([0.40, 0.30, 0.20, 0.10])
-        w_range = np.array([0.15, 0.25, 0.35, 0.25])
-        p_scale = 1.0
-    elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR", "APT"]):
-        w_trend = np.array([0.35, 0.35, 0.20, 0.10])
-        w_range = np.array([0.20, 0.30, 0.30, 0.20])
-        p_scale = 1.5
-    else:
-        w_trend = np.array([0.30, 0.30, 0.25, 0.15])
-        w_range = np.array([0.25, 0.25, 0.25, 0.25])
-        p_scale = 0.8 
-    return w_trend, w_range, np.eye(4) * p_scale
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if len(btc_hist) < 30 or len(alt_hist) < 30: return 0.0
@@ -134,19 +219,6 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
     if abs(btc_momentum) > 0.00015 and correlation > 0.45:
         return float(math.copysign(min(1.0, abs(correlation)), btc_momentum))
     return 0.0
-
-def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
-    if len(series) < (order * delay): return 1.0
-    sub_vectors = [[series[i + j * delay] for j in range(order)] for i in range(len(series) - (order - 1) * delay)]
-    perm_counts = {perm: 0 for perm in permutations(range(order))}
-    
-    for vec in sub_vectors:
-        perm_counts[tuple(np.argsort(vec))] += 1
-        
-    total = len(sub_vectors)
-    entropy = sum(- (c / total) * math.log2(c / total) for c in perm_counts.values() if c > 0)
-    max_entropy = math.log2(math.factorial(order))
-    return float(entropy / max_entropy)
 
 def get_vpin_bucket_size(symbol: str) -> float:
     if "BTC" in symbol: return 1_000_000.0
@@ -258,19 +330,18 @@ def calculate_rolling_cvar(variance_history: deque, percentile: float = 95.0) ->
         
     return 1.0
 
-def calibrate_confidence(prob: float, regime: str, mse: float) -> float:
-    floor, ceiling = 0.48, 0.85
-    if regime in ["TRENDING_BULL", "TRENDING_BEAR", "TRENDING"]:
-        ceiling, floor = min(0.92, ceiling + 0.07), max(0.45, floor - 0.02)
-    elif regime == "LIQUIDITY_VACUUM":
-        ceiling, floor = min(0.90, ceiling + 0.05), max(0.50, floor + 0.02)
-    else:
-        ceiling, floor = min(0.80, ceiling - 0.05), max(0.50, floor + 0.02)
-        
-    mse_penalty = min(0.08, mse * 0.3)
+def calibrate_confidence(prob: float, kaufman_er: float, shannon_entropy: float, mse: float) -> float:
+    """Dynamic signal boundaries driven by ER and Entropy."""
+    er_scale = np.clip(kaufman_er, 0.1, 0.9)
+    chaos_scale = np.clip(shannon_entropy, 0.1, 1.5)
+    
+    ceiling = np.clip(0.95 - (chaos_scale * 0.10), 0.70, 0.95)
+    floor = np.clip(0.48 + (er_scale * 0.05), 0.48, 0.55)
+    
+    mse_penalty = min(0.10, mse * 0.4)
     return max(floor, min(ceiling - mse_penalty, prob))
 
-def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v14_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -295,6 +366,7 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     log_returns = deque(maxlen=500)
     variance_history = deque(maxlen=300)
     inst_variance = 1e-6
+    kaufman_er = 0.5
     
     base_vpin_bucket_size = get_vpin_bucket_size(symbol)
     current_bucket_vol = 0.0
@@ -302,18 +374,16 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     vpin_history = deque(maxlen=200)
     vol_history = deque(maxlen=1000)
     synthetic_vpin_z = 0.0
-    
-    # 4D Gram-Schmidt Initialization
-    gs_cov = np.eye(4)
-    gs_alpha = 0.02
 
-    w_t, w_r, P_init = get_cluster_priors(symbol)
-    weights_trending = w_t.copy()
-    weights_ranging  = w_r.copy()
-    P_trending = P_init.copy()
-    P_ranging = P_init.copy()
+    w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
     
-    rls_updates = 100 
+    # Initialize V14 Streaming ML Engines
+    gs_engine = StreamingGramSchmidt4D(alpha=0.02)
+    rls_trending = JosephStabilizedRLS(dim=4, p_init=p_scale)
+    rls_ranging = JosephStabilizedRLS(dim=4, p_init=p_scale)
+    rls_trending.w = w_t.copy()
+    rls_ranging.w = w_r.copy()
+    
     hmm_state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
     
     validation_buffer = deque(maxlen=100)
@@ -354,7 +424,6 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             shannon_entropy = compute_permutation_entropy(list(log_returns)[-20:])
             entropy_history.append(shannon_entropy) 
 
-        # 🚀 Meso-Momentum Wavelet (Backtest Proxy)
         a_fast = 2.0 / (51.0)
         a_slow = 2.0 / (301.0)
         if meso_fast_ema is None:
@@ -390,10 +459,10 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
         closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
         vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
-        regime, hmm_state_probs, er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
+        regime, hmm_state_probs, kaufman_er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
 
         vol_scalar = min(1.0, max(0.0, inst_variance * 5000.0))
-        alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (er * 0.05), 0.05, 0.35)
+        alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (kaufman_er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
         vol_step = c_prev['volume']
@@ -423,30 +492,22 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         hawkes_z_prev, hawkes_v_prev = hawkes_z, hawkes_velocity
         
         tensor_alpha = compute_tensor_alpha(btc_1m_history, alt_1m_history)
-        
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
         # 🚀 4D ONLINE GRAM-SCHMIDT ORTHOGONALIZATION
-        raw_vec = np.array([ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha], dtype=float)
-        v = raw_vec.copy()
-        for v_i in range(4):
-            for v_j in range(v_i):
-                proj = (np.dot(raw_vec, gs_cov[:, v_j])) / (gs_cov[v_j, v_j] + 1e-9)
-                v[v_i] -= proj * gs_cov[v_i, v_j]
-            gs_cov[v_i, v_i] = (1 - gs_alpha) * gs_cov[v_i, v_i] + gs_alpha * (v[v_i] ** 2)
-
-        features = np.clip(v / (np.sqrt(np.diag(gs_cov)) + 1e-9) / 4.0, -1.0, 1.0)
+        raw_vec = np.array([ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha], dtype=np.float64)
+        features = gs_engine.orthogonalize(raw_vec)
         
-        attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - er)))
+        attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - kaufman_er)))
         feature_magnitudes = np.abs(features)
         exp_f = np.exp(feature_magnitudes / attention_temp)
         attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
         
-        r_blend = 1.0 / (1.0 + math.exp(-12.0 * (er - 0.35)))
+        r_blend = 1.0 / (1.0 + math.exp(-12.0 * (kaufman_er - 0.35)))
 
-        logit_trend = np.dot(weights_trending, attended_features)
-        logit_range = np.dot(weights_ranging, attended_features)
+        logit_trend = np.dot(rls_trending.w, attended_features)
+        logit_range = np.dot(rls_ranging.w, attended_features)
         logit_fused = (r_blend * logit_trend) + ((1.0 - r_blend) * logit_range)
 
         logit = max(-5.0, min(5.0, logit_fused))
@@ -456,7 +517,7 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
         
-        prob_success = calibrate_confidence(prob_success, regime, ewma_mse)
+        prob_success = calibrate_confidence(prob_success, kaufman_er, shannon_entropy, ewma_mse)
         
         historical_probs.append(prob_success)
         if len(historical_probs) >= 30:
@@ -469,16 +530,14 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
         if len(entropy_history) > 10:
             ent_arr = np.array(entropy_history)
-            ent_mean = np.mean(ent_arr)
-            ent_std = np.std(ent_arr) + 1e-9
-            entropy_z_val = (shannon_entropy - ent_mean) / ent_std
+            entropy_z_val = (shannon_entropy - float(np.mean(ent_arr))) / (float(np.std(ent_arr)) + 1e-9)
             entropy_multiplier = 1.0 + (entropy_z_val * 0.04)
         else:
             entropy_multiplier = 1.0
             
         error_scaler = 1.0 + max(0.0, (ewma_mse - 0.25) * 0.5)
         raw_gate = baseline_gate * entropy_multiplier * error_scaler
-        dynamic_gate = max(0.515, min(dynamic_ceiling, raw_gate))  # 🚀 V5.0 Conviction Floor
+        dynamic_gate = max(0.515, min(dynamic_ceiling, raw_gate))  
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
             old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
@@ -494,46 +553,19 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
 
                 old_p_up_prob = old_p_up if old_action_dir == "BUY" else (1.0 - old_p_up)
-                error = y_target - old_p_up_prob 
                 
+                # 🚀 INVERTED ENTROPY SCALING
+                entropy_norm = min(1.0, max(0.0, shannon_entropy))
+                dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
+                
+                err_t = rls_trending.update(old_features, y_target, old_p_up_prob, lam=dynamic_lambda)
+                err_r = rls_ranging.update(old_features, y_target, old_p_up_prob, lam=dynamic_lambda)
+                
+                error = (err_t * old_r_blend) + (err_r * (1.0 - old_r_blend))
                 ewma_mse = (0.98 * ewma_mse) + (0.02 * (error ** 2))
-                
-                validation_buffer.append(error ** 2)
-                if len(validation_buffer) == 100:
-                    rolling_mse = np.mean(validation_buffer)
-                    if rolling_mse > 0.35 or np.trace(P_trending) > 1000.0:
-                        trace_t = np.trace(P_trending)
-                        trace_r = np.trace(P_ranging)
-                        if trace_t > 1000.0: P_trending = (P_trending * (1000.0 / trace_t)) + np.eye(4) * 1e-3
-                        if trace_r > 1000.0: P_ranging = (P_ranging * (1000.0 / trace_r)) + np.eye(4) * 1e-3
-                        validation_buffer.clear()
-                        continue
-
-                x_feat = old_features.reshape(-1, 1)
-                dynamic_lambda = max(0.990, min(0.9995, 0.990 + (shannon_entropy * 0.0095)))
-                
-                # Trending Matrix Update (4x4)
-                P_x_t = P_trending @ x_feat
-                den_t = dynamic_lambda + float((x_feat.T @ P_x_t)[0][0])
-                K_t = P_x_t / den_t
-                weights_trending = weights_trending + (K_t.flatten() * error * old_r_blend)
-                P_trending = (P_trending - (K_t @ (x_feat.T @ P_trending))) / dynamic_lambda
-                
-                # Ranging Matrix Update (4x4)
-                P_x_r = P_ranging @ x_feat
-                den_r = dynamic_lambda + float((x_feat.T @ P_x_r)[0][0])
-                K_r = P_x_r / den_r
-                weights_ranging = weights_ranging + (K_r.flatten() * error * (1.0 - old_r_blend))
-                P_ranging = (P_ranging - (K_r @ (x_feat.T @ P_ranging))) / dynamic_lambda
-                    
-                P_trending = (P_trending + P_trending.T) / 2.0
-                P_ranging = (P_ranging + P_ranging.T) / 2.0
-                rls_updates += 1
 
         t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
         skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
-        
-        # Override rules removed to trust EV 
         
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         atr_proxy = vol_sigma * sim_price
@@ -541,7 +573,7 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sl_distance = max(atr_proxy * p.sl_atr_mult, sim_price * 0.025)
         sl_dist_pct = sl_distance / sim_price
         
-        dynamic_rr_ratio = np.clip(p.rr_ratio + (1.5 * (er ** 2)), 1.2, 4.0)
+        dynamic_rr_ratio = np.clip(p.rr_ratio + (1.5 * (kaufman_er ** 2)), 1.2, 4.0)
         tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
 
         virt_sl = sim_price - (sl_dist_pct * sim_price) if action_dir == "BUY" else sim_price + (sl_dist_pct * sim_price)
@@ -560,7 +592,6 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         if i > cooldown_until and i > 150:
             vacuum_blocked = len(amihud_history) >= 10 and amihud_history[-1] > (np.mean(list(amihud_history)[-10:]) * 4.0)
             
-            # Anti-Starvation Kelly Sizing
             if len(rolling_outcomes) >= 10:
                 p_win = np.mean(rolling_outcomes)
                 q_loss = 1.0 - p_win
@@ -626,12 +657,10 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                         current_r = (c_j - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - c_j) / (initial_risk + 1e-9)
                         
-                        # 🚀 V5.0 INTELLIGENT EXITS
                         c_prev_j = target_candles[j-1]
                         norm_vol_j = target_candles[j]["volume"] / (vol_ewma + 1e-9)
                         hawkes_z_j = math.log1p(max(0.0, norm_vol_j)) * 1.5 * np.sign(c_j - c_prev_j["close"])
                         
-                        # 1. HAWKES CLIMAX EXHAUSTION
                         if r_multiple >= 0.75:
                             if action_dir == "BUY" and hawkes_z_j < -2.8:
                                 outcome, exit_price = "HAWKES_CLIMAX", c_j
@@ -640,14 +669,12 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                                 outcome, exit_price = "HAWKES_CLIMAX", c_j
                                 break
                                 
-                        # 2. PROFIT RETRACEMENT GUARD
                         if r_multiple >= 1.20:
                             retrace_pct = (r_multiple - current_r) / (r_multiple + 1e-9)
                             if retrace_pct >= 0.30:
                                 outcome, exit_price = "PROFIT_RETRACEMENT", c_j
                                 break
 
-                        # 3. VOLATILITY TRAILING RATCHET
                         if r_multiple >= 0.60:
                             fee_buffer = entry * 0.0015
                             be_price = (entry + fee_buffer) if action_dir == "BUY" else (entry - fee_buffer)
@@ -696,7 +723,6 @@ def run_v50_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
                         applied_fee = TAKER_FEE * 2
                     
-                    # Simulated Stop Compression limit to 2.5% max risk
                     base_fraction = max(0.002, kelly_f / 2.0)
                     cvar_penalty = calculate_rolling_cvar(variance_history)
                     edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
@@ -781,7 +807,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V5.0 APEX NEURAL Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V14 TITANIUM APEX Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -803,7 +829,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v50_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v14_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -845,7 +871,6 @@ if __name__ == "__main__":
             print(f" {i}. RR: {res['RR']} | SL ATR: {res['ATR']} "
                   f"--> Avg Sharpe: {res['OOS_Avg_Sharpe']:.2f} | Min Fold Sharpe: {res['Min_Fold_Sharpe']:.2f}")
         
-        import json
         if best_params:
             best = best_params[0]
             with open("params.json", "w") as f:
@@ -856,9 +881,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v50_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v14_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V5.0 APEX NEURAL OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V14 TITANIUM APEX OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

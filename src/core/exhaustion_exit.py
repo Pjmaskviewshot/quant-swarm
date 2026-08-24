@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TITANIUM APEX: MICRO-PRICE ABSORPTION & EXHAUSTION GUARD
 -----------------------------------------------------------------
 Tracks continuous micro-price acceleration vs. aggressor trade flow divergence.

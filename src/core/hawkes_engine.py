@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TITANIUM APEX: SELF-CALIBRATING HAWKES PROCESS
 -------------------------------------------------------
 Models the arrival intensity of algorithmic trade cascades.

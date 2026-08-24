@@ -1,12 +1,12 @@
-﻿"""
-💎 V6.0 ULTRA-APEX NEURAL: ADAPTIVE FEATURE ENGINE
+"""
+💎 V14.1 TITANIUM APEX: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Dynamically Calibrated Hidden Markov Model (HMM) for Regime Detection.
 Upgraded with 1D Kalman Filtering on the price stream to eradicate 
 micro-whipsaws and stabilize order routing decisions. 
 
-CRITICAL FIX: Fully initialized price buffers, self.prices deque, 
-and safe fallback in get_book_depth_metrics to prevent AttributeError crashes.
+CRITICAL UPGRADE: Strict Statistical Significance Enforcer implemented
+to eradicate HMM hallucinations on insufficient sample sizes.
 """
 
 import math
@@ -111,15 +111,18 @@ class AdaptiveFeatureEngine:
 
     def detect_market_regime(self) -> str:
         """Dynamically Calibrated HMM without look-ahead bias."""
+        
+        # 🚀 STRICT STATISTICAL SIGNIFICANCE ENFORCER
+        # If we do not have sufficient high-resolution history, we cannot
+        # statistically define a regime. Default to conservative MEAN_REVERTING.
+        if len(self.prices) < 300 and len(self.timeframes["5"]) < 60:
+            return "MEAN_REVERTING"
+
+        # Favor 5m candles for regime stability, fallback to 1m if necessary
         if len(self.timeframes["5"]) >= 100:
             candles = list(self.timeframes["5"])[-100:]
         elif len(self.timeframes["1"]) >= 100:
             candles = list(self.timeframes["1"])[-100:]
-        elif len(self.timeframes["5"]) >= 20: 
-            candles = list(self.timeframes["5"])[-20:]
-        elif len(self.prices) >= 20:
-            raw_p = np.array(list(self.prices)[-60:])
-            return "TRENDING" if abs(raw_p[-1] - raw_p[0]) > np.std(raw_p) * 2 else "RANGING"
         else:
             return "MEAN_REVERTING" 
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸŒŒ V1.0 TITANIUM APEX: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,

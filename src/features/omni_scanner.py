@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸŒŒ V1.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.

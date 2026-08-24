@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ’Ž V1.0 TENSOR-PRIME: OMNI-KINETIC EXHAUSTION ORACLE
 -------------------------------------------------------------------------
 A self-calibrating HFT reversal predictor.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 💎 V5.1 QUANTUM APEX: MULTI-FACTOR ALPHA FUSION MATRIX
 ------------------------------------------------------------------------
 Fuses Cross-Asset Macro Order Flows (BTC/ETH/Alt OFI), Orderbook Convexity, 

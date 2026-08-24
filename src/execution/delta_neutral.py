@@ -1,4 +1,4 @@
-﻿"""
+"""
 ðŸ¦ V1.0 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
 -----------------------------------------------------
 Executes Cash-and-Carry (Basis) Arbitrage and Funding Rate Harvesting.
