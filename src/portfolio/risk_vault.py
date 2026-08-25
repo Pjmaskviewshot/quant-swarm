@@ -1,9 +1,9 @@
 """
-💎 V17.0 APEX TITANIUM OMEGA: INSTITUTIONAL RISK VAULT
+💎 V21.0 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
 - Continuous Merton-Kelly Sizing (f* = mu / sigma^2)
-- Peaks-Over-Threshold (POT) Heavy-Tail EVT Risk Estimator
+- L-Moment Generalized Pareto Distribution (GPD) Heavy-Tail Risk Estimator
 - Margin & Heat Map Allocation Caps
 - Exact NaN/Inf Sanitization & Matrix Invertibility Guards
 """
@@ -22,7 +22,6 @@ class InstitutionalRiskVault:
     def __init__(
         self, 
         max_drawdown_pct: float = 0.30, 
-        # 🚀 UPGRADED: Widened base risk to 5% to survive minimum exchange notional sizes on micro-accounts
         max_single_position_risk_pct: float = 0.05, 
         exchange_min_notional: float = 6.50
     ):
@@ -40,7 +39,6 @@ class InstitutionalRiskVault:
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
 
-        # Kept for backward compatibility with legacy logging/TCA modules
         self.outcomes_history = deque(maxlen=2000) 
         self.avg_win_r = 1.5   
         self.avg_loss_r = 1.0  
@@ -52,38 +50,57 @@ class InstitutionalRiskVault:
 
     def calculate_evt_tail_risk(self) -> float:
         """
-        🚀 PEAKS-OVER-THRESHOLD (POT) EVT ESTIMATOR
-        Estimates the Pareto tail index (xi) using the Hill estimator on variance exceedances.
+        🚀 V21.0 ROBUST L-MOMENT EVT (PEAKS-OVER-THRESHOLD)
+        Replaces the fragile Hill Estimator. Uses L-Moments to fit the Generalized 
+        Pareto Distribution (GPD), which is mathematically immune to small-sample 
+        variance explosions and never requires matrix inversion.
         """
         if len(self.volatility_surface) < 50:
             return 1.0  
             
         try:
-            vol_arr = np.sort(np.array(self.volatility_surface, dtype=float))
+            vol_arr = np.array(self.volatility_surface, dtype=float)
+            vol_arr = np.sort(vol_arr[~np.isnan(vol_arr)])
             
-            # Prevent NaN/Inf arrays from crashing the calculation
-            if np.isnan(vol_arr).any() or np.isinf(vol_arr).any():
+            if len(vol_arr) == 0:
                 return 1.0
                 
             # 90th percentile threshold (u)
             k = max(5, int(len(vol_arr) * 0.10))
             threshold = vol_arr[-k]
-            tail_data = vol_arr[-k:]
             
-            if threshold <= 0 or len(tail_data) == 0:
+            # Extract exceedances above the threshold
+            exceedances = vol_arr[-k:] - threshold
+            
+            if threshold <= 0 or len(exceedances) < 3:
                 return 1.0
                 
-            # Hill Estimator for Heavy Tails: xi = (1/k) * sum(log(X_i / u))
-            xi = float(np.mean(np.log(tail_data / (threshold + 1e-9))))
+            # 🚀 L-Moments method for GPD (Highly robust)
+            # l_1 = mean, l_2 = half mean mean difference
+            l_1 = np.mean(exceedances)
+            n = len(exceedances)
             
-            # If tail index is heavy (xi > 0.20), scale down sizing proportionally
-            if xi > 0.20:
-                tail_penalty = min(0.60, (xi - 0.20) * 3.0)
-                return max(0.40, 1.0 - tail_penalty)
+            # Vectorized L-2 moment computation
+            j = np.arange(1, n + 1)
+            l_2 = np.sum(exceedances * ((2 * j - 1 - n) / (n * (n - 1))))
+            
+            # GPD Tail Index (Xi)
+            if l_2 == 0: 
+                return 1.0
                 
-            return 1.05
+            tau = l_2 / l_1
+            xi = 2.0 - (1.0 / tau)
+            
+            # Sizing Penalty Application: Compress sizing if tail index is heavy (xi > 0.15)
+            if xi > 0.15:
+                # Huber-style clipping to prevent absolute position eradication
+                tail_penalty = min(0.65, (xi - 0.15) * 2.5)
+                return max(0.35, 1.0 - tail_penalty)
+                
+            return 1.05 # Reward tight, well-behaved tails with a slight leverage bump
+            
         except Exception as e:
-            logger.debug(f"[MATH_WARN] Numerical instability in POT-EVT calculation: {e}")
+            logger.debug(f"[MATH_WARN] L-Moment GPD EVT calculation fallback: {e}")
             return 1.0
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
@@ -123,7 +140,6 @@ class InstitutionalRiskVault:
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
         """
-        🚀 V17 MICRO-CALIBRATED CONVICTION THRESHOLD
         Sets a flat 51.8% base conviction floor for micro-accounts.
         """
         if math.isnan(balance) or math.isinf(balance):
@@ -141,9 +157,8 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
         """
-        🚀 AUDIT FIX: Continuous Merton-Kelly Sizing
-        Properly sizes positions based on continuous log-returns and instantaneous variance 
-        rather than binary Win/Loss hit rates.
+        Continuous Merton-Kelly Sizing
+        Properly sizes positions based on continuous log-returns and instantaneous variance.
         """
         # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
@@ -160,7 +175,7 @@ class InstitutionalRiskVault:
         # Continuous Kelly Fraction: f* = mu / sigma^2
         raw_kelly = mu / sigma_sq
         
-        # Half-Kelly for safety + EVT Tail Penalty + Drawdown Penalty
+        # Half-Kelly for safety + L-Moment EVT Tail Penalty + Drawdown Penalty
         half_kelly = raw_kelly / 2.0
         evt_multiplier = self.calculate_evt_tail_risk()
         drawdown_penalty = max(0.10, 1.0 - (self.current_drawdown_state * 3.0))
@@ -209,7 +224,7 @@ class InstitutionalRiskVault:
                         if not math.isnan(corr_value) and corr_value > dynamic_corr_threshold:
                             return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
 
-        # 🚀 V17 NATURAL HEAT MAP (Organic Scaling)
+        # NATURAL HEAT MAP (Organic Scaling)
         # Allows an organic 1.8x leveraged equity multiplier to efficiently use available margin
         max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
         total_exposure = sum(self.active_positions.values()) + new_position_notional

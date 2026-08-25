@@ -1,9 +1,9 @@
 """
-💎 V14.1 TENSOR-PRIME: OPTIMISTIC DECOUPLED MEMORY LEDGER
-----------------------------------------------------------
+💎 V21.0 APEX QUANTUM PRIME: HOLOGRAPHIC DECOUPLED MEMORY LEDGER
+----------------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution (Zero trade-loop freezes)
-- Strict Fail-Closed Cloud Resilience (Zero blind trading)
+- Holographic Memory Fallback (Zero-Downtime NumPy Local Tensor Matrix)
 - Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
 - Pure NumPy vectorization for shadow OHLC forensics
 - Upgraded Bayesian DNA Matrix utilizing K-Nearest Neighbors (KNN) 
@@ -26,6 +26,7 @@ class MemoryBank:
     """
     Serves as the ultimate forensic ledger and probabilistic memory engine.
     Handles high-throughput shadow execution resolution and Latent DNA clustering.
+    Upgraded with V21.0 Holographic RAM Fallback for immortal uptime.
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -44,6 +45,33 @@ class MemoryBank:
 
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self.cache_ttl_seconds: float = 120.0 
+        
+        # 🚀 V21.0 HOLOGRAPHIC MEMORY MATRIX
+        # Stores recent verified cloud data in localized CPU cache to survive cloud disconnects
+        self.holo_capacity = 25000
+        self.holo_features = np.zeros((self.holo_capacity, 3), dtype=np.float32) # [vol_mult, z_obi, spread]
+        self.holo_outcomes = np.zeros(self.holo_capacity, dtype=np.float32)
+        self.holo_pointer = 0
+        self.holo_warmed_up = False
+
+    def _ingest_hologram_data(self, rows: List[Dict[str, Any]]):
+        """Organically feeds the local Hologram with verified cloud resolutions."""
+        if not rows: return
+        
+        for r in rows:
+            idx = self.holo_pointer % self.holo_capacity
+            self.holo_features[idx, 0] = min(float(r.get("vol_mult", 1.0)), 10.0)
+            self.holo_features[idx, 1] = float(r.get("z_obi", 0.0))
+            
+            h_price = float(r.get("price_at_prediction", 1.0))
+            h_spread_raw = float(r.get("spread", 0.0))
+            self.holo_features[idx, 2] = (h_spread_raw / h_price) * 1000 if h_price > 0 else 0.001
+            
+            self.holo_outcomes[idx] = 1.0 if r.get("is_correct") is True else 0.0
+            self.holo_pointer += 1
+            
+        if self.holo_pointer >= 100:
+            self.holo_warmed_up = True
 
     def _safe_execute(self, query_builder, max_retries: int = 2):
         """
@@ -377,20 +405,15 @@ class MemoryBank:
 
     def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
-        🚀 V14.1 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS)
-        Upgraded to cluster based on Log-MLOFI, Volume Multiplier, and Micro-Spread.
-        Matches current multi-dimensional conditions against historical outcomes 
-        to determine execution viability.
-        
-        CRITICAL FIX: Fully decoupled fallback. If the cloud database drops, this
-        instantly returns a STRICT FAIL-CLOSED veto instead of risking capital blindly.
+        🚀 V21.0 BAYESIAN DNA MATRIX (K-NEAREST NEIGHBORS) + HOLOGRAPHIC SURVIVAL
+        Matches current multi-dimensional conditions against historical outcomes.
+        If the cloud database drops, automatically fails over to local CPU Hologram.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
         target_symbol = current_dna.get("symbol", "UNKNOWN")
         
-        # Coarse buckets for caching efficiency
         vol_bucket = round(c_vol * 2.0) / 2.0  
         mlofi_bucket = round(c_log_mlofi * 2.0) / 2.0  
         spread_bucket = round(c_spread, 2)
@@ -416,6 +439,9 @@ class MemoryBank:
             response = self._safe_execute(query)
             historical_data = response.data if response else []
             
+            # 🚀 V21.0 Organically feed the RAM Hologram for Offline Survival
+            self._ingest_hologram_data(historical_data)
+            
             promo_eval = self.evaluate_shadow_promotion(target_symbol)
             
             if len(historical_data) < k_neighbors:
@@ -433,7 +459,6 @@ class MemoryBank:
                 }
 
             h_vols = [min(float(row.get("vol_mult", 1.0)), 10.0) for row in historical_data]
-            # z_obi represents the logged Log-MLOFI in the database
             h_mlofis = [float(row.get("z_obi", 0.0)) for row in historical_data]
             
             h_spreads = []
@@ -496,15 +521,50 @@ class MemoryBank:
             return result_payload
 
         except Exception as e:
-            logger.error(f"[X-RAY] 🛑 Latent DNA matching failed. CLOUD DISCONNECT. Falling back to FAIL-CLOSED: {e}")
+            # 🚀 V21.0: HOLOGRAPHIC RAM FALLBACK INTERCEPT
+            logger.error(f"[X-RAY] 🛑 CLOUD DISCONNECT: Supabase fault ({e}). Engaging HOLOGRAPHIC FALLBACK.")
+            
+            if not self.holo_warmed_up:
+                logger.error("[X-RAY] 💀 Hologram not warmed up yet. Executing STRICT FAIL-CLOSED.")
+                return {
+                    "bayesian_edge": 0.0, "is_armed": False, "matched_samples": 0, 
+                    "cluster_win_rate": 0.0, "win_rate": 0.0, "shadow_sharpe": 0.0,
+                    "promotion_event": "CLOUD_FAULT_VETO"
+                }
+                
+            active_size = min(self.holo_pointer, self.holo_capacity)
+            f_view = self.holo_features[:active_size]
+            
+            std_vol = np.std(f_view[:, 0]) + 1e-9
+            std_mlofi = np.std(f_view[:, 1]) + 1e-9
+            std_spread = np.std(f_view[:, 2]) + 1e-9
+            
+            norm_vol = (c_vol - f_view[:, 0]) / std_vol
+            norm_mlofi = (c_log_mlofi - f_view[:, 1]) / std_mlofi
+            norm_spread = (c_spread - f_view[:, 2]) / std_spread
+            
+            distances_sq = (1.5 * norm_vol)**2 + (2.0 * norm_mlofi)**2 + (1.0 * norm_spread)**2
+            
+            k_actual = min(k_neighbors, active_size)
+            nearest_idx = np.argpartition(distances_sq, k_actual - 1)[:k_actual]
+            
+            k_outcomes = self.holo_outcomes[nearest_idx]
+            wins = np.sum(k_outcomes)
+            total = k_actual
+            
+            bayesian_edge = (wins + 2.0) / (total + 4.0)
+            is_armed = bayesian_edge >= 0.55
+            
+            logger.info(f"[X-RAY] 🌌 HOLOGRAPHIC SURVIVAL // Local Edge Computed: {bayesian_edge:.2%}")
+            
             return {
-                "bayesian_edge": 0.0, 
-                "is_armed": False, # 🔒 STRICT FAIL-CLOSED: Do not trade without DB edge verification
-                "matched_samples": 0, 
-                "cluster_win_rate": 0.0,
-                "win_rate": 0.0,
+                "bayesian_edge": round(bayesian_edge, 4),
+                "is_armed": is_armed,
+                "matched_samples": total,
+                "cluster_win_rate": round(wins/total, 4) if total > 0 else 0.5,
+                "win_rate": round(wins/total, 4) if total > 0 else 0.5,
                 "shadow_sharpe": 0.0,
-                "promotion_event": "CLOUD_FAULT_VETO"
+                "promotion_event": "HOLOGRAPHIC_SURVIVAL"
             }
 
     def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:

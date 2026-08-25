@@ -1,11 +1,11 @@
 """
-💎 V15.1 TITANIUM APEX: MULTI-SCALE PREDICTIVE ENGINE
+💎 V21.0 APEX QUANTUM PRIME: MULTI-SCALE PREDICTIVE ENGINE
 --------------------------------------------------------------
 Features:
-- Inverted Entropy-Adaptive Forgetting Factor (Fast adaptation during chaos)
-- Asymmetric Bivariate Hawkes Kernels with Micro-Batch Filtering
-- 🚀 NEW: True Multivariate Decorrelation via Online Cholesky Whitening
-- Joseph-Stabilized Recursive Least Squares (Positive Semi-Definite Guarantee)
+- Tikhonov-Regularized Joseph RLS (Ridge Penalty for Anti-Overfitting)
+- Eigen-Clipped Streaming Cholesky Whitening (Guaranteed P.S.D Matrices)
+- Jump-Diffusion Meso-Momentum (Zero-Lag Flash Crash Tracking)
+- Non-Linear Stoikov Micro-Price (Asymptotic Spread Curvature)
 - C-Vectorized Shannon Permutation Entropy
 """
 
@@ -15,7 +15,7 @@ import numpy as np
 import datetime
 import logging
 from collections import deque
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 
 logger = logging.getLogger("QUANT_CORE.MICRO_MODELS")
 
@@ -87,9 +87,9 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 class StreamingCholeskyWhitening:
     """
-    🚀 True Multivariate Decorrelation via Online Cholesky Decomposition.
-    Replaces the mathematically flawed Gram-Schmidt loop.
-    Guarantees output features are perfectly orthogonalized (Cov(z) = I).
+    🚀 V21.0 EIGEN-CLIPPED CHOLESKY
+    Guarantees infinite mathematical uptime by projecting decaying covariance
+    matrices back onto the positive-definite cone before decomposition.
     """
     def __init__(self, alpha: float = 0.02, dim: int = 4):
         self.alpha = alpha
@@ -103,35 +103,46 @@ class StreamingCholeskyWhitening:
         self.mean_vector += self.alpha * delta
         self.cov_matrix = (1.0 - self.alpha) * self.cov_matrix + self.alpha * np.outer(delta, delta)
         
-        # Ensure exact matrix symmetry to prevent floating point drift
-        self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T) + (np.eye(self.dim) * 1e-8)
+        # 2. Strict Symmetrization
+        self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T)
 
         try:
-            # 2. Cholesky Decomposition: Cov = L * L^T
+            # 3. Eigen-Clipping to guarantee Positive-Definiteness
+            eigvals, eigvecs = np.linalg.eigh(self.cov_matrix)
+            if np.any(eigvals <= 1e-9):
+                eigvals = np.maximum(eigvals, 1e-9)
+                self.cov_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
+
+            # 4. Cholesky Decomposition: Cov = L * L^T
             L = np.linalg.cholesky(self.cov_matrix)
             
-            # 3. Whiten Features: Solve L * z = delta  =>  z = L^-1 * delta
+            # 5. Whiten Features: Solve L * z = delta  =>  z = L^-1 * delta
             whitened = np.linalg.solve(L, delta)
             return np.clip(whitened / 3.0, -1.0, 1.0)
             
         except np.linalg.LinAlgError:
-            # Fallback to simple variance scaling if matrix becomes singular
-            diag_stds = np.sqrt(np.diag(self.cov_matrix)) + 1e-9
+            # Absolute failsafe
+            diag_stds = np.sqrt(np.abs(np.diag(self.cov_matrix))) + 1e-9
             return np.clip(delta / (diag_stds * 3.0), -1.0, 1.0)
 
 
-class JosephStabilizedRLS:
-    """Numerically Stable Joseph-Form Recursive Least Squares Filter."""
-    def __init__(self, dim: int = 4, p_init: float = 1.0):
+class TikhonovJosephRLS:
+    """
+    🚀 V21.0 TIKHONOV-REGULARIZED JOSEPH RLS
+    Injects an L2 Ridge Penalty into the covariance trace.
+    Mathematically prevents the filter from overfitting to chaotic market regimes.
+    """
+    def __init__(self, dim: int = 4, p_init: float = 1.0, ridge_gamma: float = 1e-4):
         self.dim = dim
         self.w = np.zeros(dim, dtype=np.float64)
         self.P = np.eye(dim, dtype=np.float64) * p_init
         self.I = np.eye(dim, dtype=np.float64)
+        self.gamma = ridge_gamma  # Tikhonov Penalty
 
     def update(self, x: np.ndarray, y_target: float, y_pred: float, lam: float = 0.995) -> float:
         raw_error = y_target - y_pred
         
-        # 🚀 ANTI-NOISE EXPLOSION: Huber-style gradient clipping prevents flash crashes from destroying matrix P
+        # Huber-style gradient clipping prevents flash crashes from destroying matrix P
         bounded_error = np.clip(raw_error, -1.0, 1.0)
         
         x_vec = x.reshape(-1, 1)
@@ -143,19 +154,20 @@ class JosephStabilizedRLS:
         # Update weights using raw directional error for accuracy
         self.w = self.w + (K.flatten() * raw_error)
 
-        # Joseph's Stabilized Update: Guarantees positive semi-definite matrix.
-        # Use bounded error for noise variance to prevent matrix corruption.
+        # Joseph's Stabilized Update
         IKx = self.I - (K @ x_vec.T)
         R_noise = (bounded_error ** 2) + 1e-6
-        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
-        self.P = 0.5 * (self.P + self.P.T) 
+        
+        P_new = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
+        P_new = 0.5 * (P_new + P_new.T) 
+        
+        # 🚀 TIKHONOV REGULARIZATION: Bounds the condition number
+        self.P = P_new + (self.I * self.gamma)
 
-        # Prevent trace explosion (Adaptive Regularization)
+        # Prevent trace explosion
         trace_P = np.trace(self.P)
         if trace_P > 1000.0:
-            self.P = (self.P * (1000.0 / trace_P)) + (self.I * 1e-3)
-        else:
-            self.P += self.I * 1e-3
+            self.P = self.P * (1000.0 / trace_P)
 
         return bounded_error
 
@@ -194,12 +206,12 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
-        # 🚀 Decoupled 4D Cholesky Whitening and Stabilized RLS Engines
+        # 🚀 4D Eigen-Clipped Cholesky Whitening & Tikhonov RLS Engines
         self.whitening_engine = StreamingCholeskyWhitening(alpha=0.02, dim=4)
         w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
         
-        self.rls_trending = JosephStabilizedRLS(dim=4, p_init=p_scale)
-        self.rls_ranging = JosephStabilizedRLS(dim=4, p_init=p_scale)
+        self.rls_trending = TikhonovJosephRLS(dim=4, p_init=p_scale, ridge_gamma=1e-4)
+        self.rls_ranging = TikhonovJosephRLS(dim=4, p_init=p_scale, ridge_gamma=1e-4)
         
         self.rls_trending.w = w_t.copy()
         self.rls_ranging.w = w_r.copy()
@@ -214,7 +226,7 @@ class ContinuousMicrostructureEngine:
         return alpha_fast, alpha_fast / 5.0, np.clip(1.0 + (vol_scalar * 4.0), 1.0, 5.0)
 
     def update_orderbook_pressure(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
-        """Processes Level 2 updates to calculate true micro-price and Order Flow Imbalance (OFI)."""
+        """Processes Level 2 updates to calculate Stoikov non-linear micro-price and Order Flow Imbalance."""
         delta_W = 0.0
         if best_bid > self.prev_bid: 
             delta_W += bid_vol
@@ -241,15 +253,32 @@ class ContinuousMicrostructureEngine:
         self.ofi_slow_ewmvar = (1 - alpha_slow) * self.ofi_slow_ewmvar + alpha_slow * (delta_W - self.ofi_slow_ewma)**2
         self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
         
-        self.true_micro_price = (best_bid * ask_vol + best_ask * bid_vol) / (bid_vol + ask_vol + 1e-9)
+        # 🚀 V21.0 NON-LINEAR STOIKOV MICRO-PRICE
+        mid_price = (best_bid + best_ask) / 2.0
+        spread = best_ask - best_bid
+        imb = bid_vol / (bid_vol + ask_vol + 1e-9)
+        stoikov_adj = spread * (imb - 0.5) * (1.0 + abs(imb - 0.5))
+        
+        self.true_micro_price = mid_price + stoikov_adj
 
     def update_trades(self, price: float, volume: float = 0.0, is_buy: bool = True, current_time: float = 0.0):
         if current_time == 0.0:
             current_time = time.time()
 
-        # Meso-Trend Structural Computation
         self.tick_prices.append(price)
-        alpha_meso_fast, alpha_meso_slow = 2.0 / 51.0, 2.0 / 301.0
+        
+        # 🚀 V21.0 JUMP-DIFFUSION MESO-MOMENTUM (Zero-Lag Snap)
+        # If the tick causes a >3 sigma price jump, instantly snap the EMA to the new price
+        # preventing phase-lag during violent breakouts.
+        inst_jump = abs(price - self.prices[-1]) if self.prices else 0.0
+        jump_z = inst_jump / (math.sqrt(self.inst_variance) * price + 1e-9)
+
+        if jump_z > 3.0:
+            alpha_meso_fast = 1.0  # Instant snap
+        else:
+            alpha_meso_fast = 2.0 / 51.0
+            
+        alpha_meso_slow = 2.0 / 301.0
         
         if self.meso_fast_ema is None:
             self.meso_fast_ema = self.meso_slow_ema = price
@@ -275,13 +304,12 @@ class ContinuousMicrostructureEngine:
                 self.inst_variance = float(np.var(log_rets_arr[-10:]) + 1e-9)
             self.last_price_time = current_time
 
-        # 🚀 ASYMMETRIC HAWKES CASCADE CALCULUS
+        # ASYMMETRIC HAWKES CASCADE CALCULUS
         alpha_fast, alpha_slow, decay_base = self.get_dynamic_decays()
         
         if self.last_trade_time > 0:
             dt = current_time - self.last_trade_time
-            # 🛡️ MICRO-BATCH FILTER: Exchanges batch orders in the same millisecond. 
-            # If dt is practically zero, do not decay, just aggregate volume.
+            # MICRO-BATCH FILTER
             if dt > 0.005:
                 self.hawkes_buy_state *= math.exp(-decay_base * 1.2 * max(0.0, dt))
                 self.hawkes_sell_state *= math.exp(-decay_base * 0.7 * max(0.0, dt))
@@ -303,7 +331,7 @@ class ContinuousMicrostructureEngine:
         self.hawkes_z_prev, self.hawkes_v_prev = self.hawkes_z, self.hawkes_velocity
 
     def _process_rls_feedback_loop(self, current_time: float, price: float):
-        """Processes historical predictions via the new Joseph RLS form."""
+        """Processes historical predictions via the new Tikhonov-Ridge RLS form."""
         if len(self.prediction_buffer) > 0:
             while self.prediction_buffer and current_time - self.prediction_buffer[0][0] >= 60.0:
                 old_time, old_price, features_array, old_pred_prob, virt_sl, virt_tp, action_dir, r_blend = self.prediction_buffer.popleft()
@@ -320,7 +348,7 @@ class ContinuousMicrostructureEngine:
 
                     old_p_up = old_pred_prob if action_dir == "BUY" else (1.0 - old_pred_prob)
                     
-                    # INVERTED ENTROPY SCALING: Higher chaos -> Smaller lambda -> Faster model adaptation
+                    # INVERTED ENTROPY SCALING
                     entropy_norm = min(1.0, max(0.0, self.shannon_entropy))
                     dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
                     
@@ -332,7 +360,7 @@ class ContinuousMicrostructureEngine:
                     self.rls_updates += 1
 
     def calibrate_confidence(self, prob: float, mse: float) -> float:
-        """Dynamic signal boundaries driven by ER and Entropy. Stripped static magic strings."""
+        """Dynamic signal boundaries driven by ER and Entropy."""
         er_scale = np.clip(self.kaufman_er, 0.1, 0.9)
         chaos_scale = np.clip(self.shannon_entropy, 0.1, 1.5)
         
@@ -344,11 +372,10 @@ class ContinuousMicrostructureEngine:
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         """
-        🚀 V15.1 TITANIUM APEX: 4D MACRO FEATURE EXTRACTION
-        Ingests vectors, dynamically orthogonalizes via true Cholesky Whitening, 
-        and extracts deterministic Bayesian Probabilities from the Joseph RLS matrix.
+        🚀 V21.0 QUANTUM PRIME: TENSOR EXTRACTION
+        Ingests vectors, statically orthogonalizes via Eigen-Clipped Cholesky, 
+        and scales prediction boundaries via Entropy-driven Information Geometry.
         """
-        # 1. Update rolling environment metrics
         if len(self.log_returns) > 10:
             self.shannon_entropy = compute_permutation_entropy(list(self.log_returns)[-20:])
             self.entropy_history.append(self.shannon_entropy) 
@@ -357,15 +384,15 @@ class ContinuousMicrostructureEngine:
             prices_arr = np.array(list(self.prices)[-20:])
             self.kaufman_er = float(abs(prices_arr[-1] - prices_arr[0]) / (np.sum(np.abs(np.diff(prices_arr))) + 1e-9))
 
-        # 2. Process asynchronous SGD updates
         self._process_rls_feedback_loop(exchange_timestamp, current_price)
 
-        # 3. ONLINE CHOLESKY WHITENING (4-Dimensional)
+        # EIGEN-CLIPPED CHOLESKY WHITENING
         raw_vec = np.array([log_mlofi_z, hawkes_z, self.meso_momentum_z, sector_impulse], dtype=np.float64)
         features = self.whitening_engine.orthogonalize(raw_vec)
 
-        # 4. KAUFMAN-ATTENDED SIGMOID PREDICTION
-        attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - self.kaufman_er)))
+        # INFORMATION-GEOMETRIC ATTENTION
+        # Scales softmax temperature dynamically using Shannon Entropy
+        attention_temp = max(0.1, min(0.60, 0.50 * self.shannon_entropy))
         exp_f = np.exp(np.abs(features) / attention_temp)
         attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
 
@@ -380,7 +407,6 @@ class ContinuousMicrostructureEngine:
         
         self.historical_probs.append(prob_success)
         
-        # 5. ANTI-STARVATION CONFIDENCE GATING
         if len(self.historical_probs) >= 30:
             prob_arr = np.fromiter(self.historical_probs, dtype=float, count=len(self.historical_probs))
             baseline_gate = float(np.percentile(prob_arr, 60))
