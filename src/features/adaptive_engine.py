@@ -296,7 +296,6 @@ class AdaptiveFeatureEngine:
                         spread = max(1e-9, best_ask_price - best_bid_price)
                         imb = bid_vol / (bid_vol + ask_vol + 1e-9)
                         
-                        # Mathematically bounded front-run exponential scalar
                         stoikov_adjustment = spread * (imb - 0.5) * (1.0 + abs(imb - 0.5))
                         self._latest_micro_price = self._latest_mid + stoikov_adjustment
                     
@@ -313,6 +312,130 @@ class AdaptiveFeatureEngine:
         except Exception as e:
             logger.error(f"[X-RAY] Microstructure local cache reconstruction failure: {e}")
 
+    # ====================================================================
+    # 🚀 RESTORED TIME-SERIES AND UTILITY METHODS
+    # ====================================================================
+
+    def update_multi_timeframe_candle(self, timeframe: str, open_p: float, high_p: float, low_p: float, close_p: float, volume: float):
+        tf_key = str(timeframe).rstrip("m")
+        if tf_key in self.timeframes:
+            self.timeframes[tf_key].append({
+                "open": open_p, "high": high_p, "low": low_p, "close": close_p, "volume": volume
+            })
+        if close_p > 0:
+            self.prices.append(close_p)
+            self._latest_mid = close_p
+
+    def extract_multi_timeframe_momentum(self) -> Dict[str, float]:
+        momentum_matrix = {}
+        for tf, candles in self.timeframes.items():
+            if len(candles) < 2:
+                momentum_matrix[f"momentum_{tf}"] = 0.0
+                continue
+            
+            current_close = candles[-1]["close"]
+            historical_close = candles[0]["close"]
+            momentum_matrix[f"momentum_{tf}"] = (current_close - historical_close) / max(historical_close, 1e-9)
+            
+        return momentum_matrix
+
+    def get_htf_trend_bias(self, current_price: float) -> float:
+        bias = 0.0
+        
+        if len(self.timeframes["240"]) >= 10:
+            candles_4h = list(self.timeframes["240"])
+            closes_4h = np.array([float(c["close"]) for c in candles_4h])
+            
+            alpha = 2.0 / (len(closes_4h) + 1)
+            ema_4h = closes_4h[0]
+            for val in closes_4h[1:]:
+                ema_4h = (val * alpha) + (ema_4h * (1 - alpha))
+                
+            atr_4h = self.get_computed_atr(period=min(14, len(candles_4h)))
+            if atr_4h > 0:
+                bias_4h = np.clip((current_price - ema_4h) / atr_4h, -1.0, 1.0)
+                bias += (bias_4h * 0.6)
+                
+        if len(self.timeframes["60"]) >= 20:
+            candles_1h = list(self.timeframes["60"])
+            closes_1h = np.array([float(c["close"]) for c in candles_1h])
+            
+            alpha = 2.0 / (min(20, len(closes_1h)) + 1)
+            ema_1h = closes_1h[0]
+            for val in closes_1h[1:]:
+                ema_1h = (val * alpha) + (ema_1h * (1 - alpha))
+                
+            atr_1h = self.get_computed_atr(period=min(14, len(candles_1h)))
+            if atr_1h > 0:
+                bias_1h = np.clip((current_price - ema_1h) / atr_1h, -1.0, 1.0)
+                bias += (bias_1h * 0.4)
+                
+        return np.clip(bias, -1.0, 1.0)
+
+    def get_dynamic_rr_ratio(self) -> float:
+        if len(self.timeframes["5"]) >= 20:
+            candles = list(self.timeframes["5"])[-20:]
+            closes = np.array([float(c["close"]) for c in candles])
+            
+            directional_change = abs(closes[-1] - closes[0])
+            absolute_changes = np.sum(np.abs(np.diff(closes)))
+            er = float(directional_change / (absolute_changes + 1e-9))
+        else:
+            er = 0.5 
+            
+        dynamic_rr = 1.2 + (2.0 * (er ** 2))
+        return np.clip(dynamic_rr, 1.2, 3.2)
+
+    def get_latest_mid(self) -> float:
+        if self._latest_mid > 0:
+            return self._latest_mid
+        return self.prices[-1] if self.prices else 0.0
+        
+    def get_latest_micro_price(self) -> float:
+        """Returns the Stoikov-adjusted Non-Linear Micro-Price."""
+        if self._latest_micro_price > 0:
+            return self._latest_micro_price
+        return self.get_latest_mid()
+
+    def get_latest_tfi(self) -> float:
+        return self.tfi_history[-1] if self.tfi_history else 0.0
+
+    def get_orderbook_snapshot(self) -> Dict[str, List[List[str]]]:
+        return self._cached_snapshot
+        
+    def get_deep_book_floats(self) -> Tuple[List[List[float]], List[List[float]]]:
+        return self._cached_floats["bids"], self._cached_floats["asks"]
+
+    def get_computed_atr(self, period: int = 14) -> float:
+        if len(self.timeframes["5"]) >= period + 1:
+            candles = list(self.timeframes["5"])
+        elif len(self.timeframes["1"]) >= period + 1:
+            candles = list(self.timeframes["1"])
+        elif len(self.prices) >= period + 1:
+            return float(np.std(list(self.prices)[-period:]) * 1.5)
+        else:
+            return 0.0
+
+        tr_values = []
+        for i in range(1, len(candles)):
+            high = float(candles[i].get("high", 0))
+            low = float(candles[i].get("low", 0))
+            prev_close = float(candles[i-1].get("close", 0))
+            
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_values.append(tr)
+            
+        if not tr_values:
+            return 0.0
+            
+        init_period = min(period, len(tr_values))
+        atr = float(np.mean(tr_values[:init_period]))
+        
+        for i in range(init_period, len(tr_values)):
+            atr = (atr * (period - 1) + tr_values[i]) / period
+            
+        return float(atr)
+
     def _compute_spatial_entropy(self, levels: List[List[float]]) -> float:
         """Computes Shannon Entropy of volume distribution to detect liquidity fragmentation."""
         if not levels or len(levels) < 2: return 0.0
@@ -325,6 +448,7 @@ class AdaptiveFeatureEngine:
         probs = probs[probs > 0] # Avoid log(0)
         
         entropy = -np.sum(probs * np.log2(probs))
+        # Normalize between 0 (fragile/concentrated) and 1 (resilient/distributed)
         return float(entropy / math.log2(len(levels)))
 
     def get_book_depth_metrics(self) -> Dict[str, float]:
