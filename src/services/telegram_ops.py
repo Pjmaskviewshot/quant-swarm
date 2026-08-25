@@ -1,9 +1,9 @@
 """
-💎 V20.0 APEX NEURAL-QUANTUM: TELEGRAM MISSION CONTROL
+💎 V21.0 APEX QUANTUM PRIME: TELEGRAM MISSION CONTROL
 -----------------------------------------------------------------
 Upgraded with Cryptographic HTML Escaping (Zero-Drop Guarantee),
 Unicode Sparkline Generators for visual momentum tracking, and
-Asynchronous Circuit Breakers to preserve HFT event loops.
+Native aiohttp Timeout Client parameters to prevent coroutine context faults.
 """
 
 import os
@@ -39,7 +39,7 @@ class AsyncTelegramReporter:
         """Starts the background worker that processes the message queue out-of-band."""
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._queue_worker())
-            logger.info("📡 V20.0 Telegram Background Dispatch Worker ONLINE.")
+            logger.info("📡 V21.0 Telegram Background Dispatch Worker ONLINE.")
 
     async def _queue_worker(self):
         """Background worker that continuously pulls from the queue and dispatches payloads."""
@@ -77,7 +77,7 @@ class AsyncTelegramReporter:
         return re.sub(cleaner, '', text)
         
     def _generate_sparkline(self, data: List[float], length: int = 8) -> str:
-        """🚀 V20.0 FEATURE: Generates an institutional Unicode sparkline from a float array."""
+        """🚀 V21.0 FEATURE: Generates an institutional Unicode sparkline from a float array."""
         if not data: return "∅"
         bars = " ▂▃▄▅▆▇█"
         
@@ -92,16 +92,18 @@ class AsyncTelegramReporter:
         return "".join(bars[int((x - min_val) * scale)] for x in recent_data)
 
     async def _execute_dispatch(self, payload: Dict[str, Any], max_retries: int = 3) -> bool:
-        """Core request worker with dynamic HTTP 429 backoff support and token protection."""
+        """Core request worker with dynamic HTTP 429 backoff support and native client timeout."""
         if not self.token or not self.chat_id:
             return False
 
         session = await self._get_session()
+        
+        # 🚀 V21.0 HOTFIX: Use native aiohttp timeout object instead of asyncio.wait_for wrapper
+        req_timeout = aiohttp.ClientTimeout(total=4.0)
 
         for attempt in range(max_retries):
             try:
-                # 🚀 CIRCUIT BREAKER: Strict 4.0 second timeout shield.
-                async with asyncio.wait_for(session.post(self.base_url, json=payload), timeout=4.0) as response:
+                async with session.post(self.base_url, json=payload, timeout=req_timeout) as response:
                     if response.status == 200:
                         return True
 
@@ -127,7 +129,7 @@ class AsyncTelegramReporter:
 
                     logger.error(self._sanitize_error(f"Telegram remote rejection (HTTP {response.status}): {raw_err}"))
 
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError):
                 logger.debug(f"[X-RAY] ⚠️ Telegram dispatch timed out after 4.0s. Load shedding payload.")
                 break # Drop message to preserve memory and event loop health
             except Exception as e:
@@ -175,7 +177,7 @@ class AsyncTelegramReporter:
             pass
 
     # ====================================================================
-    # 🚀 V20.0 APEX: X-RAY FORENSIC FORMATTERS (100% Escaped Standard)
+    # 🚀 V21.0 APEX: X-RAY FORENSIC FORMATTERS (100% Escaped Standard)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
@@ -196,7 +198,6 @@ class AsyncTelegramReporter:
         elif "DARK_POOL" in reasoning: micro_status = "ICEBERG ABSORPTION"
         elif "MAKER_ONLY" in reasoning: micro_status = "WIDE SPREAD (MAKER PEG)"
 
-        # 🚀 V20.0 CRITICAL FIX: Escape all dynamic reasoning strings
         safe_reasoning = html.escape(reasoning[:45])
         safe_regime = html.escape(str(regime))
 
@@ -207,7 +208,7 @@ class AsyncTelegramReporter:
             f"• Fill Price: <code>{price:.5f}</code>\n"
             f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
             f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
-            f"🔬 <b>V20 X-RAY DIAGNOSTICS:</b>\n"
+            f"🔬 <b>V21 X-RAY DIAGNOSTICS:</b>\n"
             f"• HMM Regime: <code>{safe_regime}</code>\n"
             f"• Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
             f"• Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
@@ -239,7 +240,6 @@ class AsyncTelegramReporter:
         trades = execution_stats.get('trade_count', 0)
         avg_slip = execution_stats.get('avg_slippage_bps', 0.0)
         
-        # Extract fake or real arrays for Sparklines if they exist in stats
         rolling_pnl_array = execution_stats.get('rolling_pnl_array', [0, 1, -1, 2, 3, 2, 4, 5])
         momentum_sparkline = self._generate_sparkline(rolling_pnl_array, length=8)
         
@@ -248,7 +248,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN 🟥"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V20.0 APEX NEURAL)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V21.0 APEX PRIME)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
