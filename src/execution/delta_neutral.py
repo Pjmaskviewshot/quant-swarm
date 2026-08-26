@@ -1,9 +1,9 @@
 """
-ðŸ¦ V1.0 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
+🏦 V1.1 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
 -----------------------------------------------------
 Executes Cash-and-Carry (Basis) Arbitrage and Funding Rate Harvesting.
-Upgraded with Exact Execution Drag Calculus, Break-Even Horizon Gating, 
-20% Account Exposure Limits, and Active Yield Ejection (Unwind) Daemons.
+Upgraded with Atomic Execution Legging (Perp-First), Exact Execution 
+Drag Calculus, Break-Even Horizon Gating, and Active Yield Unwind Daemons.
 """
 
 import asyncio
@@ -31,7 +31,7 @@ class DeltaNeutralYieldEngine:
         self.taker_fee_rate = 0.00055 # Bybit base taker fee
 
     async def run_yield_scanner_daemon(self):
-        logger.info("ðŸ¦ DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
+        logger.info("🏦 DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
         
         while True:
             await asyncio.sleep(300)  # Scan global rates every 5 minutes
@@ -85,7 +85,7 @@ class DeltaNeutralYieldEngine:
                 
                 # Eject if funding drops too low or flips negative
                 if current_funding <= self.exit_funding_threshold:
-                    logger.warning(f"[X-RAY] ðŸ“‰ YIELD COLLAPSE // {active_symbol} funding dropped to {current_funding*10000:.1f} bps. Initiating Unwind.")
+                    logger.warning(f"[X-RAY] 📉 YIELD COLLAPSE // {active_symbol} funding dropped to {current_funding*10000:.1f} bps. Initiating Unwind.")
                     symbols_to_unwind.append(active_symbol)
 
         for sym in symbols_to_unwind:
@@ -118,7 +118,7 @@ class DeltaNeutralYieldEngine:
         if funding_rate < self.entry_funding_threshold:
             return
             
-        logger.info(f"[X-RAY] âš–ï¸ YIELD LOCK EVALUATION // {symbol} | Target Funding Rate: {funding_rate*10000:.1f} bps")
+        logger.info(f"[X-RAY] ⚖️ YIELD LOCK EVALUATION // {symbol} | Target Funding Rate: {funding_rate*10000:.1f} bps")
         
         try:
             # 1. Evaluate Execution Drag vs. Break-Even Horizon
@@ -131,7 +131,7 @@ class DeltaNeutralYieldEngine:
             
             # Reject if it takes more than 1.5 days just to earn back the entry fees & spread
             if break_even_days > 1.5:
-                logger.warning(f"[X-RAY] ðŸš« YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {break_even_days:.1f} days to break even. Skipping.")
+                logger.warning(f"[X-RAY] 🚫 YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {break_even_days:.1f} days to break even. Skipping.")
                 return
 
             # 2. Calculate True Idle Capital Dynamically
@@ -152,7 +152,7 @@ class DeltaNeutralYieldEngine:
             if idle_capital < 15.0:
                 return
 
-            # ðŸš€ V1.0: Strict Capital Allocation Limits
+            # 🚀 V1.1: Strict Capital Allocation Limits
             # Sweep 90% of IDLE capital, but NEVER exceed 20% of TOTAL account equity per hedge
             max_allowed_hedge = total_bal * 0.20
             yield_capital = min(idle_capital * 0.90, max_allowed_hedge)
@@ -166,26 +166,35 @@ class DeltaNeutralYieldEngine:
             await self.core.sor._fetch_exchange_limits(symbol)
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
-            # ATOMIC EXECUTION BLOCK
-            logger.info(f"[X-RAY] ðŸ¦ Routing SPOT BUY for {qty} {symbol}...")
-            spot_order = await self.core.executor.safe_call(
-                self.core.executor.client.place_order, category="spot", symbol=symbol, side="Buy", 
-                orderType="Market", qty=str(qty), marketUnit="baseCoin" # Force exact base coin matching
-            )
+            # =========================================================
+            # ATOMIC EXECUTION BLOCK (CORRECTED LEGGING)
+            # =========================================================
             
-            if spot_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] âŒ SPOT Leg Failed: {spot_order.get('retMsg')}. Aborting hedge.")
-                return
-                
-            logger.info(f"[X-RAY] ðŸ¦ Routing PERPETUAL SHORT for {qty} {symbol}...")
+            # LEG 1: Perpetual Short (Zero capital locked if failed)
+            logger.info(f"[X-RAY] 🏦 Routing PERPETUAL SHORT for {qty} {symbol}...")
             perp_order = await self.core.executor.safe_call(
                 self.core.executor.client.place_order, category="linear", symbol=symbol, side="Sell", 
                 orderType="Market", qty=str(qty), positionIdx=self.core.sor.position_idx
             )
             
             if perp_order.get("retCode") != 0:
-                logger.critical(f"ðŸš¨ FATAL: PERPETUAL Leg Failed after Spot execution! Engaging emergency Spot liquidation.")
-                await self.core.executor.safe_call(self.core.executor.client.place_order, category="spot", symbol=symbol, side="Sell", orderType="Market", qty=str(qty))
+                logger.error(f"[X-RAY] ❌ PERPETUAL Leg Failed: {perp_order.get('retMsg')}. Aborting hedge safely (Zero Exposure).")
+                return
+            
+            # LEG 2: Spot Buy
+            logger.info(f"[X-RAY] 🏦 Routing SPOT BUY for {qty} {symbol}...")
+            spot_order = await self.core.executor.safe_call(
+                self.core.executor.client.place_order, category="spot", symbol=symbol, side="Buy", 
+                orderType="Market", qty=str(qty), marketUnit="baseCoin" # Force exact base coin matching
+            )
+            
+            # SAFETEY NET: Clean up perp if spot is rejected
+            if spot_order.get("retCode") != 0:
+                logger.critical(f"🚨 FATAL: SPOT Leg Failed after Perpetual execution! Engaging emergency Perp liquidation.")
+                await self.core.executor.safe_call(
+                    self.core.executor.client.place_order, category="linear", symbol=symbol, side="Buy", 
+                    orderType="Market", qty=str(qty), reduceOnly=True, positionIdx=self.core.sor.position_idx
+                )
                 return
             
             self.active_hedges[symbol] = {
@@ -196,27 +205,27 @@ class DeltaNeutralYieldEngine:
             }
             
             msg = (
-                f"âœ… <b>DELTA-NEUTRAL YIELD LOCK SECURED</b>\n"
+                f"✅ <b>DELTA-NEUTRAL YIELD LOCK SECURED</b>\n"
                 f"Asset: <code>{symbol}</code>\n"
                 f"Capital Swept: <code>${yield_capital:.2f}</code>\n"
                 f"Yield APY Target: <code>~{(funding_rate * 3 * 365)*100:.1f}%</code>\n"
                 f"Break-Even Horizon: <code>{break_even_days:.1f} Days</code>"
             )
             await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.critical(f"âœ… DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
+            logger.critical(f"✅ DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
             
         except Exception as e:
             logger.error(f"[X-RAY] Hedge execution failed for {symbol}: {e}", exc_info=True)
 
     async def unwind_cash_and_carry_hedge(self, symbol: str):
-        """Dismantles an active hedge by Selling Spot and Buying back the Perpetual Short."""
+        """Dismantles an active hedge by Closing the Perpetual Short and Selling Spot."""
         if symbol not in self.active_hedges:
             return
             
         hedge_data = self.active_hedges[symbol]
         qty = str(hedge_data["qty"])
         
-        logger.critical(f"[X-RAY] ðŸŒªï¸ UNWINDING HEDGE // {symbol}. Selling Spot, Covering Short.")
+        logger.critical(f"[X-RAY] 🌪️ UNWINDING HEDGE // {symbol}. Covering Short, Selling Spot.")
         
         try:
             # 1. Close Perpetual Short
@@ -225,25 +234,31 @@ class DeltaNeutralYieldEngine:
                 orderType="Market", qty=qty, reduceOnly=True, positionIdx=self.core.sor.position_idx
             )
             
-            if perp_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] âŒ Unwind PERP Leg Failed: {perp_order.get('retMsg')}. Manual intervention required.")
-                
             # 2. Sell Spot Collateral
             spot_order = await self.core.executor.safe_call(
                 self.core.executor.client.place_order, category="spot", symbol=symbol, side="Sell", 
                 orderType="Market", qty=qty
             )
             
-            if spot_order.get("retCode") != 0:
-                logger.error(f"[X-RAY] âŒ Unwind SPOT Leg Failed: {spot_order.get('retMsg')}. Manual intervention required.")
-            
-            # Remove from tracking regardless of success to prevent infinite loop errors
-            del self.active_hedges[symbol]
-            
-            duration_days = (time.time() - hedge_data["timestamp"]) / 86400.0
-            msg = f"ðŸ”„ <b>DELTA-NEUTRAL HEDGE UNWOUND</b>\nAsset: <code>{symbol}</code>\nHolding Time: <code>{duration_days:.1f} Days</code>\nReason: Funding Decay"
-            await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.info(f"âœ… HEDGE SUCCESSFULLY UNWOUND for {symbol}.")
+            # 🚀 FIX: Only clean up tracking if both legs successfully unwound
+            perp_success = perp_order.get("retCode") == 0
+            spot_success = spot_order.get("retCode") == 0
+
+            if not perp_success:
+                logger.critical(f"[X-RAY]   CRITICAL: Unwind PERP Leg Failed for {symbol}: {perp_order.get('retMsg')}")
+            if not spot_success:
+                logger.critical(f"[X-RAY]   CRITICAL: Unwind SPOT Leg Failed for {symbol}: {spot_order.get('retMsg')}")
+
+            if perp_success and spot_success:
+                del self.active_hedges[symbol]
+                duration_days = (time.time() - hedge_data["timestamp"]) / 86400.0
+                msg = f"🔄 <b>DELTA-NEUTRAL HEDGE UNWOUND</b>\nAsset: <code>{symbol}</code>\nHolding Time: <code>{duration_days:.1f} Days</code>\nReason: Funding Decay"
+                await self.core._safe_telegram_dispatch(msg, is_html=True)
+                logger.info(f"✅ HEDGE SUCCESSFULLY UNWOUND for {symbol}.")
+            else:
+                # Mark hedge state as errored so automated retries or manual intervention can occur
+                self.active_hedges[symbol]["status"] = "UNWIND_ERROR"
+                logger.error(f"⚠️ HEDGE RETAINED IN MEMORY: Manual clearance required for {symbol}.")
             
         except Exception as e:
             logger.error(f"[X-RAY] Unwind execution failed for {symbol}: {e}", exc_info=True)

@@ -266,7 +266,10 @@ class MemoryBank:
                 exit_price = entry_price
                 bars_held = 0
 
-                candles_to_check = max(1, int(elapsed_minutes) + 2) 
+                # 🚀 FIX: Scale candle search window by the actual candle timeframe interval
+                tf_interval = max(1.0, float(interval_mins))
+                bars_elapsed = int(math.ceil(elapsed_minutes / tf_interval))
+                candles_to_check = max(1, min(len(closes), bars_elapsed + 2))
                 start_index = max(0, len(closes) - candles_to_check)
 
                 # VECTORIZED INTRA-BAR HIT DETECTION

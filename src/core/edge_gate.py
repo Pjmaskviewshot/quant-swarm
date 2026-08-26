@@ -1,9 +1,12 @@
 """
-💎 V5.1 APEX NEURAL: MICROSTRUCTURE EDGE GATE
+💎 V5.2 APEX NEURAL: MICROSTRUCTURE EDGE GATE
 -------------------------------------------------------------------------
 Enforces rigorous Adverse Selection Vetoes. 
 Evaluates Orderbook Depth Ratios, VWAP Exhaustion, and stable Kyle's Lambda
 to determine if the Alpha Fusion signal should be executed or rejected.
+
+Upgraded with Price-Mapped L2 Order Flow Imbalance (Cont-Kukanov-Stoikov)
+to eradicate index-shifted array corruption during order book insertions.
 """
 
 import math
@@ -18,7 +21,7 @@ logger = logging.getLogger("QUANT_CORE.EDGE_GATE")
 
 class MicrostructureEdgeGate:
     """
-    🚀 V5.1 STRICT STRUCTURAL EDGE GATE
+    🚀 V5.2 STRICT STRUCTURAL EDGE GATE
     Reinstates binary hard-stops for toxic flow. 
     Implements robust L2/L3 alignment for Kyle's Lambda estimation.
     """
@@ -44,6 +47,10 @@ class MicrostructureEdgeGate:
         self.prev_bids = []
         self.prev_asks = []
         
+        # 🚀 V5.2 Hash Maps for absolute price-level tracking
+        self.prev_bid_map: Dict[float, float] = {}
+        self.prev_ask_map: Dict[float, float] = {}
+        
         self._last_log_time = {}
 
     def _throttled_warn(self, category: str, message: str, throttle_sec: float = 60.0):
@@ -63,8 +70,20 @@ class MicrostructureEdgeGate:
         self._current_period_volume += volume
 
     def update_orderbook_state(self, symbol: str, bids: List[List[float]], asks: List[List[float]], mid_price: float):
-        """Updates Stationarized Log-MLOFI, Rolling VWAP, and Micro-Price Spreads."""
-        if not self.prev_bids or not self.prev_asks:
+        """
+        Computes mathematically rigorous Cont-Kukanov-Stoikov Level-2 OFI
+        by tracking discrete price coordinates rather than array indices.
+        Updates Stationarized Log-MLOFI, Rolling VWAP, and Micro-Price Spreads.
+        """
+        if not bids or not asks:
+            return
+
+        curr_bid_map = {float(p): float(v) for p, v in bids[:self.mlofi_levels]}
+        curr_ask_map = {float(p): float(v) for p, v in asks[:self.mlofi_levels]}
+
+        if not self.prev_bid_map or not self.prev_ask_map:
+            self.prev_bid_map = curr_bid_map
+            self.prev_ask_map = curr_ask_map
             self.prev_bids = bids[:self.mlofi_levels]
             self.prev_asks = asks[:self.mlofi_levels]
             self.prices.append(mid_price)
@@ -77,43 +96,49 @@ class MicrostructureEdgeGate:
             self._current_period_volume = 0.0
             return
 
-        current_bids = bids[:self.mlofi_levels]
-        current_asks = asks[:self.mlofi_levels]
-        
         mlofi_t = 0.0
         l1_ofi_t = 0.0
-        limit = min(self.mlofi_levels, len(current_bids), len(self.prev_bids), len(current_asks), len(self.prev_asks))
         
-        for i in range(limit):
-            try:
-                curr_bid_p, curr_bid_s = float(current_bids[i][0]), float(current_bids[i][1])
-                prev_bid_p, prev_bid_s = float(self.prev_bids[i][0]), float(self.prev_bids[i][1])
-                
-                if curr_bid_p > prev_bid_p: 
-                    delta_bid = math.log1p(curr_bid_s)
-                elif curr_bid_p == prev_bid_p: 
-                    delta_bid = math.log1p(curr_bid_s) - math.log1p(prev_bid_s)
-                else: 
-                    delta_bid = -math.log1p(prev_bid_s)
+        try:
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+        except (IndexError, ValueError):
+            return
 
-                curr_ask_p, curr_ask_s = float(current_asks[i][0]), float(current_asks[i][1])
-                prev_ask_p, prev_ask_s = float(self.prev_asks[i][0]), float(self.prev_asks[i][1])
-                
-                if curr_ask_p < prev_ask_p: 
-                    delta_ask = math.log1p(curr_ask_s)
-                elif curr_ask_p == prev_ask_p: 
-                    delta_ask = math.log1p(curr_ask_s) - math.log1p(prev_ask_s)
-                else: 
-                    delta_ask = -math.log1p(prev_ask_s)
+        # 🚀 LOGARITHMIC BID VOLUME DELTA (Coordinate Mapped)
+        all_bid_prices = set(curr_bid_map.keys()) | set(self.prev_bid_map.keys())
+        for p in all_bid_prices:
+            curr_v = curr_bid_map.get(p, 0.0)
+            prev_v = self.prev_bid_map.get(p, 0.0)
+            
+            delta_bid = math.log1p(curr_v) - math.log1p(prev_v)
+            
+            # Weight by proximity to mid-price
+            dist_bps = abs(p - mid_price) / (mid_price + 1e-9) * 10000.0
+            weight = math.exp(-self.decay_alpha * (dist_bps / 5.0))
+            
+            level_ofi = delta_bid * weight
+            mlofi_t += level_ofi
+            
+            if p == best_bid:
+                l1_ofi_t += level_ofi
 
-                level_ofi = delta_bid - delta_ask
-                weight = math.exp(-self.decay_alpha * i)
-                mlofi_t += level_ofi * weight
-                
-                if i == 0:
-                    l1_ofi_t = level_ofi
-            except (IndexError, ValueError, TypeError):
-                continue
+        # 🚀 LOGARITHMIC ASK VOLUME DELTA (Coordinate Mapped)
+        all_ask_prices = set(curr_ask_map.keys()) | set(self.prev_ask_map.keys())
+        for p in all_ask_prices:
+            curr_v = curr_ask_map.get(p, 0.0)
+            prev_v = self.prev_ask_map.get(p, 0.0)
+            
+            delta_ask = math.log1p(curr_v) - math.log1p(prev_v)
+            
+            dist_bps = abs(p - mid_price) / (mid_price + 1e-9) * 10000.0
+            weight = math.exp(-self.decay_alpha * (dist_bps / 5.0))
+            
+            level_ofi = delta_ask * weight
+            mlofi_t -= level_ofi
+            
+            if p == best_ask:
+                l1_ofi_t -= level_ofi
 
         self.ofis.append(l1_ofi_t)
         self.mlofis.append(mlofi_t)
@@ -142,12 +167,15 @@ class MicrostructureEdgeGate:
         self._current_trade_buy_vol = 0.0
         self._current_trade_sell_vol = 0.0
 
-        self.prev_bids = current_bids
-        self.prev_asks = current_asks
+        # Update cache mapping
+        self.prev_bid_map = curr_bid_map
+        self.prev_ask_map = curr_ask_map
+        self.prev_bids = bids[:self.mlofi_levels]
+        self.prev_asks = asks[:self.mlofi_levels]
         
         try:
-            best_bid_p, best_bid_s = float(current_bids[0][0]), float(current_bids[0][1])
-            best_ask_p, best_ask_s = float(current_asks[0][0]), float(current_asks[0][1])
+            best_bid_p, best_bid_s = float(bids[0][0]), float(bids[0][1])
+            best_ask_p, best_ask_s = float(asks[0][0]), float(asks[0][1])
             
             total_v = best_bid_s + best_ask_s
             if total_v <= 0:

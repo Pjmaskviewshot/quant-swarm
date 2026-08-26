@@ -1,10 +1,10 @@
 """
-💎 V5.1 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
+💎 V5.2 APEX NEURAL: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
-Upgraded with V5.1 Instant Loop Shattering for Fatal Exchange Blocks.
+Upgraded with V5.2 Elimination of Adverse Selection Fallback Chasing.
 """
 
 import os
@@ -501,14 +501,10 @@ class SmartOrderRouter:
                 symbol=symbol, direction=direction, qty=slice_qty, sl=sl, tp=tp, timeout=chunk_timeout
             )
             
-            # GUARANTEED FALLBACK: If a slice misses its peg, flash strike it immediately.
+            # CRITICAL FIX: If a slice misses its peg, DO NOT flash strike it. Record zero fill and move on.
             if not success or fill_qty == 0:
-                logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Escalating slice to Flash Strike.")
-                success, fill_price, fill_qty = await self._execute_flash_strike(
-                    symbol=symbol, direction=direction, qty=slice_qty, current_mid_price=current_mid_price, sl=sl, tp=tp
-                )
-                
-            if fill_qty > 0:
+                logger.warning(f"[X-RAY] 🧊 TWAP SLICE FAILED // Maker Peg rejected. Skipping slice to prevent adverse selection.")
+            else:
                 total_executed_qty += fill_qty
                 weighted_notional_sum += (fill_price * fill_qty)
                 
@@ -589,18 +585,17 @@ class SmartOrderRouter:
                 feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
             )
             
+            # CRITICAL FIX: Abort instead of chasing.
             if not success or f_qty == 0:
-                logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
-                success, f_price, f_qty = await self._execute_flash_strike(
-                    symbol=symbol, direction=direction, qty=total_qty, 
-                    current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit
-                )
+                logger.info(f"[X-RAY] 🛑 MAKER PEG UNFILLED // Safely canceling order for {symbol}. Trade aborted.")
+                return False, arrival_price, 0.0, 0.0
                 
             return success, arrival_price, f_price, f_qty
 
     async def execute_mean_reversion_bracket(self, symbol: str, direction: str, total_qty: float, current_mid_price: float, stop_loss: float = None, take_profit: float = None, depth_snapshot: dict = None, vol_z: float = 0.0, vol_mult: float = 1.0, feature_engine: Any = None, regime: str = "MEAN_REVERTING", **kwargs) -> Tuple[bool, float, float, float]:
         """
-        🚀 V5.1 ATOMIC PROBABILITY ROUTING & IS TRACKING
+        Deterministic Router: Executes pure Maker Peg with cancellation on drift,
+        or pure Flash Strike IOC during high volatility. NEVER escalates failed makers to market orders.
         Returns Tuple[Success, Arrival_Price, Fill_Price, Filled_Qty]
         """
         await self._fetch_exchange_limits(symbol)
@@ -644,8 +639,8 @@ class SmartOrderRouter:
         elif direction.upper() == "SELL" and (book_skew > 2.8 or vol_z < -2.2):
             urgent_taker = True
 
-        if urgent_taker:
-            logger.info(f"[X-RAY] ⚡ ATOMIC TAKER IOC // {symbol} Micro-book collapsing. Routing immediate IOC to prevent queue delay.")
+        if urgent_taker or abs(vol_z) >= 1.8 or vol_mult >= 2.0 or regime == "TRENDING":
+            logger.info(f"[X-RAY] ⚡ ATOMIC TAKER IOC // {symbol} Micro-book collapsing or momentum breaking. Routing immediate IOC to prevent queue delay.")
             success, f_price, f_qty = await self._execute_flash_strike(symbol, direction, total_qty, current_mid_price, stop_loss, take_profit)
             return success, arrival_price, f_price, f_qty
 
@@ -658,12 +653,9 @@ class SmartOrderRouter:
             feature_engine=feature_engine, depth_snapshot=depth_snapshot, timeout=dynamic_timeout
         )
 
-        # GUARANTEED FALLBACK: Solves Trade Starvation Issue
+        # CRITICAL FIX: DO NOT chase with a market order if maker peg fails.
         if not success or f_qty == 0:
-            logger.warning(f"[X-RAY] ⚠️ MAKER PEG UNFILLED // Escalating {symbol} to Flash Strike IOC execution.")
-            success, f_price, f_qty = await self._execute_flash_strike(
-                symbol=symbol, direction=direction, qty=total_qty, 
-                current_mid_price=current_mid_price, sl=stop_loss, tp=take_profit
-            )
+            logger.info(f"[X-RAY] 🛑 MAKER PEG UNFILLED // Safely canceling order for {symbol}. Trade aborted.")
+            return False, arrival_price, 0.0, 0.0
 
-        return success, arrival_price, f_price, f_qty
+        return True, arrival_price, f_price, f_qty

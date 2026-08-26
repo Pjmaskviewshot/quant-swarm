@@ -1,9 +1,13 @@
 """
-💎 V21.2 APEX QUANTUM PRIME: MICRO-SCALPING & IN-FLIGHT GUARD
+💎 V21.3 APEX QUANTUM PRIME: MICRO-SCALPING & IN-FLIGHT GUARD
 ------------------------------------------------------------------------
 Eliminates duplicate entries via instant in-flight position reservation,
 enforces 5-minute directional hysteresis to stop fee churn in ranging markets,
-and scales trailing stop thresholds dynamically to position notional size.
+and eradicates destructive stop-loss compression to guarantee mathematical survival.
+
+Upgraded with V21.3 Disruptor Pattern: 100% of portfolio mutations are now 
+strictly routed through the lock-free GlobalStateActor queue to eradicate 
+concurrency race conditions and orphan locks.
 """
 
 import os
@@ -77,8 +81,9 @@ class MutationCommand:
 
 class GlobalStateActor:
     """
-    🚀 V21.2 LOCK-FREE STATE ACTOR (LMAX DISRUPTOR PATTERN)
+    🚀 V21.3 LOCK-FREE STATE ACTOR (LMAX DISRUPTOR PATTERN)
     Operates as the single source of truth for portfolio mutations.
+    Eliminates async race conditions by serializing dictionary modifications.
     """
     def __init__(self, core_engine):
         self.core = core_engine
@@ -87,7 +92,7 @@ class GlobalStateActor:
 
     async def start(self):
         self._is_running = True
-        logger.info("🛡️ V21.2 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
+        logger.info("🛡️ V21.3 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
         while self._is_running:
             try:
                 cmd: MutationCommand = await self.mutation_queue.get()
@@ -118,7 +123,7 @@ class GlobalStateActor:
                 self.core.risk_vault.update_position_ledger(cmd.target_asset, 0.0)
                 self.core.exit_states.pop(cmd.target_asset, None)
                 self.core.active_contexts.pop(cmd.target_asset, None)
-                # 🚀 V21.2 Anti-Whipsaw Directional Hysteresis
+                # 🚀 V21.3 Anti-Whipsaw Directional Hysteresis
                 self.core.last_exit_direction[cmd.target_asset] = (cmd.payload.get("direction", "NONE"), time.time())
 
             elif cmd.mutation_type == "UPDATE_PROFIT_PEAK":
@@ -166,7 +171,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V21.2 APEX QUANTUM PRIME MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V21.3 APEX QUANTUM PRIME MATRIX ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -217,7 +222,7 @@ class DistributedQuantEngine:
         self.portfolio_state_lock = asyncio.Lock() 
         
         self.active_positions_map: Dict[str, str] = {}  
-        # 🚀 V21.2 IN-FLIGHT GUARD & HYSTERESIS TRACKERS
+        # 🚀 V21.3 IN-FLIGHT GUARD & HYSTERESIS TRACKERS
         self.in_flight_symbols = set()
         self.last_exit_direction: Dict[str, tuple] = {} 
 
@@ -508,6 +513,7 @@ class DistributedQuantEngine:
                                 elif direction == "SELL" and k_low < historical_max_favorable: historical_max_favorable = k_low
                 except Exception as e: logger.debug(f"Amnesia recovery fetch failed for {symbol}: {e}")
                 
+                # Use GlobalStateActor to perform ledger registration
                 self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "recommended_leverage": 5}
                 
@@ -526,10 +532,10 @@ class DistributedQuantEngine:
                 symbols_to_check = list(self.active_positions_map.keys())
                 for symbol in symbols_to_check:
                     if (active_daemon := self.daemon_tasks.get(symbol)) and not active_daemon.done(): continue 
-                    if not hasattr(self.risk_vault, 'active_positions') or symbol not in self.risk_vault.active_positions:
-                        pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
-                        if pos_response.get("retCode") == 0 and not any(float(p.get("size", 0.0)) > 0 for p in pos_response.get("result", {}).get("list", [])):
-                            self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": "NONE"})
+                    # If the daemon is dead but the symbol is still in active_positions_map, verify and liquidate.
+                    pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", symbol=symbol)
+                    if pos_response.get("retCode") == 0 and not any(float(p.get("size", 0.0)) > 0 for p in pos_response.get("result", {}).get("list", [])):
+                        self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": "NONE"})
             except Exception as e: logger.error(f"[X-RAY] Failed stale lock cleanup: {e}", exc_info=True)
 
     async def run_crowded_trade_oracle(self):
@@ -721,7 +727,7 @@ class DistributedQuantEngine:
             self.active_contexts[symbol]["latest_tick_price"] = price
             return
 
-        # 🚀 V21.2 IN-FLIGHT & ACTIVE CHECK
+        # 🚀 V21.3 IN-FLIGHT & ACTIVE CHECK
         if symbol in self.active_positions_map or symbol in self.in_flight_symbols:
             return
 
@@ -790,13 +796,13 @@ class DistributedQuantEngine:
                     
                     action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
                     
-                    # 🚀 V21.2 STRICT RANGING REGIME ORDER FLOW CONFIRMATION
+                    # 🚀 V21.3 STRICT RANGING REGIME ORDER FLOW CONFIRMATION
                     if regime in ["RANGING", "MEAN_REVERTING", "HIGH_VOL_CHOP"]:
                         aligned_mlofi = stat_engine.ofi_fast_z if action == "BUY" else -stat_engine.ofi_fast_z
                         if aligned_mlofi < 1.2:
                             return  # Block chop entries with weak flow
                     
-                    # 🚀 V21.2 ANTI-WHIPSAW HYSTERESIS
+                    # 🚀 V21.3 ANTI-WHIPSAW HYSTERESIS
                     if symbol in self.last_exit_direction:
                         prev_dir, exit_t = self.last_exit_direction[symbol]
                         if prev_dir != action and (time.time() - exit_t) < 300.0:
@@ -847,7 +853,7 @@ class DistributedQuantEngine:
                     actual_notional = calculated_qty * price
                     actual_risk_pct = ((actual_notional * sl_dist_pct) / (available_balance + 1e-9)) * 100.0
 
-                    # 🚀 V21.2 FEE-AWARE EV THRESHOLD (Must clear at least 65 bps net edge to cover 11 bps round trip)
+                    # 🚀 V21.3 FEE-AWARE EV THRESHOLD (Must clear at least 65 bps net edge to cover 11 bps round trip)
                     net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
                     if (net_ev_pct * 10000.0) < 65.0:
                         return  # Reject thin-margin setups that bleed to fees
@@ -863,7 +869,7 @@ class DistributedQuantEngine:
                             "payload_features": {
                                 "symbol": symbol, "market_regime": regime, "virtual_sl": sgd_state["virtual_sl"], "virtual_tp": sgd_state["virtual_tp"], 
                                 "log_mlofi_z": stat_engine.ofi_fast_z, "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost, 
-                                "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), "ai_verdict": "V21.2_APEX_PRIME",
+                                "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), "ai_verdict": "V21.3_APEX_PRIME",
                                 "tensor_alpha": tensor_alpha
                             },
                             "elasticity": self.elasticity_engines.get(symbol), "dynamic_rr": dynamic_rr_ratio 
@@ -1034,7 +1040,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V21.2 MATRIX REFRESH: Probing High-Velocity Universe...")
+            logger.info("🌌 V21.3 MATRIX REFRESH: Probing High-Velocity Universe...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -1051,7 +1057,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V21.2 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V21.3 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}")
 
@@ -1103,7 +1109,7 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"State reconciliation failed: {e}")
 
     # ==============================================================================
-    # 🚀 V21.2 LIFECYCLE DAEMON
+    # 🚀 V21.3 LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1214,178 +1220,174 @@ class DistributedQuantEngine:
 
         from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ThesisVector
 
+        ctx = {
+            "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
+            "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
+            "arrival_price": risk_matrix.get("arrival_price", current_price),
+            "regime": market_regime, "daemon_start_time": time.time(),
+            "actual_qty_filled": risk_matrix.get("size", 1.0),
+            "qty_step": self.hardware_min_qty.get(symbol, 0.1), 
+            "stat_engine": self.stat_engines.get(symbol),
+            "feature_engine": self.feature_engines.get(symbol), 
+            "last_ob": {},
+            "latest_tick_price": current_price,
+            "current_vault_balance": self.global_state_cache.get("current_vault_balance", 21.0),
+            "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
+            "active_positions_count": len(self.active_positions_map),
+            "payload_features": { 
+                "bid_ask_spread": 0.001,
+                "tensor_alpha": 0.0
+            },
+            "exec_details": {}
+        }
+
+        # 🚀 FIX: Scope execution_semaphore STRICTLY to the entry verification phase
         async with self.execution_semaphore:
-            # 🚀 V21.2 INSTANT IN-FLIGHT REGISTRATION: Reserves the symbol before verification sleep starts
             self.state_actor.dispatch(symbol, "RESERVE_IN_FLIGHT", {})
-
-            ctx = {
-                "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
-                "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
-                "arrival_price": risk_matrix.get("arrival_price", current_price),
-                "regime": market_regime, "daemon_start_time": time.time(),
-                "actual_qty_filled": risk_matrix.get("size", 1.0),
-                "qty_step": self.hardware_min_qty.get(symbol, 0.1), 
-                "stat_engine": self.stat_engines.get(symbol),
-                "feature_engine": self.feature_engines.get(symbol), 
-                "last_ob": {},
-                "latest_tick_price": current_price,
-                "current_vault_balance": self.global_state_cache.get("current_vault_balance", 21.0),
-                "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
-                "active_positions_count": len(self.active_positions_map),
-                "payload_features": { 
-                    "bid_ask_spread": 0.001,
-                    "tensor_alpha": 0.0
-                },
-                "exec_details": {}
-            }
-
             loop_state = await self._state_verify_entry(ctx)
             if loop_state == "ABORT":
                 self.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
-
+            
+            # Mutates safely strictly through the State Actor
             self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": ctx["actual_qty_filled"] * ctx["actual_entry"]})
 
-            if symbol not in self.exit_states:
-                stat = self.stat_engines.get(symbol)
+        if symbol not in self.exit_states:
+            stat = self.stat_engines.get(symbol)
+            ob = self.orderbook_snapshots.get(symbol, {})
+            bid = max(ob.get("bid_size", 1.0), 1e-9)
+            ask = max(ob.get("ask_size", 1.0), 1e-9)
+            depth_ratio = bid / ask if direction == "BUY" else ask / bid
+
+            entry_thesis = ThesisVector(features=np.array([
+                getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0,
+                getattr(stat, "hawkes_z", 0.0) if stat else 0.0,
+                getattr(stat, "meso_momentum_z", 0.0) if stat else 0.0,
+                depth_ratio,
+                getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
+            ]))
+
+            feature_weights = np.diag([1.0 / 2.25, 1.0 / 4.0, 1.0 / 1.5, 1.0 / 0.5, 1.0 / 1e-4])
+
+            self.exit_states[symbol] = PositionExitState(
+                position_id=signal_id, entry_time=time.time(), entry_price=ctx["actual_entry"],
+                exit_side="Sell" if direction == "BUY" else "Buy", entry_balance=ctx["current_vault_balance"], 
+                actual_qty=ctx["actual_qty_filled"], base_qty=ctx["actual_qty_filled"],          
+                entry_thesis=entry_thesis, thesis_inv_cov=feature_weights  
+            )
+
+        state = self.exit_states[symbol]
+        self.active_contexts[symbol] = ctx
+
+        if self.test_mode:
+            self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
+            return
+
+        try:
+            # 🚀 V21.3 HOTFIX: Eradicate Destructive Stop Compression
+            # Stop loss is ALWAYS derived from market physics (ATR), with a hard minimum of 2.0%
+            actual_sl_distance = max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.5), ctx["actual_entry"] * 0.020)
+            
+            safe_rr = min(2.0, dynamic_rr_ratio)
+            
+            initial_sl = ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance
+            initial_tp = ctx["actual_entry"] + (actual_sl_distance * safe_rr) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * safe_rr)
+            
+            await self._amend_trailing_stop(symbol, initial_sl, initial_tp)
+
+            current_active_sl = initial_sl
+            current_active_tp = initial_tp
+
+            loop_state = "ACTIVE_MONITORING"
+
+            while loop_state == "ACTIVE_MONITORING":
+                await asyncio.sleep(0.05)
+
+                current_price = ctx["latest_tick_price"]
+                time_since_eval = time.time() - ctx.get("last_eval_time", 0)
+                if current_price == ctx.get("last_eval_price") and time_since_eval < 1.0:
+                    continue
+                    
+                ctx["last_eval_price"] = current_price
+                ctx["last_eval_time"] = time.time()
+
                 ob = self.orderbook_snapshots.get(symbol, {})
-                bid = max(ob.get("bid_size", 1.0), 1e-9)
-                ask = max(ob.get("ask_size", 1.0), 1e-9)
-                depth_ratio = bid / ask if direction == "BUY" else ask / bid
-
-                entry_thesis = ThesisVector(features=np.array([
-                    getattr(stat, "ofi_fast_z", 0.0) if stat else 0.0,
-                    getattr(stat, "hawkes_z", 0.0) if stat else 0.0,
-                    getattr(stat, "meso_momentum_z", 0.0) if stat else 0.0,
-                    depth_ratio,
-                    getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
-                ]))
-
-                feature_weights = np.diag([1.0 / 2.25, 1.0 / 4.0, 1.0 / 1.5, 1.0 / 0.5, 1.0 / 1e-4])
-
-                self.exit_states[symbol] = PositionExitState(
-                    position_id=signal_id, entry_time=time.time(), entry_price=ctx["actual_entry"],
-                    exit_side="Sell" if direction == "BUY" else "Buy", entry_balance=ctx["current_vault_balance"], 
-                    actual_qty=ctx["actual_qty_filled"], base_qty=ctx["actual_qty_filled"],          
-                    entry_thesis=entry_thesis, thesis_inv_cov=feature_weights  
-                )
-
-            state = self.exit_states[symbol]
-            self.active_contexts[symbol] = ctx
-
-            if self.test_mode:
-                self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
-                return
-
-            try:
-                # 🚀 V21.2 HOTFIX: Tighter Initial Brackets for Micro-Scalping
-                # Reduced minimum SL floor from 2.0% to 1.0% to prevent wide stops in high vol
-                actual_sl_distance = max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.0), ctx["actual_entry"] * 0.010)
+                best_bid = ob.get("best_bid", current_price)
+                best_ask = ob.get("best_ask", current_price)
                 
-                # Cap the dynamic RR ratio to max 2.0 to prevent unreachable Take Profits
-                safe_rr = min(2.0, dynamic_rr_ratio)
+                spread_cost = abs(best_ask - best_bid) / (best_bid + 1e-9) if best_bid > 0 else 0.001
+                ctx["payload_features"]["bid_ask_spread"] = spread_cost
+                ctx["payload_features"]["tensor_alpha"] = self.tensor_oracle.compute_lead_lag_signal(symbol)
+
+                ctx["safe_c_price"] = best_bid if ctx["is_buy"] else best_ask
+                if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0:
+                    ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
+
+                ctx["now"] = time.time()
+                ctx["current_vault_balance"] = self.global_state_cache.get("current_vault_balance", ctx["current_vault_balance"])
+                ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
+                ctx["active_positions_count"] = len(self.active_positions_map)
+                ctx["last_ob"] = ob
+
+                if ctx["safe_c_price"] != current_price:
+                    if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0):
+                        ctx["max_favorable_price"] = ctx["safe_c_price"]
+                    elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0):
+                        ctx["max_favorable_price"] = ctx["safe_c_price"]
+
+                decision = IntelligentExitEngine.evaluate(ctx, state)
+
+                notional = ctx["actual_qty_filled"] * ctx["actual_entry"]
                 
-                initial_sl = ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance
-                initial_tp = ctx["actual_entry"] + (actual_sl_distance * safe_rr) if ctx["is_buy"] else ctx["actual_entry"] - (actual_sl_distance * safe_rr)
-                
-                await self._amend_trailing_stop(symbol, initial_sl, initial_tp)
+                profit_hurdle = notional * 0.004  
 
-                current_active_sl = initial_sl
-                current_active_tp = initial_tp
-
-                loop_state = "ACTIVE_MONITORING"
-
-                while loop_state == "ACTIVE_MONITORING":
-                    await asyncio.sleep(0.05)
-
-                    current_price = ctx["latest_tick_price"]
-                    time_since_eval = time.time() - ctx.get("last_eval_time", 0)
-                    if current_price == ctx.get("last_eval_price") and time_since_eval < 1.0:
-                        continue
-                        
-                    ctx["last_eval_price"] = current_price
-                    ctx["last_eval_time"] = time.time()
-
-                    ob = self.orderbook_snapshots.get(symbol, {})
-                    best_bid = ob.get("best_bid", current_price)
-                    best_ask = ob.get("best_ask", current_price)
-                    
-                    spread_cost = abs(best_ask - best_bid) / (best_bid + 1e-9) if best_bid > 0 else 0.001
-                    ctx["payload_features"]["bid_ask_spread"] = spread_cost
-                    ctx["payload_features"]["tensor_alpha"] = self.tensor_oracle.compute_lead_lag_signal(symbol)
-
-                    ctx["safe_c_price"] = best_bid if ctx["is_buy"] else best_ask
-                    if ctx["stat_engine"] and ctx["stat_engine"].true_micro_price > 0:
-                        ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
-
-                    ctx["now"] = time.time()
-                    ctx["current_vault_balance"] = self.global_state_cache.get("current_vault_balance", ctx["current_vault_balance"])
-                    ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
-                    ctx["active_positions_count"] = len(self.active_positions_map)
-                    ctx["last_ob"] = ob
-
-                    if ctx["safe_c_price"] != current_price:
-                        if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0):
-                            ctx["max_favorable_price"] = ctx["safe_c_price"]
-                        elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0):
-                            ctx["max_favorable_price"] = ctx["safe_c_price"]
-
-                    decision = IntelligentExitEngine.evaluate(ctx, state)
-
-                    # 🚀 V21.2 HOTFIX: Hyper-Sensitive Trailing Stop Lock
-                    notional = ctx["actual_qty_filled"] * ctx["actual_entry"]
-                    
-                    # Activate trail lock when profit hits just +0.40% of notional
-                    profit_hurdle = notional * 0.004  
-
-                    if state.profit_state.peak_pnl > profit_hurdle:
-                        # Lock in 85% of peak profits instantly
-                        tight_lock = state.profit_state.peak_pnl * 0.85
-                        if tight_lock > state.profit_state.locked_pnl:
-                            self.state_actor.dispatch(symbol, "UPDATE_PROFIT_PEAK", {"peak_pnl": state.profit_state.peak_pnl, "locked_pnl": tight_lock})
-                            if ctx["is_buy"]:
-                                decision.exchange_ts_price = state.entry_price + (tight_lock / state.actual_qty)
-                            else:
-                                decision.exchange_ts_price = state.entry_price - (tight_lock / state.actual_qty)
-
-                    amend_required = False
-                    
-                    if decision.exchange_ts_price and decision.exchange_ts_price > 0:
+                if state.profit_state.peak_pnl > profit_hurdle:
+                    tight_lock = state.profit_state.peak_pnl * 0.85
+                    if tight_lock > state.profit_state.locked_pnl:
+                        self.state_actor.dispatch(symbol, "UPDATE_PROFIT_PEAK", {"peak_pnl": state.profit_state.peak_pnl, "locked_pnl": tight_lock})
                         if ctx["is_buy"]:
-                            if decision.exchange_ts_price > current_active_sl and decision.exchange_ts_price < current_price:
-                                current_active_sl = decision.exchange_ts_price
-                                amend_required = True
+                            decision.exchange_ts_price = state.entry_price + (tight_lock / state.actual_qty)
                         else:
-                            if decision.exchange_ts_price < current_active_sl and decision.exchange_ts_price > current_price:
-                                current_active_sl = decision.exchange_ts_price
-                                amend_required = True
-                                
-                    if hasattr(decision, 'dynamic_tp_price') and decision.dynamic_tp_price > 0:
-                        if ctx["is_buy"]:
-                            if decision.dynamic_tp_price < current_active_tp and decision.dynamic_tp_price > current_price:
-                                current_active_tp = decision.dynamic_tp_price
-                                amend_required = True
-                        else:
-                            if decision.dynamic_tp_price > current_active_tp and decision.dynamic_tp_price < current_price:
-                                current_active_tp = decision.dynamic_tp_price
-                                amend_required = True
+                            decision.exchange_ts_price = state.entry_price - (tight_lock / state.actual_qty)
 
-                    if amend_required:
-                        logger.info(f"[X-RAY] 🛡️ BRACKET SYNC // {symbol} SL: {current_active_sl:.4f} | TP: {current_active_tp:.4f}")
-                        await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
+                amend_required = False
+                
+                if decision.exchange_ts_price and decision.exchange_ts_price > 0:
+                    if ctx["is_buy"]:
+                        if decision.exchange_ts_price > current_active_sl and decision.exchange_ts_price < current_price:
+                            current_active_sl = decision.exchange_ts_price
+                            amend_required = True
+                    else:
+                        if decision.exchange_ts_price < current_active_sl and decision.exchange_ts_price > current_price:
+                            current_active_sl = decision.exchange_ts_price
+                            amend_required = True
+                            
+                if hasattr(decision, 'dynamic_tp_price') and decision.dynamic_tp_price > 0:
+                    if ctx["is_buy"]:
+                        if decision.dynamic_tp_price < current_active_tp and decision.dynamic_tp_price > current_price:
+                            current_active_tp = decision.dynamic_tp_price
+                            amend_required = True
+                    else:
+                        if decision.dynamic_tp_price > current_active_tp and decision.dynamic_tp_price < current_price:
+                            current_active_tp = decision.dynamic_tp_price
+                            amend_required = True
 
-                    await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
+                if amend_required:
+                    logger.info(f"[X-RAY] 🛡️ BRACKET SYNC // {symbol} SL: {current_active_sl:.4f} | TP: {current_active_tp:.4f}")
+                    await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
 
-                    if state.q_retained <= 0.01 and state.execution_state == "OBSERVE":
-                        ctx["exit_trigger_price"] = current_price
-                        break
+                await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
-                await self._state_settle_trade(ctx)
+                if state.q_retained <= 0.01 and state.execution_state == "OBSERVE":
+                    ctx["exit_trigger_price"] = current_price
+                    break
 
-            except Exception as e:
-                logger.error(f"[X-RAY] FSM Position daemon fault for {symbol}: {e}")
-            finally:
-                self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
+            await self._state_settle_trade(ctx)
+
+        except Exception as e:
+            logger.error(f"[X-RAY] FSM Position daemon fault for {symbol}: {e}", exc_info=True)
+        finally:
+            self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")

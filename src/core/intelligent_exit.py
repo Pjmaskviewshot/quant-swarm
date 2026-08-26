@@ -1,5 +1,5 @@
 """
-💎 V21.2 APEX QUANTUM: CALIBRATED OPTIMAL-STOPPING & HJB ENGINE
+💎 V21.2 APEX QUANTUM: CALibrated OPTIMAL-STOPPING & HJB ENGINE
 -----------------------------------------------------------------------------------------
 Continuous-Time Non-Reactive, Predictive Optimal-Stopping Matrix.
 Mathematically anchored to Position Notional (Zero Equity-Bleed).
@@ -133,12 +133,16 @@ class QuantumMicrostructurePredictor:
 
         d_m = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         try:
-            ood_prob = float(np.clip(1.0 - chi2.cdf(d_m**2, df=5), 0.0, 1.0))
+            # 🚀 FIX: Removed 1.0 - chi2.cdf() inversion.
+            # Chi-Square CDF directly represents the cumulative probability of anomalous shift
+            ood_prob = float(np.clip(chi2.cdf(d_m**2, df=5), 0.0, 1.0))
         except Exception:
-            ood_prob = 0.5
+            # 🚀 FIX: Fail closed by defaulting to 0.0 instead of 0.5 to prevent phantom triggers
+            ood_prob = 0.0
             
-        if ood_prob > 0.96 and current_pnl < 0 and ev_score_norm < -0.15:
-            return True, 0.0, f"MAHALANOBIS_OOD_DESTRUCTION (Prob: {ood_prob:.2f})", price
+        # Triggers emergency ejection if market structural shift exceeds 95% confidence bound with negative EV
+        if ood_prob >= 0.95 and current_pnl < 0 and ev_score_norm < -0.15:
+            return True, 0.0, f"MAHALANOBIS_OOD_DESTRUCTION (Anomaly Conf: {ood_prob:.2%})", price
 
         return False, 1.0, "SAFE", ood_prob
 
@@ -369,9 +373,12 @@ class IntelligentExitEngine:
         
         d_m_for_ev = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         try:
-            ood_prob_base = float(np.clip(1.0 - chi2.cdf(d_m_for_ev**2, df=5), 0.0, 1.0))
+            # 🚀 FIX: Removed 1.0 - chi2.cdf() inversion.
+            # Properly measure structural divergence probability without inverse corruption
+            ood_prob_base = float(np.clip(chi2.cdf(d_m_for_ev**2, df=5), 0.0, 1.0))
         except Exception:
-            ood_prob_base = 0.5
+            # 🚀 FIX: Fail closed default
+            ood_prob_base = 0.0
         
         ev_fut, cvar_95, cvar_99 = AnalyticalJumpRiskEngine.compute_analytical_cvar(sigma_eff, p_cont, ood_prob_base)
         ev_score_norm = ev_fut / max(sigma_eff, 1e-9)

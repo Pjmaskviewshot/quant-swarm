@@ -1,12 +1,12 @@
 """
-💎 V17.0 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
+💎 V17.1 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
 -----------------------------------------------------------------
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent
 Exits into an execution pipeline with Zero-Discard Stop Compression.
 
-Upgraded with V17 Continuous Kelly Integration, Race Condition Elimination 
-(Heat Cap Reservation Guards), True Implementation Shortfall (IS) Tracking, 
-and Atomic Routing unpacks.
+Upgraded with V17.1 Continuous Kelly Integration, Destructive Stop 
+Compression Eradication, True Implementation Shortfall (IS) Tracking, 
+and Atomic StateActor Disruptor Queue mutations.
 """
 
 import time
@@ -53,7 +53,7 @@ class CapitalAuctionEngine:
             self._last_rejection_log[log_key] = now
 
     async def run_global_capital_auction_worker(self):
-        logger.info("🏛️ V17.0 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V17.1 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.4) 
@@ -79,8 +79,9 @@ class CapitalAuctionEngine:
                     item = heapq.heappop(self.core.auction_queue)
                     _, _, sym, _, payload = item
                     
-                    if hasattr(self.core, 'auction_queue_symbols') and sym in self.core.auction_queue_symbols:
-                        self.core.auction_queue_symbols.remove(sym)
+                    if hasattr(self.core, 'auction_queue_symbols'):
+                        # 🚀 FIX: Use discard() to avoid raising KeyError on duplicate symbol pops
+                        self.core.auction_queue_symbols.discard(sym)
                     
                     if now - payload["timestamp"] > 3.0: 
                         continue
@@ -99,7 +100,7 @@ class CapitalAuctionEngine:
                     if payload["action"] == "SELL" and impulse > 0.40:
                         continue
                         
-                    # 🚀 V17 CONVICTION FLOOR
+                    # 🚀 V17.1 CONVICTION FLOOR
                     if payload.get("prob_success", 0.0) < 0.515:
                         continue
 
@@ -129,7 +130,8 @@ class CapitalAuctionEngine:
 
             # 🚀 AUDIT FIX: Lock state, evaluate risk, and immediately reserve capacity to prevent race conditions
             async with self.core.portfolio_state_lock:
-                if top_symbol in self.core.active_positions_map:
+                # Shield against race conditions checking both maps
+                if top_symbol in self.core.active_positions_map or top_symbol in self.core.in_flight_symbols:
                     continue
                     
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
@@ -164,11 +166,11 @@ class CapitalAuctionEngine:
                     self._throttled_reject_log(top_symbol, f"Risk Vault Veto: {risk_reason}")
                     continue
 
-                # 🛡️ INSTANT HEAT CAP RESERVATION
-                self.core.active_positions_map[top_symbol] = top_payload["action"]
+                # 🛡️ INSTANT HEAT CAP RESERVATION (Prevents double-entry on identical tick)
+                self.core.in_flight_symbols.add(top_symbol)
             
-            # Update ledger outside portfolio lock
-            self.core.risk_vault.update_position_ledger(top_symbol, provisional_notional)
+            # Delegate true ledger tracking to the lock-free State Actor
+            self.core.state_actor.dispatch(top_symbol, "RESERVE_IN_FLIGHT", {})
             
             logger.critical(
                 f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
@@ -202,13 +204,11 @@ class CapitalAuctionEngine:
     ):
         try:
             if confidence < 0.515:
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
+                self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
             if symbol in self.core.daemon_tasks and not self.core.daemon_tasks[symbol].done():
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
+                self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
             signal_id = str(uuid.uuid4())
@@ -220,8 +220,7 @@ class CapitalAuctionEngine:
                 available_balance = 12.0
 
             if available_balance < 3.0: 
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                self.core.risk_vault.update_position_ledger(symbol, 0.0)
+                self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
             sl_atr_mult = max(2.0, self.core.live_params.get("sl_atr_mult", 2.5))
@@ -248,25 +247,14 @@ class CapitalAuctionEngine:
 
             if fractional_risk <= 0.0:
                 logger.warning(f"[X-RAY] 🚫 EV REJECT // {symbol} EV is negative or Kelly returned 0.0.")
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Release reservation
+                self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
-            # DYNAMIC STOP COMPRESSION (Ensures Micro Accounts never exceed 2.5% risk)
-            if available_balance < 50.0:
-                target_notional = exchange_min_notional
-                actual_dollar_risk = target_notional * sl_distance_pct
-                actual_risk_pct = (actual_dollar_risk / available_balance) * 100.0
-                
-                if actual_risk_pct > 2.5:
-                    target_risk_dollars = available_balance * 0.025  
-                    compressed_sl_pct = target_risk_dollars / (target_notional + 1e-9)
-                    compressed_sl_pct = max(0.010, compressed_sl_pct)  
-                    sl_distance_pct = compressed_sl_pct
-                    sl_distance = sl_distance_pct * current_price
-            else:
-                raw_notional = (available_balance * fractional_risk) / sl_distance_pct
-                target_notional = max(exchange_min_notional, min(raw_notional, available_balance * 0.25))
+            # 🚀 V17.1 AUDIT FIX: Eradicate destructive Stop Compression
+            # Stop loss is ALWAYS derived from market physics (ATR), never artificially squeezed
+            # Maintain viable position size while capping maximum margin leverage
+            raw_notional = (available_balance * fractional_risk) / sl_distance_pct if fractional_risk > 0 else exchange_min_notional
+            target_notional = max(exchange_min_notional, min(raw_notional, available_balance * 0.30))
 
             safe_qty = target_notional / current_price
             stepped_qty = math.floor(safe_qty / qty_step) * qty_step
@@ -278,8 +266,9 @@ class CapitalAuctionEngine:
             target_notional = target_position_size * current_price
             trade_risk_dollars = target_notional * sl_distance_pct
 
-            safe_max_lev = math.floor(0.5 / (sl_distance_pct + 1e-9))
-            target_leverage = int(max(2, min(10, safe_max_lev)))
+            # Dynamic leverage derived safely from stop distance
+            safe_max_lev = math.floor(1.0 / (sl_distance_pct * 1.5))
+            target_leverage = int(max(1, min(5, safe_max_lev)))
 
             tp_distance = sl_distance * dynamic_rr_ratio 
             tick_dec = Decimal(str(self.core.tick_sizes.get(symbol, 0.0001)))
@@ -311,24 +300,34 @@ class CapitalAuctionEngine:
                     elasticity=elasticity
                 )
                 
-                # Atomic Unpacking for True Implementation Shortfall Tracking
-                if isinstance(res, tuple) and len(res) >= 2:
+                # 🚀 FIX: Extract all 4 elements returned by SOR for True Implementation Shortfall
+                if isinstance(res, tuple) and len(res) >= 4:
                     execution_success = bool(res[0])
                     arrival_price = float(res[1])
+                    fill_price = float(res[2])
+                    actual_qty_filled = float(res[3])
+                elif isinstance(res, tuple) and len(res) >= 2:
+                    execution_success = bool(res[0])
+                    arrival_price = float(res[1])
+                    fill_price = current_price
+                    actual_qty_filled = target_position_size if execution_success else 0.0
                 else:
                     execution_success = bool(res) if not isinstance(res, tuple) else bool(res[0])
                     arrival_price = current_price
+                    fill_price = current_price
+                    actual_qty_filled = target_position_size if execution_success else 0.0
             else:
                 execution_success = True
                 arrival_price = current_price
+                fill_price = current_price
+                actual_qty_filled = target_position_size
 
-            if not execution_success: 
-                async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-                self.core.risk_vault.update_position_ledger(symbol, 0.0) # Refund reservation
+            # 🚀 FIX: Abort correctly if zero quantity was filled
+            if not execution_success or actual_qty_filled <= 0: 
+                self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return 
                 
-            actual_qty_filled = target_position_size
-            actual_filled_notional = target_notional
+            actual_filled_notional = actual_qty_filled * (fill_price if fill_price > 0 else current_price)
                     
             safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime}
             self.core.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
@@ -339,10 +338,8 @@ class CapitalAuctionEngine:
             )
             self.core.track_task(self.core._safe_telegram_dispatch(ticket_msg, is_html=True))
             
-            # Finalize ledger with actual filled notional
-            self.core.risk_vault.update_position_ledger(symbol, actual_filled_notional)
-            
             # Spawn the Intelligent FSM Guardian WITH Arrival Price
+            # Guardian Daemon handles REGISTER_POSITION mutation inside its initialization
             self.core.daemon_tasks[symbol] = self.core.track_task(
                 self.core._position_lifecycle_daemon(
                     symbol, signal_id, direction, current_price, atr, 
@@ -359,5 +356,4 @@ class CapitalAuctionEngine:
             
         except Exception as e:
             logger.error(f"[X-RAY] Critical failure in execution for {symbol}: {e}", exc_info=True)
-            async with self.core.portfolio_state_lock: self.core.active_positions_map.pop(symbol, None)
-            self.core.risk_vault.update_position_ledger(symbol, 0.0) # Safe cleanup
+            self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
