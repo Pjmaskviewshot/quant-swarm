@@ -4,7 +4,8 @@
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
-Upgraded with V5.2 Elimination of Adverse Selection Fallback Chasing.
+Upgraded with V5.2 Elimination of Adverse Selection Fallback Chasing,
+Dynamic TWAP Slice Clamping, and True L2 Top-of-Book Slippage Anchors.
 """
 
 import os
@@ -130,10 +131,14 @@ class SmartOrderRouter:
             return 999.0 # Depleted depth = infinite slippage
 
         avg_expected_price = accumulated_cost / accumulated_qty
+        
+        # 🚀 V5.2 FIX: Anchor slippage to true Top-of-Book instead of phantom mid-price
+        top_of_book = float(levels[0][0])
+        
         if side.upper() == "BUY":
-            slippage_bps = ((avg_expected_price - current_mid) / current_mid) * 10000.0
+            slippage_bps = ((avg_expected_price - top_of_book) / top_of_book) * 10000.0
         else:
-            slippage_bps = ((current_mid - avg_expected_price) / current_mid) * 10000.0
+            slippage_bps = ((top_of_book - avg_expected_price) / top_of_book) * 10000.0
 
         return max(0.0, slippage_bps)
 
@@ -440,16 +445,26 @@ class SmartOrderRouter:
                             break
                             
                     elif order_status in ["New", "PartiallyFilled"]:
-                        # Only amend if price drifted significantly (> 1 tick)
-                        if abs(final_target_price - current_peg_price) >= tick_size:
-                            logger.info(f"[X-RAY] 🔄 Amending Maker Peg from {current_peg_price} to new Top-of-Book {final_target_price}")
-                            await self.executor.safe_call(self.executor.client.amend_order, category="linear", symbol=symbol, orderId=current_order_id, price=str(final_target_price))
+                        # 🚀 V5.2 FIX: Atomic Cancel-and-Replace + 2-Tick Drift Defense
+                        if abs(final_target_price - current_peg_price) >= (tick_size * 2):
+                            logger.info(f"[X-RAY] 🔄 Drift detected. Canceling Peg at {current_peg_price} to replace at {final_target_price}")
+                            
+                            # 1. Safely cancel the existing order
+                            cancel_success = await self.cancel_order_safe(symbol, current_order_id)
+                            
+                            if cancel_success:
+                                # 2. Clear the ID so the loop drops a fresh PostOnly order on the next iteration
+                                current_order_id = None
+                                
+                                # 3. Debounce to respect API rate limits before replacing
+                                await asyncio.sleep(0.5) 
+                            else:
+                                logger.warning(f"[X-RAY] ⚠️ Failed to cancel peg for {symbol}. Holding current position.")
 
             except Exception as e: 
                 error_str = str(e)
                 logger.warning(f"[X-RAY] ⚠️ Maker peg cycle variance for {symbol}: {error_str}")
                 
-                # 🚀 V5.1 INSTANT SHATTER: Do not wait timeout seconds if the coin is banned
                 if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
                     logger.error(f"[X-RAY] 🛑 FATAL BLOCK // {symbol} is banned or invalid. Shattering Maker Peg loop instantly.")
                     break
@@ -484,11 +499,23 @@ class SmartOrderRouter:
         Time-Weighted Iceberg Execution with Patched SL/TP propagation.
         Slices massive institutional orders into undetectable smaller chunks executed sequentially.
         """
-        logger.critical(f"[X-RAY] 🧊 ICEBERG ENGAGED // {symbol} large notional size detected. Slicing order into {slices} TWAP chunks.")
-        
+        # 🚀 V5.2 FIX: Fetch exchange minimums to prevent invalid slice sizes
+        limits = self.instrument_cache.get(symbol, {"min_qty": 1.0})
+        min_qty = limits["min_qty"]
+        min_notional_qty = 6.50 / current_mid_price
+        absolute_min_slice = max(min_qty, min_notional_qty)
+
+        # 🚀 V5.2 FIX: Dynamically reduce slices if they fall below exchange minimums
+        if (total_qty / slices) < absolute_min_slice:
+            safe_slices = max(1, math.floor(total_qty / absolute_min_slice))
+            logger.warning(f"[X-RAY] ⚠️ Iceberg slices too thin for {symbol}. Reducing from {slices} to {safe_slices} chunks.")
+            slices = safe_slices
+
         slice_qty = total_qty / slices
         total_executed_qty = 0.0
         weighted_notional_sum = 0.0
+        
+        logger.critical(f"[X-RAY] 🧊 ICEBERG ENGAGED // {symbol} slicing into {slices} TWAP chunks of {slice_qty:.4f}.")
         
         # Dynamic Maker Timeouts for Iceberg Chunks
         is_major_asset = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]

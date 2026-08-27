@@ -1,12 +1,12 @@
 """
-💎 V17.1 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
+💎 V17.2 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
 -----------------------------------------------------------------
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent
 Exits into an execution pipeline with Zero-Discard Stop Compression.
 
-Upgraded with V17.1 Continuous Kelly Integration, Destructive Stop 
+Upgraded with V17.2 Continuous Kelly Integration, Destructive Stop 
 Compression Eradication, True Implementation Shortfall (IS) Tracking, 
-and Atomic StateActor Disruptor Queue mutations.
+Atomic StateActor Disruptor Queue mutations, and Uncapped Risk-Dollar Sizing.
 """
 
 import time
@@ -53,7 +53,7 @@ class CapitalAuctionEngine:
             self._last_rejection_log[log_key] = now
 
     async def run_global_capital_auction_worker(self):
-        logger.info("🏛️ V17.1 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V17.2 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.4) 
@@ -250,11 +250,18 @@ class CapitalAuctionEngine:
                 self.core.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
-            # 🚀 V17.1 AUDIT FIX: Eradicate destructive Stop Compression
-            # Stop loss is ALWAYS derived from market physics (ATR), never artificially squeezed
-            # Maintain viable position size while capping maximum margin leverage
-            raw_notional = (available_balance * fractional_risk) / sl_distance_pct if fractional_risk > 0 else exchange_min_notional
-            target_notional = max(exchange_min_notional, min(raw_notional, available_balance * 0.30))
+            # 🚀 V17.2 AUDIT FIX: Eradicate Notional Capping. Cap Risk Dollars Instead.
+            # Stop loss is ALWAYS derived from market physics (ATR), never artificially squeezed.
+            # Capping notional directly destroyed Kelly sizing. We now cap risk at 5% and notional at max leverage.
+            max_leverage_cap = 5.0
+            max_permitted_notional = available_balance * max_leverage_cap
+            
+            target_risk_dollars = available_balance * fractional_risk
+            # Hard-cap Kelly fraction to prevent catastrophic overallocation
+            target_risk_dollars = min(target_risk_dollars, available_balance * 0.05)
+            
+            raw_notional = target_risk_dollars / sl_distance_pct if target_risk_dollars > 0.0 else exchange_min_notional
+            target_notional = max(exchange_min_notional, min(raw_notional, max_permitted_notional))
 
             safe_qty = target_notional / current_price
             stepped_qty = math.floor(safe_qty / qty_step) * qty_step
