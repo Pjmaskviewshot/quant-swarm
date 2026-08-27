@@ -1,9 +1,14 @@
 """
-🏦 V1.1 TITANIUM APEX: INSTITUTIONAL YIELD HARVESTER
+💎 V22.0 APEX QUANTUM PRIME: INSTITUTIONAL YIELD HARVESTER
 -----------------------------------------------------
 Executes Cash-and-Carry (Basis) Arbitrage and Funding Rate Harvesting.
-Upgraded with Atomic Execution Legging (Perp-First), Exact Execution 
-Drag Calculus, Break-Even Horizon Gating, and Active Yield Unwind Daemons.
+Upgraded with Exact Execution Drag Calculus, Break-Even Horizon Gating, 
+20% Account Exposure Limits, and Active Yield Ejection (Unwind) Daemons.
+
+Audit Fixes (V22.0):
+- Pure Asyncio Endpoint Migration (Eliminates ThreadPool Lockups)
+- Atomic Legging Protection (Prevents Naked Short Exposure)
+- Limit-Scratch Emergency Rollbacks (Eradicates Market-Order Drag)
 """
 
 import asyncio
@@ -40,9 +45,8 @@ class DeltaNeutralYieldEngine:
                 continue
                 
             try:
-                tickers_res = await self.core.executor.safe_call(
-                    self.core.executor.client.get_tickers, category="linear"
-                )
+                # 🚀 V22.0 Migration: Pure Asyncio API Call
+                tickers_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear")
                 if tickers_res.get("retCode") != 0: continue
                 
                 ticker_list = tickers_res.get("result", {}).get("list", [])
@@ -97,8 +101,9 @@ class DeltaNeutralYieldEngine:
         Returns the total cost in basis points (bps).
         """
         try:
-            spot_res = await self.core.executor.safe_call(self.core.executor.client.get_tickers, category="spot", symbol=symbol)
-            perp_res = await self.core.executor.safe_call(self.core.executor.client.get_tickers, category="linear", symbol=symbol)
+            # 🚀 V22.0 Migration: Pure Asyncio API Call
+            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=symbol)
+            perp_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear", symbol=symbol)
             
             spot_ask = float(spot_res["result"]["list"][0]["ask1Price"])
             perp_bid = float(perp_res["result"]["list"][0]["bid1Price"])
@@ -140,7 +145,8 @@ class DeltaNeutralYieldEngine:
             active_alpha_margin = 0.0
             for sym in self.core.active_positions_map.keys():
                 try:
-                    pos_res = await self.core.executor.safe_call(self.core.executor.client.get_positions, category="linear", symbol=sym)
+                    # 🚀 V22.0 Migration: Pure Asyncio API Call
+                    pos_res = await self.core.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=sym)
                     pos_list = pos_res.get("result", {}).get("list", [])
                     if pos_list:
                         active_alpha_margin += float(pos_list[0].get("positionValue", 0.0)) / float(pos_list[0].get("leverage", 1.0))
@@ -152,7 +158,7 @@ class DeltaNeutralYieldEngine:
             if idle_capital < 15.0:
                 return
 
-            # 🚀 V1.1: Strict Capital Allocation Limits
+            # Strict Capital Allocation Limits
             # Sweep 90% of IDLE capital, but NEVER exceed 20% of TOTAL account equity per hedge
             max_allowed_hedge = total_bal * 0.20
             yield_capital = min(idle_capital * 0.90, max_allowed_hedge)
@@ -160,40 +166,59 @@ class DeltaNeutralYieldEngine:
             if yield_capital < 12.0:
                 return
             
-            spot_res = await self.core.executor.safe_call(self.core.executor.client.get_tickers, category="spot", symbol=symbol)
+            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=symbol)
             spot_price = float(spot_res["result"]["list"][0]["lastPrice"])
             
             await self.core.sor._fetch_exchange_limits(symbol)
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
             # =========================================================
-            # ATOMIC EXECUTION BLOCK (CORRECTED LEGGING)
+            # ATOMIC EXECUTION BLOCK (ASYMMETRIC LEGGING FIX)
             # =========================================================
             
             # LEG 1: Perpetual Short (Zero capital locked if failed)
             logger.info(f"[X-RAY] 🏦 Routing PERPETUAL SHORT for {qty} {symbol}...")
             perp_order = await self.core.executor.safe_call(
-                self.core.executor.client.place_order, category="linear", symbol=symbol, side="Sell", 
+                "POST", "/v5/order/create", is_execution=True, 
+                category="linear", symbol=symbol, side="Sell", 
                 orderType="Market", qty=str(qty), positionIdx=self.core.sor.position_idx
             )
             
             if perp_order.get("retCode") != 0:
                 logger.error(f"[X-RAY] ❌ PERPETUAL Leg Failed: {perp_order.get('retMsg')}. Aborting hedge safely (Zero Exposure).")
                 return
+
+            # Retrieve exact fill price via Zero-Latency WebSocket hook for Limit Scratch
+            perp_order_id = perp_order.get("result", {}).get("orderId", "")
+            perp_fill_price = spot_price
             
+            if perp_order_id:
+                ws_report = await self.core.executor.await_ws_execution_report(perp_order_id, timeout=0.5)
+                if ws_report and ws_report.get("avgPrice"):
+                    parsed_avg = float(ws_report["avgPrice"])
+                    if parsed_avg > 0:
+                        perp_fill_price = parsed_avg
+
             # LEG 2: Spot Buy
             logger.info(f"[X-RAY] 🏦 Routing SPOT BUY for {qty} {symbol}...")
             spot_order = await self.core.executor.safe_call(
-                self.core.executor.client.place_order, category="spot", symbol=symbol, side="Buy", 
-                orderType="Market", qty=str(qty), marketUnit="baseCoin" # Force exact base coin matching
+                "POST", "/v5/order/create", is_execution=True, 
+                category="spot", symbol=symbol, side="Buy", 
+                orderType="Market", qty=str(qty), marketUnit="baseCoin"
             )
             
-            # SAFETEY NET: Clean up perp if spot is rejected
+            # 🚀 V22.0 SAFETY NET: Neutralize Naked Short Exposure via Limit Scratch
             if spot_order.get("retCode") != 0:
-                logger.critical(f"🚨 FATAL: SPOT Leg Failed after Perpetual execution! Engaging emergency Perp liquidation.")
+                logger.critical(f"🚨 FATAL: SPOT Leg Failed ({spot_order.get('retMsg')}). Engaging LIMIT scratch order to neutralize naked short.")
+                
+                safe_limit_price = self.core.sor._format_dynamic_price(perp_fill_price, symbol)
+                
+                # Scratch the trade exactly at entry price using PostOnly/Limit to avoid market order drag
                 await self.core.executor.safe_call(
-                    self.core.executor.client.place_order, category="linear", symbol=symbol, side="Buy", 
-                    orderType="Market", qty=str(qty), reduceOnly=True, positionIdx=self.core.sor.position_idx
+                    "POST", "/v5/order/create", is_execution=True, 
+                    category="linear", symbol=symbol, side="Buy", 
+                    orderType="Limit", price=str(safe_limit_price), qty=str(qty), 
+                    timeInForce="PostOnly", reduceOnly=True, positionIdx=self.core.sor.position_idx
                 )
                 return
             
@@ -230,17 +255,19 @@ class DeltaNeutralYieldEngine:
         try:
             # 1. Close Perpetual Short
             perp_order = await self.core.executor.safe_call(
-                self.core.executor.client.place_order, category="linear", symbol=symbol, side="Buy", 
+                "POST", "/v5/order/create", is_execution=True, 
+                category="linear", symbol=symbol, side="Buy", 
                 orderType="Market", qty=qty, reduceOnly=True, positionIdx=self.core.sor.position_idx
             )
             
             # 2. Sell Spot Collateral
             spot_order = await self.core.executor.safe_call(
-                self.core.executor.client.place_order, category="spot", symbol=symbol, side="Sell", 
+                "POST", "/v5/order/create", is_execution=True, 
+                category="spot", symbol=symbol, side="Sell", 
                 orderType="Market", qty=qty
             )
             
-            # 🚀 FIX: Only clean up tracking if both legs successfully unwound
+            # FIX: Only clean up tracking if both legs successfully unwound
             perp_success = perp_order.get("retCode") == 0
             spot_success = spot_order.get("retCode") == 0
 

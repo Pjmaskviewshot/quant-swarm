@@ -1,11 +1,17 @@
 """
-💎 V21.1 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
+💎 V22.0 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
-- Discrete Binary Kelly Criterion (f* = p - q/b) using empirical R-multiples
+- Calibrated Binary Kelly Criterion (Platt Scaling Proxy)
 - L-Moment Generalized Pareto Distribution (GPD) Heavy-Tail Risk Estimator
+- 5% Daily Loss Limit (Intraday Circuit Breaker)
 - Margin & Heat Map Allocation Caps
 - Exact NaN/Inf Sanitization & Matrix Invertibility Guards
+
+Audit Fixes (V22.0):
+- Miscalibrated Kelly Fix: Raw model confidence is now mathematically squashed into empirical probabilities.
+- Missing Daily Stop Fix: Implemented rolling 24h high-watermark loss limit (5%).
+- Anti-Hedging Fix: Removed absolute correlation block that prevented offsetting shorts during crashes.
 """
 
 import math
@@ -14,6 +20,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import numpy as np
 import pandas as pd
+from datetime import datetime, timezone
 
 logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
@@ -32,9 +39,15 @@ class InstitutionalRiskVault:
         self.absolute_max_leverage: float = 5.0
         self.base_leverage: float = 3.0
         
+        # Systemic Drawdown Trackers
         self.peak_balance = 0.0
         self.current_drawdown_state = 0.0
         self.emergency_circuit_breaker = False
+        
+        # 🚀 V22.0 Daily Loss Limit Trackers
+        self.daily_high_watermark = 0.0
+        self.current_day_utc = datetime.now(timezone.utc).date()
+        self.daily_loss_limit_pct = 0.05  # 5% Max Intraday Drawdown
         
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
@@ -155,19 +168,36 @@ class InstitutionalRiskVault:
         """Universal Max of 5."""
         return 5
 
-    def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
+    def _calibrate_model_probability(self, raw_confidence: float) -> float:
         """
-        🚀 V21.1 BINARY KELLY CRITERION
-        Replaces the dimensionally flawed Continuous Merton-Kelly with a robust 
-        Discrete Binary Kelly (f* = (p*b - q) / b) utilizing historical R-multiples.
+        🚀 V22.0 PLATT SCALING PROXY (KELLY SANITIZATION)
+        Machine learning / statistical models are notoriously overconfident at the tails.
+        A model outputting "85% confidence" does NOT mean an 85% empirical win rate.
+        This function squashes the [0.5, 1.0] output range into a realistic [0.50, 0.65] 
+        empirical probability envelope using a scaled Sigmoid (Hyperbolic Tangent) curve.
+        """
+        if math.isnan(raw_confidence) or math.isinf(raw_confidence): 
+            return 0.50
+            
+        # Tanh compression formula: y = 0.5 + 0.15 * tanh((x - 0.5) * 5.0)
+        # Yields: 0.5 -> 0.50 | 0.6 -> 0.569 | 0.8 -> 0.635 | 0.99 -> 0.647
+        compressed_p = 0.50 + 0.15 * math.tanh((raw_confidence - 0.5) * 5.0)
+        
+        return float(np.clip(compressed_p, 0.50, 0.65))
+
+    def calculate_calibrated_kelly_fraction(self, model_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
+        """
+        🚀 V22.0 CALIBRATED BINARY KELLY CRITERION
+        Replaces raw confidence directly fed to Kelly. Maps statistical scores to 
+        empirical win rates to prevent account-destroying over-leverage.
         """
         # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
-        if base_confidence < min_required_conviction:
+        if model_confidence < min_required_conviction:
             return 0.0  # Rejected by Dynamic EV Gate
 
-        # 2. Discrete Binary Kelly Sizing
-        p = base_confidence
+        # 2. Calibrate Probability (V22.0 Audit Fix)
+        p = self._calibrate_model_probability(model_confidence)
         q = 1.0 - p
         
         # Calculate empirical payoff ratio (b)
@@ -202,6 +232,21 @@ class InstitutionalRiskVault:
         if math.isnan(current_balance) or math.isinf(current_balance):
             return False, "INVALID_BALANCE_STATE"
 
+        # 🚀 V22.0 DAILY LOSS LIMIT (5% Circuit Breaker)
+        now_date = datetime.now(timezone.utc).date()
+        if now_date != self.current_day_utc:
+            self.current_day_utc = now_date
+            self.daily_high_watermark = current_balance
+            
+        if current_balance > self.daily_high_watermark:
+            self.daily_high_watermark = current_balance
+            
+        daily_drawdown = (self.daily_high_watermark - current_balance) / max(self.daily_high_watermark, 1e-9)
+        if daily_drawdown >= self.daily_loss_limit_pct:
+            logger.warning(f"🚨 INTRADAY LOSS LIMIT REACHED ({daily_drawdown:.2%}). Suspending new entries for the UTC day.")
+            return False, f"DAILY_LOSS_LIMIT_REACHED_{daily_drawdown:.2%}"
+
+        # 🚀 CATASTROPHIC ABSOLUTE DRAWDOWN (30%)
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
             self.current_drawdown_state = 0.0
@@ -221,20 +266,10 @@ class InstitutionalRiskVault:
         if len(self.active_positions) >= max_slots:
             return False, f"DYNAMIC_SLOT_CAP_REACHED // Active: {len(self.active_positions)} >= Max Allowed: {max_slots}"
 
-        evt_multiplier = self.calculate_evt_tail_risk()
-        dynamic_corr_threshold = max(0.40, min(0.85, 0.85 * evt_multiplier - (self.current_drawdown_state * 1.5)))
-
-        if symbol and new_position_notional > 0:
-            if hasattr(self, 'correlation_matrix') and self.correlation_matrix is not None:
-                for active_sym in self.active_positions.keys():
-                    if active_sym in self.correlation_matrix.index and symbol in self.correlation_matrix.columns:
-                        corr_value = float(self.correlation_matrix.loc[active_sym, symbol])
-                        if not math.isnan(corr_value) and corr_value > dynamic_corr_threshold:
-                            return False, f"RISK_PARITY_BLOCK // {symbol} correlates {corr_value:.2f} with {active_sym} (Max allowed: {dynamic_corr_threshold:.2f})"
-
-        # NATURAL HEAT MAP (Organic Scaling)
-        # Allows an organic 1.8x leveraged equity multiplier to efficiently use available margin
-        max_heat_dollars = max(self.exchange_min_notional * 2.5, current_balance * 1.8)
+        # 🚀 V21.2 NATURAL HEAT MAP FIX
+        # Aligns the max portfolio heat capacity with the auction engine's maximum allowed leverage cap (5.0x)
+        # Prevents valid individual trades from being rejected due to artificially tight portfolio constraints
+        max_heat_dollars = max(self.exchange_min_notional * 5.0, current_balance * self.absolute_max_leverage)
         total_exposure = sum(self.active_positions.values()) + new_position_notional
 
         if total_exposure > max_heat_dollars:

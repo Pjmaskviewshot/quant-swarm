@@ -1,11 +1,12 @@
 """
-💎 V21.7 APEX QUANTUM PRIME: DECOUPLED L2 INGESTION LAYER
+💎 V22.0 APEX QUANTUM PRIME: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,
 L2 Delta Staging Buffers (Zero-Tick-Loss Resync), Subscription Chunking,
 Pure JSON Pings, and C-Optimized Float Pre-Parsing.
 
-Upgraded with V21.7:
+Upgraded with V22.0:
+- O(1) Memory Leak Eradication (Explicit GC for hot-swapped symbols)
 - Symbol-Sharded Ingestion Queues (Eradicates Single-Consumer Bottleneck)
 - Independent Asynchronous Workers per Asset
 - O(1) Demultiplexed Routing
@@ -30,7 +31,7 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V21.7 QUANTUM PRIME: DECOUPLED INGESTION LAYER
+    🚀 V22.0 QUANTUM PRIME: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
     from downstream processing via Symbol-Sharded asynchronous FIFO queues.
     """
@@ -64,10 +65,11 @@ class HighVelocityMultiFeed:
         self.active_ws = None  
         self._active_tasks = set()
         
-        # 🚀 V21.7: Symbol-Sharded Queues for parallel processing
+        # 🚀 V22.0: Symbol-Sharded Queues & Deterministic Worker Tracking
         self.sharded_queues: Dict[str, asyncio.Queue] = {}
+        self.consumer_tasks: Dict[str, asyncio.Task] = {}
 
-    def track_task(self, coro: Coroutine):
+    def track_task(self, coro: Coroutine) -> asyncio.Task:
         """Safely tracks fire-and-forget daemon tasks to prevent GC mid-flight."""
         task = asyncio.create_task(coro)
         self._active_tasks.add(task)
@@ -78,7 +80,8 @@ class HighVelocityMultiFeed:
         """Dynamically provisions a queue and an isolated consumer worker per symbol."""
         if symbol not in self.sharded_queues:
             self.sharded_queues[symbol] = asyncio.Queue(maxsize=10000)
-            self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
+            worker_task = self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
+            self.consumer_tasks[symbol] = worker_task
             logger.info(f"[X-RAY] ⚡ Spawning isolated data consumer for {symbol}")
         return self.sharded_queues[symbol]
 
@@ -91,6 +94,11 @@ class HighVelocityMultiFeed:
         while self.is_running:
             try:
                 payload_type, payload_data = await queue.get()
+                
+                # 🚀 Garbage Collection / Termination Signal
+                if payload_type == "SHUTDOWN":
+                    queue.task_done()
+                    break
                 
                 if payload_type == "orderbook":
                     await self.orderbook_callback(payload_data)
@@ -107,8 +115,11 @@ class HighVelocityMultiFeed:
                 break
             except Exception as e:
                 logger.error(f"[X-RAY] ❌ Consumer worker for {symbol} failed: {e}", exc_info=True)
+                
+        logger.info(f"[X-RAY] ♻️ Consumer worker for {symbol} successfully garbage collected.")
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
+        """Dynamically updates the multiplexed stream and reallocates workers."""
         if not self.active_ws or self.active_ws.closed:
             return
 
@@ -130,11 +141,23 @@ class HighVelocityMultiFeed:
             for i in range(0, len(sub_args), 10):
                 await self.active_ws.send_json({"op": "subscribe", "args": sub_args[i:i+10]})
             
-            # Clean up local sequence memory and queues for dropped coin
+            # 🧹 Clean up local sequence memory for dropped coin
             self.orderbook_sequences.pop(drop_symbol, None)
             self.is_resyncing.pop(drop_symbol, None)
             self.delta_buffer.pop(drop_symbol, None)
-            # We intentionally leave the old queue alive so it can drain any remaining packets
+            
+            # 🚀 V22.0: MEMORY LEAK PREVENTION (Plugging the Zombie Task vulnerability)
+            drop_queue = self.sharded_queues.pop(drop_symbol, None)
+            drop_task = self.consumer_tasks.pop(drop_symbol, None)
+            
+            if drop_queue:
+                try:
+                    # Allow queue to drain gracefully before worker terminates
+                    drop_queue.put_nowait(("SHUTDOWN", None))
+                except asyncio.QueueFull:
+                    # If queue is gridlocked, forcibly assassinate the task
+                    if drop_task and not drop_task.done():
+                        drop_task.cancel()
             
             logger.info(f"[X-RAY] 🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
         except Exception as e:
@@ -142,7 +165,7 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V21.7 ZERO-TICK-LOSS SNAPSHOT RESYNC
+        🚀 ZERO-TICK-LOSS SNAPSHOT RESYNC
         Fetches a REST snapshot and seamlessly replays any deltas that arrived 
         over the WebSocket directly into the symbol's isolated queue.
         """
@@ -157,7 +180,7 @@ class HighVelocityMultiFeed:
             if self.engine_reference and hasattr(self.engine_reference, "executor"):
                 try:
                     rest_ob = await self.engine_reference.executor.safe_call(
-                        self.engine_reference.executor.client.get_orderbook, 
+                        "GET", "/v5/market/orderbook", 
                         category="linear", symbol=symbol, limit=50
                     )
                     data = rest_ob.get("result", {})
@@ -293,7 +316,7 @@ class HighVelocityMultiFeed:
                                     continue
 
                                 try:
-                                    # 🚀 V21.7: Route incoming bytes to SYMBOL-SPECIFIC FIFO queues
+                                    # Route incoming bytes to SYMBOL-SPECIFIC FIFO queues
                                     if topic.startswith("orderbook"):
                                         symbol = data.get("s")
                                         u_sequence = data.get("u")
@@ -320,7 +343,7 @@ class HighVelocityMultiFeed:
                                                     
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue 
-                                                    
+                                                
                                             self.orderbook_sequences[symbol] = u_sequence
                                             
                                         parsed_bids = self._fast_float_parse_book(data.get("b", []))

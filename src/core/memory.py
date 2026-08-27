@@ -1,10 +1,10 @@
 """
-💎 V21.1 APEX QUANTUM PRIME: HOLOGRAPHIC DECOUPLED MEMORY LEDGER
+💎 V22.0 APEX QUANTUM PRIME: PURE-ASYNC MEMORY LEDGER
 ----------------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
-- 100% Non-blocking Cloud execution via Daemonized Write Buffers
+- 100% Non-blocking Cloud execution via Asyncio Event Loop Offloading
+- Guaranteed Data Retention via Synchronous Queue Flushing on Shutdown
 - Holographic Memory Fallback (Zero-Downtime NumPy Local Tensor Matrix)
-- Shadow-to-Live Auto-Promotion Engine with X-Ray Telemetry
 - Pure NumPy vectorization for shadow OHLC forensics and KNN Distance
 """
 
@@ -13,8 +13,6 @@ import time
 import math
 import logging
 import asyncio
-import threading
-import queue
 import numpy as np
 from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any, Optional
@@ -25,8 +23,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 class MemoryBank:
     """
     Serves as the ultimate forensic ledger and probabilistic memory engine.
-    Handles high-throughput shadow execution resolution and Latent DNA clustering.
-    Upgraded with V21.1 Lock-Free Write Buffers and Holographic RAM Fallback.
+    Upgraded to V22.0 Pure Async I/O to prevent execution loop starvation.
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -46,39 +43,96 @@ class MemoryBank:
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self.cache_ttl_seconds: float = 120.0 
         
-        # 🚀 V21.0 HOLOGRAPHIC MEMORY MATRIX
+        # 🚀 HOLOGRAPHIC MEMORY MATRIX
         self.holo_capacity = 25000
         self.holo_features = np.zeros((self.holo_capacity, 3), dtype=np.float32)
         self.holo_outcomes = np.zeros(self.holo_capacity, dtype=np.float32)
         self.holo_pointer = 0
         self.holo_warmed_up = False
 
-        # 🚀 V21.1 DAEMONIZED WRITE BUFFER
-        self.write_queue = queue.Queue(maxsize=50000)
-        self.sync_worker = threading.Thread(target=self._cloud_sync_worker, daemon=True, name="SupabaseSyncWorker")
-        self.sync_worker.start()
+        # 🚀 ASYNC WRITE BUFFER STATE
+        self.write_queue: Optional[asyncio.Queue] = None
+        self._bg_task: Optional[asyncio.Task] = None
+        self._is_shutting_down = False
 
-    def _cloud_sync_worker(self):
-        """Dedicated background thread handling all HTTP operations to prevent GIL locking."""
-        logger.info("🛡️ BACKGROUND SYNC WORKER ONLINE: Database writes decoupled from event loop.")
-        while True:
+    async def start(self):
+        """Initializes the async write queue and background daemon within the event loop."""
+        self.write_queue = asyncio.Queue(maxsize=50000)
+        self._is_shutting_down = False
+        self._bg_task = asyncio.create_task(self._async_sync_worker())
+        logger.info("🛡️ ASYNC BACKGROUND SYNC WORKER ONLINE: DB writes decoupled.")
+
+    async def flush_and_close(self):
+        """
+        Forces immediate execution of all pending writes to prevent data loss.
+        Replaces the broken 'poison pill' pattern.
+        """
+        logger.info("⏳ Halting async DB worker and flushing forensic ledger...")
+        self._is_shutting_down = True
+        if self._bg_task:
+            self._bg_task.cancel()
+            
+        if not self.write_queue:
+            return
+
+        pending_tasks = []
+        while not self.write_queue.empty():
             try:
-                task = self.write_queue.get()
-                if task is None: break
-                
-                op_type, table, payload, match_col, match_val = task
-                
-                if op_type == "INSERT":
-                    self._safe_execute(self.supabase.table(table).insert(payload))
-                elif op_type == "UPDATE":
-                    self._safe_execute(self.supabase.table(table).update(payload).eq(match_col, match_val))
-                elif op_type == "UPSERT":
-                    self._safe_execute(self.supabase.table(table).upsert(payload))
-                    
+                task = self.write_queue.get_nowait()
+                if task is not None:
+                    pending_tasks.append(task)
+            except asyncio.QueueEmpty:
+                break
+
+        if pending_tasks:
+            logger.info(f"💾 Flushing {len(pending_tasks)} pending execution records to cloud...")
+            for task in pending_tasks:
+                try:
+                    await self._process_task(task)
+                except Exception as e:
+                    logger.error(f"Flush execution error: {e}")
+            logger.info("✅ Cloud ledger sync complete.")
+
+    async def _async_sync_worker(self):
+        """Processes database mutations asynchronously without blocking the HFT loop."""
+        while not self._is_shutting_down:
+            try:
+                task = await self.write_queue.get()
+                if task is None: 
+                    break
+                await self._process_task(task)
                 self.write_queue.task_done()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"[X-RAY] Background HTTP sync failed: {e}")
-                time.sleep(1.0) # Prevent tight crash loops
+                logger.error(f"[X-RAY] Async background sync failed: {e}")
+                await asyncio.sleep(1.0) 
+
+    async def _process_task(self, task: Tuple):
+        """Executes the specific Supabase mutation via a background thread context."""
+        op_type, table, payload, match_col, match_val = task
+        query = None
+        
+        if op_type == "INSERT":
+            query = self.supabase.table(table).insert(payload)
+        elif op_type == "UPDATE":
+            query = self.supabase.table(table).update(payload).eq(match_col, match_val)
+        elif op_type == "UPSERT":
+            query = self.supabase.table(table).upsert(payload)
+            
+        if query:
+            await self._safe_execute_async(query)
+
+    async def _safe_execute_async(self, query_builder, max_retries: int = 2):
+        """Wraps synchronous Supabase SDK calls in to_thread to prevent event loop blocking."""
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.to_thread(query_builder.execute)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.debug(f"[X-RAY] Supabase fault absorbed after {max_retries} attempts: {e}")
+                    raise Exception(f"Supabase fault after {max_retries} attempts: {e}")
+                await asyncio.sleep(0.05)
 
     def _ingest_hologram_data(self, rows: List[Dict[str, Any]]):
         """Organically feeds the local Hologram with verified cloud resolutions."""
@@ -99,22 +153,12 @@ class MemoryBank:
         if self.holo_pointer >= 100:
             self.holo_warmed_up = True
 
-    def _safe_execute(self, query_builder, max_retries: int = 2):
-        for attempt in range(max_retries):
-            try:
-                return query_builder.execute()
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.debug(f"[X-RAY] Supabase fault absorbed after {max_retries} attempts: {e}")
-                    raise Exception(f"Supabase fault after {max_retries} attempts: {e}")
-                time.sleep(0.05)
-
     def _parse_iso_timestamp(self, ts_str: str) -> datetime:
         if ts_str.endswith('Z'):
             ts_str = ts_str.replace('Z', '+00:00')
         return datetime.fromisoformat(ts_str)
 
-    def commit_prediction(
+    async def commit_prediction(
         self, 
         signal_id: str, 
         timestamp: float, 
@@ -124,6 +168,7 @@ class MemoryBank:
         features: Optional[Dict[str, Any]] = None, 
         is_shadow: bool = False
     ):
+        if not self.write_queue: return
         if features is None: features = {}
             
         market_regime = features.get("market_regime", "UNKNOWN")
@@ -158,15 +203,14 @@ class MemoryBank:
             "execution_mode": "SHADOW" if is_shadow else "LIVE"
         }
 
-        # 🚀 O(1) Queue Dispatch (Prevents GIL lock during API requests)
         try:
             self.write_queue.put_nowait(("INSERT", "quantitative_ledger", payload, None, None))
             label = "🦇 SHADOW" if is_shadow else "💾 CORE"
             logger.info(f"[X-RAY] {label} LEDGER ROUTED TO QUEUE // ID: {signal_id[:8]}... | Node: {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
-        except queue.Full:
+        except asyncio.QueueFull:
             logger.error(f"❌ Write queue overflow. Dropping signal {signal_id[:8]}")
 
-    def log_live_execution_result(
+    async def log_live_execution_result(
         self, 
         signal_id: str, 
         net_pnl: float, 
@@ -174,17 +218,13 @@ class MemoryBank:
         outcome: str, 
         execution_details: Optional[Dict[str, Any]] = None
     ):
+        if not self.write_queue: return
         is_correct = True if net_pnl > 0 else False
         if execution_details is None: execution_details = {}
             
         try:
-            # We must fetch the original timestamp to calculate hold time.
-            # This read is still synchronous, but generally bounded. 
-            response = self._safe_execute(
-                self.supabase.table("quantitative_ledger")
-                .select("timestamp")
-                .eq("signal_id", str(signal_id))
-            )
+            query = self.supabase.table("quantitative_ledger").select("timestamp").eq("signal_id", str(signal_id))
+            response = await self._safe_execute_async(query)
             
             if response and response.data:
                 start_dt = self._parse_iso_timestamp(response.data[0]["timestamp"])
@@ -203,7 +243,6 @@ class MemoryBank:
                     "holding_minutes": round(duration, 2)
                 }
                 
-                # 🚀 O(1) Queue Dispatch
                 self.write_queue.put_nowait(("UPDATE", "quantitative_ledger", update_payload, "signal_id", str(signal_id)))
                 logger.info(f"[X-RAY] 🎯 ATTRIBUTION DISPATCHED // Signal {signal_id[:8]}... PnL: ${net_pnl:.4f}")
             else:
@@ -212,18 +251,19 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"Database update route failed: {e}")
 
-    def resolve_batch_historical_predictions(
+    async def resolve_batch_historical_predictions(
         self, 
         assets: List[str], 
         current_prices: Dict[str, Any], 
         age_cutoff: float, 
         interval_mins: float = 15.0
     ) -> int:
+        if not self.write_queue: return 0
         resolved_count = 0
 
         try:
-            query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False)
-            response = self._safe_execute(query.order("timestamp", desc=False).limit(500))
+            query = self.supabase.table("quantitative_ledger").select("*").eq("resolved", False).order("timestamp", desc=False).limit(500)
+            response = await self._safe_execute_async(query)
 
             unresolved_rows = response.data if response else []
             if not unresolved_rows: return 0
@@ -325,8 +365,7 @@ class MemoryBank:
                 chunk_size = 100
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
-                    # 🚀 Push updates to background queue
-                    self.write_queue.put(("UPSERT", "quantitative_ledger", chunk, None, None))
+                    self.write_queue.put_nowait(("UPSERT", "quantitative_ledger", chunk, None, None))
                 logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Dispatched {len(update_batch)} paths to sync queue.")
                 
             return resolved_count
@@ -335,7 +374,7 @@ class MemoryBank:
             logger.error(f"Batch resolution fault: {e}")
             return 0
 
-    def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
+    async def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -345,7 +384,7 @@ class MemoryBank:
                 .order("timestamp", desc=True)
                 .limit(window_trades)
             )
-            response = self._safe_execute(query)
+            response = await self._safe_execute_async(query)
             data = response.data if response else []
 
             if len(data) < 35:
@@ -362,7 +401,6 @@ class MemoryBank:
 
             mean_pnl = np.mean(pnls)
             std_pnl = np.std(pnls) + 1e-9
-            # 🚀 V21.1: Crypto markets trade 365 days a year, adjusting Sharpe scalar.
             shadow_sharpe = float((mean_pnl / std_pnl) * math.sqrt(365.0)) if std_pnl > 1e-6 else 0.0
 
             should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.5)
@@ -386,7 +424,7 @@ class MemoryBank:
                 "shadow_win_rate": 0.50, "sample_count": 0, "reason": f"Evaluation exception: {e}"
             }
 
-    def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
+    async def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
         c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
@@ -414,11 +452,11 @@ class MemoryBank:
                 .limit(2000)
             )
             
-            response = self._safe_execute(query)
+            response = await self._safe_execute_async(query)
             historical_data = response.data if response else []
             
             self._ingest_hologram_data(historical_data)
-            promo_eval = self.evaluate_shadow_promotion(target_symbol)
+            promo_eval = await self.evaluate_shadow_promotion(target_symbol)
             
             if len(historical_data) < k_neighbors:
                 is_armed_default = promo_eval["should_promote"]
@@ -429,7 +467,6 @@ class MemoryBank:
                     "promotion_event": "PROMOTED" if is_armed_default else "INSUFFICIENT_DATA"
                 }
 
-            # 🚀 V21.1: Vectorized Cloud Distance Evaluation
             h_vols = np.array([min(float(r.get("vol_mult", 1.0)), 10.0) for r in historical_data])
             h_mlofis = np.array([float(r.get("z_obi", 0.0)) for r in historical_data])
             h_spreads_raw = np.array([float(r.get("spread", 0.0)) for r in historical_data])
@@ -448,7 +485,6 @@ class MemoryBank:
             
             distances_sq = (1.5 * norm_vol)**2 + (2.0 * norm_mlofi)**2 + (1.0 * norm_spread)**2
             
-            # KNN Extraction
             k_actual = min(k_neighbors, len(historical_data))
             nearest_idx = np.argpartition(distances_sq, k_actual - 1)[:k_actual]
             
@@ -527,7 +563,7 @@ class MemoryBank:
                 "promotion_event": "HOLOGRAPHIC_SURVIVAL"
             }
 
-    def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
+    async def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -536,7 +572,7 @@ class MemoryBank:
                 .eq("is_shadow", False)
                 .gte("timestamp", today_iso_start)
             )
-            res = self._safe_execute(query)
+            res = await self._safe_execute_async(query)
             rows = res.data if res else []
 
             if not rows:

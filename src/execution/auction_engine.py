@@ -1,12 +1,13 @@
 """
-💎 V17.4 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
+💎 V22.0 APEX TITANIUM OMEGA: DYNAMIC EV AUCTION & ROUTING ENGINE
 -----------------------------------------------------------------
 Fuses Multi-Scale Probabilities, Order Book Convexity, and Intelligent
 Exits into an execution pipeline with Zero-Discard Stop Compression.
 
-Upgraded with V17.4:
-- In-Flight TTL Dictionary Fix (Prevents AttributeError crashes)
-- Exact Sizing Parameter Preservation (Fixes Kelly Risk Desync)
+Audit Fixes (V22.0):
+- Atomic Reservation Locks (Eradicates Double-Exposure Race Condition)
+- Precision Passthrough (Eradicates 10001 Step Size Order Rejections)
+- Calibrated Probability Routing (Protects Kelly Criterion Math)
 """
 
 import time
@@ -53,7 +54,7 @@ class CapitalAuctionEngine:
             self._last_rejection_log[log_key] = now
 
     async def run_global_capital_auction_worker(self):
-        logger.info("🏛️ V17.4 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
+        logger.info("🏛️ V22.0 TITANIUM DYNAMIC EV AUCTION ENGINE ONLINE.")
         
         while True:
             await asyncio.sleep(0.4) 
@@ -120,16 +121,21 @@ class CapitalAuctionEngine:
             top_neg_sharpe, _, top_symbol, _, top_payload = best_candidate
             top_sharpe = -top_neg_sharpe
 
-            try:
-                raw_bal = await self.core.executor.get_wallet_balance_usdt()
-                current_bal = max(1.0, raw_bal)
-            except Exception:
-                current_bal = 10.0
-
+            # 🚀 V22.0 AUDIT FIX: Atomic Reservation
+            # Lock the portfolio state and claim the in-flight ticket instantly.
+            # Eradicates the double-exposure race condition.
             async with self.core.portfolio_state_lock:
                 if top_symbol in self.core.active_positions_map or top_symbol in self.core.in_flight_symbols:
                     continue
-                    
+                self.core.in_flight_symbols[top_symbol] = time.time() + 60.0
+
+            try:
+                try:
+                    raw_bal = await self.core.executor.get_wallet_balance_usdt()
+                    current_bal = max(1.0, raw_bal)
+                except Exception:
+                    current_bal = 10.0
+
                 current_ob = self.core.orderbook_snapshots.get(top_symbol)
                 if current_ob and current_ob.get("best_bid", 0) > 0:
                     stat_engine = self.core.stat_engines.get(top_symbol)
@@ -148,21 +154,23 @@ class CapitalAuctionEngine:
                     
                     if drift_pct > 0.0150 or drift_pct < -0.0150: 
                         self._throttled_reject_log(top_symbol, f"Micro-Price drifted {drift_pct*10000:.1f} bps from signal.")
+                        self.core.in_flight_symbols.pop(top_symbol, None)
                         continue
 
-                # 🚀 V17.3 EXACT SIZING PRE-COMPUTATION
+                # 🚀 V22.0 AUDIT FIX: Calibrated Kelly Call
                 stat_engine = self.core.stat_engines.get(top_symbol)
                 inst_var = getattr(stat_engine, 'inst_variance', 1e-4) if stat_engine else 1e-4
 
-                fractional_risk = self.core.risk_vault.calculate_optimal_fraction(
-                    base_confidence=top_payload["prob_success"], 
+                fractional_risk = self.core.risk_vault.calculate_calibrated_kelly_fraction(
+                    model_confidence=top_payload["prob_success"], 
                     net_edge_bps=top_payload["net_edge_bps"], 
                     current_balance=current_bal,
                     symbol_variance=inst_var
                 )
 
                 if fractional_risk <= 0.0:
-                    self._throttled_reject_log(top_symbol, "EV/Kelly Sizing returned 0.0")
+                    self._throttled_reject_log(top_symbol, "Calibrated EV/Kelly Sizing returned 0.0")
+                    self.core.in_flight_symbols.pop(top_symbol, None)
                     continue
 
                 sl_atr_mult = max(2.0, self.core.live_params.get("sl_atr_mult", 2.5))
@@ -187,27 +195,30 @@ class CapitalAuctionEngine:
 
                 if not is_safe:
                     self._throttled_reject_log(top_symbol, f"Risk Vault Veto: {risk_reason}")
+                    self.core.in_flight_symbols.pop(top_symbol, None)
                     continue
+            
+                self.core.state_actor.dispatch(top_symbol, "RESERVE_IN_FLIGHT", {})
+                
+                logger.critical(
+                    f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
+                    f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
+                    f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
+                )
+                
+                self.core.track_task(self.execute_statistical_signal(
+                    top_payload["symbol"], top_payload["action"], top_payload["price"], 
+                    top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
+                    top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
+                    exact_target_notional, fractional_risk, sl_distance, sl_distance_pct,
+                    top_payload.get("payload_features"), top_payload.get("elasticity"),
+                    top_payload.get("dynamic_rr", self.core.live_params.get("rr_ratio", 2.0))
+                ))
 
-                # 🚀 V17.4 FIX: Dict Assignment for TTL Deadlock Prevention
-                self.core.in_flight_symbols[top_symbol] = time.time() + 60.0
-            
-            self.core.state_actor.dispatch(top_symbol, "RESERVE_IN_FLIGHT", {})
-            
-            logger.critical(
-                f"🏛️ AUCTION WINNER // {top_symbol} [{top_payload['regime']}] | "
-                f"{top_payload['action']} | Net Sharpe: {top_sharpe:.2f} | "
-                f"Prob: {top_payload['prob_success']:.2%} | Net Edge: {top_payload['net_edge_bps']:.1f} bps"
-            )
-            
-            self.core.track_task(self.execute_statistical_signal(
-                top_payload["symbol"], top_payload["action"], top_payload["price"], 
-                top_payload["prob_success"], top_payload["dna_stats"], top_payload["atr"], 
-                top_payload["regime"], top_payload["net_edge_bps"], top_payload["vol_z"], top_payload["vol_mult"],
-                exact_target_notional, fractional_risk, sl_distance, sl_distance_pct,
-                top_payload.get("payload_features"), top_payload.get("elasticity"),
-                top_payload.get("dynamic_rr", self.core.live_params.get("rr_ratio", 2.0))
-            ))
+            except Exception as e:
+                self.core.in_flight_symbols.pop(top_symbol, None)
+                logger.error(f"[X-RAY] Auction evaluation fault for {top_symbol}: {e}", exc_info=True)
+
 
     async def execute_statistical_signal(
         self, 
@@ -238,12 +249,15 @@ class CapitalAuctionEngine:
             
             await self.core.sor._fetch_exchange_limits(symbol)
             limits = self.core.sor.instrument_cache.get(symbol, {"min_qty": 1.0, "qty_step": 1.0})
+            
             min_qty = limits["min_qty"]
             qty_step = limits["qty_step"]
             
             exchange_min_notional = max(6.50, min_qty * current_price)
 
             safe_qty = target_notional / current_price
+            
+            # Use strict qty_step for calculation, never min_qty.
             stepped_qty = math.floor(safe_qty / qty_step) * qty_step
 
             if (stepped_qty * current_price) < exchange_min_notional:
@@ -251,11 +265,9 @@ class CapitalAuctionEngine:
                 
             target_position_size = max(min_qty, stepped_qty)
             
-            # 🚀 V17.4 FIX: Removed redundant SL recalculation to perfectly preserve Kelly sizing logic
             actual_target_notional = target_position_size * current_price
             trade_risk_dollars = actual_target_notional * sl_distance_pct
 
-            # Dynamic leverage derived safely from stop distance
             safe_max_lev = math.floor(1.0 / (sl_distance_pct * 1.5))
             target_leverage = int(max(1, min(5, safe_max_lev)))
 
@@ -317,7 +329,7 @@ class CapitalAuctionEngine:
             actual_filled_notional = actual_qty_filled * (fill_price if fill_price > 0 else current_price)
                     
             safe_features = payload_features if payload_features else {"symbol": symbol, "market_regime": regime}
-            self.core.log_to_wal_sync("prediction", [signal_id, time.time(), current_price, direction, confidence, safe_features, False])
+            await self.core.memory.commit_prediction(signal_id, time.time(), current_price, direction, confidence, safe_features, False)
             
             ticket_msg = self.core.telegram.format_entry_ticket(
                 symbol, direction, current_price, actual_qty_filled, 
@@ -331,7 +343,8 @@ class CapitalAuctionEngine:
                     {
                         "allocated_value_usdt": actual_filled_notional, 
                         "size": actual_qty_filled,
-                        "arrival_price": arrival_price  
+                        "arrival_price": arrival_price,
+                        "qty_step": qty_step  # 🚀 V22.0 AUDIT FIX: Explicitly pass step to prevent 10001 reject
                     }, 
                     target_leverage, regime, realigned_tp=target_tp_price, dynamic_rr_ratio=dynamic_rr_ratio,
                     realigned_sl=initial_sl_price
