@@ -1,16 +1,14 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
+💎 V22.1 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Pure Asyncio I/O, 
 Smart Leverage Caching, and True Unified Equity Parsing.
 
-Upgraded with V22.0:
-- Eradicated ThreadPoolExecutor (Pure aiohttp REST & WS)
-- Zero-Latency Private WebSocket Execution Tracking
-- Thread-Safe Asyncio Future Bridging
-- Innovation Zone Cooldowns (ErrCode 110126)
-- Volatility-Adjusted Spread Coefficient (VASC) 
-- Top-of-Book Depth Shields
+Upgraded with V22.1:
+- Legacy Adapter __getattr__ Injection (Resolves AttributeError crashes)
+- Atomic WS Future Resolution (Eradicates micro-window race conditions)
+- Deterministic Rate Limiter Sleeps (Eliminates event-loop CPU spin-burn)
+- GET Parameter Boolean Scrubbing (Prevents Bybit parse rejections)
 """
 
 import time
@@ -29,27 +27,28 @@ logger = logging.getLogger("QUANT_CORE.BYBIT")
 
 class BybitRetCode:
     """
-    🚀 V22.0 BYBIT RETURN CODES
+    🚀 V22.1 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
-    PARAMETER_ERROR = 10002          # Invalid request parameter
-    SYSTEM_MAINTENANCE = 10004       # Server maintenance window
-    RATE_LIMIT_REACHED = 10006       # Too many requests
-    QTY_OUT_OF_BOUNDS = 10001        # Invalid parameter / quantity step error
-    SERVICE_UNAVAILABLE = 10016      # Service temporary error
-    ORDER_NOT_EXISTS = 110001        # Order does not exist or too late to cancel
-    INSUFFICIENT_BALANCE = 110007    # Abundant/insufficient balance
-    RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
-    LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
-    LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
-    AGREEMENT_NOT_SIGNED = 110126    # Innovation Zone UI agreement required
+    PARAMETER_ERROR = 10002          
+    SYSTEM_MAINTENANCE = 10004       
+    RATE_LIMIT_REACHED = 10006       
+    QTY_OUT_OF_BOUNDS = 10001        
+    SERVICE_UNAVAILABLE = 10016      
+    ORDER_NOT_EXISTS = 110001        
+    INSUFFICIENT_BALANCE = 110007    
+    RISK_LIMIT_EXCEEDED = 110013     
+    LEVERAGE_NOT_MODIFIED = 110025   
+    LEVERAGE_NOT_MODIFIED_2 = 110043 
+    AGREEMENT_NOT_SIGNED = 110126    
 
 
 class TokenBucketRateLimiter:
     """
-    🚀 TOKEN-BUCKET RATE LIMITER
+    🚀 TOKEN-BUCKET RATE LIMITER (DETERMINISTIC)
     Throttles outbound API calls to strictly respect Bybit's private endpoint limits.
+    Calculates exact sleep durations to prevent event loop CPU thrashing.
     """
     def __init__(self, capacity: int = 10, fill_rate: float = 5.0):
         self.capacity = float(capacity)
@@ -69,12 +68,31 @@ class TokenBucketRateLimiter:
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-            await asyncio.sleep(0.02) 
+                
+                # V22.1: Deterministic sleep eliminates 20ms continuous spinning
+                deficit = 1.0 - self.tokens
+                sleep_time = deficit / self.fill_rate
+                
+            await asyncio.sleep(max(0.005, sleep_time)) 
+
+
+class LegacyAdapterClient:
+    """
+    🚀 V22.1 DYNAMIC ATTRIBUTE MOCK
+    Intercepts calls like `self.executor.client.get_tickers` before they raise 
+    AttributeError, injecting a dummy callable that safely transports the __name__
+    down into the safe_call endpoint router.
+    """
+    def __getattr__(self, name):
+        def _dummy_callable(*args, **kwargs):
+            pass
+        _dummy_callable.__name__ = name
+        return _dummy_callable
 
 
 class BybitUnifiedExecutor:
     """
-    🚀 V22.0 PURE ASYNC UNIFIED API EXECUTOR
+    🚀 V22.1 PURE ASYNC UNIFIED API EXECUTOR
     Native aiohttp wrapper for Bybit V5 with automated rate-limiting, leverage caching,
     VASC ticker filtering, and Priority Execution Lanes.
     """
@@ -83,11 +101,9 @@ class BybitUnifiedExecutor:
         self.api_secret = api_secret or ""
         self.testnet = testnet
         
-        # Network Routing
         self.rest_base_url = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
         self.ws_private_url = "wss://stream-testnet.bybit.com/v5/private" if testnet else "wss://stream.bybit.com/v5/private"
         
-        # Priority lanes to ensure orders fire even if data polling is saturated
         self.data_rate_limiter = TokenBucketRateLimiter(capacity=20, fill_rate=10.0)
         self.execution_rate_limiter = TokenBucketRateLimiter(capacity=30, fill_rate=15.0)
         
@@ -96,7 +112,6 @@ class BybitUnifiedExecutor:
         self._leverage_cache: Dict[str, int] = {}
         self.temporary_symbol_bans: Dict[str, float] = {}
 
-        # WebSocket Integration State (Zero-Latency Fill Tracking)
         self._ws_connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._order_waiters: Dict[str, List[asyncio.Future]] = {}
@@ -104,20 +119,16 @@ class BybitUnifiedExecutor:
         self._waiter_lock = asyncio.Lock()
         self._is_terminating = False
         
+        self.client = LegacyAdapterClient()
+        
         logger.info(f"Initialized Pure-Async Bybit V5 Executor (Testnet: {self.testnet})")
 
-    # =========================================================================
-    # 1. CORE REST ENGINE & CLOCK SYNCHRONIZATION
-    # =========================================================================
-
     async def initialize(self):
-        """Bootstraps the HTTP session and calibrates the clock."""
         if not self.session:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0))
         await self.calibrate_server_time()
 
     async def calibrate_server_time(self) -> int:
-        """Computes exact network latency and clock drift to prevent 10002 errors."""
         try:
             start_local = int(time.time() * 1000)
             async with self.session.get(f"{self.rest_base_url}/v5/market/time") as resp:
@@ -143,10 +154,6 @@ class BybitUnifiedExecutor:
         ).hexdigest()
 
     async def _safe_api_call(self, method: str, endpoint: str, is_execution: bool = False, **kwargs) -> Any:
-        """
-        🛡️ UNIFIED API GATEWAY
-        Enforces rate-limiting, thread-free async I/O, and token/secret scrubbing.
-        """
         if not self.session:
             await self.initialize()
 
@@ -162,7 +169,9 @@ class BybitUnifiedExecutor:
 
                 if method == "GET":
                     if kwargs:
-                        payload = urllib.parse.urlencode(kwargs)
+                        # 🚀 V22.1 FIX: Scrub python booleans into JSON-compliant strings
+                        safe_kwargs = {k: (str(v).lower() if isinstance(v, bool) else v) for k, v in kwargs.items()}
+                        payload = urllib.parse.urlencode(safe_kwargs)
                         endpoint_full = f"{endpoint}?{payload}"
                     else:
                         endpoint_full = endpoint
@@ -185,7 +194,6 @@ class BybitUnifiedExecutor:
 
                 ret_code = response.get("retCode", -1)
                 
-                # Innovation Zone Block (Temporary Cooldown)
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
@@ -225,12 +233,57 @@ class BybitUnifiedExecutor:
                     raise Exception(error_str)
                 await asyncio.sleep(1.0)
 
+    async def safe_call(self, *args, **kwargs) -> Any:
+        """Universal Backward-Compatible Adapter"""
+        if args and isinstance(args[0], str):
+            method = args[0]
+            endpoint = args[1] if len(args) > 1 else ""
+            is_exec = kwargs.pop("is_execution", False)
+            return await self._safe_api_call(method, endpoint, is_execution=is_exec, **kwargs)
+        
+        if not args:
+            return {"retCode": -1, "retMsg": "Empty call", "result": {}}
+            
+        func = args[0]
+        func_name = ""
+        
+        if hasattr(func, '__name__'):
+            func_name = func.__name__
+        elif hasattr(func, '__func__'):
+            func_name = func.__func__.__name__
+        else:
+            func_name = str(func).split(" ")[2].split(".")[-1] if "bound method" in str(func) else str(func)
+        
+        endpoint_map = {
+            "get_tickers": ("GET", "/v5/market/tickers", False),
+            "get_orderbook": ("GET", "/v5/market/orderbook", False),
+            "get_positions": ("GET", "/v5/position/list", False),
+            "get_wallet_balance": ("GET", "/v5/account/wallet-balance", False),
+            "place_order": ("POST", "/v5/order/create", True),
+            "cancel_order": ("POST", "/v5/order/cancel", True),
+            "cancel_all_orders": ("POST", "/v5/order/cancel-all", True),
+            "set_leverage": ("POST", "/v5/position/set-leverage", True),
+            "switch_position_mode": ("POST", "/v5/position/switch-mode", True),
+            "set_trading_stop": ("POST", "/v5/position/trading-stop", True),
+            "get_open_orders": ("GET", "/v5/order/realtime", False),
+            "get_order_history": ("GET", "/v5/order/history", False),
+            "get_closed_pnl": ("GET", "/v5/position/closed-pnl", False),
+            "get_kline": ("GET", "/v5/market/kline", False),
+            "get_instruments_info": ("GET", "/v5/market/instruments-info", False)
+        }
+        
+        if func_name in endpoint_map:
+            method, endpoint, is_exec = endpoint_map[func_name]
+            return await self._safe_api_call(method, endpoint, is_execution=is_exec, **kwargs)
+        else:
+            logger.error(f"[X-RAY] Unmapped legacy API call intercepted: {func_name}")
+            return {"retCode": -1, "retMsg": f"Unmapped API endpoint: {func_name}", "result": {}}
+
     # =========================================================================
     # 2. PRIVATE WEBSOCKET INTEGRATION
     # =========================================================================
 
     async def connect_ws(self):
-        """Initializes the private WebSocket stream inside the main event loop."""
         if not self.session:
             await self.initialize()
         self._is_terminating = False
@@ -307,15 +360,18 @@ class BybitUnifiedExecutor:
                     fut.set_result(data)
 
     async def await_ws_execution_report(self, order_id: str, timeout: float = 0.2) -> Optional[Dict[str, Any]]:
-        """O(1) Zero-Latency Execution Tracker."""
-        cached = self._execution_cache.get(order_id)
-        if cached and cached.get("orderStatus") in ["Filled", "Cancelled", "Rejected"]:
-            return cached
-
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-
+        """
+        🚀 V22.1 ATOMIC RESOLUTION CHECK
+        Validates the cache entirely inside the async lock to eradicate 
+        the race condition where messages arrive nanoseconds before future allocation.
+        """
         async with self._waiter_lock:
+            cached = self._execution_cache.get(order_id)
+            if cached and cached.get("orderStatus") in ["Filled", "Cancelled", "Rejected"]:
+                return cached
+
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
             self._order_waiters.setdefault(order_id, []).append(fut)
 
         try:
@@ -332,7 +388,6 @@ class BybitUnifiedExecutor:
     # =========================================================================
 
     async def get_wallet_balance_usdt(self) -> float:
-        """Calculates absolute Total Equity (Cash + Unrealized PnL)."""
         try:
             response = await self._safe_api_call("GET", "/v5/account/wallet-balance", accountType="UNIFIED", coin="USDT")
             if response.get("retCode") == 0:
@@ -350,7 +405,6 @@ class BybitUnifiedExecutor:
             return 0.0
 
     async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:
-        """Smart Leverage Caching with Error Guards."""
         try:
             if self._leverage_cache.get(symbol) == target_leverage:
                 return True
@@ -398,9 +452,6 @@ class BybitUnifiedExecutor:
             return False
 
     async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
-        """
-        🚀 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
-        """
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         
         try:
@@ -431,13 +482,11 @@ class BybitUnifiedExecutor:
                 volatility_bps = ((high - low) / low) * 10000.0
                 if volatility_bps < 200.0: continue
                 
-                # 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
                 dynamic_spread_cap_bps = max(5.0, volatility_bps * 0.015)
                 live_spread_bps = ((ask - bid) / bid) * 10000.0
                 
                 if live_spread_bps > dynamic_spread_cap_bps: continue 
                 
-                # 🛡️ TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
                 bid_size = float(t.get("bid1Size", 0.0) or 0.0)
                 ask_size = float(t.get("ask1Size", 0.0) or 0.0)
                 top_depth_usd = min(bid * bid_size, ask * ask_size)
@@ -463,7 +512,6 @@ class BybitUnifiedExecutor:
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
     async def close(self):
-        """Gracefully halts active socket streams and requests."""
         logger.info("Halting Bybit Exchange Connector...")
         self._is_terminating = True
         

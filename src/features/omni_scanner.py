@@ -1,16 +1,21 @@
 """
-ðŸŒŒ V1.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
+💎 V22.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
 Upgraded with Relaxed Hot-Swap Thresholds to eradicate liquidity stagnation,
 ensuring the Swarm continuously rotates into high-RVOL, high-Alpha nodes.
-Features Titanium Blocklist filtering and Adaptive Session Volume Thresholds.
+
+Audit Fixes (V22.0):
+- SVD Thread Isolation: CPU-bound SVD computation offloaded to background threads to prevent async event loop starvation.
+- Pure Asyncio API Compliance: Natively calls V22.0 pure aiohttp executor endpoints.
+- Titanium Blocklist filtering and Adaptive Session Volume Thresholds.
 """
 
 import math
 import time
 import numpy as np
 import logging
+import asyncio
 from typing import List, Dict, Tuple, Set, Optional
 
 from features.micro_models import AdaptiveSessionClock
@@ -20,9 +25,10 @@ logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    ðŸš€ V1.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
+    🚀 V22.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market factor
     across a stable 60-period return window, returning idiosyncratic alpha residuals.
+    NOTE: This is a heavy CPU-bound SVD calculation and MUST be called via asyncio.to_thread.
     """
     # Require at least 2 assets and 30 time steps for a stable covariance decomposition
     if price_matrix.shape[0] < 2 or price_matrix.shape[1] < 30:
@@ -53,7 +59,7 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    ðŸŒŒ V1.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V22.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit perpetual universe with live microstructure spread gating and 
     logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
@@ -66,10 +72,11 @@ class GlobalOmniScanner:
 
     async def _fetch_global_tickers(self) -> dict:
         try:
-            res = await self.executor.safe_call(self.executor.client.get_tickers, category="linear")
+            # 🚀 V22.0 Native Pure-Async API call mapping
+            res = await self.executor.safe_call("GET", "/v5/market/tickers", category="linear")
             return {item['symbol']: item for item in res.get("result", {}).get("list", []) if item['symbol'].endswith('USDT')}
         except Exception as e:
-            logger.error(f"[X-RAY] âŒ Global ticker fetch failed during Omni-Scan: {e}")
+            logger.error(f"[X-RAY] ❌ Global ticker fetch failed during Omni-Scan: {e}")
             return {}
 
     async def scan_and_rank_universe(
@@ -108,10 +115,10 @@ class GlobalOmniScanner:
                     self.btc_returns.pop(0)
             self.last_btc_price = current_btc_price
 
-        # ðŸš€ V1.0 TITANIUM BLOCKLIST
+        # 🚀 V22.0 TITANIUM BLOCKLIST
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         
-        # ðŸš€ ADAPTIVE SESSION CLOCK
+        # 🚀 ADAPTIVE SESSION CLOCK
         min_turnover = AdaptiveSessionClock.get_turnover_threshold()
 
         for sym, data in tickers.items():
@@ -167,7 +174,9 @@ class GlobalOmniScanner:
             return None, None
 
         price_matrix = np.array(return_matrix_rows)
-        pca_alphas = compute_pca_residual_alpha(price_matrix)
+        
+        # 🚀 V22.0 SVD ISOLATION: Offload heavy Numpy math to background thread to preserve Event Loop latency
+        pca_alphas = await asyncio.to_thread(compute_pca_residual_alpha, price_matrix)
 
         for idx, sym in enumerate(valid_symbols):
             try:
@@ -194,7 +203,7 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # ðŸš€ V1.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
+        # 🚀 V1.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
         # Lowered Z-Score requirement from 3.0 to 2.0. Lowered base score from 2500 to 1500.
         if top_sym not in current_basket and top_z > 2.0 and top_score > 1500.0:
             basket_scores = [
@@ -210,7 +219,7 @@ class GlobalOmniScanner:
                 # Only execute swap if the candidate is 3x stronger than the weakest active symbol (Was 5x)
                 if top_score > (deadest_score * 3.0):
                     logger.critical(
-                        f"[X-RAY] ðŸŒªï¸ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
+                        f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "
                         f"Injecting Pure-Alpha Asset {top_sym} (Score: {top_score:.2f} | RVOL-Z: {top_z:.1f})"
                     )
                     self.last_swap_time = time.time()  # Lock the matrix for 30 minutes
