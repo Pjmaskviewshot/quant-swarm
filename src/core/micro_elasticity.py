@@ -1,11 +1,12 @@
 """
-💎 V5.1 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
+💎 V5.2 TENSOR-PRIME: MICRO-PRICE ELASTICITY & ADVERSE SELECTION ENGINE
 -------------------------------------------------------------------------
 Computes EWMA-smoothed Orderbook Elasticity (λ_OB), Micro-Price Variance,
 and Deterministic Liquidity Absorption Modeling.
 
 Integrates with the Stationarized Log-MLOFI engine to provide stable volatility 
 scalars and simulates exact L2 book-walking slippage prior to routing.
+Upgraded with V5.2 Temporal Normalization to eradicate false-positive sweeps.
 """
 
 import math
@@ -19,7 +20,7 @@ logger = logging.getLogger("QUANT_CORE.MICRO_ELASTICITY")
 
 class MicroElasticityEngine:
     """
-    🚀 V5.1 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
+    🚀 V5.2 TENSOR-PRIME: MICRO-PRICE ELASTICITY ENGINE
     Maps the "stretchiness" of the orderbook. High elasticity means the book is 
     hollow and vulnerable to toxic sweeps. Low elasticity means it's dense and safe.
     Upgraded with Deterministic Liquidity Absorption Modeling.
@@ -152,13 +153,16 @@ class MicroElasticityEngine:
         
         self.prev_top_bid_qty = bid_qty
         self.prev_top_ask_qty = ask_qty
+
+        # 🚀 V5.2 FIX: Normalize dt to a 1.0-second floor to prevent division-by-microsecond explosion
+        normalized_dt = max(1.0, dt)
         
         return {
             "micro_price": micro_price,
             "instant_variance": self.instant_variance,
             "elasticity": self.orderbook_elasticity,
-            "bid_depletion_rate": bid_depletion_pct / dt,
-            "ask_depletion_rate": ask_depletion_pct / dt
+            "bid_depletion_rate": bid_depletion_pct / normalized_dt,
+            "ask_depletion_rate": ask_depletion_pct / normalized_dt
         }
 
     def compute_dynamic_micro_brackets(self, current_price: float, side: str, risk_multiplier: float = 1.5) -> Tuple[float, float]:

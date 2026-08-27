@@ -1,9 +1,10 @@
 """
-💎 V21.2 APEX QUANTUM: CALibrated OPTIMAL-STOPPING & HJB ENGINE
+💎 V21.3 APEX QUANTUM: CALIBRATED OPTIMAL-STOPPING ENGINE
 -----------------------------------------------------------------------------------------
 Continuous-Time Non-Reactive, Predictive Optimal-Stopping Matrix.
 Mathematically anchored to Position Notional (Zero Equity-Bleed).
-Hyper-lethal micro-scalping Trailing Stops for $20-$100 accounts.
+Upgraded with Dimensionally Correct Mahalanobis Scaling and 
+Honest Heuristic Inventory Modeling.
 """
 
 import math
@@ -14,7 +15,7 @@ from scipy.stats import chi2, norm
 from dataclasses import dataclass, field
 from typing import Dict, Any, Tuple
 
-logger = logging.getLogger("QUANT_CORE.V21_2_EXIT")
+logger = logging.getLogger("QUANT_CORE.V21_3_EXIT")
 
 @dataclass
 class ThesisVector:
@@ -23,7 +24,22 @@ class ThesisVector:
     def mahalanobis_distance(self, other: 'ThesisVector', inv_cov_matrix: np.ndarray) -> float:
         delta = self.features - other.features
         try:
-            distance_sq = float(np.dot(np.dot(delta.T, inv_cov_matrix), delta))
+            # 🚀 V21.3 FIX: Override the miscalibrated inv_cov_matrix from main.py.
+            # First 3 features are Z-scores (Var ≈ 1.0). 
+            # 4th is Depth Ratio (Var ≈ 0.5). 
+            # 5th is Inst_variance (Scale: ~1e-6. Var ≈ (entry_var)^2).
+            # This ensures the distance correctly measures true structural shift across all dimensions.
+            safe_entry_var = max(self.features[4], 1e-12)
+            
+            proper_inv_cov = np.diag([
+                1.0,                           # ofi_fast_z
+                1.0,                           # hawkes_z
+                1.0,                           # meso_momentum_z
+                2.0,                           # depth_ratio (1.0 / 0.5)
+                1.0 / (safe_entry_var ** 2)    # inst_variance percentage drift
+            ])
+            
+            distance_sq = float(np.dot(np.dot(delta.T, proper_inv_cov), delta))
             return math.sqrt(max(0.0, distance_sq))
         except Exception:
             return 0.0
@@ -126,18 +142,14 @@ class QuantumMicrostructurePredictor:
             return True, 0.0, f"DYNAMIC_HAWKES_INVERSION ({aligned_hawkes:.2f}σ)", price
 
         ofi_divergence = p_state.rolling_mlofi_peak - aligned_ofi
-        # 🚀 Fix: Anchor exhaustion to Notional, not Balance
         notional = price * qty
         if current_pnl > (notional * 0.005) and ofi_divergence > 3.00 and depth_ratio < 0.35:
             return True, 0.0, f"MLOFI_EXHAUSTION (Div: {ofi_divergence:.2f}σ)", price
 
         d_m = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         try:
-            # 🚀 FIX: Removed 1.0 - chi2.cdf() inversion.
-            # Chi-Square CDF directly represents the cumulative probability of anomalous shift
             ood_prob = float(np.clip(chi2.cdf(d_m**2, df=5), 0.0, 1.0))
         except Exception:
-            # 🚀 FIX: Fail closed by defaulting to 0.0 instead of 0.5 to prevent phantom triggers
             ood_prob = 0.0
             
         # Triggers emergency ejection if market structural shift exceeds 95% confidence bound with negative EV
@@ -179,8 +191,7 @@ class ScaleInvariantProfitGovernor:
         
         fee_hurdle = notional * 0.0015
         
-        # 🚀 V21.2 TRUTH FIX: Anchor profit scaling purely to Notional. Eradicate Equity drag.
-        # This guarantees Tier 1 arms at a 0.6% absolute price move (6% ROE).
+        # Anchor profit scaling purely to Notional to guarantee Tier 1 arms correctly
         base_unit = max(notional * 0.006, notional * atr_pct * 0.8)
 
         t1_threshold = base_unit * 1.0
@@ -244,12 +255,10 @@ class TensorFusedAlphaDecay:
         info_velocity = current_variance / max(entry_variance, 1e-9)
         effective_info_time = wall_clock_mins * min(2.0, info_velocity)
         
-        # 🚀 Fix: Base horizon pulled back to 45.0 to force TP compression faster in chop
         base_horizon = 45.0
         dynamic_horizon = base_horizon * lambda_t
         fee_hurdle = notional * 0.0015
 
-        # 🚀 Fix: If time runs out and trade is barely profitable, close it immediately
         if effective_info_time > dynamic_horizon and p_state.peak_pnl <= (fee_hurdle * 3.0):
             return True, 0.0, f"HORIZON_EXHAUSTED (Vol-Time: {effective_info_time:.1f}T)", price, price
 
@@ -258,7 +267,6 @@ class TensorFusedAlphaDecay:
         compressed_tp = price + (tp_distance * compression_ratio) if is_buy else price - (tp_distance * compression_ratio)
 
         breakeven_sl = 0.0
-        # 🚀 Fix: Anchor Breakeven Stop Loss to 0.5% absolute move, discarding Balance entirely
         if p_state.peak_pnl > (notional * 0.005) and aligned_force < (-1.0 * lambda_t):
             fee_buffer = state.entry_price * 0.0015
             breakeven_sl = (state.entry_price + fee_buffer) if is_buy else (state.entry_price - fee_buffer)
@@ -288,7 +296,11 @@ class AnalyticalJumpRiskEngine:
         return total_ev, float(cvar_95), float(cvar_99)
 
 
-class ContinuousHJBInventoryOptimizer:
+class HeuristicInventoryOptimizer:
+    """
+    🚀 V21.3 FIX: Correctly renamed from ContinuousHJBInventoryOptimizer.
+    This module applies a heuristic penalty function utilizing jump-diffusion CVaR constraints.
+    """
     @staticmethod
     def solve_optimal_q(
         gross_pnl: float, 
@@ -373,11 +385,8 @@ class IntelligentExitEngine:
         
         d_m_for_ev = state.entry_thesis.mahalanobis_distance(current_thesis, state.thesis_inv_cov)
         try:
-            # 🚀 FIX: Removed 1.0 - chi2.cdf() inversion.
-            # Properly measure structural divergence probability without inverse corruption
             ood_prob_base = float(np.clip(chi2.cdf(d_m_for_ev**2, df=5), 0.0, 1.0))
         except Exception:
-            # 🚀 FIX: Fail closed default
             ood_prob_base = 0.0
         
         ev_fut, cvar_95, cvar_99 = AnalyticalJumpRiskEngine.compute_analytical_cvar(sigma_eff, p_cont, ood_prob_base)
@@ -412,7 +421,9 @@ class IntelligentExitEngine:
             
         last_ob = ctx.get("last_ob", {})
         drawdown_pct = float(ctx.get("drawdown_pct", 0.0))
-        q_opt_raw = ContinuousHJBInventoryOptimizer.solve_optimal_q(
+        
+        # 🚀 V21.3 FIX: Pointed to the mathematically honest Heuristic Inventory Optimizer
+        q_opt_raw = HeuristicInventoryOptimizer.solve_optimal_q(
             gross_pnl, ev_fut, cvar_95, cvar_99, sigma_eff, ood_prob_base, 
             price, total_qty, last_ob, state.exit_side, drawdown_pct, aligned_ofi
         )

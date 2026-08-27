@@ -1,13 +1,12 @@
 """
-💎 V21.0 APEX QUANTUM PRIME: ADAPTIVE FEATURE ENGINE
+💎 V21.1 APEX QUANTUM PRIME: ADAPTIVE FEATURE ENGINE
 --------------------------------------------------------------
 Multi-Dimensional State Generation & Microstructure Physics.
 
 Breakthroughs:
-- Bounded Jump-Diffusion Adaptive Kalman Filter (JD-AKF) for Zero-Lag smoothing
-- Non-Linear Stoikov Micro-Price (Asymptotic Spread Curvature)
-- Orderbook Spatial Entropy (Fragmentation) & Convexity Tracking
-- Hawkes-Coupled HMM Transition Matrices (Instant Cascade Shifts)
+- O(N) L2 Orderbook Reconstruction (Zero CPU Spikes)
+- Bounded Jump-Diffusion Kalman Filter (Algebraic Process Noise Capping)
+- Deterministic Efficiency-Ratio (ER) Regime Classification
 - Guaranteed Mathematical Immunity to Zero-Variance Float Overflows
 """
 
@@ -15,6 +14,7 @@ import math
 import time
 import numpy as np
 import logging
+import heapq
 from collections import deque
 from typing import Dict, Any, Tuple, List
 
@@ -44,52 +44,28 @@ class AdaptiveFeatureEngine:
         self._latest_mid = 0.0
         self._latest_micro_price = 0.0
 
-        # ====================================================================
-        # 🚀 HMM STATE PRIORS & DYNAMIC TRANSITION MATRIX
-        # ====================================================================
-        self.regimes = [
-            "TRENDING_BULL", 
-            "TRENDING_BEAR", 
-            "HIGH_VOL_CHOP", 
-            "MEAN_REVERTING", 
-            "LIQUIDITY_VACUUM"
-        ]
-        
-        self.state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
-        
-        # Base matrix (dynamically modulated by Kalman volatility, Kaufman ER, and Hawkes intensity)
-        self.transition_matrix = np.array([
-            [0.75, 0.05, 0.10, 0.08, 0.02],
-            [0.05, 0.75, 0.10, 0.08, 0.02],
-            [0.10, 0.10, 0.70, 0.05, 0.05],
-            [0.05, 0.05, 0.05, 0.80, 0.05],
-            [0.05, 0.05, 0.15, 0.05, 0.70] 
-        ], dtype=np.float64)
-        
         self.last_detected_regime = "UNKNOWN"
         self._last_log_time = 0.0
 
     def _prune_book(self):
-        """Memory Leak Prevention: Batched threshold pruning to prevent event-loop freezing."""
+        """
+        🚀 V21.1 O(N) MEMORY LEAK PREVENTION
+        Uses heapq to prune the book in linear time, destroying the O(N log N)
+        CPU spike that was choking the async event loop.
+        """
         if len(self.local_bids) > 1500:
-            sorted_bids = sorted(self.local_bids.keys(), reverse=True)[:500]
-            self.local_bids = {p: self.local_bids[p] for p in sorted_bids}
+            top_bids = heapq.nlargest(500, self.local_bids.keys())
+            self.local_bids = {p: self.local_bids[p] for p in top_bids}
             
         if len(self.local_asks) > 1500:
-            sorted_asks = sorted(self.local_asks.keys())[:500]
-            self.local_asks = {p: self.local_asks[p] for p in sorted_asks}
-
-    def _log_gaussian_pdf(self, x: float, mean: float, std: float) -> float:
-        """Computes ln(P) to eliminate float underflow. Hardened variance floor."""
-        var = max(float(std)**2, 1e-12)
-        return -0.5 * math.log(2 * math.pi * var) - ((float(x) - float(mean))**2 / (2 * var))
+            top_asks = heapq.nsmallest(500, self.local_asks.keys())
+            self.local_asks = {p: self.local_asks[p] for p in top_asks}
 
     def _apply_adaptive_kalman_smoothing(self, prices: np.ndarray) -> np.ndarray:
         """
-        🚀 V21.0 JUMP-DIFFUSION ADAPTIVE KALMAN FILTER (JD-AKF)
-        Instantly detects flash crashes and breakouts, snapping the filter to the 
-        new price level by exponentially scaling Process Noise (Q) during anomalies.
-        Includes mathematically bounded limits to eradicate FloatOverflow crashes.
+        🚀 V21.1 JUMP-DIFFUSION ADAPTIVE KALMAN FILTER (JD-AKF)
+        Replaced the deadly math.exp() multiplier with a hard-capped algebraic 
+        polynomial scale. Guarantees the filter will not overflow during flash crashes.
         """
         if len(prices) < 2:
             return prices
@@ -106,16 +82,15 @@ class AdaptiveFeatureEngine:
         P = 1.0
         
         for i in range(n):
-            # Dynamic Process Noise (Q)
             inst_jump = abs(float(prices[i]) - x_hat)
             avg_jump = float(np.mean(rolling_diffs[max(0, i-10):i])) if i > 10 else (inst_jump + 1e-9)
             
             # Mahalanobis-style anomaly distance
             jump_z = inst_jump / (avg_jump + 1e-9)
             
-            # 🚀 V21.0 BOUNDED EXPONENT: Prevents math.range overflow during zero-variance flatlines
-            exponent = min(20.0, max(0.0, jump_z - 2.5))
-            dynamic_Q = base_Q * math.exp(exponent)
+            # 🚀 V21.1 ALGEBRAIC CAP: Strict polynomial scaling to eradicate FloatOverflow
+            q_multiplier = 1.0 + min(100.0, jump_z ** 2)
+            dynamic_Q = base_Q * q_multiplier
             
             x_pred = x_hat
             P_pred = P + dynamic_Q
@@ -133,96 +108,52 @@ class AdaptiveFeatureEngine:
         return filtered
 
     def detect_market_regime(self) -> str:
-        """Dynamically Calibrated Hawkes-Coupled HMM."""
-        
+        """
+        🚀 V21.1 DETERMINISTIC REGIME CLASSIFIER
+        Stripped out the bloated pseudo-HMM and replaced it with a fast, computationally
+        efficient Realized Volatility and Efficiency Ratio (ER) classifier.
+        """
         candles = []
-        if len(self.timeframes["5"]) >= 60:
-            candles = list(self.timeframes["5"])[-60:]
-        elif len(self.timeframes["1"]) >= 60:
-            candles = list(self.timeframes["1"])[-60:]
-        elif len(self.prices) >= 50:
-            price_list = list(self.prices)[-50:]
+        if len(self.timeframes["5"]) >= 20:
+            candles = list(self.timeframes["5"])[-20:]
+        elif len(self.timeframes["1"]) >= 20:
+            candles = list(self.timeframes["1"])[-20:]
+        elif len(self.prices) >= 20:
+            price_list = list(self.prices)[-20:]
             candles = [{"close": p, "volume": 1.0} for p in price_list]
         else:
             return "MEAN_REVERTING"
 
-        raw_closes = np.array([float(c["close"]) for c in candles])
-        volumes = np.array([float(c["volume"]) for c in candles])
-        
-        closes = self._apply_adaptive_kalman_smoothing(raw_closes)
+        closes = self._apply_adaptive_kalman_smoothing(np.array([float(c["close"]) for c in candles]))
         
         try:
             log_returns = np.diff(np.log(closes + 1e-9))
-            mu_ret = float(np.mean(log_returns))
             volatility = float(np.std(log_returns)) + 1e-9
             
             directional_change = abs(closes[-1] - closes[0])
             absolute_changes = float(np.sum(np.abs(np.diff(closes))))
             er = float(directional_change / (absolute_changes + 1e-9))
             
-            avg_vol = float(np.mean(volumes))
-            vol_baseline = float(np.median(volumes)) + 1e-9
-            
-            base_vol = max(0.001, float(np.median([np.std(log_returns[max(0, i-5):i]) for i in range(5, len(log_returns)+1, 5)])))
-            
-            archetypes = {
-                "TRENDING_BULL":    {"ret": (base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
-                "TRENDING_BEAR":    {"ret": (-base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
-                "HIGH_VOL_CHOP":    {"ret": (0.0, base_vol * 2.5), "vol": (base_vol * 3.0, base_vol * 1.5), "er": (0.2, 0.15)},
-                "MEAN_REVERTING":   {"ret": (0.0, base_vol * 0.8), "vol": (base_vol * 1.0, base_vol * 0.5), "er": (0.3, 0.15)},
-                "LIQUIDITY_VACUUM": {"ret": (0.0, base_vol * 0.5), "vol": (base_vol * 0.5, base_vol * 0.3), "er": (0.5, 0.2)}
-            }
-            
-            log_emissions = np.zeros(5)
-            for i, regime in enumerate(self.regimes):
-                arch = archetypes[regime]
-                log_p_ret = self._log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
-                log_p_vol = self._log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
-                log_p_er  = self._log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
-                
-                log_emission = log_p_ret + log_p_vol + log_p_er
-                if regime == "LIQUIDITY_VACUUM" and avg_vol < vol_baseline * 0.5:
-                    log_emission += math.log(2.0) 
-                    
-                log_emissions[i] = log_emission
+            if er > 0.45:
+                detected_regime = "TRENDING"
+            elif er < 0.20 and volatility > 0.005:
+                detected_regime = "HIGH_VOL_CHOP"
+            else:
+                detected_regime = "MEAN_REVERTING"
 
-            # 🚀 V21.0 HAWKES-COUPLED TRANSITION MATRIX
-            base_diag = 0.75
-            chaos_penalty = max(0.0, 0.4 - er) 
-            
-            # Incorporate recent volume shocks into state instability
-            vol_shock = max(0.0, min(0.15, (avg_vol / vol_baseline) - 1.0))
-            
-            dynamic_diag = max(0.35, min(0.90, base_diag - chaos_penalty - vol_shock))
-            off_diag = (1.0 - dynamic_diag) / 4.0
-            
-            dynamic_transition = np.full((5, 5), off_diag, dtype=np.float64)
-            np.fill_diagonal(dynamic_transition, dynamic_diag)
-                
-            prior = np.dot(self.state_probs, dynamic_transition)
-            prior_log = np.log(prior + 1e-12)
-            
-            unnormalized_log_posterior = log_emissions + prior_log
-            max_log = np.max(unnormalized_log_posterior)
-            posterior = np.exp(unnormalized_log_posterior - max_log)
-            self.state_probs = posterior / np.sum(posterior)
-            
-            best_state_idx = int(np.argmax(self.state_probs))
-            detected_regime = self.regimes[best_state_idx]
-            
             now = time.time()
             if detected_regime != self.last_detected_regime and (now - self._last_log_time > 300):
                 logger.info(f"[X-RAY] 🌌 PHYSICS REGIME SHIFT // Space-Time transitioned to: {detected_regime}")
                 self.last_detected_regime = detected_regime
                 self._last_log_time = now
             
-            if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"]:
+            if detected_regime == "TRENDING":
                 return "TRENDING"
             else:
                 return "RANGING"
 
         except Exception as e:
-            logger.debug(f"[X-RAY] HMM Regime detection fallback: {e}")
+            logger.debug(f"[X-RAY] Regime detection fallback: {e}")
             return "MEAN_REVERTING"
 
     def push_trade_tick(self, trades: List[Dict[str, Any]]):
@@ -279,8 +210,9 @@ class AdaptiveFeatureEngine:
             self._prune_book()
 
             if self.local_bids and self.local_asks:
-                best_bids = sorted(self.local_bids.items(), key=lambda x: x[0], reverse=True)[:10]
-                best_asks = sorted(self.local_asks.items(), key=lambda x: x[0])[:10]
+                # 🚀 V21.1 O(N) HEAP EXTRACTION: Replaces O(N log N) sorting
+                best_bids = heapq.nlargest(10, self.local_bids.items(), key=lambda x: x[0])
+                best_asks = heapq.nsmallest(10, self.local_asks.items(), key=lambda x: x[0])
 
                 if best_bids and best_asks:
                     best_bid_price = best_bids[0][0]
@@ -290,7 +222,7 @@ class AdaptiveFeatureEngine:
                         self._latest_mid = (best_bid_price + best_ask_price) / 2.0
                         self.prices.append(self._latest_mid)
                         
-                        # 🚀 V21.0 NON-LINEAR STOIKOV MICRO-PRICE
+                        # V21.0 NON-LINEAR STOIKOV MICRO-PRICE
                         bid_vol = best_bids[0][1]
                         ask_vol = best_asks[0][1]
                         spread = max(1e-9, best_ask_price - best_bid_price)
@@ -313,7 +245,7 @@ class AdaptiveFeatureEngine:
             logger.error(f"[X-RAY] Microstructure local cache reconstruction failure: {e}")
 
     # ====================================================================
-    # 🚀 RESTORED TIME-SERIES AND UTILITY METHODS
+    # TIME-SERIES AND UTILITY METHODS
     # ====================================================================
 
     def update_multi_timeframe_candle(self, timeframe: str, open_p: float, high_p: float, low_p: float, close_p: float, volume: float):
@@ -475,7 +407,6 @@ class AdaptiveFeatureEngine:
             top_bid = float(snapshot["bids"][0][0])
             top_ask = float(snapshot["asks"][0][0])
             
-            # 🚀 V21.0 SAFE ORDERBOOK CONVEXITY & SPATIAL ENTROPY
             bid_vols = [float(lvl[1]) for lvl in snapshot["bids"]]
             ask_vols = [float(lvl[1]) for lvl in snapshot["asks"]]
             

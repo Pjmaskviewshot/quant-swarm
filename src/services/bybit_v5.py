@@ -1,11 +1,15 @@
 """
-💎 V17.0 APEX TITANIUM OMEGA: PARALLELIZED UNIFIED API EXECUTOR
+💎 V21.6 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
 --------------------------------------------------------
-Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, Smart Leverage Caching,
-True Unified Equity Parsing, and Dynamic L2 Depth Ticker Discovery.
-Upgraded with V17 Dynamic Innovation Zone Cooldowns (ErrCode 110126), 
-Thread Starvation Shields, Volatility-Adjusted Spread Coefficient (VASC), 
-and Top-of-Book Depth Shields.
+Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, 
+Smart Leverage Caching, and True Unified Equity Parsing.
+
+Upgraded with V21.6:
+- Zero-Latency Private WebSocket Execution Tracking
+- Thread-Safe Asyncio Future Bridging
+- Innovation Zone Cooldowns (ErrCode 110126)
+- Volatility-Adjusted Spread Coefficient (VASC) 
+- Top-of-Book Depth Shields
 """
 
 import os
@@ -16,9 +20,9 @@ import logging
 import functools
 import concurrent.futures
 from typing import Dict, Any, List, Optional
-from pybit.unified_trading import HTTP
+from pybit.unified_trading import HTTP, WebSocket
 
-logger = logging.getLogger("QUANT_CORE.EXECUTION")
+logger = logging.getLogger("QUANT_CORE.BYBIT")
 
 class BybitRetCode:
     """
@@ -68,18 +72,21 @@ class TokenBucketRateLimiter:
 
 class BybitUnifiedExecutor:
     """
-    🚀 V17.0 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V21.6 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
     secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 12):
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
+        self.testnet = testnet
         
+        # 1. REST Client (Synchronous, offloaded to thread pool)
         self.client = HTTP(
             testnet=testnet,
-            api_key=api_key,
-            api_secret=api_secret
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            recv_window=10000 
         )
         
         # Expanded Execution Capacity for High-Frequency Chandelier Stops
@@ -94,6 +101,74 @@ class BybitUnifiedExecutor:
         
         # 🚀 AUDIT FIX: Replaced permanent set with dynamic expiry dictionary
         self.temporary_symbol_bans: Dict[str, float] = {}
+
+        # 🚀 V21.6 WebSocket Integration State
+        self.ws_client: Optional[WebSocket] = None
+        self._ws_futures: Dict[str, asyncio.Future] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        
+        logger.info(f"Initialized Bybit V5 Unified Executor (Testnet: {self.testnet})")
+
+    async def connect_ws(self):
+        """
+        Initializes the private WebSocket stream.
+        MUST be called inside the main async event loop during engine startup.
+        """
+        self._loop = asyncio.get_running_loop()
+        
+        self.ws_client = WebSocket(
+            testnet=self.testnet,
+            channel_type="private",
+            api_key=self.api_key,
+            api_secret=self.api_secret
+        )
+        
+        # Bind the callback to the order stream
+        self.ws_client.order_stream(callback=self._on_order_msg)
+        logger.info("📡 Bybit Private WebSocket Stream Connected. Zero-Latency Tracking Armed.")
+
+    def _on_order_msg(self, message: dict):
+        """
+        Fired by pybit's background daemon thread. 
+        Must safely cross the thread boundary to interact with asyncio.
+        """
+        if "data" not in message: return
+        
+        for order in message["data"]:
+            order_id = order.get("orderId")
+            status = order.get("orderStatus")
+            
+            # We only track statuses that indicate a fill or a terminal rejection
+            if order_id in self._ws_futures and status in ["Filled", "PartiallyFilled", "Cancelled", "Rejected"]:
+                if self._loop and not self._loop.is_closed():
+                    # Safely bridge the background thread to the main event loop
+                    self._loop.call_soon_threadsafe(self._resolve_ws_future, order_id, order)
+
+    def _resolve_ws_future(self, order_id: str, data: dict):
+        """Executes strictly on the main asyncio event loop."""
+        fut = self._ws_futures.get(order_id)
+        if fut and not fut.done():
+            fut.set_result(data)
+
+    async def await_ws_execution_report(self, order_id: str, timeout: float = 0.2) -> Optional[Dict[str, Any]]:
+        """
+        O(1) Zero-Latency Execution Tracker.
+        Suspends the SOR router until the WebSocket confirms the physical fill, 
+        eradicating the need for REST polling.
+        """
+        if not self._loop:
+            logger.warning("[X-RAY] WebSocket loop not initialized. Skipping WS tracking.")
+            return None
+            
+        fut = self._loop.create_future()
+        self._ws_futures[order_id] = fut
+        
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._ws_futures.pop(order_id, None)
 
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
@@ -380,3 +455,15 @@ class BybitUnifiedExecutor:
             logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
             # Failsafe fallback 
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+    def close(self):
+        """Gracefully halts active socket streams and destroys zombie threads."""
+        logger.info("Halting Bybit Exchange Connector...")
+        if self.ws_client:
+            try:
+                self.ws_client.exit()
+            except Exception as e:
+                logger.debug(f"Error closing WebSocket: {e}")
+                
+        if self._api_thread_pool:
+            self._api_thread_pool.shutdown(wait=False, cancel_futures=True)

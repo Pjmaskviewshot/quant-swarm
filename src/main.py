@@ -1,36 +1,32 @@
 """
-💎 V21.4 APEX QUANTUM PRIME: MICRO-SCALPING & IN-FLIGHT GUARD
+💎 V22.0 APEX QUANTUM PRIME: BARE-METAL CORE
 ------------------------------------------------------------------------
-Eliminates duplicate entries via instant in-flight position reservation,
-enforces 5-minute directional hysteresis to stop fee churn in ranging markets,
-and eradicates destructive stop-loss compression to guarantee mathematical survival.
-
-Upgraded with V21.4 Graceful Thread Synchronization, Redundant API Traps Eradicated,
-and Coroutine Dispatch fixes for Telegram Telemetry.
+Micro-Scalping & In-Flight Guard Execution Engine.
+Features:
+- Lock-Free LMAX Disruptor State Mutations
+- O(1) Decoupled Cloud Memory Routing (Zero-I/O Blocking)
+- Strict Directional Hysteresis & In-Flight TTL Purging
+- Direct Execution Sizing (No Provisional Overrides)
 """
 
 import os
 import sys
-
-# Ensure `src/` directory is prepended to sys.path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import time
 import math
 import asyncio
 import logging
 import hashlib
-import json
-import tempfile
 import datetime
 import heapq
 import numpy as np
-import aiosqlite  
 from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any, Callable
 from dataclasses import dataclass
 from dotenv import load_dotenv
+
+# Ensure `src/` directory is prepended to sys.path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 class EmergencyShutdown(Exception):
     """Custom exception to trigger safe, async-aware system shutdown."""
@@ -67,7 +63,7 @@ from services.tensor_oracle import CrossAssetTensorOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V21_APEX")
+logger = logging.getLogger("QUANT_CORE.V22_APEX")
 
 
 @dataclass
@@ -80,9 +76,8 @@ class MutationCommand:
 
 class GlobalStateActor:
     """
-    🚀 V21.3 LOCK-FREE STATE ACTOR (LMAX DISRUPTOR PATTERN)
+    🚀 V22.0 LOCK-FREE STATE ACTOR (LMAX DISRUPTOR PATTERN)
     Operates as the single source of truth for portfolio mutations.
-    Eliminates async race conditions by serializing dictionary modifications.
     """
     def __init__(self, core_engine):
         self.core = core_engine
@@ -91,7 +86,7 @@ class GlobalStateActor:
 
     async def start(self):
         self._is_running = True
-        logger.info("🛡️ V21.3 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
+        logger.info("🛡️ V22.0 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
         while self._is_running:
             try:
                 cmd: MutationCommand = await self.mutation_queue.get()
@@ -108,17 +103,18 @@ class GlobalStateActor:
             if cmd.mutation_type == "REGISTER_POSITION":
                 self.core.active_positions_map[cmd.target_asset] = cmd.payload["direction"]
                 self.core.risk_vault.update_position_ledger(cmd.target_asset, cmd.payload["notional"])
-                self.core.in_flight_symbols.discard(cmd.target_asset)
+                self.core.in_flight_symbols.pop(cmd.target_asset, None)
             
             elif cmd.mutation_type == "RESERVE_IN_FLIGHT":
-                self.core.in_flight_symbols.add(cmd.target_asset)
+                # 60 Second TTL Expiration
+                self.core.in_flight_symbols[cmd.target_asset] = time.time() + 60.0
 
             elif cmd.mutation_type == "RELEASE_IN_FLIGHT":
-                self.core.in_flight_symbols.discard(cmd.target_asset)
+                self.core.in_flight_symbols.pop(cmd.target_asset, None)
 
             elif cmd.mutation_type == "LIQUIDATE_POSITION":
                 self.core.active_positions_map.pop(cmd.target_asset, None)
-                self.core.in_flight_symbols.discard(cmd.target_asset)
+                self.core.in_flight_symbols.pop(cmd.target_asset, None)
                 self.core.risk_vault.update_position_ledger(cmd.target_asset, 0.0)
                 self.core.exit_states.pop(cmd.target_asset, None)
                 self.core.active_contexts.pop(cmd.target_asset, None)
@@ -170,7 +166,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V21.4 APEX QUANTUM PRIME MATRIX ACTIVE.")
+            logger.critical("💎 LIVE MODE: V22.0 APEX BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -179,12 +175,6 @@ class DistributedQuantEngine:
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(15)
         self.execution_semaphore = asyncio.Semaphore(10)
-        
-        # PERSISTENT CLOUD STORAGE
-        storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
-        self.wal_db_path = os.path.join(storage_path, "quant_swarm_wal.db")
-        self.wal_batch_queue = []
-        self.wal_lock = asyncio.Lock()  
         
         self.tick_error_counts: Dict[str, List[float]] = {}
         self.circuit_breakers: Dict[str, float] = {}
@@ -221,7 +211,8 @@ class DistributedQuantEngine:
         self.portfolio_state_lock = asyncio.Lock() 
         
         self.active_positions_map: Dict[str, str] = {}  
-        self.in_flight_symbols = set()
+        self.in_flight_symbols: Dict[str, float] = {}
+        
         self.last_exit_direction: Dict[str, tuple] = {} 
 
         self.symbol_locks, self.eval_semaphores, self.daemon_tasks, self.last_eval_time = {}, {}, {}, {}
@@ -275,6 +266,7 @@ class DistributedQuantEngine:
 
     def _load_live_params(self) -> dict:
         default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.0}
+        import os, json
         try:
             if os.path.exists("params.json"):
                 with open("params.json", "r") as f: return {**default_params, **json.load(f)}
@@ -282,7 +274,7 @@ class DistributedQuantEngine:
         return default_params
 
     async def _prune_dead_symbols(self):
-        active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()) + list(self.in_flight_symbols))
+        active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()) + list(self.in_flight_symbols.keys()))
         for key in list(self.stat_engines.keys()):
             if key not in active_set:
                 self.stat_engines.pop(key, None)
@@ -319,6 +311,7 @@ class DistributedQuantEngine:
                     "rls_updates": engine.rls_updates
                 }
         def _write_file():
+            import tempfile, json
             try:
                 storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
                 target_path = os.path.join(storage_path, "sgd_state.json")
@@ -327,21 +320,6 @@ class DistributedQuantEngine:
                 os.replace(path, target_path)
             except Exception as e: logger.debug(f"[X-RAY] Failed RLS disk serialization: {e}")
         await asyncio.to_thread(_write_file)
-
-    def _load_sgd_state(self):
-        try:
-            storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
-            target_path = os.path.join(storage_path, "sgd_state.json")
-            if not os.path.exists(target_path): return
-            with open(target_path, "r") as f: state = json.load(f)
-            for sym, data in state.items():
-                if sym in self.stat_engines and hasattr(self.stat_engines[sym], 'rls_trending'):
-                    self.stat_engines[sym].rls_trending.w = np.array(data.get("weights_trending", self.stat_engines[sym].rls_trending.w))
-                    self.stat_engines[sym].rls_ranging.w = np.array(data.get("weights_ranging", self.stat_engines[sym].rls_ranging.w))
-                    self.stat_engines[sym].rls_trending.P = np.array(data.get("P_trending", self.stat_engines[sym].rls_trending.P))
-                    self.stat_engines[sym].rls_ranging.P = np.array(data.get("P_ranging", self.stat_engines[sym].rls_ranging.P))
-            logger.info("🧠 KALMAN RLS MEMORY LOADED: Recovered Covariance Tensors from disk.")
-        except Exception as e: logger.debug(f"[X-RAY] Failed to load RLS state: {e}", exc_info=True)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
         for s in symbols:
@@ -368,7 +346,6 @@ class DistributedQuantEngine:
         except asyncio.QueueFull:
             logger.warning("[X-RAY] ⚠️ Telegram queue full. Dropping telemetry to preserve HFT event loop.")
 
-    # 🚀 V21.4 FIX: Converted to Coroutine to prevent TypeErrors in track_task dispatch
     async def _safe_telegram_dispatch(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
         self._safe_telegram_dispatch_sync(message, is_html, message_type)
 
@@ -541,6 +518,13 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(5.0)
             try:
+                # In-Flight Deadlock TTL Purge
+                now = time.time()
+                expired_flights = [sym for sym, exp in self.in_flight_symbols.items() if now > exp]
+                for sym in expired_flights:
+                    self.in_flight_symbols.pop(sym, None)
+                    logger.warning(f"[X-RAY] 🧹 IN-FLIGHT TTL EXPIRED: Purged phantom lock for {sym}")
+
                 pos_response = await self.executor.safe_call(self.executor.client.get_positions, category="linear", settleCoin="USDT")
                 if pos_response.get("retCode") != 0: continue
 
@@ -723,201 +707,158 @@ class DistributedQuantEngine:
         if now - self.last_eval_time.get(symbol + "_eval_throttle", 0.0) < 0.2: return  
         self.last_eval_time[symbol + "_eval_throttle"] = now
 
-        async def _eval_gate(m_snapshot):
-            async with self.circuit_breaker_lock:
-                if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
-            if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
+        # Synchronous execution of the eval gate prevents task explosion
+        await self._eval_gate(symbol, price, manifests, stat_engine, clock, feature_engine, regime, now, exchange_timestamp)
 
-            if symbol in self.active_positions_map or symbol in self.in_flight_symbols: return
+    async def _eval_gate(self, symbol, price, m_snapshot, stat_engine, clock, feature_engine, regime, now, exchange_timestamp):
+        async with self.circuit_breaker_lock:
+            if self.circuit_breakers.get(symbol, 0.0) > now or self.circuit_breakers.get("GLOBAL_MAINTENANCE", 0.0) > now: return
+        if not self.fsm.can_execute_trades or (time.time() - self.last_socket_reconnect < 5.0): return
 
-            try:
-                if not stat_engine or not clock: return
-                
-                valid_manifests = [m for m in m_snapshot if m.get("valid")]
-                vol_z = getattr(stat_engine, "hawkes_z", 0.0)
-                
-                if valid_manifests: 
-                    vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
-                    stat_engine.vpin_z = vpin_z
-                elif clock.vpin_history:
-                    hist = np.array(list(clock.vpin_history)[-200:])
-                    if len(hist) >= 20 and np.std(hist) > 0:
-                        vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
-                        stat_engine.vpin_z = vpin_z
-                    else: vpin_z = 0.0
-                else: vpin_z = 0.0
+        if symbol in self.active_positions_map or symbol in self.in_flight_symbols: return
+
+        try:
+            if not stat_engine or not clock: return
             
-                ob = self.orderbook_snapshots.get(symbol)
-                if not ob or "bid_size" not in ob: return
-                spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
-                vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
+            valid_manifests = [m for m in m_snapshot if m.get("valid")]
+            vol_z = getattr(stat_engine, "hawkes_z", 0.0)
+            
+            if valid_manifests: 
+                vpin_z = float(valid_manifests[-1].get("vpin_z_score", 0.0))
+                stat_engine.vpin_z = vpin_z
+            elif clock.vpin_history:
+                hist = np.array(list(clock.vpin_history)[-200:])
+                if len(hist) >= 20 and np.std(hist) > 0:
+                    vpin_z = float((clock.vpin_history[-1] - np.mean(hist)) / (np.std(hist) + 1e-9))
+                    stat_engine.vpin_z = vpin_z
+                else: vpin_z = 0.0
+            else: vpin_z = 0.0
+        
+            ob = self.orderbook_snapshots.get(symbol)
+            if not ob or "bid_size" not in ob: return
+            spread_cost = abs(ob["best_ask"] - ob["best_bid"]) / (price + 1e-9) if price > 0 else 0.001
+            vol_mult = self.screener_metrics.get(symbol, {}).get("vol_mult", 1.0)
+            
+            vol_sigma = math.sqrt(getattr(stat_engine, "inst_variance", 1e-6))
+            max_allowable_spread = max(0.0030, vol_sigma * 1.5)
+            if spread_cost > max_allowable_spread: return
+            if abs(vpin_z) > 3.5: return
+            
+            async with self.eval_semaphores[symbol]:
+                raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
+                atr = raw_atr if raw_atr > 0 else price * 0.005
                 
-                vol_sigma = math.sqrt(getattr(stat_engine, "inst_variance", 1e-6))
-                max_allowable_spread = max(0.0030, vol_sigma * 1.5)
-                if spread_cost > max_allowable_spread: return
-                if abs(vpin_z) > 3.5: return
+                er_scale = getattr(stat_engine, "kaufman_er", 0.5) if stat_engine else 0.5
+                dynamic_sl_mult = 1.5 + 2.0 * (1.0 - er_scale)
+                sl_dist_pct = max((atr * dynamic_sl_mult) / (price + 1e-9), 0.015)
                 
-                async with self.eval_semaphores[symbol]:
-                    raw_atr = feature_engine.get_computed_atr() if feature_engine and hasattr(feature_engine, 'get_computed_atr') else 0.0
-                    atr = raw_atr if raw_atr > 0 else price * 0.005
-                    
-                    er_scale = getattr(stat_engine, "kaufman_er", 0.5) if stat_engine else 0.5
-                    dynamic_sl_mult = 1.5 + 2.0 * (1.0 - er_scale)
-                    sl_dist_pct = max((atr * dynamic_sl_mult) / (price + 1e-9), 0.015)
-                    
-                    dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else (1.5 + (2.0 * er_scale**2))
-                    tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
-                    
-                    tensor_alpha = self.tensor_oracle.compute_lead_lag_signal(symbol)
-                    
-                    sgd_state = stat_engine.extract_statistical_state(
-                        current_price=price, log_mlofi_z=stat_engine.ofi_fast_z, hawkes_z=getattr(stat_engine, "hawkes_z", 0.0), 
-                        sector_impulse=tensor_alpha, sl_dist_pct=sl_dist_pct, 
-                        tp_dist_pct=tp_dist_pct, exchange_timestamp=exchange_timestamp
+                dynamic_rr_ratio = feature_engine.get_dynamic_rr_ratio() if feature_engine and hasattr(feature_engine, 'get_dynamic_rr_ratio') else (1.5 + (2.0 * er_scale**2))
+                tp_dist_pct = sl_dist_pct * dynamic_rr_ratio
+                
+                tensor_alpha = self.tensor_oracle.compute_lead_lag_signal(symbol)
+                
+                sgd_state = stat_engine.extract_statistical_state(
+                    current_price=price, log_mlofi_z=stat_engine.ofi_fast_z, hawkes_z=getattr(stat_engine, "hawkes_z", 0.0), 
+                    sector_impulse=tensor_alpha, sl_dist_pct=sl_dist_pct, 
+                    tp_dist_pct=tp_dist_pct, exchange_timestamp=exchange_timestamp
+                )
+                
+                action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
+                
+                if regime in ["RANGING", "MEAN_REVERTING", "HIGH_VOL_CHOP"]:
+                    aligned_mlofi = stat_engine.ofi_fast_z if action == "BUY" else -stat_engine.ofi_fast_z
+                    if aligned_mlofi < 1.2:
+                        return  
+                
+                if symbol in self.last_exit_direction:
+                    prev_dir, exit_t = self.last_exit_direction[symbol]
+                    if prev_dir != action and (time.time() - exit_t) < 300.0:
+                        return  
+
+                fusion_engine = self.entry_matrices.get(symbol)
+                exec_weight = 1.0
+                if fusion_engine:
+                    btc_eng = self.stat_engines.get("BTCUSDT")
+                    eth_eng = self.stat_engines.get("ETHUSDT")
+                    fusion_engine.update_macro_flows(
+                        asset_ofi_z=stat_engine.ofi_fast_z,
+                        btc_ofi_z=getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0,
+                        eth_ofi_z=getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
                     )
+                    fusion_engine.update_mlofi_state(stat_engine.ofi_fast_z)
+                    fusion_verdict = fusion_engine.fuse_signal_probability(symbol=symbol, raw_prob=prob_success, intended_action=action, bids=ob.get("bids", []), asks=ob.get("asks", []))
+                    prob_success = fusion_verdict.get("fused_prob", prob_success)
+                    exec_weight = fusion_verdict.get("execution_weight", 1.0)
+                else: return 
+
+                if prob_success < 0.525: return 
+
+                structural_verdict = self.edge_gates[symbol].evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
+                action = structural_verdict.get("action", action)
+                edge_weight = structural_verdict.get("edge_weight", 1.0)
+                if edge_weight == 0.0: return 
                     
-                    action, prob_success = sgd_state["action_dir"], max(sgd_state["p_up"], sgd_state["p_down"])
-                    
-                    if regime in ["RANGING", "MEAN_REVERTING", "HIGH_VOL_CHOP"]:
-                        aligned_mlofi = stat_engine.ofi_fast_z if action == "BUY" else -stat_engine.ofi_fast_z
-                        if aligned_mlofi < 1.2:
-                            return  
-                    
-                    if symbol in self.last_exit_direction:
-                        prev_dir, exit_t = self.last_exit_direction[symbol]
-                        if prev_dir != action and (time.time() - exit_t) < 300.0:
-                            return  
+                prob_success = min(0.95, prob_success * edge_weight)
+                prob_success = stat_engine.calibrate_confidence(prob_success, stat_engine.ewma_mse)
 
-                    fusion_engine = self.entry_matrices.get(symbol)
-                    exec_weight = 1.0
-                    if fusion_engine:
-                        btc_eng = self.stat_engines.get("BTCUSDT")
-                        eth_eng = self.stat_engines.get("ETHUSDT")
-                        fusion_engine.update_macro_flows(
-                            asset_ofi_z=stat_engine.ofi_fast_z,
-                            btc_ofi_z=getattr(btc_eng, 'ofi_fast_z', 0.0) if btc_eng else 0.0,
-                            eth_ofi_z=getattr(eth_eng, 'ofi_fast_z', 0.0) if eth_eng else 0.0
-                        )
-                        fusion_engine.update_mlofi_state(stat_engine.ofi_fast_z)
-                        fusion_verdict = fusion_engine.fuse_signal_probability(symbol=symbol, raw_prob=prob_success, intended_action=action, bids=ob.get("bids", []), asks=ob.get("asks", []))
-                        prob_success = fusion_verdict.get("fused_prob", prob_success)
-                        exec_weight = fusion_verdict.get("execution_weight", 1.0)
-                    else: return 
+                dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
 
-                    if prob_success < 0.525: return 
+                bbo_depth_qty = float(ob.get("ask_size", 1.0)) if action == "BUY" else float(ob.get("bid_size", 1.0))
+                max_notional = self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
+                calculated_qty = (max_notional * exec_weight) / price
+                
+                try: available_balance = max(1.0, float(self.global_state_cache.get("current_vault_balance", 21.0))) 
+                except Exception: available_balance = 21.0
 
-                    structural_verdict = edge_gate.evaluate_structural_edge(symbol, vpin_z, intended_direction=action)
-                    action = structural_verdict.get("action", action)
-                    edge_weight = structural_verdict.get("edge_weight", 1.0)
-                    if edge_weight == 0.0: return 
-                        
-                    prob_success = min(0.95, prob_success * edge_weight)
-                    prob_success = stat_engine.calibrate_confidence(prob_success, stat_engine.ewma_mse)
+                max_permitted_notional = available_balance * 0.95
+                if (calculated_qty * price) > max_permitted_notional: calculated_qty = max_permitted_notional / price
 
-                    dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "win_rate": 0.50})
+                min_qty = self.hardware_min_qty.get(symbol, 1.0)
+                if calculated_qty < min_qty: return
+                if calculated_qty > (bbo_depth_qty * 0.50): calculated_qty = bbo_depth_qty * 0.50
+                
+                actual_notional = calculated_qty * price
 
-                    bbo_depth_qty = float(ob.get("ask_size", 1.0)) if action == "BUY" else float(ob.get("bid_size", 1.0))
-                    max_notional = self._get_max_affordable_notional(sl_dist_pct=sl_dist_pct)
-                    calculated_qty = (max_notional * exec_weight) / price
-                    
-                    try: available_balance = max(1.0, float(self.global_state_cache.get("current_vault_balance", 21.0))) 
-                    except Exception: available_balance = 21.0
+                net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
+                if (net_ev_pct * 10000.0) < 65.0:
+                    return 
 
-                    max_permitted_notional = available_balance * 0.95
-                    if (calculated_qty * price) > max_permitted_notional: calculated_qty = max_permitted_notional / price
+                safe_leverage = math.floor(1.0 / (sl_dist_pct * 1.5))
+                target_leverage = float(max(1.0, min(5.0, safe_leverage)))
 
-                    min_qty = self.hardware_min_qty.get(symbol, 1.0)
-                    if calculated_qty < min_qty: return
-                    if calculated_qty > (bbo_depth_qty * 0.50): calculated_qty = bbo_depth_qty * 0.50
-                    
-                    actual_notional = calculated_qty * price
-
-                    net_ev_pct = (prob_success * tp_dist_pct) - ((1.0 - prob_success) * sl_dist_pct) - (spread_cost * 0.5)
-                    if (net_ev_pct * 10000.0) < 65.0:
-                        return 
-
-                    safe_leverage = math.floor(1.0 / (sl_dist_pct * 1.5))
-                    target_leverage = float(max(1.0, min(5.0, safe_leverage)))
-
-                    try:
-                        payload = {
-                            "symbol": symbol, "action": action, "price": price, "prob_success": prob_success, "dna_stats": dna_stats, 
-                            "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
-                            "target_leverage": target_leverage, "actual_notional": actual_notional,
-                            "payload_features": {
-                                "symbol": symbol, "market_regime": regime, "virtual_sl": sgd_state["virtual_sl"], "virtual_tp": sgd_state["virtual_tp"], 
-                                "log_mlofi_z": stat_engine.ofi_fast_z, "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost, 
-                                "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), "ai_verdict": "V21.4_APEX_PRIME",
-                                "tensor_alpha": tensor_alpha
-                            },
-                            "elasticity": self.elasticity_engines.get(symbol), "dynamic_rr": dynamic_rr_ratio 
-                        }
-                        heap_id = self.auction_engine.get_next_heap_id()
-                        async with self.auction_lock: 
-                            if symbol not in self.auction_queue_symbols and symbol not in self.in_flight_symbols:
-                                heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
-                                self.auction_queue_symbols.add(symbol)
-                                self.last_eval_time[symbol + "_last_trade"] = time.time()
-                    except Exception as ex_payload: logger.error(f"[X-RAY] Payload error for {symbol}: {ex_payload}")
-            except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}")
-
-        self.track_task(_eval_gate(manifests))
-
-    async def log_to_wal_async(self, action_type: str, args: list):
-        async with self.wal_lock:
-            if len(self.wal_batch_queue) > 10000: self.wal_batch_queue.pop(0)
-            det_id = hashlib.sha256(f"{action_type}_{time.time()}_{len(self.wal_batch_queue)}".encode()).hexdigest()[:16]
-            self.wal_batch_queue.append((det_id, action_type, json.dumps(args), time.time()))
+                try:
+                    payload = {
+                        "symbol": symbol, "action": action, "price": price, "prob_success": prob_success, "dna_stats": dna_stats, 
+                        "atr": atr, "regime": regime, "net_edge_bps": net_ev_pct * 10000.0, "vol_z": vol_z, "vol_mult": vol_mult, "timestamp": time.time(),
+                        "target_leverage": target_leverage, "actual_notional": actual_notional,
+                        "payload_features": {
+                            "symbol": symbol, "market_regime": regime, "virtual_sl": sgd_state["virtual_sl"], "virtual_tp": sgd_state["virtual_tp"], 
+                            "log_mlofi_z": stat_engine.ofi_fast_z, "liquidity_density_ratio": vol_mult, "bid_ask_spread": spread_cost, 
+                            "reasoning": structural_verdict.get("reasoning", "ALPHA_FUSION_EV"), "ai_verdict": "V22.0_BARE_METAL",
+                            "tensor_alpha": tensor_alpha
+                        },
+                        "elasticity": self.elasticity_engines.get(symbol), "dynamic_rr": dynamic_rr_ratio 
+                    }
+                    heap_id = self.auction_engine.get_next_heap_id()
+                    async with self.auction_lock: 
+                        if symbol not in self.auction_queue_symbols and symbol not in self.in_flight_symbols:
+                            heapq.heappush(self.auction_queue, (-(net_ev_pct / (sl_dist_pct + 1e-9)), time.time(), symbol, heap_id, payload))
+                            self.auction_queue_symbols.add(symbol)
+                            self.last_eval_time[symbol + "_last_trade"] = time.time()
+                except Exception as ex_payload: logger.error(f"[X-RAY] Payload error for {symbol}: {ex_payload}")
+        except Exception as e: logger.error(f"[X-RAY] Trade processing fault for {symbol}: {e}")
 
     def log_to_wal_sync(self, action_type: str, args: list):
-        self.track_task(self.log_to_wal_async(action_type, args))
-
-    async def _batch_wal_flush_loop(self):
-        while True:
-            await asyncio.sleep(5.0)
-            async with self.wal_lock:
-                if not self.wal_batch_queue: continue
-                batch_to_process, self.wal_batch_queue = self.wal_batch_queue[:], []
-            try:
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    await db.executemany("INSERT INTO pending_wal (id, action_type, payload, created_at) VALUES (?, ?, ?, ?)", batch_to_process)
-                    await db.commit()
-            except Exception as e:
-                logger.error(f"[X-RAY] Failed SQLite WAL write: {e}")
-                async with self.wal_lock: self.wal_batch_queue = batch_to_process + self.wal_batch_queue
-
-    async def run_db_wal_worker(self):
-        logger.info("🖲️ SQLITE WAL ENGINE ONLINE.")
-        try:
-            async with aiosqlite.connect(self.wal_db_path) as db:
-                await db.execute("""CREATE TABLE IF NOT EXISTS pending_wal (id TEXT PRIMARY KEY, action_type TEXT, payload TEXT, created_at REAL)""")
-                await db.commit()
-        except Exception as e:
-            logger.critical(f"FATAL: SQLite WAL Init Failed: {e}")
-            return
-
-        while True:
-            try:
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    await db.execute("DELETE FROM pending_wal WHERE id IN (SELECT id FROM pending_wal ORDER BY created_at ASC LIMIT -1 OFFSET 50000)")
-                    await db.commit()
-                async with aiosqlite.connect(self.wal_db_path) as db:
-                    async with db.execute("SELECT id, action_type, payload FROM pending_wal ORDER BY created_at ASC LIMIT 100") as cursor:
-                        rows = await cursor.fetchall()
-                for item_id, action_type, payload_str in rows:
-                    args = json.loads(payload_str)
-                    try:
-                        async with self.db_semaphore:
-                            if action_type == "prediction" and self.memory: await asyncio.wait_for(asyncio.to_thread(self.memory.commit_prediction, *args), timeout=10.0)
-                            elif action_type == "settlement" and self.memory: await asyncio.wait_for(asyncio.to_thread(self.memory.log_live_execution_result, *args), timeout=10.0)
-                        async with aiosqlite.connect(self.wal_db_path) as db:
-                            await db.execute("DELETE FROM pending_wal WHERE id = ?", (item_id,))
-                            await db.commit()
-                    except (asyncio.TimeoutError, Exception) as e: 
-                        logger.debug(f"[X-RAY] WAL cloud sync postponed for item {item_id}: {e}")
-                        break 
-            except Exception as e: logger.error(f"[X-RAY] WAL Worker Loop Error: {e}")
-            await asyncio.sleep(1.0)
+        """
+        🚀 V22.0 DECOUPLED I/O LOGGING
+        Bypasses SQLite entirely and drops logs directly into the MemoryBank's
+        O(1) lock-free Threaded Queue. Zero async event loop disruption.
+        """
+        if not self.memory: return
+        if action_type == "prediction":
+            self.memory.commit_prediction(*args)
+        elif action_type == "settlement":
+            self.memory.log_live_execution_result(*args)
 
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE.")
@@ -966,7 +907,7 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(15) 
             try:
-                protected_symbols = set(self.active_positions_map.keys()) | self.in_flight_symbols
+                protected_symbols = set(self.active_positions_map.keys()) | set(self.in_flight_symbols.keys())
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
                 
                 if dead_sym and hot_sym and not any(b in hot_sym for b in banned_keywords):
@@ -1017,7 +958,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V21.4 MATRIX REFRESH: Probing High-Velocity Universe...")
+            logger.info("🌌 V22.0 MATRIX REFRESH: Probing High-Velocity Universe...")
             await self._fetch_exchange_tick_sizes()
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -1033,7 +974,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V21.4 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V22.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}")
 
@@ -1068,7 +1009,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(2)
 
     # ==============================================================================
-    # 🚀 V21.4 LIFECYCLE DAEMON
+    # 🚀 V22.0 LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -1176,9 +1117,6 @@ class DistributedQuantEngine:
         self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
 
     async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
-
-        from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ThesisVector
-
         ctx = {
             "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
             "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
@@ -1207,7 +1145,6 @@ class DistributedQuantEngine:
                 self.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
             
-            # Mutates safely strictly through the State Actor
             self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": ctx["actual_qty_filled"] * ctx["actual_entry"]})
 
         if symbol not in self.exit_states:
@@ -1225,7 +1162,8 @@ class DistributedQuantEngine:
                 getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
             ]))
 
-            feature_weights = np.diag([1.0 / 2.25, 1.0 / 4.0, 1.0 / 1.5, 1.0 / 0.5, 1.0 / 1e-4])
+            # Identity Matrix overrides the Mahalanobis dimensional mismatch flagged in the audit
+            feature_weights = np.eye(5, dtype=np.float64)
 
             self.exit_states[symbol] = PositionExitState(
                 position_id=signal_id, entry_time=time.time(), entry_price=ctx["actual_entry"],
@@ -1257,7 +1195,7 @@ class DistributedQuantEngine:
             loop_state = "ACTIVE_MONITORING"
 
             while loop_state == "ACTIVE_MONITORING":
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.005)
 
                 current_price = ctx["latest_tick_price"]
                 time_since_eval = time.time() - ctx.get("last_eval_time", 0)
@@ -1347,6 +1285,13 @@ class DistributedQuantEngine:
 
     async def graceful_shutdown(self):
         logger.critical("🛑 INITIATING EMERGENCY FLATTEN & SHUTDOWN...")
+        
+        if hasattr(self, 'telegram'):
+            try:
+                await self.telegram.send_html_report("🚨 <b>CRITICAL: SYSTEM SHUTDOWN INITIATED</b>\nAll positions are being flattened and Matrix disconnected.")
+            except Exception:
+                pass
+                
         symbols_to_cancel = list(self.active_positions_map.keys())
             
         for symbol in symbols_to_cancel:
@@ -1363,15 +1308,7 @@ class DistributedQuantEngine:
                     current_p = float(pos_list[0].get("markPrice", pos_list[0].get("avgPrice", 0.0)))
                     await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
             except Exception as e: logger.error(f"[X-RAY] Flatten failed for {symbol}: {e}")
-                
-        try:
-            async with aiosqlite.connect(self.wal_db_path) as db:
-                async with db.execute("SELECT COUNT(*) FROM pending_wal") as cursor:
-                    count = (await cursor.fetchone())[0]
-            logger.info(f"⏳ WAL Engine offline. {count} items remaining in local buffer.")
-        except Exception: pass
 
-        # 🚀 V21.4 FIX: Gracefully wait for the Cloud Sync daemon to push final ledger writes
         if hasattr(self, 'memory') and self.memory and hasattr(self.memory, 'write_queue'):
             logger.info("⏳ Flushing Cloud Sync Queue. Awaiting database commits...")
             self.memory.write_queue.put(None) # Poison pill
@@ -1385,6 +1322,11 @@ class DistributedQuantEngine:
 
     async def run_engine_forever(self):
         self.fsm.release_global_emergency_lock()
+        
+        try: 
+            await self.executor.connect_ws()
+        except Exception as e:
+            logger.error(f"[X-RAY] ⚠️ Failed to bind private WebSocket stream: {e}")
         
         try:
             try: 
@@ -1409,11 +1351,10 @@ class DistributedQuantEngine:
         
         await self.run_universe_refresher()
         
-        # 🚀 V21.4 FIX: Cleaned up redundant State Reconciliation and Lock Cleanup tasks
         daemons = [
             self.state_actor.start,
             self.run_telegram_worker,
-            self.run_db_wal_worker, self._batch_wal_flush_loop, self.run_dna_prewarmer, 
+            self.run_dna_prewarmer, 
             self.stream_manager_loop, self.run_system_heartbeat, 
             self.run_shadow_resolution_daemon, self._universe_refresher_loop, 
             self.auction_engine.run_global_capital_auction_worker, self.run_omni_swarm_director,            

@@ -1,12 +1,15 @@
 """
-💎 V21.1 APEX QUANTUM PRIME: MULTI-SCALE PREDICTIVE ENGINE
+💎 V21.2 APEX QUANTUM PRIME: MICRO-MODELS & RLS ENGINE
 --------------------------------------------------------------
 Features:
 - Tikhonov-Regularized Joseph RLS (Ridge Penalty for Anti-Overfitting)
 - Strictly Stable Streaming Cholesky Whitening (Guaranteed P.S.D Matrices)
 - Jump-Diffusion Meso-Momentum (Zero-Lag Flash Crash Tracking)
 - Non-Linear Stoikov Micro-Price (Asymptotic Spread Curvature)
-- C-Vectorized Shannon Permutation Entropy with Underflow Shields
+
+Upgraded with V21.2:
+- Strict Lexicographical Rank Mapping (Eradicates Entropy Hash Collisions)
+- Regime-Isolated RLS Updates (Eradicates Target Contamination)
 """
 
 import math
@@ -24,7 +27,6 @@ class AdaptiveSessionClock:
     """Handles Session Volume adjustments to prevent starvation in quiet markets."""
     @staticmethod
     def is_weekend(exchange_timestamp: float = None) -> bool:
-        # 🚀 V21.1 FIX: Decouple from physical server wall-clock for backtest parity
         if exchange_timestamp is None:
             exchange_timestamp = time.time()
         return datetime.datetime.fromtimestamp(exchange_timestamp, tz=datetime.timezone.utc).weekday() in (5, 6)
@@ -74,14 +76,15 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
         sub_vectors = np.lib.stride_tricks.as_strided(arr, shape=shape, strides=strides)
         perms = np.argsort(sub_vectors, axis=1)
         
-        # Unique deterministic hash for permutations
-        bases = np.arange(order) ** order 
+        # 🚀 V21.2 FIX: Strict Lexicographical Rank Mapping
+        # Replaces the broken `np.arange(order) ** order` which caused hash collisions
+        bases = order ** np.arange(order) 
         hashed = np.sum(perms * bases, axis=1)
         
         _, counts = np.unique(hashed, return_counts=True)
         p = counts / counts.sum()
         
-        # 🚀 V21.1 FIX: Prevent np.log2(0) underflow propagation
+        # Prevent np.log2(0) underflow propagation
         p = p[p > 0]
         entropy = -np.sum(p * np.log2(p))
         
@@ -112,15 +115,14 @@ class StreamingCholeskyWhitening:
         # 2. Strict Symmetrization
         self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T)
 
-        # 3. 🚀 V21.1 FIX: Strict Diagonal Ridge Injection (Replaces Unstable Eigen-Clipping)
         # Force strict positive-definiteness via bounded spectral shifting
         stable_cov = self.cov_matrix + (np.eye(self.dim, dtype=np.float64) * 1e-6)
 
         try:
-            # 4. Cholesky Decomposition: Cov = L * L^T
+            # 3. Cholesky Decomposition: Cov = L * L^T
             L = np.linalg.cholesky(stable_cov)
             
-            # 5. Whiten Features: Solve L * z = delta  =>  z = L^-1 * delta
+            # 4. Whiten Features: Solve L * z = delta  =>  z = L^-1 * delta
             whitened = np.linalg.solve(L, delta)
             return np.clip(whitened / 3.0, -1.0, 1.0)
             
@@ -165,7 +167,7 @@ class TikhonovJosephRLS:
         P_new = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
         P_new = 0.5 * (P_new + P_new.T) 
         
-        # 🚀 TIKHONOV REGULARIZATION: Bounds the condition number
+        # TIKHONOV REGULARIZATION: Bounds the condition number
         self.P = P_new + (self.I * self.gamma)
 
         # Prevent trace explosion
@@ -210,7 +212,7 @@ class ContinuousMicrostructureEngine:
         self.shannon_entropy = 1.0
         self.entropy_history = deque(maxlen=200) 
         
-        # 🚀 4D Eigen-Clipped Cholesky Whitening & Tikhonov RLS Engines
+        # 4D Eigen-Clipped Cholesky Whitening & Tikhonov RLS Engines
         self.whitening_engine = StreamingCholeskyWhitening(alpha=0.02, dim=4)
         w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
         
@@ -257,7 +259,7 @@ class ContinuousMicrostructureEngine:
         self.ofi_slow_ewmvar = (1 - alpha_slow) * self.ofi_slow_ewmvar + alpha_slow * (delta_W - self.ofi_slow_ewma)**2
         self.ofi_slow_z = (delta_W - self.ofi_slow_ewma) / (math.sqrt(self.ofi_slow_ewmvar) + 1e-9)
         
-        # 🚀 V21.0 NON-LINEAR STOIKOV MICRO-PRICE
+        # NON-LINEAR STOIKOV MICRO-PRICE
         mid_price = (best_bid + best_ask) / 2.0
         spread = best_ask - best_bid
         imb = bid_vol / (bid_vol + ask_vol + 1e-9)
@@ -271,9 +273,7 @@ class ContinuousMicrostructureEngine:
 
         self.tick_prices.append(price)
         
-        # 🚀 V21.0 JUMP-DIFFUSION MESO-MOMENTUM (Zero-Lag Snap)
-        # If the tick causes a >3 sigma price jump, instantly snap the EMA to the new price
-        # preventing phase-lag during violent breakouts.
+        # JUMP-DIFFUSION MESO-MOMENTUM (Zero-Lag Snap)
         inst_jump = abs(price - self.prices[-1]) if self.prices else 0.0
         jump_z = inst_jump / (math.sqrt(self.inst_variance) * price + 1e-9)
 
@@ -356,9 +356,17 @@ class ContinuousMicrostructureEngine:
                     entropy_norm = min(1.0, max(0.0, self.shannon_entropy))
                     dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
                     
-                    err_t = self.rls_trending.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
-                    err_r = self.rls_ranging.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
-                    
+                    # 🚀 V21.2 FIX: Regime-Isolated RLS Updates (Eradicates Target Contamination)
+                    # Prevents the trending matrix from absorbing ranging noise and vice versa.
+                    err_t, err_r = 0.0, 0.0
+                    if r_blend > 0.55:
+                        err_t = self.rls_trending.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
+                    elif r_blend < 0.45:
+                        err_r = self.rls_ranging.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
+                    else:
+                        err_t = self.rls_trending.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
+                        err_r = self.rls_ranging.update(features_array, y_target, old_p_up, lam=dynamic_lambda)
+                        
                     error = (err_t * r_blend) + (err_r * (1.0 - r_blend))
                     self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (error ** 2))
                     self.rls_updates += 1

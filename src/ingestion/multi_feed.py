@@ -1,10 +1,14 @@
 """
-💎 V17.0 APEX TITANIUM OMEGA: DECOUPLED L2 INGESTION LAYER
+💎 V21.7 APEX QUANTUM PRIME: DECOUPLED L2 INGESTION LAYER
 ----------------------------------------------------
 Features absolute sequence gap intolerance with Seamless REST Bridging,
 L2 Delta Staging Buffers (Zero-Tick-Loss Resync), Subscription Chunking,
-Pure JSON Pings, C-Optimized Float Pre-Parsing, Institutional Load Shedding, 
-and X-Ray Diagnostic Telemetry for High-Frequency Swarm execution.
+Pure JSON Pings, and C-Optimized Float Pre-Parsing.
+
+Upgraded with V21.7:
+- Symbol-Sharded Ingestion Queues (Eradicates Single-Consumer Bottleneck)
+- Independent Asynchronous Workers per Asset
+- O(1) Demultiplexed Routing
 """
 
 import asyncio
@@ -26,10 +30,9 @@ logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
 
 class HighVelocityMultiFeed:
     """
-    🚀 V17.0 TITANIUM APEX: DECOUPLED INGESTION LAYER
+    🚀 V21.7 QUANTUM PRIME: DECOUPLED INGESTION LAYER
     Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
-    from downstream processing via a high-capacity asynchronous FIFO queue.
-    Upgraded with Zero-Tick-Loss Delta Buffering for seamless orderbook resyncs.
+    from downstream processing via Symbol-Sharded asynchronous FIFO queues.
     """
     def __init__(
         self, 
@@ -55,15 +58,14 @@ class HighVelocityMultiFeed:
         self.last_msg_timestamp = time.time()
         self.orderbook_sequences: Dict[str, int] = {}
         
-        # 🚀 V17 ZERO-TICK-LOSS RESYNC BUFFERS
         self.delta_buffer: Dict[str, List[Dict[str, Any]]] = {}
         self.is_resyncing: Dict[str, bool] = {}
         
-        self.active_ws = None  # Reference to the active WebSocket for hot-swapping
+        self.active_ws = None  
         self._active_tasks = set()
         
-        # High-Capacity Decoupling Queue (Prevents network backpressure)
-        self.ingestion_queue = asyncio.Queue(maxsize=50000)
+        # 🚀 V21.7: Symbol-Sharded Queues for parallel processing
+        self.sharded_queues: Dict[str, asyncio.Queue] = {}
 
     def track_task(self, coro: Coroutine):
         """Safely tracks fire-and-forget daemon tasks to prevent GC mid-flight."""
@@ -72,18 +74,24 @@ class HighVelocityMultiFeed:
         task.add_done_callback(self._active_tasks.discard)
         return task
 
-    async def _data_consumer_worker(self):
+    def _get_or_create_queue(self, symbol: str) -> asyncio.Queue:
+        """Dynamically provisions a queue and an isolated consumer worker per symbol."""
+        if symbol not in self.sharded_queues:
+            self.sharded_queues[symbol] = asyncio.Queue(maxsize=10000)
+            self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
+            logger.info(f"[X-RAY] ⚡ Spawning isolated data consumer for {symbol}")
+        return self.sharded_queues[symbol]
+
+    async def _sharded_consumer_worker(self, symbol: str, queue: asyncio.Queue):
         """
-        🚀 DEDICATED CONSUMER
-        Pulls from the high-speed FIFO queue and executes callbacks sequentially.
-        Maintains strict chronological L2/L3 ordering without blocking network socket reading.
+        🚀 DEDICATED SYMBOL CONSUMER
+        Pulls from the symbol-specific FIFO queue and executes callbacks.
+        Guarantees heavy flow on BTC will never block execution routing for ETH.
         """
-        logger.info("[X-RAY] ⚡ V17.0 Decoupled Data Consumer Worker ONLINE.")
         while self.is_running:
             try:
-                payload_type, payload_data = await self.ingestion_queue.get()
+                payload_type, payload_data = await queue.get()
                 
-                # Ordered by highest frequency to optimize branching
                 if payload_type == "orderbook":
                     await self.orderbook_callback(payload_data)
                 elif payload_type == "trade" and self.trade_callback:
@@ -93,19 +101,14 @@ class HighVelocityMultiFeed:
                 elif payload_type == "kline":
                     await self.kline_callback(payload_data)
                     
-                self.ingestion_queue.task_done()
+                queue.task_done()
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[X-RAY] ❌ Consumer worker failed to process payload: {e}", exc_info=True)
+                logger.error(f"[X-RAY] ❌ Consumer worker for {symbol} failed: {e}", exc_info=True)
 
     async def hot_swap_socket_stream(self, drop_symbol: str, add_symbol: str):
-        """
-        🚀 V17 OMNI-SWARM DYNAMIC HOT-SWAPPING
-        Pushes chunked subscribe/unsubscribe JSON commands over the active WebSocket
-        without needing to tear down the entire multiplexer connection.
-        """
         if not self.active_ws or self.active_ws.closed:
             return
 
@@ -122,16 +125,16 @@ class HighVelocityMultiFeed:
         ] + [f"kline.{i}.{add_symbol}" for i in self.intervals]
 
         try:
-            # Bybit Limit: Max 10 args per payload. Chunking required.
             for i in range(0, len(unsub_args), 10):
                 await self.active_ws.send_json({"op": "unsubscribe", "args": unsub_args[i:i+10]})
             for i in range(0, len(sub_args), 10):
                 await self.active_ws.send_json({"op": "subscribe", "args": sub_args[i:i+10]})
             
-            # Clean up local sequence memory for dropped coin
+            # Clean up local sequence memory and queues for dropped coin
             self.orderbook_sequences.pop(drop_symbol, None)
             self.is_resyncing.pop(drop_symbol, None)
             self.delta_buffer.pop(drop_symbol, None)
+            # We intentionally leave the old queue alive so it can drain any remaining packets
             
             logger.info(f"[X-RAY] 🔄 Socket Hot-Swap Complete: Dropped {drop_symbol}, Added {add_symbol}")
         except Exception as e:
@@ -139,18 +142,18 @@ class HighVelocityMultiFeed:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 V17.0 ZERO-TICK-LOSS SNAPSHOT RESYNC (Buffered REST Bridging)
+        🚀 V21.7 ZERO-TICK-LOSS SNAPSHOT RESYNC
         Fetches a REST snapshot and seamlessly replays any deltas that arrived 
-        over the WebSocket while the HTTP request was in flight.
+        over the WebSocket directly into the symbol's isolated queue.
         """
         if not self.active_ws or self.active_ws.closed:
             return
             
         logger.warning(f"[X-RAY] 🔄 Requesting buffered snapshot resync for {symbol}...")
         self.orderbook_sequences.pop(symbol, None)
+        symbol_queue = self._get_or_create_queue(symbol)
         
         try:
-            # 1. Seamless REST Bridge
             if self.engine_reference and hasattr(self.engine_reference, "executor"):
                 try:
                     rest_ob = await self.engine_reference.executor.safe_call(
@@ -163,34 +166,29 @@ class HighVelocityMultiFeed:
                         parsed_asks = self._fast_float_parse_book(data.get("a", []))
                         snap_seq = int(data.get("u", 0))
                         
-                        # Inject REST snapshot directly into the fast-queue
                         try:
-                            self.ingestion_queue.put_nowait(("orderbook", {
+                            symbol_queue.put_nowait(("orderbook", {
                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, 
                                 "u": snap_seq, "type": "snapshot", 
                                 "ts": int(data.get("ts", time.time() * 1000))
                             }))
                         except asyncio.QueueFull:
-                            logger.debug("[X-RAY] ⚠️ Ingestion queue full during REST resync. Load shedding snapshot.")
+                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full during REST resync. Load shedding snapshot.")
 
-                        # Re-anchor sequence state to the fresh REST snapshot
                         self.orderbook_sequences[symbol] = snap_seq
                         
-                        # 🚀 2. Replay buffered deltas ensuring strict chronological parity
                         buffered_deltas = self.delta_buffer.get(symbol, [])
                         replayed = 0
                         for delta in buffered_deltas:
-                            # Only apply deltas strictly newer than our REST snapshot
                             if int(delta.get("u", 0)) > snap_seq:
                                 try:
                                     b_parsed = self._fast_float_parse_book(delta.get("b", []))
                                     a_parsed = self._fast_float_parse_book(delta.get("a", []))
                                     
-                                    # We don't have the original wrapper, reconstruct the payload
-                                    self.ingestion_queue.put_nowait(("orderbook", {
+                                    symbol_queue.put_nowait(("orderbook", {
                                         "s": symbol, "b": b_parsed, "a": a_parsed, 
                                         "u": delta.get("u"), "type": "delta", 
-                                        "ts": int(time.time() * 1000) # Proxy TS
+                                        "ts": int(time.time() * 1000) 
                                     }))
                                     self.orderbook_sequences[symbol] = delta.get("u")
                                     replayed += 1
@@ -202,11 +200,9 @@ class HighVelocityMultiFeed:
                     logger.debug(f"[X-RAY] REST bridge failed during resync for {symbol}: {e}")
 
         finally:
-            # Always unlock the buffer logic
             self.is_resyncing[symbol] = False
             self.delta_buffer.pop(symbol, None)
             
-            # 3. Cycle WS to repair the stream behind the scenes
             try:
                 if self.active_ws and not self.active_ws.closed:
                     await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
@@ -215,14 +211,9 @@ class HighVelocityMultiFeed:
                 pass
 
     def _fast_float_parse_book(self, levels: list) -> list:
-        """
-        🚀 V17 UPGRADE: Pre-parses string lists into float arrays using 
-        C-optimized list comprehensions to save downstream CPU cycles.
-        """
         try:
             return [[float(lvl[0]), float(lvl[1])] for lvl in levels]
         except (IndexError, ValueError):
-            # Fallback for malformed exchange payloads
             parsed = []
             for lvl in levels:
                 try:
@@ -232,10 +223,7 @@ class HighVelocityMultiFeed:
             return parsed
 
     async def initialize_multiplexed_stream(self):
-        """Spawns concurrent asynchronous subscription worker processes."""
         self.is_running = True
-        
-        consumer_task = self.track_task(self._data_consumer_worker())
         
         args_payload = []
         for symbol in self.basket:
@@ -266,7 +254,7 @@ class HighVelocityMultiFeed:
                         async def connection_watchdog():
                             try:
                                 while not ws.closed and self.is_running:
-                                    await asyncio.sleep(20) # Bybit requires a ping exactly every 20s
+                                    await asyncio.sleep(20) 
                                     try:
                                         await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
                                         if time.time() - self.last_msg_timestamp > 45.0:
@@ -281,12 +269,11 @@ class HighVelocityMultiFeed:
                                     
                         watchdog_task = self.track_task(connection_watchdog())
 
-                        # Bybit Limit: Max 10 args per request. We must chunk the payload.
                         chunk_size = 10
                         for i in range(0, len(args_payload), chunk_size):
                             chunk = args_payload[i:i + chunk_size]
                             await ws.send_json({"op": "subscribe", "args": chunk})
-                            await asyncio.sleep(0.05) # Prevent connection flooding
+                            await asyncio.sleep(0.05) 
                             
                         logger.info(f"[X-RAY] ✅ Successfully multiplexed topics (chunked) for tracking matrix: {len(self.basket)} nodes.")
 
@@ -306,18 +293,17 @@ class HighVelocityMultiFeed:
                                     continue
 
                                 try:
-                                    # Route incoming bytes to FIFO queue in O(1) time
-                                    # Ordered by highest frequency updates first
+                                    # 🚀 V21.7: Route incoming bytes to SYMBOL-SPECIFIC FIFO queues
                                     if topic.startswith("orderbook"):
                                         symbol = data.get("s")
                                         u_sequence = data.get("u")
                                         msg_type = payload.get("type", "delta")
                                         
+                                        target_queue = self._get_or_create_queue(symbol)
+                                        
                                         if msg_type == "snapshot":
                                             self.orderbook_sequences[symbol] = u_sequence
                                         elif msg_type == "delta":
-                                            # 🚀 V17 DELTA BUFFERING
-                                            # If currently fetching a REST snapshot, stage the delta in memory
                                             if self.is_resyncing.get(symbol, False):
                                                 self.delta_buffer.setdefault(symbol, []).append(data)
                                                 continue
@@ -325,17 +311,15 @@ class HighVelocityMultiFeed:
                                             last_seq = self.orderbook_sequences.get(symbol)
                                             prev_seq = data.get("pu")  
                                             
-                                            # ZERO SEQUENCE GAP TOLERANCE
                                             if last_seq is not None and prev_seq is not None:
                                                 if prev_seq != last_seq:
                                                     logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating buffered REST resync.")
                                                     
-                                                    # Flag as resyncing and stage this specific broken delta
                                                     self.is_resyncing[symbol] = True
                                                     self.delta_buffer.setdefault(symbol, []).append(data)
                                                     
                                                     self.track_task(self._resync_isolated_symbol(symbol))
-                                                    continue # Skip processing this broken delta
+                                                    continue 
                                                     
                                             self.orderbook_sequences[symbol] = u_sequence
                                             
@@ -343,14 +327,16 @@ class HighVelocityMultiFeed:
                                         parsed_asks = self._fast_float_parse_book(data.get("a", []))
 
                                         try:
-                                            self.ingestion_queue.put_nowait(("orderbook", {
+                                            target_queue.put_nowait(("orderbook", {
                                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding orderbook tick.")
+                                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding orderbook tick.")
                                             
                                     elif topic.startswith("publicTrade"):
                                         symbol = topic.split(".")[-1]
+                                        target_queue = self._get_or_create_queue(symbol)
+                                        
                                         for tick in data:
                                             tick_payload = {
                                                 "symbol": symbol,
@@ -360,23 +346,28 @@ class HighVelocityMultiFeed:
                                                 "timestamp": float(tick.get("T", time.time() * 1000))
                                             }
                                             try:
-                                                self.ingestion_queue.put_nowait(("trade", tick_payload))
+                                                target_queue.put_nowait(("trade", tick_payload))
                                             except asyncio.QueueFull:
-                                                logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding trade tick.")
+                                                logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding trade tick.")
                                                 
                                     elif topic.startswith("tickers"):
-                                        try:
-                                            self.ingestion_queue.put_nowait(("tickers", data))
-                                        except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding tickers tick.")
+                                        symbol = data.get("symbol")
+                                        if symbol:
+                                            target_queue = self._get_or_create_queue(symbol)
+                                            try:
+                                                target_queue.put_nowait(("tickers", data))
+                                            except asyncio.QueueFull:
+                                                logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding tickers tick.")
                                             
                                     elif topic.startswith("kline"):
+                                        symbol = topic.split(".")[2]
+                                        target_queue = self._get_or_create_queue(symbol)
                                         try:
-                                            self.ingestion_queue.put_nowait(("kline", {
-                                                "interval": topic.split(".")[1], "symbol": topic.split(".")[2], "candle_data": data[0]
+                                            target_queue.put_nowait(("kline", {
+                                                "interval": topic.split(".")[1], "symbol": symbol, "candle_data": data[0]
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug("[X-RAY] ⚠️ Ingestion queue full. Shedding kline tick.")
+                                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding kline tick.")
 
                                 except Exception as e:
                                     logger.error(f"[X-RAY] 🚨 OVERLOAD OR ROUTING ERROR: {e}")
@@ -397,9 +388,6 @@ class HighVelocityMultiFeed:
             logger.warning(f"[X-RAY] ⚠️ Ingestion link down. Reconnecting via backoff protocol in {reconnect_delay:.2f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(max_reconnect_delay, reconnect_delay * 1.5)
-
-        if consumer_task and not consumer_task.done():
-            consumer_task.cancel()
 
     def terminate_all_feeds(self):
         """Performs structural teardown actions across active streaming context pipelines."""

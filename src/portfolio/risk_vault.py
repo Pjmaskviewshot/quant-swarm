@@ -1,8 +1,8 @@
 """
-💎 V21.0 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
+💎 V21.1 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
-- Continuous Merton-Kelly Sizing (f* = mu / sigma^2)
+- Discrete Binary Kelly Criterion (f* = p - q/b) using empirical R-multiples
 - L-Moment Generalized Pareto Distribution (GPD) Heavy-Tail Risk Estimator
 - Margin & Heat Map Allocation Caps
 - Exact NaN/Inf Sanitization & Matrix Invertibility Guards
@@ -157,25 +157,33 @@ class InstitutionalRiskVault:
 
     def calculate_optimal_fraction(self, base_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
         """
-        Continuous Merton-Kelly Sizing
-        Properly sizes positions based on continuous log-returns and instantaneous variance.
+        🚀 V21.1 BINARY KELLY CRITERION
+        Replaces the dimensionally flawed Continuous Merton-Kelly with a robust 
+        Discrete Binary Kelly (f* = (p*b - q) / b) utilizing historical R-multiples.
         """
         # 1. Micro-Calibrated EV Conviction Check
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if base_confidence < min_required_conviction:
             return 0.0  # Rejected by Dynamic EV Gate
 
-        # 2. Continuous Merton-Kelly
-        # Convert bps to decimal drift (mu)
-        mu = net_edge_bps / 10000.0
+        # 2. Discrete Binary Kelly Sizing
+        p = base_confidence
+        q = 1.0 - p
         
-        # Floor variance to prevent division by zero in zero-tick regimes
-        sigma_sq = max(symbol_variance, 1e-8)
+        # Calculate empirical payoff ratio (b)
+        b = self.avg_win_r / max(self.avg_loss_r, 1e-9)
         
-        # Continuous Kelly Fraction: f* = mu / sigma^2
-        raw_kelly = mu / sigma_sq
+        if b <= 0:
+            return 0.001
+            
+        # Binary Kelly Fraction
+        raw_kelly = p - (q / b)
         
-        # Half-Kelly for safety + L-Moment EVT Tail Penalty + Drawdown Penalty
+        # Block negative edge sizings
+        if raw_kelly <= 0.0:
+            return 0.0
+        
+        # 3. Half-Kelly for safety + L-Moment EVT Tail Penalty + Drawdown Penalty
         half_kelly = raw_kelly / 2.0
         evt_multiplier = self.calculate_evt_tail_risk()
         drawdown_penalty = max(0.10, 1.0 - (self.current_drawdown_state * 3.0))
