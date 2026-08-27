@@ -1,15 +1,16 @@
 """
-💎 V21.6 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
+💎 V22.0 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Thread-Isolated Dispatch, 
 Smart Leverage Caching, and True Unified Equity Parsing.
 
-Upgraded with V21.6:
+Upgraded with V22.0:
 - Zero-Latency Private WebSocket Execution Tracking
 - Thread-Safe Asyncio Future Bridging
 - Innovation Zone Cooldowns (ErrCode 110126)
 - Volatility-Adjusted Spread Coefficient (VASC) 
 - Top-of-Book Depth Shields
+- Terminal Deployment Ready
 """
 
 import os
@@ -26,7 +27,7 @@ logger = logging.getLogger("QUANT_CORE.BYBIT")
 
 class BybitRetCode:
     """
-    🚀 V17.0 BYBIT RETURN CODES
+    🚀 V22.0 BYBIT RETURN CODES
     Structured integer mapping to eliminate fragile string-matching on API errors.
     """
     SUCCESS = 0
@@ -40,19 +41,18 @@ class BybitRetCode:
     RISK_LIMIT_EXCEEDED = 110013     # Requested leverage exceeds symbol's max risk tier limit
     LEVERAGE_NOT_MODIFIED = 110025   # Position mode or leverage already set
     LEVERAGE_NOT_MODIFIED_2 = 110043 # Set leverage not modified
-    AGREEMENT_NOT_SIGNED = 110126    # 🚀 V17.0: Innovation Zone UI agreement required
+    AGREEMENT_NOT_SIGNED = 110126    # Innovation Zone UI agreement required
 
 
 class TokenBucketRateLimiter:
     """
     🚀 TOKEN-BUCKET RATE LIMITER
-    Throttles outbound API calls to strictly respect Bybit's private endpoint limits
-    and prevent HTTP 429 rate-limit bans.
+    Throttles outbound API calls to strictly respect Bybit's private endpoint limits.
     """
     def __init__(self, capacity: int = 10, fill_rate: float = 5.0):
         self.capacity = float(capacity)
         self.tokens = float(capacity)
-        self.fill_rate = float(fill_rate)  # Tokens regenerated per second
+        self.fill_rate = float(fill_rate) 
         self.last_fill_time = time.time()
         self.lock = asyncio.Lock()
 
@@ -67,14 +67,14 @@ class TokenBucketRateLimiter:
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-            await asyncio.sleep(0.02)  # Tightened sleep for lower latency acquisition
+            await asyncio.sleep(0.02) 
 
 
 class BybitUnifiedExecutor:
     """
-    🚀 V21.6 PARALLELIZED UNIFIED API EXECUTOR
+    🚀 V22.0 PARALLELIZED UNIFIED API EXECUTOR
     Thread-isolated wrapper for Pybit V5 with automated rate-limiting, leverage caching,
-    secrets scrubbing, Hyperion ticker filtering, and Priority Execution Lanes.
+    secrets scrubbing, VASC ticker filtering, and Priority Execution Lanes.
     """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, max_workers: int = 12):
         self.api_key = api_key or ""
@@ -89,7 +89,7 @@ class BybitUnifiedExecutor:
             recv_window=10000 
         )
         
-        # Expanded Execution Capacity for High-Frequency Chandelier Stops
+        # Priority lanes to ensure orders fire even if data polling is saturated
         self.data_rate_limiter = TokenBucketRateLimiter(capacity=20, fill_rate=10.0)
         self.execution_rate_limiter = TokenBucketRateLimiter(capacity=30, fill_rate=15.0)
         
@@ -98,11 +98,9 @@ class BybitUnifiedExecutor:
             thread_name_prefix="BybitIsolator"
         )
         self._leverage_cache: Dict[str, int] = {}
-        
-        # 🚀 AUDIT FIX: Replaced permanent set with dynamic expiry dictionary
         self.temporary_symbol_bans: Dict[str, float] = {}
 
-        # 🚀 V21.6 WebSocket Integration State
+        # 2. WebSocket Integration State (Zero-Latency Fill Tracking)
         self.ws_client: Optional[WebSocket] = None
         self._ws_futures: Dict[str, asyncio.Future] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -123,7 +121,6 @@ class BybitUnifiedExecutor:
             api_secret=self.api_secret
         )
         
-        # Bind the callback to the order stream
         self.ws_client.order_stream(callback=self._on_order_msg)
         logger.info("📡 Bybit Private WebSocket Stream Connected. Zero-Latency Tracking Armed.")
 
@@ -138,26 +135,18 @@ class BybitUnifiedExecutor:
             order_id = order.get("orderId")
             status = order.get("orderStatus")
             
-            # We only track statuses that indicate a fill or a terminal rejection
             if order_id in self._ws_futures and status in ["Filled", "PartiallyFilled", "Cancelled", "Rejected"]:
                 if self._loop and not self._loop.is_closed():
-                    # Safely bridge the background thread to the main event loop
                     self._loop.call_soon_threadsafe(self._resolve_ws_future, order_id, order)
 
     def _resolve_ws_future(self, order_id: str, data: dict):
-        """Executes strictly on the main asyncio event loop."""
         fut = self._ws_futures.get(order_id)
         if fut and not fut.done():
             fut.set_result(data)
 
     async def await_ws_execution_report(self, order_id: str, timeout: float = 0.2) -> Optional[Dict[str, Any]]:
-        """
-        O(1) Zero-Latency Execution Tracker.
-        Suspends the SOR router until the WebSocket confirms the physical fill, 
-        eradicating the need for REST polling.
-        """
+        """O(1) Zero-Latency Execution Tracker."""
         if not self._loop:
-            logger.warning("[X-RAY] WebSocket loop not initialized. Skipping WS tracking.")
             return None
             
         fut = self._loop.create_future()
@@ -173,10 +162,8 @@ class BybitUnifiedExecutor:
     async def _safe_api_call(self, func, *args, **kwargs) -> Any:
         """
         🛡️ UNIFIED API GATEWAY
-        Enforces rate-limiting, thread isolation, automatic retries on server load,
-        fail-fast on parameter faults (10002), and token/secret scrubbing.
+        Enforces rate-limiting, thread isolation, and token/secret scrubbing.
         """
-        # Segment traffic: Priority express lane for crucial position management commands
         func_name = getattr(func, '__name__', '').lower()
         is_execution = any(word in func_name for word in ["place", "cancel", "amend", "set_trading_stop", "set_leverage"])
         
@@ -190,27 +177,24 @@ class BybitUnifiedExecutor:
         
         for attempt in range(3):
             try:
-                # 🚀 AUDIT FIX: Added 10-second timeout to prevent ThreadPoolExecutor starvation on hung requests
+                # 🚀 AUDIT FIX: 10-second timeout prevents ThreadPool starvation
                 response = await asyncio.wait_for(loop.run_in_executor(self._api_thread_pool, bound_func), timeout=10.0)
-                
                 ret_code = response.get("retCode") if isinstance(response, dict) else 0
                 
-                # 🚀 V17 FAIL FAST: Innovation Zone Block (Temporary Cooldown)
+                # Innovation Zone Block (Temporary Cooldown)
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
-                        self.temporary_symbol_bans[symbol_banned] = time.time() + 900.0  # 15 minute ban
+                        self.temporary_symbol_bans[symbol_banned] = time.time() + 900.0 
                     error_msg = f"[X-RAY] 🚫 110126 INNOVATION ZONE: {symbol_banned} requires UI agreement. 15m cooldown applied."
                     logger.warning(error_msg)
                     raise ValueError(error_msg)
 
-                # Fail Fast on Parameter Error
                 if ret_code == BybitRetCode.PARAMETER_ERROR:
                     error_msg = f"[X-RAY] ❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
-                # Backoff on server load or rate limits
                 if ret_code in [BybitRetCode.RATE_LIMIT_REACHED, BybitRetCode.SERVICE_UNAVAILABLE]: 
                     logger.warning(f"[X-RAY] ⚠️ Bybit System Load/Rate Limit (Code: {ret_code}). Backing off...")
                     await asyncio.sleep(2.0)
@@ -233,7 +217,6 @@ class BybitUnifiedExecutor:
                 if self.api_secret and self.api_secret in error_str:
                     error_str = error_str.replace(self.api_secret, "********")
                 
-                # Catch raw exception strings for Innovation Zone blocks
                 if "110126" in error_str:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
@@ -249,40 +232,23 @@ class BybitUnifiedExecutor:
                 await asyncio.sleep(1.0)
 
     async def safe_call(self, func, *args, **kwargs) -> Any:
-        """Public async gateway for executing raw pybit methods safely."""
         return await self._safe_api_call(func, *args, **kwargs)
 
     async def get_wallet_balance_usdt(self) -> float:
-        """
-        🚀 True Intelligent Equity Parsing.
-        Calculates absolute Total Equity (Cash + Unrealized PnL), completely ignoring 
-        Initial Margin locks. Prevents the "Margin Illusion" from triggering false drawdowns.
-        """
+        """Calculates absolute Total Equity (Cash + Unrealized PnL), ignoring Initial Margin locks."""
         try:
-            # Primary: Try Unified Trading Account
-            response = await self._safe_api_call(
-                self.client.get_wallet_balance, 
-                accountType="UNIFIED"
-            )
-            
+            response = await self._safe_api_call(self.client.get_wallet_balance, accountType="UNIFIED")
             if response.get("retCode") == 0:
                 accounts = response.get("result", {}).get("list", [])
                 if accounts:
                     true_equity = accounts[0].get("totalEquity") 
                     if true_equity is not None:
                         return float(true_equity)
-                    
                     for coin_info in accounts[0].get("coin", []):
                         if coin_info.get("coin") == "USDT":
                             return float(coin_info.get("equity", 0.0))
 
-            # Fallback: Try Standard Contract Account
-            response_contract = await self._safe_api_call(
-                self.client.get_wallet_balance, 
-                accountType="CONTRACT",
-                coin="USDT"
-            )
-            
+            response_contract = await self._safe_api_call(self.client.get_wallet_balance, accountType="CONTRACT", coin="USDT")
             if response_contract.get("retCode") == 0:
                 accounts = response_contract.get("result", {}).get("list", [])
                 if accounts:
@@ -296,21 +262,12 @@ class BybitUnifiedExecutor:
             return 0.0
 
     async def adjust_leverage(self, symbol: str, target_leverage: int) -> bool:
-        """
-        🚀 Smart Leverage Caching with Error Guards.
-        Only sends API updates when leverage differs from current exchange state.
-        Uses structured integer return codes.
-        """
+        """Smart Leverage Caching with Error Guards."""
         try:
             if self._leverage_cache.get(symbol) == target_leverage:
                 return True
                 
-            pos_info = await self._safe_api_call(
-                self.client.get_positions,
-                category="linear",
-                symbol=symbol
-            )
-            
+            pos_info = await self._safe_api_call(self.client.get_positions, category="linear", symbol=symbol)
             positions = pos_info.get("result", {}).get("list", [])
             if positions:
                 current_leverage = int(float(positions[0].get("leverage", 1)))
@@ -318,13 +275,9 @@ class BybitUnifiedExecutor:
                 if current_leverage == target_leverage:
                     return True
 
-            # Push state update to Bybit
             res = await self._safe_api_call(
-                self.client.set_leverage,
-                category="linear",
-                symbol=symbol,
-                buyLeverage=str(target_leverage),
-                sellLeverage=str(target_leverage)
+                self.client.set_leverage, category="linear", symbol=symbol,
+                buyLeverage=str(target_leverage), sellLeverage=str(target_leverage)
             )
             
             self._leverage_cache[symbol] = target_leverage
@@ -335,28 +288,19 @@ class BybitUnifiedExecutor:
             error_msg = str(e)
             ret_code = getattr(e, "ret_code", None) or getattr(e, "code", None)
             
-            # Leverage not modified (already at target value)
             if ret_code == BybitRetCode.LEVERAGE_NOT_MODIFIED_2 or ret_code == BybitRetCode.LEVERAGE_NOT_MODIFIED or "110043" in error_msg or "not modified" in error_msg.lower():
                 self._leverage_cache[symbol] = target_leverage
                 return True
                 
-            # Requested leverage exceeds symbol's max risk tier limit
             if ret_code == BybitRetCode.RISK_LIMIT_EXCEEDED or "110013" in error_msg:
                 try:
-                    info = await self._safe_api_call(
-                        self.client.get_instruments_info,
-                        category="linear",
-                        symbol=symbol
-                    )
+                    info = await self._safe_api_call(self.client.get_instruments_info, category="linear", symbol=symbol)
                     max_allowed = int(float(info["result"]["list"][0]["leverageFilter"]["maxLeverage"]))
                     logger.warning(f"[X-RAY] ⚠️ Risk Cap hit for {symbol}. Auto-clamping leverage from {target_leverage}x to {max_allowed}x.")
                     
                     await self._safe_api_call(
-                        self.client.set_leverage,
-                        category="linear",
-                        symbol=symbol,
-                        buyLeverage=str(max_allowed),
-                        sellLeverage=str(max_allowed)
+                        self.client.set_leverage, category="linear", symbol=symbol,
+                        buyLeverage=str(max_allowed), sellLeverage=str(max_allowed)
                     )
                     self._leverage_cache[symbol] = max_allowed
                     return True
@@ -369,35 +313,27 @@ class BybitUnifiedExecutor:
 
     async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        🚀 V17.0 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
+        🚀 TRUE DYNAMIC OMNI-SCANNER (VASC + DEPTH SHIELD)
         Calculates Volatility-Adjusted Spread Coefficient AND enforces a minimum
         Top-of-Book Depth Floor ($250 USD) to reject paper-thin, sweep-prone coins.
-        Automatically filters out Innovation Zone blocks with a 15-minute cooldown.
         """
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC"]
         
         try:
-            response = await self._safe_api_call(
-                self.client.get_tickers,
-                category="linear"
-            )
-            
+            response = await self._safe_api_call(self.client.get_tickers, category="linear")
             tickers = response.get("result", {}).get("list", [])
             valid_assets = []
             
             for t in tickers:
                 symbol = t.get("symbol", "")
                 
-                # 1. Broad Universe & Innovation Zone Filters
                 if not symbol.endswith("USDT"): continue
                 if any(b in symbol for b in banned_keywords): continue
                 
-                # 🚀 AUDIT FIX: Check if symbol is in temporary timeout and hasn't expired yet
                 if symbol in self.temporary_symbol_bans:
                     if time.time() < self.temporary_symbol_bans[symbol]:
                         continue
                     else:
-                        # Ban has expired, remove it to allow re-evaluation
                         del self.temporary_symbol_bans[symbol]
                     
                 turnover = float(t.get("turnover24h", 0.0) or 0.0)
@@ -406,36 +342,29 @@ class BybitUnifiedExecutor:
                 
                 if bid <= 0 or ask <= bid or turnover < min_turnover: continue
                 
-                # 2. Extract True 24H Volatility
                 high = float(t.get("highPrice24h", ask))
                 low = float(t.get("lowPrice24h", bid))
                 
                 if low <= 0: continue
                 volatility_bps = ((high - low) / low) * 10000.0
                 
-                # 3. Dead Market Filter (Requires > 2.0% daily variance to justify trading)
                 if volatility_bps < 200.0: continue
                 
-                # 4. 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
+                # 🧬 THE VASC MATH (Volatility-Adjusted Spread Cap)
                 dynamic_spread_cap_bps = max(5.0, volatility_bps * 0.015)
-                
-                # Calculate live spread
                 live_spread_bps = ((ask - bid) / bid) * 10000.0
                 
-                # If the spread eats too much of the asset's daily range, reject it.
                 if live_spread_bps > dynamic_spread_cap_bps: 
                     continue 
                 
-                # 5. 🛡️ V17 TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
+                # 🛡️ TOP-OF-BOOK DEPTH FLOOR (Hollow Book Shield)
                 bid_size = float(t.get("bid1Size", 0.0) or 0.0)
                 ask_size = float(t.get("ask1Size", 0.0) or 0.0)
                 top_depth_usd = min(bid * bid_size, ask * ask_size)
                 
-                # If top level holds less than $250 USD, the coin is a hollow trap. Reject.
                 if top_depth_usd < 250.0:
                     continue
 
-                # 6. Asset Approval
                 valid_assets.append({
                     "symbol": symbol,
                     "spread_bps": live_spread_bps,
@@ -444,7 +373,6 @@ class BybitUnifiedExecutor:
                     "top_depth_usd": top_depth_usd
                 })
                 
-            # Rank dynamically by high-volatility momentum, weighted by turnover to prevent thin flash-crashes
             valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
             
@@ -453,7 +381,6 @@ class BybitUnifiedExecutor:
             
         except Exception as e:
             logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
-            # Failsafe fallback 
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
     def close(self):

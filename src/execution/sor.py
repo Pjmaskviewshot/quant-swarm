@@ -784,4 +784,4 @@ class BybitUnifiedExecutor:
         if not sorted_symbols:
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
             
-        return sorted_symbols"""
+        return sorted_symbols
