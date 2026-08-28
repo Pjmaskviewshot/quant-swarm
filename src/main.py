@@ -1,5 +1,5 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: BARE-METAL CORE
+💎 V22.3 APEX QUANTUM PRIME: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 Features:
@@ -8,12 +8,13 @@ Features:
 - Strict Directional Hysteresis & In-Flight TTL Purging
 - Direct Execution Sizing (No Provisional Overrides)
 
-Audit Fixes (V22.0):
-- Pure Asyncio API Call Migration (Eliminates ThreadPool Starvation)
-- Exact Partial Fill Reconciliation (Fixes PnL/Stop Drift)
-- Platt-Scaled EV Gating (Prevents Negative Expectancy Routing)
-- Memory Queue Flush Protocol (Protects Forensic Data)
-- Strict Qty Step Formatting (Eradicates 10001 Rejections)
+Audit Fixes (V22.3):
+- Active Prey-Hunting Trailing Engine: Bypasses Bybit API latency to execute 
+  immediate IOC Market exits the millisecond price breaches a profit lock.
+- Early Breakeven Activation: Drops the profit hurdle to 0.20% and secures 
+  a 70% ratchet plus fee buffer to stop bleed-outs.
+- Persistent Lifetime Baseline: Fixes the UTC midnight reset glitch that caused 
+  the Telegram dashboard to report inaccurate session returns.
 """
 
 import os
@@ -82,8 +83,7 @@ class MutationCommand:
 
 class GlobalStateActor:
     """
-    🚀 V22.0 LOCK-FREE STATE ACTOR (LMAX DISRUPTOR PATTERN)
-    Operates as the single source of truth for portfolio mutations.
+    🚀 V22.0 LOCK-FREE STATE ACTOR (LMAX Disruptor Pattern)
     """
     def __init__(self, core_engine):
         self.core = core_engine
@@ -139,7 +139,6 @@ class GlobalStateActor:
                 cmd.callback(False)
 
     def dispatch(self, asset: str, m_type: str, payload: Dict[str, Any]):
-        """Fire-and-forget API for the async mesh."""
         try:
             self.mutation_queue.put_nowait(MutationCommand(asset, m_type, payload))
         except asyncio.QueueFull:
@@ -170,7 +169,7 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V22.0 APEX BARE-METAL CORE ACTIVE.")
+            logger.critical("💎 LIVE MODE: V22.3 APEX BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -242,7 +241,6 @@ class DistributedQuantEngine:
         self.telegram = AsyncTelegramReporter(token=os.getenv("TELEGRAM_BOT_TOKEN"), chat_id=os.getenv("TELEGRAM_CHAT_ID"))
         self.telegram_queue = asyncio.Queue(maxsize=50)
         
-        # V22.0 Pure Asyncio Executor
         self.executor = BybitUnifiedExecutor(api_key=os.getenv("BYBIT_API_KEY"), api_secret=os.getenv("BYBIT_API_SECRET"), testnet=self.test_mode)
         self.sor = SmartOrderRouter(executor=self.executor, max_slippage_pct=0.0012)
         self.omni_scanner = GlobalOmniScanner(self.executor)
@@ -575,6 +573,10 @@ class DistributedQuantEngine:
                 if "wallet_baseline" not in self.global_state_cache: 
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
 
+                # 🚀 V22.3 FIX: Persistent Lifetime Baseline Tracking
+                if "lifetime_initial_balance" not in self.global_state_cache:
+                    self.global_state_cache["lifetime_initial_balance"] = max(current_vault_balance, 0.01)
+
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
                 current_day = now_utc.strftime("%Y-%m-%d")
                 if self.global_state_cache.get("current_day") != current_day:
@@ -590,7 +592,8 @@ class DistributedQuantEngine:
 
                 execution_stats["rolling_pnl_array"] = list(self.recent_pnl_history) if self.recent_pnl_history else [0.0]
 
-                actual_net_pnl = current_vault_balance - self.global_state_cache.get("start_of_day_balance", current_vault_balance)
+                # 🚀 V22.3 FIX: Calculate Net PnL against lifetime baseline instead of rolling daily baseline
+                actual_net_pnl = current_vault_balance - self.global_state_cache["lifetime_initial_balance"]
                 baseline = self.global_state_cache["wallet_baseline"]
                 
                 if current_vault_balance > baseline:
@@ -1237,43 +1240,67 @@ class DistributedQuantEngine:
 
                 decision = IntelligentExitEngine.evaluate(ctx, state)
 
+                # =========================================================================
+                # 🚀 ACTIVE PREY-HUNTING TRAILING & PROFIT-LOCK ENGINE
+                # =========================================================================
                 notional = ctx["actual_qty_filled"] * ctx["actual_entry"]
+                profit_hurdle = notional * 0.0020  # Lowered: Arm after +0.20% price move
                 
-                profit_hurdle = notional * 0.004  
-
                 if state.profit_state.peak_pnl > profit_hurdle:
-                    tight_lock = state.profit_state.peak_pnl * 0.85
-                    if tight_lock > state.profit_state.locked_pnl:
-                        self.state_actor.dispatch(symbol, "UPDATE_PROFIT_PEAK", {"peak_pnl": state.profit_state.peak_pnl, "locked_pnl": tight_lock})
-                        if ctx["is_buy"]:
-                            decision.exchange_ts_price = state.entry_price + (tight_lock / state.actual_qty)
-                        else:
-                            decision.exchange_ts_price = state.entry_price - (tight_lock / state.actual_qty)
-
-                amend_required = False
-                
-                if decision.exchange_ts_price and decision.exchange_ts_price > 0:
+                    # 1. Breakeven Floor: Ensure fees (+0.15%) are 100% protected
+                    fee_buffer_pnl = notional * 0.0015
+                    
+                    # 2. Dynamic Ratchet: Lock in 70% of gains once in deep profit
+                    locked_gain = max(fee_buffer_pnl, state.profit_state.peak_pnl * 0.70)
+                    
+                    if locked_gain > state.profit_state.locked_pnl:
+                        state.profit_state.locked_pnl = locked_gain
+                        self.state_actor.dispatch(symbol, "UPDATE_PROFIT_PEAK", {
+                            "peak_pnl": state.profit_state.peak_pnl, 
+                            "locked_pnl": locked_gain
+                        })
+                    
+                    # Calculate physical price coordinates
                     if ctx["is_buy"]:
-                        if decision.exchange_ts_price > current_active_sl and decision.exchange_ts_price < current_price:
-                            current_active_sl = decision.exchange_ts_price
-                            amend_required = True
+                        target_ts_price = state.entry_price + (state.profit_state.locked_pnl / state.actual_qty)
                     else:
-                        if decision.exchange_ts_price < current_active_sl and decision.exchange_ts_price > current_price:
-                            current_active_sl = decision.exchange_ts_price
-                            amend_required = True
-                            
+                        target_ts_price = state.entry_price - (state.profit_state.locked_pnl / state.actual_qty)
+                    
+                    # 🚀 CRITICAL FIX: If price pulls back BELOW our locked profit target, 
+                    # DO NOT wait for Bybit! Fire an immediate MARKET IOC EJECTION.
+                    if ctx["is_buy"] and current_price <= target_ts_price:
+                        logger.critical(f"[X-RAY] 🎯 PROFIT PRESERVATION TRIGGERED // {symbol} Market dropped below lock ({current_price:.4f} <= {target_ts_price:.4f}). Ejecting!")
+                        ctx["exit_trigger_price"] = current_price
+                        break
+                    elif not ctx["is_buy"] and current_price >= target_ts_price:
+                        logger.critical(f"[X-RAY] 🎯 PROFIT PRESERVATION TRIGGERED // {symbol} Market spiked above lock ({current_price:.4f} >= {target_ts_price:.4f}). Ejecting!")
+                        ctx["exit_trigger_price"] = current_price
+                        break
+                    
+                    # Otherwise, trail the exchange stop upward behind the price
+                    if ctx["is_buy"] and target_ts_price > current_active_sl and target_ts_price < current_price:
+                        current_active_sl = target_ts_price
+                        logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
+                        await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
+                    elif not ctx["is_buy"] and target_ts_price < current_active_sl and target_ts_price > current_price:
+                        current_active_sl = target_ts_price
+                        logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
+                        await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
+
+                # Retain Dynamic TP updates from Exit Engine
+                amend_tp_required = False
                 if hasattr(decision, 'dynamic_tp_price') and decision.dynamic_tp_price > 0:
                     if ctx["is_buy"]:
                         if decision.dynamic_tp_price < current_active_tp and decision.dynamic_tp_price > current_price:
                             current_active_tp = decision.dynamic_tp_price
-                            amend_required = True
+                            amend_tp_required = True
                     else:
                         if decision.dynamic_tp_price > current_active_tp and decision.dynamic_tp_price < current_price:
                             current_active_tp = decision.dynamic_tp_price
-                            amend_required = True
+                            amend_tp_required = True
 
-                if amend_required:
-                    logger.info(f"[X-RAY] 🛡️ BRACKET SYNC // {symbol} SL: {current_active_sl:.4f} | TP: {current_active_tp:.4f}")
+                if amend_tp_required:
+                    logger.info(f"[X-RAY] 🛡️ TP BRACKET SYNC // {symbol} TP: {current_active_tp:.4f}")
                     await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
 
                 await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)

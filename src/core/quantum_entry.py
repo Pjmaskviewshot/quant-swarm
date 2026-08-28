@@ -1,11 +1,15 @@
 """
-💎 V5.1 QUANTUM APEX: MULTI-FACTOR ALPHA FUSION MATRIX
+💎 V22.2 APEX QUANTUM PRIME: MULTI-FACTOR ALPHA FUSION MATRIX
 ------------------------------------------------------------------------
 Fuses Cross-Asset Macro Order Flows (BTC/ETH/Alt OFI), Orderbook Convexity, 
 and Microstructure Depth Elasticity into an adaptive decision manifold.
 
 Eliminates fragile heuristics and outputs calibrated Bayesian probabilities 
 and execution weights ($w_{\text{exec}}$) conditioned on market regime.
+
+Audit Fixes (V22.2):
+- Minimum MLOFI Floor (Anti-FOMO Guard): Drops entries lacking >0.8σ local 
+  orderbook pressure, preventing top-ticking into exhaustion structures.
 """
 
 import math
@@ -116,6 +120,21 @@ class QuantumEntryMatrix:
         Blends raw statistical probability with Macro Synergy, Depth Convexity,
         and Microstructure Elasticity to output the fused probability & execution weight.
         """
+        # 🚀 V22.2 FIX: Minimum MLOFI Floor (Anti-FOMO Guard)
+        # Reject entries where local orderbook pressure does not support momentum
+        local_mlofi_z = self.asset_ofi_history[-1] if self.asset_ofi_history else 0.0
+        if raw_prob > 0.50 and abs(local_mlofi_z) < 0.80:
+            logger.debug(f"[X-RAY] 🛑 ANTI-FOMO GUARD // Vetoing {intended_action} on {symbol} (Weak MLOFI: {local_mlofi_z:.2f}σ)")
+            return {
+                "symbol": symbol,
+                "fused_prob": 0.45,  # Force rejection below dynamic gate
+                "execution_weight": 0.0,
+                "convexity_score": 0.0,
+                "macro_z_score": 0.0,
+                "synergy_multiplier": 1.0,
+                "action": intended_action
+            }
+
         # 1. Orderbook Curvature & Convexity
         convexity = self._compute_orderbook_convexity(bids, asks)
         self.convexity_history.append(convexity)
