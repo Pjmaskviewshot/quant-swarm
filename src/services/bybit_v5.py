@@ -10,6 +10,8 @@ Upgraded with V22.5:
 - Last-Known-Good Balance Fallback (Prevents 0.0 equity dropouts on timeout)
 - Atomic WS Future Resolution (Eradicates micro-window race conditions)
 - Deterministic Rate Limiter Sleeps (Eliminates event-loop CPU spin-burn)
+- Auto-Recalibration on Error 10002 (Forces immediate time sync upon parameter fault)
+- Suppressed Transport Reset Noise (Cleanly handles closed websocket connections)
 """
 
 import time
@@ -201,7 +203,8 @@ class BybitUnifiedExecutor:
                     "X-BAPI-API-KEY": self.api_key,
                     "X-BAPI-TIMESTAMP": timestamp,
                     "X-BAPI-SIGN": signature,
-                    "X-BAPI-RECV-WINDOW": "5000",
+                    # 🚀 DEPLOYMENT HARDENING: Widen receive window to 10s to absorb container clock drift
+                    "X-BAPI-RECV-WINDOW": "10000",
                     "Content-Type": "application/json"
                 }
 
@@ -223,6 +226,13 @@ class BybitUnifiedExecutor:
                     error_msg = f"[X-RAY] 🚫 110126 INNOVATION ZONE: {symbol_banned} requires UI agreement. 15m cooldown applied."
                     logger.warning(error_msg)
                     raise ValueError(error_msg)
+
+                # 🚀 AUTO-RECALIBRATION: If clock drift trips 10002, force immediate NTP sync
+                if ret_code == BybitRetCode.PARAMETER_ERROR and "timestamp" in response.get("retMsg", "").lower():
+                    logger.warning("[X-RAY] ⚠️ Timestamp Drift detected via Error 10002. Forcing immediate NTP recalibration...")
+                    await self.calibrate_server_time()
+                    await asyncio.sleep(0.5)
+                    continue
 
                 if ret_code == BybitRetCode.PARAMETER_ERROR:
                     error_msg = f"[X-RAY] ❌ 10002 Parameter Fault: {response.get('retMsg', 'Unknown')}. Failing fast."
@@ -340,8 +350,10 @@ class BybitUnifiedExecutor:
                             break
             except asyncio.CancelledError:
                 break
+            except (ConnectionResetError, aiohttp.ClientPayloadError):
+                break
             except Exception as e:
-                logger.warning(f"WebSocket disconnected ({e}). Reconnecting in {backoff}s...")
+                logger.debug(f"WebSocket transport dropped ({e}). Reconnecting in {backoff}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 1.5)
 
