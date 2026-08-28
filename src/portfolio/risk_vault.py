@@ -1,18 +1,18 @@
 """
-💎 V22.1 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
+💎 V22.5 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
-- Calibrated Binary Kelly Criterion (Platt Scaling Proxy)
-- L-Moment Generalized Pareto Distribution (GPD) Heavy-Tail Risk Estimator
-- 5% Daily Loss Limit (Intraday Circuit Breaker) with Balance Fail-Safe Guard
-- Margin & Heat Map Allocation Caps
-- Exact NaN/Inf Sanitization & Matrix Invertibility Guards
+- Live Portfolio Correlation Stress Guard (Rejects trades if avg pairwise corr > 0.70)
+- Fail-Closed Liquidity & Balance Integrity Verification
+- Calibrated Binary Kelly Criterion with Platt Sigmoidal Scaling
+- L-Moment Generalized Pareto Distribution (GPD) Heavy-Tail Estimator
+- Intraday High-Watermark Circuit Breaker (5%) & Systemic Drawdown (30%)
+- Exact Matrix Invertibility Guards & Exposure Heat Allocation
 
-Audit Fixes (V22.1):
-- Balance Timeout Protection: Bypasses checks if balance reads <= $1.0 due to transient API drops.
-- Miscalibrated Kelly Fix: Raw model confidence is now mathematically squashed into empirical probabilities.
-- Missing Daily Stop Fix: Implemented rolling 24h high-watermark loss limit (5%).
-- Anti-Hedging Fix: Removed absolute correlation block that prevented offsetting shorts during crashes.
+Audit Fixes (V22.5):
+- Portfolio Beta Contagion Guard: Added a live cross-sectional correlation filter 
+  to prevent the system from clustering risk into highly correlated assets during 
+  directional market sweeps.
 """
 
 import math
@@ -41,21 +41,22 @@ class InstitutionalRiskVault:
         self.base_leverage: float = 3.0
         
         # Systemic Drawdown Trackers
-        self.peak_balance = 0.0
-        self.current_drawdown_state = 0.0
-        self.emergency_circuit_breaker = False
+        self.peak_balance: float = 0.0
+        self.last_valid_equity: float = 21.0
+        self.current_drawdown_state: float = 0.0
+        self.emergency_circuit_breaker: bool = False
         
-        # 🚀 V22.0 Daily Loss Limit Trackers
-        self.daily_high_watermark = 0.0
+        # Daily Loss Limit Trackers
+        self.daily_high_watermark: float = 0.0
         self.current_day_utc = datetime.now(timezone.utc).date()
-        self.daily_loss_limit_pct = 0.05  # 5% Max Intraday Drawdown
+        self.daily_loss_limit_pct: float = 0.05  # 5% Max Intraday Drawdown
         
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
 
         self.outcomes_history = deque(maxlen=2000) 
-        self.avg_win_r = 1.5   
-        self.avg_loss_r = 1.0  
+        self.avg_win_r: float = 1.5   
+        self.avg_loss_r: float = 1.0  
         self.volatility_surface: deque = deque(maxlen=300)
 
     def push_microstructure_variance(self, variance: float):
@@ -64,57 +65,45 @@ class InstitutionalRiskVault:
 
     def calculate_evt_tail_risk(self) -> float:
         """
-        🚀 V21.0 ROBUST L-MOMENT EVT (PEAKS-OVER-THRESHOLD)
-        Replaces the fragile Hill Estimator. Uses L-Moments to fit the Generalized 
-        Pareto Distribution (GPD), which is mathematically immune to small-sample 
-        variance explosions and never requires matrix inversion.
+        L-Moment fitting of Generalized Pareto Distribution (GPD).
+        Mathematically immune to small-sample variance explosions.
         """
         if len(self.volatility_surface) < 50:
             return 1.0  
             
         try:
-            vol_arr = np.array(self.volatility_surface, dtype=float)
+            vol_arr = np.array(self.volatility_surface, dtype=np.float64)
             vol_arr = np.sort(vol_arr[~np.isnan(vol_arr)])
             
             if len(vol_arr) == 0:
                 return 1.0
                 
-            # 90th percentile threshold (u)
             k = max(5, int(len(vol_arr) * 0.10))
             threshold = vol_arr[-k]
-            
-            # Extract exceedances above the threshold
             exceedances = vol_arr[-k:] - threshold
             
             if threshold <= 0 or len(exceedances) < 3:
                 return 1.0
                 
-            # 🚀 L-Moments method for GPD (Highly robust)
-            # l_1 = mean, l_2 = half mean mean difference
-            l_1 = np.mean(exceedances)
+            l_1 = float(np.mean(exceedances))
             n = len(exceedances)
-            
-            # Vectorized L-2 moment computation
             j = np.arange(1, n + 1)
-            l_2 = np.sum(exceedances * ((2 * j - 1 - n) / (n * (n - 1))))
+            l_2 = float(np.sum(exceedances * ((2 * j - 1 - n) / (n * (n - 1)))))
             
-            # GPD Tail Index (Xi)
-            if l_2 == 0: 
+            if l_2 == 0 or l_1 == 0: 
                 return 1.0
                 
             tau = l_2 / l_1
             xi = 2.0 - (1.0 / tau)
             
-            # Sizing Penalty Application: Compress sizing if tail index is heavy (xi > 0.15)
             if xi > 0.15:
-                # Huber-style clipping to prevent absolute position eradication
                 tail_penalty = min(0.65, (xi - 0.15) * 2.5)
                 return max(0.35, 1.0 - tail_penalty)
                 
-            return 1.05 # Reward tight, well-behaved tails with a slight leverage bump
+            return 1.05
             
         except Exception as e:
-            logger.debug(f"[MATH_WARN] L-Moment GPD EVT calculation fallback: {e}")
+            logger.debug(f"[MATH_WARN] L-Moment GPD EVT fallback: {e}")
             return 1.0
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
@@ -122,22 +111,23 @@ class InstitutionalRiskVault:
             if not price_histories:
                 return
                 
-            min_len = min([len(prices) for prices in price_histories.values()])
+            min_len = min(len(prices) for prices in price_histories.values())
             if min_len < 30: 
                 return
             
-            trimmed_histories = {sym: prices[-min_len:] for sym, prices in price_histories.items()}
-            df = pd.DataFrame(trimmed_histories, dtype=float)
-            
-            # Log diffs with safe zero-division avoidance
+            trimmed = {sym: prices[-min_len:] for sym, prices in price_histories.items()}
+            df = pd.DataFrame(trimmed, dtype=np.float64)
             shifted = df.shift(1)
             returns_df = np.log(df / shifted.replace(0, np.nan)).dropna()
             
-            # Fill NaNs generated by zero-variance series to prevent propagation
-            self.correlation_matrix = returns_df.corr().fillna(0.0)
+            # Tikhonov Ridge regularization for invertible correlation matrix
+            corr = returns_df.corr().fillna(0.0).values
+            reg_corr = (1.0 - 1e-4) * corr + (1e-4 * np.eye(corr.shape[0]))
+            self.correlation_matrix = pd.DataFrame(reg_corr, index=df.columns, columns=df.columns)
+            
             logger.info("[X-RAY] 🧠 Risk Parity Matrix Updated: Full pairwise correlation computed.")
         except Exception as e:
-            logger.debug(f"[MATH_WARN] Failed to compute correlation matrix: {e}")
+            logger.debug(f"[MATH_WARN] Correlation update failure: {e}")
 
     def update_kelly_metrics(self, is_win: bool, realized_r_multiple: float):
         if math.isnan(realized_r_multiple) or math.isinf(realized_r_multiple):
@@ -153,50 +143,39 @@ class InstitutionalRiskVault:
             self.avg_loss_r = (self.avg_loss_r * 0.95) + (capped_r * 0.05)
 
     def get_dynamic_conviction_threshold(self, balance: float, net_edge_bps: float = 50.0) -> float:
-        """
-        Sets a flat 51.8% base conviction floor for micro-accounts.
-        """
         if math.isnan(balance) or math.isinf(balance):
             balance = 12.0
             
         base_threshold = 0.518
-        # High Net Expected Value (EV) Discount (up to 1.0% discount for sharp edges)
         ev_discount = min(0.010, max(0.0, (net_edge_bps - 40.0) / 5000.0))
         
         return max(0.508, base_threshold - ev_discount)
 
     def get_max_allowed_slots(self, balance: float) -> int:
-        """Universal Max of 5."""
         return 5
 
     def _calibrate_model_probability(self, raw_confidence: float) -> float:
-        """
-        🚀 V22.0 PLATT SCALING PROXY (KELLY SANITIZATION)
-        Machine learning / statistical models are notoriously overconfident at the tails.
-        A model outputting "85% confidence" does NOT mean an 85% empirical win rate.
-        This function squashes the [0.5, 1.0] output range into a realistic [0.50, 0.65] 
-        empirical probability envelope using a scaled Sigmoid (Hyperbolic Tangent) curve.
-        """
+        """Platt Sigmoidal scaling mapping raw model confidence to empirical win rate."""
         if math.isnan(raw_confidence) or math.isinf(raw_confidence): 
             return 0.50
-            
         compressed_p = 0.50 + 0.15 * math.tanh((raw_confidence - 0.5) * 5.0)
         return float(np.clip(compressed_p, 0.50, 0.65))
 
-    def calculate_calibrated_kelly_fraction(self, model_confidence: float, net_edge_bps: float = 50.0, current_balance: float = 100.0, symbol_variance: float = 1e-4) -> float:
-        """
-        🚀 V22.0 CALIBRATED BINARY KELLY CRITERION
-        Replaces raw confidence directly fed to Kelly. Maps statistical scores to 
-        empirical win rates to prevent account-destroying over-leverage.
-        """
+    def calculate_calibrated_kelly_fraction(
+        self, 
+        model_confidence: float, 
+        net_edge_bps: float = 50.0, 
+        current_balance: float = 100.0, 
+        symbol_variance: float = 1e-4
+    ) -> float:
         min_required_conviction = self.get_dynamic_conviction_threshold(current_balance, net_edge_bps)
         if model_confidence < min_required_conviction:
-            return 0.0  # Rejected by Dynamic EV Gate
+            return 0.0
 
         p = self._calibrate_model_probability(model_confidence)
         q = 1.0 - p
-        
         b = self.avg_win_r / max(self.avg_loss_r, 1e-9)
+        
         if b <= 0:
             return 0.001
             
@@ -215,16 +194,24 @@ class InstitutionalRiskVault:
             
         return max(0.001, min(self.max_single_position_risk_pct, risk_adjusted_kelly))
 
-    def evaluate_portfolio_safety(self, current_balance: float, new_position_notional: float = 0.0, symbol: str = "") -> Tuple[bool, str]:
+    def evaluate_portfolio_safety(
+        self, 
+        current_balance: float, 
+        new_position_notional: float = 0.0, 
+        symbol: str = ""
+    ) -> Tuple[bool, str]:
         if self.emergency_circuit_breaker:
             return False, "EMERGENCY_CIRCUIT_BREAKER_ACTIVE"
 
-        if math.isnan(current_balance) or math.isinf(current_balance) or current_balance <= 1.0:
-            # 🚀 V22.1 FAIL-SAFE GUARD: Prevent API timeouts or zero-balance glitches from triggering false liquidations
-            logger.warning(f"[X-RAY] ⚠️ Suspect balance reading received (${current_balance}). Bypassing safety check to protect against API timeout false-positives.")
-            return True, "SAFE_BYPASS_API_GLITCH"
+        # 🚀 V22.4 FAIL-CLOSED LATCH: Block new allocations on bad balance reads
+        if math.isnan(current_balance) or math.isinf(current_balance) or current_balance <= 0.0:
+            logger.critical(f"[RISK_VAULT] 🛑 FAIL-CLOSED ENGAGED: Invalid balance read (${current_balance}). Halting execution.")
+            return False, "HALT_INVALID_BALANCE_STATE"
 
-        # 🚀 V22.0 DAILY LOSS LIMIT (5% Circuit Breaker)
+        if current_balance > 1.0:
+            self.last_valid_equity = current_balance
+
+        # 5% Daily Loss Limit Protection
         now_date = datetime.now(timezone.utc).date()
         if now_date != self.current_day_utc:
             self.current_day_utc = now_date
@@ -235,34 +222,41 @@ class InstitutionalRiskVault:
             
         daily_drawdown = (self.daily_high_watermark - current_balance) / max(self.daily_high_watermark, 1e-9)
         if daily_drawdown >= self.daily_loss_limit_pct:
-            logger.warning(f"🚨 INTRADAY LOSS LIMIT REACHED ({daily_drawdown:.2%}). Suspending new entries for the UTC day.")
+            logger.warning(f"🚨 INTRADAY LOSS LIMIT REACHED ({daily_drawdown:.2%}). Suspending entries.")
             return False, f"DAILY_LOSS_LIMIT_REACHED_{daily_drawdown:.2%}"
 
-        # 🚀 CATASTROPHIC ABSOLUTE DRAWDOWN (30%)
+        # 30% Absolute Systemic Drawdown Protection
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
             self.current_drawdown_state = 0.0
         elif self.peak_balance > 0:
             self.current_drawdown_state = (self.peak_balance - current_balance) / self.peak_balance
-            
             if self.current_drawdown_state >= self.max_drawdown_pct:
-                if not self.emergency_circuit_breaker:
-                    logger.critical(f"🚨 ABSOLUTE MAX DRAWDOWN BREACHED ({self.current_drawdown_state:.2%}). LOCKING DOWN SYSTEMS.")
-                    self.emergency_circuit_breaker = True
+                self.emergency_circuit_breaker = True
+                logger.critical(f"🚨 ABSOLUTE MAX DRAWDOWN BREACHED ({self.current_drawdown_state:.2%}). SYSTEM LOCKDOWN.")
                 return False, f"MAX_DRAWDOWN_BREACHED_{self.current_drawdown_state:.2%}"
 
         if symbol in self.active_positions:
             return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
 
-        max_slots = self.get_max_allowed_slots(current_balance)
-        if len(self.active_positions) >= max_slots:
-            return False, f"DYNAMIC_SLOT_CAP_REACHED // Active: {len(self.active_positions)} >= Max Allowed: {max_slots}"
+        if len(self.active_positions) >= 5:
+            return False, "DYNAMIC_SLOT_CAP_REACHED (5/5)"
+
+        # 🚀 V22.5 PORTFOLIO CORRELATION GUARD: Prevent correlated long-beta clustering
+        if self.correlation_matrix is not None and len(self.active_positions) >= 2 and symbol:
+            active_symbols = [s for s in self.active_positions.keys() if s in self.correlation_matrix.index]
+            if symbol in self.correlation_matrix.index and active_symbols:
+                corrs = [self.correlation_matrix.loc[symbol, s] for s in active_symbols]
+                avg_corr = float(np.mean(corrs)) if corrs else 0.0
+                if avg_corr > 0.70:
+                    logger.warning(f"[RISK_VAULT] 🛑 CORRELATION VETO // {symbol} has {avg_corr:.2f} avg correlation with active portfolio. Aborting.")
+                    return False, f"PORTFOLIO_CORRELATION_VETO ({avg_corr:.2f} > 0.70)"
 
         max_heat_dollars = max(self.exchange_min_notional * 5.0, current_balance * self.absolute_max_leverage)
         total_exposure = sum(self.active_positions.values()) + new_position_notional
 
         if total_exposure > max_heat_dollars:
-            return False, f"NATURAL_HEAT_CAP_EXCEEDED // Req: ${total_exposure:.2f} > Max Margin Available: ${max_heat_dollars:.2f}"
+            return False, f"HEAT_CAP_EXCEEDED (Req: ${total_exposure:.2f} > Max: ${max_heat_dollars:.2f})"
                 
         return True, "SAFE"
 

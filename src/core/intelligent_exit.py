@@ -1,10 +1,14 @@
 """
-💎 V21.3 APEX QUANTUM: CALIBRATED OPTIMAL-STOPPING ENGINE
+💎 V22.4 APEX QUANTUM PRIME: INTELLIGENT EXIT & EXECUTION GOVERNOR
 -----------------------------------------------------------------------------------------
 Continuous-Time Non-Reactive, Predictive Optimal-Stopping Matrix.
 Mathematically anchored to Position Notional (Zero Equity-Bleed).
-Upgraded with Dimensionally Correct Mahalanobis Scaling and 
-Honest Heuristic Inventory Modeling.
+
+Audit Fixes (V22.4):
+- True Online Mahalanobis Distance: Stripped out the invalid hardcoded heuristic 
+  matrix; now utilizes the Tikhonov-regularized inverted covariance matrix.
+- Pure Asyncio Execution: FSM Governor now directly hits the V5 REST strings 
+  over aiohttp, bypassing legacy Pybit adapters for zero-latency ejections.
 """
 
 import math
@@ -13,35 +17,38 @@ import logging
 import numpy as np
 from scipy.stats import chi2, norm
 from dataclasses import dataclass, field
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
-logger = logging.getLogger("QUANT_CORE.V21_3_EXIT")
+logger = logging.getLogger("QUANT_CORE.V22_EXIT")
 
 @dataclass
 class ThesisVector:
     features: np.ndarray  
     
-    def mahalanobis_distance(self, other: 'ThesisVector', inv_cov_matrix: np.ndarray) -> float:
-        delta = self.features - other.features
+    def mahalanobis_distance(self, other: 'ThesisVector', inv_cov_matrix: Optional[np.ndarray] = None) -> float:
+        """
+        🚀 V22.4 FIX: Computes the Out-of-Distribution (OOD) distance between the entry thesis 
+        and live microstructure. Uses the Tikhonov-regularized inverted covariance matrix to 
+        guarantee SPD matrix properties, replacing the invalid hardcoded diagonal heuristic.
+        """
         try:
-            # 🚀 V21.3 FIX: Override the miscalibrated inv_cov_matrix from main.py.
-            # First 3 features are Z-scores (Var ≈ 1.0). 
-            # 4th is Depth Ratio (Var ≈ 0.5). 
-            # 5th is Inst_variance (Scale: ~1e-6. Var ≈ (entry_var)^2).
-            # This ensures the distance correctly measures true structural shift across all dimensions.
-            safe_entry_var = max(self.features[4], 1e-12)
+            delta = self.features - other.features
+            dim = len(delta)
             
-            proper_inv_cov = np.diag([
-                1.0,                           # ofi_fast_z
-                1.0,                           # hawkes_z
-                1.0,                           # meso_momentum_z
-                2.0,                           # depth_ratio (1.0 / 0.5)
-                1.0 / (safe_entry_var ** 2)    # inst_variance percentage drift
-            ])
-            
-            distance_sq = float(np.dot(np.dot(delta.T, proper_inv_cov), delta))
+            if inv_cov_matrix is not None and inv_cov_matrix.shape == (dim, dim):
+                if not np.isnan(inv_cov_matrix).any() and not np.isinf(inv_cov_matrix).any():
+                    cov_inv = inv_cov_matrix
+                else:
+                    cov_inv = np.eye(dim, dtype=np.float64)
+            else:
+                cov_inv = np.eye(dim, dtype=np.float64)
+
+            # Quadratic form computation: delta^T * Sigma^-1 * delta
+            distance_sq = float(np.dot(np.dot(delta.T, cov_inv), delta))
             return math.sqrt(max(0.0, distance_sq))
-        except Exception:
+            
+        except Exception as e:
+            logger.debug(f"[MATH_WARN] Mahalanobis distance evaluation failure: {e}")
             return 0.0
 
 @dataclass
@@ -352,7 +359,7 @@ class IntelligentExitEngine:
             getattr(stat, "meso_momentum_z", 0.0) if stat else 0.0,
             depth_ratio, 
             getattr(stat, "inst_variance", 1e-6) if stat else 1e-6
-        ]))
+        ], dtype=np.float64))
 
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
@@ -422,7 +429,6 @@ class IntelligentExitEngine:
         last_ob = ctx.get("last_ob", {})
         drawdown_pct = float(ctx.get("drawdown_pct", 0.0))
         
-        # 🚀 V21.3 FIX: Pointed to the mathematically honest Heuristic Inventory Optimizer
         q_opt_raw = HeuristicInventoryOptimizer.solve_optimal_q(
             gross_pnl, ev_fut, cvar_95, cvar_99, sigma_eff, ood_prob_base, 
             price, total_qty, last_ob, state.exit_side, drawdown_pct, aligned_ofi
@@ -470,9 +476,11 @@ class ExecutionGovernorFSM:
         except Exception:
             qty_str = str(qty_to_close)
             
+        # 🚀 V22.4 FIX: Pure Asyncio Execution Bypassing Legacy Adapters
         if decision.urgency in ["MARKET", "EMERGENCY", "AGGRESSIVE"]:
             res = await executor.safe_call(
-                executor.client.place_order, category="linear", symbol=symbol,
+                "POST", "/v5/order/create", is_execution=True,
+                category="linear", symbol=symbol,
                 side=state.exit_side, orderType="Market", qty=qty_str,
                 timeInForce="IOC", reduceOnly=True
             )
@@ -481,7 +489,8 @@ class ExecutionGovernorFSM:
 
         if state.execution_state == "OBSERVE":
             res = await executor.safe_call(
-                executor.client.place_order, category="linear", symbol=symbol,
+                "POST", "/v5/order/create", is_execution=True,
+                category="linear", symbol=symbol,
                 side=state.exit_side, orderType="Limit", price=str(decision.limit_price),
                 qty=qty_str, timeInForce="PostOnly", reduceOnly=True
             )

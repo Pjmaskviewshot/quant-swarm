@@ -1,10 +1,14 @@
 """
-💎 V1.0 TITANIUM APEX: SELF-CALIBRATING HAWKES PROCESS
--------------------------------------------------------
+💎 V22.5 APEX QUANTUM PRIME: ASYMMETRIC BIVARIATE HAWKES ENGINE
+-------------------------------------------------------------------------
 Models the arrival intensity of algorithmic trade cascades.
 Upgraded with Asset-Agnostic Relative Volume Normalization and 
 Dynamic Decay Calibration (β) for universal cross-coin execution.
-Features Spectral Radius Stationarity Clamping and X-Ray Telemetry.
+
+Audit Fixes (V22.5):
+- Decoupled Asymmetric Kernel: Replaced the single shared decay matrix with a fully 
+  decoupled 4-parameter kernel. This mathematically accounts for the asymmetric 
+  half-lives of buy vs. sell cascades inherent to crypto microstructure.
 """
 
 import time
@@ -18,7 +22,7 @@ logger = logging.getLogger("QUANT_CORE.HAWKES")
 
 class BivariateHawkesEngine:
     """
-    🚀 V1.0 APEX: Self-Calibrating Bivariate Hawkes Process
+    🚀 V22.5 APEX: Asymmetric Self-Calibrating Bivariate Hawkes Process
     Node 0: Aggressive BUY trades
     Node 1: Aggressive SELL trades
     """
@@ -45,13 +49,18 @@ class BivariateHawkesEngine:
         self.I = np.zeros((2, 2))
         self.last_update_time = 0.0
         
-        # 🚀 V1.0: Rolling EWMA for Asset-Agnostic Volume Normalization
+        # 🚀 V22.5 Asymmetric Tracking
+        self.last_buy_time = 0.0
+        self.last_sell_time = 0.0
+        
+        # Rolling EWMA for Asset-Agnostic Volume Normalization
         self.vol_ewma = 0.0
         self.vol_alpha = 0.05 
         
         # ONLINE ESTIMATION BUFFERS
         self.calibration_window = calibration_window
-        self.dt_buffer = deque(maxlen=calibration_window)
+        self.dt_buffer_buy = deque(maxlen=calibration_window)
+        self.dt_buffer_sell = deque(maxlen=calibration_window)
         
         self.imbalance_history = deque(maxlen=200)
         self.current_imbalance_z = 0.0
@@ -61,73 +70,80 @@ class BivariateHawkesEngine:
 
     def _calibrate_engine(self):
         """
-        Calculates the Coefficient of Variation (CV) of the trade stream.
-        Dynamically adjusts Excitation (α) and Decay (β) to account for shifting regimes.
-        Ensures mathematical stationarity via spectral radius clamping.
+        🚀 V22.5 FULLY DECOUPLED ASYMMETRIC CALIBRATION
+        Calculates the Coefficient of Variation (CV) of the trade stream independently 
+        for buy and sell cascades. Dynamically adjusts Excitation (α) and Decay (β) 
+        per dimension to account for shifting, asymmetric micro-regimes.
         """
-        if len(self.dt_buffer) < self.calibration_window: 
+        if len(self.dt_buffer_buy) < 50 or len(self.dt_buffer_sell) < 50: 
             return
             
-        dts = np.array(self.dt_buffer)
-        mean_dt = np.mean(dts)
-        std_dt = np.std(dts)
+        dts_buy = np.array(self.dt_buffer_buy)
+        dts_sell = np.array(self.dt_buffer_sell)
         
-        # Guard against micro-burst zero-variance (exchange trade batching)
-        if mean_dt < 1e-6: 
+        mean_buy, std_buy = float(np.mean(dts_buy)), float(np.std(dts_buy))
+        mean_sell, std_sell = float(np.mean(dts_sell)), float(np.std(dts_sell))
+        
+        # Guard against micro-burst zero-variance
+        if mean_buy < 1e-6 or mean_sell < 1e-6: 
             return
             
-        # 🚀 V1.0: DYNAMIC DECAY CALIBRATION (β)
-        # Faster markets (low mean_dt) require faster memory decay to prevent overflow
-        speed_factor = max(0.5, min(3.0, 1.0 / max(0.1, mean_dt)))
-        self.beta = self.base_beta * speed_factor
+        # 1. DYNAMIC ASYMMETRIC DECAY CALIBRATION (β)
+        speed_factor_buy = max(0.5, min(3.0, 1.0 / max(0.1, mean_buy)))
+        speed_factor_sell = max(0.5, min(3.0, 1.0 / max(0.1, mean_sell)))
         
-        # Coefficient of Variation (CV)
-        # CV = 1.0 -> Random noise (No cascades)
-        # CV > 1.2 -> Highly clustered algorithmic trading (Whales active)
-        cv = std_dt / mean_dt
+        self.beta[:, 0] = self.base_beta[:, 0] * speed_factor_buy
+        self.beta[:, 1] = self.base_beta[:, 1] * speed_factor_sell
         
-        # Theoretical Hawkes Approximation: CV^2 ≈ 1 / (1 - ρ)^2
-        # Implied Branching Ratio (ρ): The probability that one trade triggers another
-        implied_rho = 1.0 - (1.0 / max(cv, 1.001)) 
+        # 2. ASYMMETRIC EXCITATION SCALING (α) via Implied Branching Ratio
+        cv_buy = std_buy / mean_buy
+        cv_sell = std_sell / mean_sell
         
-        # Clamp ρ to keep the stochastic process stationary (ρ < 1.0)
-        implied_rho = max(0.05, min(0.85, implied_rho))
+        implied_rho_buy = max(0.05, min(0.85, 1.0 - (1.0 / max(cv_buy, 1.001))))
+        implied_rho_sell = max(0.05, min(0.85, 1.0 - (1.0 / max(cv_sell, 1.001))))
         
-        # 1. Scale Alpha (Excitation)
-        scale_factor = implied_rho / 0.5  # Assuming 0.5 is the baseline ρ
-        self.alpha = self.base_alpha * scale_factor
+        scale_buy = implied_rho_buy / 0.5
+        scale_sell = implied_rho_sell / 0.5
         
-        # 2. Scale Mu (Background Noise)
-        noise_factor = 1.0 - implied_rho
-        self.mu = self.base_mu * (noise_factor / 0.5)
+        self.alpha[:, 0] = self.base_alpha[:, 0] * scale_buy
+        self.alpha[:, 1] = self.base_alpha[:, 1] * scale_sell
         
-        # 3. STATIONARITY CLAMP (Spectral Radius < 1.0)
-        # The branching matrix M_ij = alpha_ij / beta_ij determines process stability
+        # 3. BACKGROUND NOISE CALIBRATION (μ)
+        noise_buy = 1.0 - implied_rho_buy
+        noise_sell = 1.0 - implied_rho_sell
+        
+        self.mu[0] = self.base_mu[0] * (noise_buy / 0.5)
+        self.mu[1] = self.base_mu[1] * (noise_sell / 0.5)
+        
+        # 4. STATIONARITY CLAMP (Spectral Radius < 0.95)
         with np.errstate(divide='ignore', invalid='ignore'):
             branching_matrix = self.alpha / self.beta
             
         try:
-            spectral_radius = np.max(np.abs(np.linalg.eigvals(branching_matrix)))
+            spectral_radius = float(np.max(np.abs(np.linalg.eigvals(branching_matrix))))
             
             if spectral_radius >= 0.95:
-                # Rescale alpha to force the spectral radius down to a safe 0.90 limit
+                # Rescale entire alpha matrix to force the spectral radius down to a safe 0.90 limit
                 stationarity_correction = 0.90 / spectral_radius
                 self.alpha *= stationarity_correction
+                
                 logger.warning(
                     f"[X-RAY] ⚠️ HAWKES STATIONARITY CLAMP // {self.symbol} | "
-                    f"Spectral Radius reached {spectral_radius:.3f}. Alpha matrix rescaled by {stationarity_correction:.2f}x."
+                    f"Spectral Radius reached {spectral_radius:.3f}. Matrix rescaled by {stationarity_correction:.2f}x."
                 )
             
             now = time.time()
             if now - self._last_log_time > 300.0:  
                 logger.debug(
-                    f"[X-RAY] ⚙️ HAWKES MLE CALIBRATED // {self.symbol} | CV: {cv:.2f} | "
-                    f"Excitation (ρ): {implied_rho:.2f} | Decay Speed: {speed_factor:.2f}x | Spectral Radius: {min(spectral_radius, 0.90):.3f}"
+                    f"[X-RAY] ⚙️ HAWKES ASYMMETRIC MLE // {self.symbol} | "
+                    f"ρ_Buy: {implied_rho_buy:.2f} | ρ_Sell: {implied_rho_sell:.2f} | "
+                    f"β_Buy: {speed_factor_buy:.2f}x | β_Sell: {speed_factor_sell:.2f}x | "
+                    f"Radius: {min(spectral_radius, 0.90):.3f}"
                 )
                 self._last_log_time = now
                 
         except np.linalg.LinAlgError:
-            logger.debug(f"[X-RAY] Hawkes Eigenvalue convergence failed for {self.symbol}. Skipping calibration step.")
+            logger.debug(f"[X-RAY] Hawkes Eigenvalue convergence failed for {self.symbol}. Skipping clamp.")
 
     def apply_tick(self, timestamp: float, is_buy: bool, trade_volume: float) -> Tuple[float, float]:
         """
@@ -135,15 +151,23 @@ class BivariateHawkesEngine:
         Incorporates Relative Volume Normalization to standardize across all market caps.
         """
         if self.last_update_time == 0.0:
-            dt = 0.001
+            global_dt = 0.001
         else:
-            raw_dt = timestamp - self.last_update_time
-            dt = max(0.001, min(60.0, raw_dt))
+            global_dt = max(0.001, min(60.0, timestamp - self.last_update_time))
         
-        self.dt_buffer.append(dt)
+        # 🚀 V22.5: Asymmetric tracking for decoupled kernel calibration
+        if is_buy:
+            if self.last_buy_time > 0.0:
+                self.dt_buffer_buy.append(max(0.001, min(60.0, timestamp - self.last_buy_time)))
+            self.last_buy_time = timestamp
+        else:
+            if self.last_sell_time > 0.0:
+                self.dt_buffer_sell.append(max(0.001, min(60.0, timestamp - self.last_sell_time)))
+            self.last_sell_time = timestamp
+            
         self.tick_count += 1
         
-        # 🚀 V1.0: ASSET-AGNOSTIC VOLUME NORMALIZATION
+        # Asset-Agnostic Volume Normalization
         if self.vol_ewma == 0.0:
             self.vol_ewma = trade_volume
         else:
@@ -155,7 +179,7 @@ class BivariateHawkesEngine:
             self._calibrate_engine()
         
         # 1. Exponential Decay of existing intensities: I(t) = I(t_last) * e^(-beta * dt)
-        self.I *= np.exp(-self.beta * dt)
+        self.I *= np.exp(-self.beta * global_dt)
         
         # 2. Apply Excitation Jump (Marked by Normalized Volume)
         event_idx = 0 if is_buy else 1
@@ -195,7 +219,6 @@ class BivariateHawkesEngine:
         Returns the raw normalized probability imbalance between buy and sell cascades.
         Returns a value between -1.0 (pure sell cascade) and 1.0 (pure buy cascade).
         """
-        # 🚀 FIX: Decay intensity state forward to current timestamp before computing delta
         if current_timestamp and self.last_update_time > 0:
             dt = max(0.001, min(60.0, current_timestamp - self.last_update_time))
             decayed_I = self.I * np.exp(-self.beta * dt)

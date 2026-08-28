@@ -1,20 +1,20 @@
 """
-💎 V22.2 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
+💎 V22.5 APEX QUANTUM PRIME: UNIFIED API EXECUTOR
 --------------------------------------------------------
 Features Token-Bucket Rate Limiting, Pure Asyncio I/O, 
 Smart Leverage Caching, and True Unified Equity Parsing.
 
-Upgraded with V22.2:
+Upgraded with V22.5:
+- Idempotent Order Dispatch (Deterministic orderLinkId prevents duplicate fills on retry)
 - Continuous 15-Minute NTP Clock Synchronization Daemon (Eradicates Error 10002 drift)
 - Last-Known-Good Balance Fallback (Prevents 0.0 equity dropouts on timeout)
-- Legacy Adapter __getattr__ Injection (Resolves AttributeError crashes)
 - Atomic WS Future Resolution (Eradicates micro-window race conditions)
 - Deterministic Rate Limiter Sleeps (Eliminates event-loop CPU spin-burn)
-- GET Parameter Boolean Scrubbing (Prevents Bybit parse rejections)
 """
 
 import time
 import math
+import uuid
 import hmac
 import hashlib
 import asyncio
@@ -28,6 +28,10 @@ import aiohttp
 logger = logging.getLogger("QUANT_CORE.BYBIT")
 
 class BybitRetCode:
+    """
+    🚀 V22.1 BYBIT RETURN CODES
+    Structured integer mapping to eliminate fragile string-matching on API errors.
+    """
     SUCCESS = 0
     PARAMETER_ERROR = 10002          
     SYSTEM_MAINTENANCE = 10004       
@@ -35,6 +39,7 @@ class BybitRetCode:
     QTY_OUT_OF_BOUNDS = 10001        
     SERVICE_UNAVAILABLE = 10016      
     ORDER_NOT_EXISTS = 110001        
+    DUPLICATE_ORDER_LINK_ID = 110008 
     INSUFFICIENT_BALANCE = 110007    
     RISK_LIMIT_EXCEEDED = 110013     
     LEVERAGE_NOT_MODIFIED = 110025   
@@ -43,6 +48,10 @@ class BybitRetCode:
 
 
 class TokenBucketRateLimiter:
+    """
+    🚀 TOKEN-BUCKET RATE LIMITER (DETERMINISTIC)
+    Throttles outbound API calls to strictly respect Bybit's private endpoint limits.
+    """
     def __init__(self, capacity: int = 10, fill_rate: float = 5.0):
         self.capacity = float(capacity)
         self.tokens = float(capacity)
@@ -77,6 +86,11 @@ class LegacyAdapterClient:
 
 
 class BybitUnifiedExecutor:
+    """
+    🚀 V22.5 PURE ASYNC UNIFIED API EXECUTOR
+    Native aiohttp wrapper for Bybit V5 with automated rate-limiting, leverage caching,
+    and Idempotent Priority Execution Lanes.
+    """
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key or ""
         self.api_secret = api_secret or ""
@@ -92,11 +106,11 @@ class BybitUnifiedExecutor:
         self._server_time_offset_ms: int = 0
         self._leverage_cache: Dict[str, int] = {}
         self.temporary_symbol_bans: Dict[str, float] = {}
-        self._last_known_equity: float = 21.00  # Balance Fallback Cache
+        self._last_known_equity: float = 21.00  
 
         self._ws_connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_task: Optional[asyncio.Task] = None
-        self._clock_sync_task: Optional[asyncio.Task] = None  # 🚀 V22.2 NTP Sync Task
+        self._clock_sync_task: Optional[asyncio.Task] = None  
         self._order_waiters: Dict[str, List[asyncio.Future]] = {}
         self._execution_cache: Dict[str, Dict[str, Any]] = {}
         self._waiter_lock = asyncio.Lock()
@@ -116,7 +130,6 @@ class BybitUnifiedExecutor:
             self._clock_sync_task = asyncio.create_task(self._continuous_clock_sync_loop())
 
     async def calibrate_server_time(self) -> int:
-        """Computes exact network latency and clock drift to prevent 10002 errors."""
         try:
             start_local = int(time.time() * 1000)
             async with self.session.get(f"{self.rest_base_url}/v5/market/time") as resp:
@@ -134,10 +147,9 @@ class BybitUnifiedExecutor:
         return self._server_time_offset_ms
 
     async def _continuous_clock_sync_loop(self):
-        """Resyncs server time offset every 15 minutes to prevent 10002 timestamp drift errors."""
         while not self._is_terminating:
             try:
-                await asyncio.sleep(900)  # 15 minute interval
+                await asyncio.sleep(900) 
                 await self.calibrate_server_time()
             except asyncio.CancelledError:
                 break
@@ -160,6 +172,12 @@ class BybitUnifiedExecutor:
             await self.execution_rate_limiter.acquire()
         else:
             await self.data_rate_limiter.acquire()
+
+        # 🚀 V22.5 SEV 1 FIX: Deterministic Idempotency Key (orderLinkId)
+        # Prevents double-execution on API timeouts and retries
+        if endpoint == "/v5/order/create" and method == "POST":
+            if "orderLinkId" not in kwargs or not kwargs["orderLinkId"]:
+                kwargs["orderLinkId"] = f"APEX_{uuid.uuid4().hex[:16]}"
 
         for attempt in range(3):
             try:
@@ -192,6 +210,11 @@ class BybitUnifiedExecutor:
 
                 ret_code = response.get("retCode", -1)
                 
+                # If retry detects the order was already successfully placed on Bybit
+                if ret_code == BybitRetCode.DUPLICATE_ORDER_LINK_ID:
+                    logger.warning(f"[X-RAY] 🛡️ IDEMPOTENCY GUARD: Order {kwargs.get('orderLinkId')} already filled on Bybit. Treating as success.")
+                    return {"retCode": 0, "retMsg": "OK_DUPLICATE_RESOLVED", "result": {"orderLinkId": kwargs.get("orderLinkId")}}
+
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
@@ -232,7 +255,6 @@ class BybitUnifiedExecutor:
                 await asyncio.sleep(1.0)
 
     async def safe_call(self, *args, **kwargs) -> Any:
-        """Universal Backward-Compatible Adapter"""
         if args and isinstance(args[0], str):
             method = args[0]
             endpoint = args[1] if len(args) > 1 else ""

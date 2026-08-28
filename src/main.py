@@ -1,5 +1,5 @@
 """
-💎 V22.3 APEX QUANTUM PRIME: BARE-METAL CORE
+💎 V22.5 APEX QUANTUM PRIME: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 Features:
@@ -8,13 +8,11 @@ Features:
 - Strict Directional Hysteresis & In-Flight TTL Purging
 - Direct Execution Sizing (No Provisional Overrides)
 
-Audit Fixes (V22.3):
-- Active Prey-Hunting Trailing Engine: Bypasses Bybit API latency to execute 
-  immediate IOC Market exits the millisecond price breaches a profit lock.
-- Early Breakeven Activation: Drops the profit hurdle to 0.20% and secures 
-  a 70% ratchet plus fee buffer to stop bleed-outs.
-- Persistent Lifetime Baseline: Fixes the UTC midnight reset glitch that caused 
-  the Telegram dashboard to report inaccurate session returns.
+Audit Fixes (V22.5):
+- Orphaned Resting Order Reconciliation on Boot (Cancels stale open orders)
+- 5.0-Second Stop-Amendment Rate Firewall (Eliminates API throttling)
+- 20 Hz (50ms) Lifecycle Polling (Zero scheduler jitter)
+- Dedicated ThreadPool Isolation for Matrix Factorization & I/O
 """
 
 import os
@@ -27,6 +25,7 @@ import hashlib
 import datetime
 import heapq
 import numpy as np
+import concurrent.futures
 from collections import deque
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Any, Callable
@@ -92,7 +91,7 @@ class GlobalStateActor:
 
     async def start(self):
         self._is_running = True
-        logger.info("🛡️ V22.0 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
+        logger.info("🛡️ V22.5 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
         while self._is_running:
             try:
                 cmd: MutationCommand = await self.mutation_queue.get()
@@ -169,11 +168,14 @@ class DistributedQuantEngine:
         if self.test_mode: 
             logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
         else: 
-            logger.critical("💎 LIVE MODE: V22.3 APEX BARE-METAL CORE ACTIVE.")
+            logger.critical("💎 LIVE MODE: V22.5 APEX BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
+        
+        # 🚀 V22.4 FIX: Dedicated Thread Pool for Heavy I/O & Matrices
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="V22_Heavy_Workers")
         
         self.db_semaphore = asyncio.Semaphore(5)
         self.eval_semaphore = asyncio.Semaphore(15)
@@ -219,6 +221,10 @@ class DistributedQuantEngine:
         self.last_exit_direction: Dict[str, tuple] = {} 
 
         self.symbol_locks, self.eval_semaphores, self.daemon_tasks, self.last_eval_time = {}, {}, {}, {}
+        
+        # 🚀 V22.5 FIX: Trailing Stop Rate Limiter Dictionary
+        self.last_amend_time: Dict[str, float] = {}
+        
         self._active_tasks = set()
         
         self.auction_queue: List[tuple] = []  
@@ -325,7 +331,9 @@ class DistributedQuantEngine:
                 with os.fdopen(fd, 'w') as f: json.dump(state_snapshot, f)
                 os.replace(path, target_path)
             except Exception as e: logger.debug(f"[X-RAY] Failed RLS disk serialization: {e}")
-        await asyncio.to_thread(_write_file)
+        
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self.thread_pool, _write_file)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
         for s in symbols:
@@ -356,7 +364,23 @@ class DistributedQuantEngine:
         self._safe_telegram_dispatch_sync(message, is_html, message_type)
 
     async def run_telegram_worker(self):
+        """Offloads blocking Telegram SSL handshakes to ThreadPool."""
         logger.info("📡 TELEGRAM WORKER ONLINE: Non-blocking telemetry active.")
+        loop = asyncio.get_running_loop()
+        
+        def _sync_telegram_send(msg, html, m_type):
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                if html:
+                    new_loop.run_until_complete(self.telegram.send_html_report(msg))
+                else:
+                    new_loop.run_until_complete(self.telegram.log_message(msg, m_type))
+            except Exception:
+                pass
+            finally:
+                new_loop.close()
+
         while True:
             try:
                 message, is_html, msg_type = await self.telegram_queue.get()
@@ -364,15 +388,12 @@ class DistributedQuantEngine:
                     self.telegram_queue.task_done()
                     continue
 
-                if is_html:
-                    await self.telegram.send_html_report(message)
-                else:
-                    await self.telegram.log_message(message, msg_type)
-                    
+                await loop.run_in_executor(self.thread_pool, _sync_telegram_send, message, is_html, msg_type)
                 self.telegram_queue.task_done()
+                
             except asyncio.CancelledError: break
             except Exception as e:
-                logger.debug(f"Telegram dispatch failed, dropping message to preserve event loop: {e}")
+                logger.debug(f"Telegram dispatch failed: {e}")
                 self.telegram_queue.task_done()
 
     async def _get_true_equity_usdt(self) -> float:
@@ -418,15 +439,21 @@ class DistributedQuantEngine:
         return str(Decimal(str(price)).quantize(tick_dec, rounding=ROUND_HALF_UP))
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
+        """🚀 V22.5 SEV 2 FIX: 5.0-Second Cooldown prevents Bybit 'trading-stop' endpoint spam."""
+        now = time.time()
+        if (now - self.last_amend_time.get(symbol, 0.0)) < 5.0:
+            return False
+            
         try:
-            await self.executor.safe_call(
+            res = await self.executor.safe_call(
                 "POST", "/v5/position/trading-stop", is_execution=True, 
                 category="linear", symbol=symbol, positionIdx=0, 
                 takeProfit=self._align_price(symbol, new_tp), 
                 stopLoss=self._align_price(symbol, new_sl),
                 tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
             )
-            return True
+            self.last_amend_time[symbol] = now
+            return res.get("retCode") == 0
         except Exception as e:
             logger.debug(f"[X-RAY] Failed to amend trailing stop for {symbol}: {e}")
             return False
@@ -470,6 +497,15 @@ class DistributedQuantEngine:
 
     async def synchronize_exchange_state(self):
         try:
+            # 🚀 V22.5 SEV 3 FIX: Sweep Orphaned Resting Orders on Boot
+            open_orders_res = await self.executor.safe_call("GET", "/v5/order/realtime", category="linear", settleCoin="USDT")
+            open_orders = open_orders_res.get("result", {}).get("list", [])
+            if open_orders:
+                logger.warning(f"🧹 BOOT ORPHAN RECONCILIATION: Found {len(open_orders)} resting orders. Sweeping...")
+                for o in open_orders:
+                    await self.executor.safe_call("POST", "/v5/order/cancel", is_execution=True, category="linear", symbol=o["symbol"], orderId=o["orderId"])
+
+            # Sync active positions
             pos_response = await self.executor.safe_call("GET", "/v5/position/list", category="linear", settleCoin="USDT")
             active_orphans = [p for p in pos_response.get("result", {}).get("list", []) if float(p.get("size", 0.0)) > 0]
             if not active_orphans: return
@@ -525,7 +561,6 @@ class DistributedQuantEngine:
         while True:
             await asyncio.sleep(5.0)
             try:
-                # In-Flight Deadlock TTL Purge
                 now = time.time()
                 expired_flights = [sym for sym, exp in self.in_flight_symbols.items() if now > exp]
                 for sym in expired_flights:
@@ -547,6 +582,8 @@ class DistributedQuantEngine:
     async def run_system_heartbeat(self):
         start_time = time.time()
         loop_counter = 0
+        loop = asyncio.get_running_loop()
+        
         while True:
             await asyncio.sleep(60) 
             loop_counter += 1
@@ -561,8 +598,9 @@ class DistributedQuantEngine:
                     for sym, mem in self.screener_memory.items():
                         if len(mem.get("prices", [])) >= 240:
                             price_histories[sym] = list(mem["prices"])[-240:]
+                            
                     if price_histories:
-                        self.risk_vault.update_correlation_matrix(price_histories)
+                        await loop.run_in_executor(self.thread_pool, self.risk_vault.update_correlation_matrix, price_histories)
                 except Exception as e: logger.debug(f"[X-RAY] Correlation matrix extraction failed: {e}")
                 
                 try: current_vault_balance = await self._get_true_equity_usdt()
@@ -573,7 +611,6 @@ class DistributedQuantEngine:
                 if "wallet_baseline" not in self.global_state_cache: 
                     self.global_state_cache["wallet_baseline"] = max(current_vault_balance, 0.01)
 
-                # 🚀 V22.3 FIX: Persistent Lifetime Baseline Tracking
                 if "lifetime_initial_balance" not in self.global_state_cache:
                     self.global_state_cache["lifetime_initial_balance"] = max(current_vault_balance, 0.01)
 
@@ -584,15 +621,25 @@ class DistributedQuantEngine:
                     self.global_state_cache["start_of_day_balance"] = current_vault_balance
 
                 today_start_iso = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                
                 try:
-                    execution_stats = await self.memory.get_forensic_execution_summary(today_start_iso) if self.memory else {}
+                    def _fetch_forensics():
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        try:
+                            return new_loop.run_until_complete(self.memory.get_forensic_execution_summary(today_start_iso))
+                        except Exception:
+                            return {}
+                        finally:
+                            new_loop.close()
+                            
+                    execution_stats = await loop.run_in_executor(self.thread_pool, _fetch_forensics) if self.memory else {}
                 except Exception as e: 
                     logger.debug(f"[X-RAY] Heartbeat DB forensic fetch failed: {e}", exc_info=True)
                     execution_stats = {} 
 
                 execution_stats["rolling_pnl_array"] = list(self.recent_pnl_history) if self.recent_pnl_history else [0.0]
 
-                # 🚀 V22.3 FIX: Calculate Net PnL against lifetime baseline instead of rolling daily baseline
                 actual_net_pnl = current_vault_balance - self.global_state_cache["lifetime_initial_balance"]
                 baseline = self.global_state_cache["wallet_baseline"]
                 
@@ -718,7 +765,6 @@ class DistributedQuantEngine:
         if now - self.last_eval_time.get(symbol + "_eval_throttle", 0.0) < 0.2: return  
         self.last_eval_time[symbol + "_eval_throttle"] = now
 
-        # Synchronous execution of the eval gate prevents task explosion
         await self._eval_gate(symbol, price, manifests, stat_engine, clock, feature_engine, regime, now, exchange_timestamp)
 
     async def _eval_gate(self, symbol, price, m_snapshot, stat_engine, clock, feature_engine, regime, now, exchange_timestamp):
@@ -830,7 +876,6 @@ class DistributedQuantEngine:
                 
                 actual_notional = calculated_qty * price
 
-                # 🚀 V22.0 AUDIT FIX: Calibrated EV Gate (Prevents Negative Expectancy)
                 true_prob = 0.50 + 0.15 * math.tanh((prob_success - 0.5) * 5.0)
                 net_ev_pct = (true_prob * tp_dist_pct) - ((1.0 - true_prob) * sl_dist_pct) - spread_cost
                 if (net_ev_pct * 10000.0) < 65.0:
@@ -863,10 +908,22 @@ class DistributedQuantEngine:
 
     def log_to_wal_sync(self, action_type: str, args: list):
         if not self.memory: return
-        if action_type == "prediction":
-            asyncio.create_task(self.memory.commit_prediction(*args))
-        elif action_type == "settlement":
-            asyncio.create_task(self.memory.log_live_execution_result(*args))
+        
+        def _sync_db_call():
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                if action_type == "prediction":
+                    new_loop.run_until_complete(self.memory.commit_prediction(*args))
+                elif action_type == "settlement":
+                    new_loop.run_until_complete(self.memory.log_live_execution_result(*args))
+            except Exception as e:
+                logger.error(f"[X-RAY] DB Offload Fault: {e}")
+            finally:
+                new_loop.close()
+
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(self.thread_pool, _sync_db_call)
 
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE.")
@@ -902,10 +959,20 @@ class DistributedQuantEngine:
                 active_syms = list(self.active_positions_map.keys())
                 current_prices = {sym: {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))} for sym in self.asset_basket + self.shadow_basket if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices") and sym not in active_syms}
                 
+                def _resolve_shadows():
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        new_loop.run_until_complete(self.memory.resolve_batch_historical_predictions(list(current_prices.keys()), current_prices, 60.0, interval_mins))
+                    finally:
+                        new_loop.close()
+
                 if current_prices:
                     async with self.db_semaphore:
                         try: 
-                            if self.memory: await asyncio.wait_for(self.memory.resolve_batch_historical_predictions(list(current_prices.keys()), current_prices, 60.0, interval_mins), timeout=15.0)
+                            if self.memory:
+                                loop = asyncio.get_running_loop()
+                                await asyncio.wait_for(loop.run_in_executor(self.thread_pool, _resolve_shadows), timeout=15.0)
                         except Exception as e: logger.debug(f"[X-RAY] Shadow resolution timeout: {e}")
             except Exception as e: logger.error(f"[X-RAY] Shadow resolution error: {e}")
 
@@ -1024,7 +1091,6 @@ class DistributedQuantEngine:
         for _ in range(5):  
             await asyncio.sleep(3)
             try:
-                # 🚀 V22.0 AUDIT FIX: Read Exact Actual Sizes
                 pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=ctx["symbol"])
                 pos_data = pos_res.get("result", {}).get("list", [])
                 if pos_data and float(pos_data[0].get("size", 0.0)) > 0:
@@ -1190,7 +1256,6 @@ class DistributedQuantEngine:
 
         try:
             actual_sl_distance = max(ctx["atr"] * self.live_params.get("sl_atr_mult", 2.5), ctx["actual_entry"] * 0.020)
-            
             safe_rr = min(2.0, dynamic_rr_ratio)
             
             initial_sl = ctx["actual_entry"] - actual_sl_distance if ctx["is_buy"] else ctx["actual_entry"] + actual_sl_distance
@@ -1203,8 +1268,9 @@ class DistributedQuantEngine:
 
             loop_state = "ACTIVE_MONITORING"
 
+            # 🚀 V22.5 SEV 4 FIX: 20 Hz Polling (0.050s) to eliminate CPU Spin-Burn
             while loop_state == "ACTIVE_MONITORING":
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0.050)
 
                 current_price = ctx["latest_tick_price"]
                 time_since_eval = time.time() - ctx.get("last_eval_time", 0)
@@ -1240,17 +1306,11 @@ class DistributedQuantEngine:
 
                 decision = IntelligentExitEngine.evaluate(ctx, state)
 
-                # =========================================================================
-                # 🚀 ACTIVE PREY-HUNTING TRAILING & PROFIT-LOCK ENGINE
-                # =========================================================================
                 notional = ctx["actual_qty_filled"] * ctx["actual_entry"]
-                profit_hurdle = notional * 0.0020  # Lowered: Arm after +0.20% price move
+                profit_hurdle = notional * 0.0020  
                 
                 if state.profit_state.peak_pnl > profit_hurdle:
-                    # 1. Breakeven Floor: Ensure fees (+0.15%) are 100% protected
                     fee_buffer_pnl = notional * 0.0015
-                    
-                    # 2. Dynamic Ratchet: Lock in 70% of gains once in deep profit
                     locked_gain = max(fee_buffer_pnl, state.profit_state.peak_pnl * 0.70)
                     
                     if locked_gain > state.profit_state.locked_pnl:
@@ -1260,14 +1320,11 @@ class DistributedQuantEngine:
                             "locked_pnl": locked_gain
                         })
                     
-                    # Calculate physical price coordinates
                     if ctx["is_buy"]:
                         target_ts_price = state.entry_price + (state.profit_state.locked_pnl / state.actual_qty)
                     else:
                         target_ts_price = state.entry_price - (state.profit_state.locked_pnl / state.actual_qty)
                     
-                    # 🚀 CRITICAL FIX: If price pulls back BELOW our locked profit target, 
-                    # DO NOT wait for Bybit! Fire an immediate MARKET IOC EJECTION.
                     if ctx["is_buy"] and current_price <= target_ts_price:
                         logger.critical(f"[X-RAY] 🎯 PROFIT PRESERVATION TRIGGERED // {symbol} Market dropped below lock ({current_price:.4f} <= {target_ts_price:.4f}). Ejecting!")
                         ctx["exit_trigger_price"] = current_price
@@ -1277,7 +1334,6 @@ class DistributedQuantEngine:
                         ctx["exit_trigger_price"] = current_price
                         break
                     
-                    # Otherwise, trail the exchange stop upward behind the price
                     if ctx["is_buy"] and target_ts_price > current_active_sl and target_ts_price < current_price:
                         current_active_sl = target_ts_price
                         logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
@@ -1287,7 +1343,6 @@ class DistributedQuantEngine:
                         logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
                         await self._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
 
-                # Retain Dynamic TP updates from Exit Engine
                 amend_tp_required = False
                 if hasattr(decision, 'dynamic_tp_price') and decision.dynamic_tp_price > 0:
                     if ctx["is_buy"]:
@@ -1342,11 +1397,12 @@ class DistributedQuantEngine:
                     await self._execute_emergency_escape(symbol, current_p, qty, side == "Sell")
             except Exception as e: logger.error(f"[X-RAY] Flatten failed for {symbol}: {e}")
 
-        # 🚀 V22.0 AUDIT FIX: Deterministic DB Flusher
         if hasattr(self, 'memory') and self.memory:
             await self.memory.flush_and_close()
             
         if hasattr(self, 'telegram'): await self.telegram.close()
+        
+        self.thread_pool.shutdown(wait=False)
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def run_engine_forever(self):

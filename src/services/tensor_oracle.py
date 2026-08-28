@@ -1,16 +1,16 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: MACRO-AWARE CROSS-ASSET TENSOR ORACLE
+💎 V22.4 APEX QUANTUM PRIME: STATISTICALLY HARDENED TENSOR ORACLE
 -------------------------------------------------------------
 Computes real-time cross-asset impulse propagation (BTC/ETH/SOL -> Alts).
 Uses Millisecond-Precise Event-Time Backward Pointer Alignment to eradicate 
 Look-Ahead Bias in sub-second real-time. 
 
-Audit Fixes (V22.0):
+Audit Fixes (V22.4):
+- Student's t-Distribution Significance Filter: Replaces static thresholds with 
+  rigorous hypothesis testing (p < 0.01) to reject spurious tick correlations.
+- Enforced Sample Size: Increased minimum observation window to N=60 for statistical validity.
 - Time-Window Synchronization: Fixes the mathematical category error where benchmark 
   returns were measured over random microsecond tick gaps instead of matching the altcoin's exact time window.
-- Stale Data Rejection: Adds a 60-second staleness guard to prevent correlating 
-  illiquid assets with outdated benchmark states.
-- CPU/Memory Optimization: Minimized redundant list casting for HFT performance.
 """
 
 import math
@@ -24,7 +24,7 @@ logger = logging.getLogger("QUANT_CORE.TENSOR_ORACLE")
 
 class CrossAssetTensorOracle:
     """
-    🚀 V22.0 TENSOR-PRIME: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
+    🚀 V22.4 TENSOR-PRIME: Asynchronous Cross-Asset Lead-Lag Tensor Oracle
     Tracks real-time impulse propagation vectors from primary market anchors 
     (BTC, ETH, SOL) to target altcoins without future-data leakage.
     """
@@ -44,11 +44,6 @@ class CrossAssetTensorOracle:
     def ingest_tick(self, symbol: str, price: float, exchange_timestamp: float):
         """
         Ingests real-time tick prices with raw millisecond precision in O(1) time.
-        
-        Args:
-            symbol: Ticker symbol (e.g. "BTCUSDT", "JUPUSDT")
-            price: Executed tick price
-            exchange_timestamp: Millisecond timestamp from exchange
         """
         if price <= 0:
             return
@@ -62,7 +57,7 @@ class CrossAssetTensorOracle:
 
     def compute_lead_lag_signal(self, target_symbol: str, benchmark_symbol: str = "BTCUSDT") -> float:
         """
-        🚀 V22.0 UPGRADE: Sub-Second Asynchronous Pointer Alignment.
+        🚀 V22.4 UPGRADE: Sub-Second Asynchronous Pointer Alignment & T-Stat Gating.
         Calculates cross-covariance tensor using exact millisecond timestamps.
         Strictly maps Benchmark[t-1] to Alt[t] to guarantee zero look-ahead bias
         and enforces exact time-window parity for log returns.
@@ -76,7 +71,8 @@ class CrossAssetTensorOracle:
         benchmark_ticks = self.benchmark_prices.get(benchmark_symbol)
         alt_ticks = self.alt_prices.get(target_symbol)
         
-        if not benchmark_ticks or not alt_ticks or len(benchmark_ticks) < 30 or len(alt_ticks) < 30: 
+        # Enforce statistical minimum history of 60 ticks
+        if not benchmark_ticks or not alt_ticks or len(benchmark_ticks) < 60 or len(alt_ticks) < 60: 
             return 0.0
             
         # Convert only once per computation to avoid O(N) penalties in deep loops
@@ -90,11 +86,6 @@ class CrossAssetTensorOracle:
         bench_idx = 0
         bench_len = len(bench_list)
         
-        # 🚀 V22.0 MATHEMATICAL FIX: Synchronized Time-Window Returns
-        # Previously, the code computed the benchmark return over the last two ticks (which could be 1ms apart),
-        # while computing the alt return over the alt interval (which could be 10s apart). 
-        # We must map the exact alt boundaries (t_prev, t_curr) to the benchmark state to ensure dimensional parity.
-
         # Align initial pointer
         while bench_idx < bench_len and bench_list[bench_idx][0] < alt_list[0][0]:
             bench_idx += 1
@@ -114,7 +105,7 @@ class CrossAssetTensorOracle:
             curr_bench_ts = bench_list[bench_idx - 1][0] if bench_idx > 0 else None
             
             if prev_bench_price is not None and curr_bench_price is not None:
-                # 🛡️ V22.0 STALENESS GUARD: Ensure benchmark data isn't disconnected by > 60 seconds
+                # 🛡️ STALENESS GUARD: Ensure benchmark data isn't disconnected by > 60 seconds
                 if (alt_ts - curr_bench_ts) < 60000 and (alt_ts_prev - prev_bench_ts) < 60000:
                     if prev_alt_price > 0 and prev_bench_price > 0:
                         try:
@@ -129,44 +120,49 @@ class CrossAssetTensorOracle:
             prev_bench_price = curr_bench_price
             prev_bench_ts = curr_bench_ts
             
-        if len(aligned_alt) < 20:
+        n = len(aligned_alt)
+        if n < 60:
             return 0.0
 
-        bench_arr = np.array(aligned_benchmark, dtype=float)
-        alt_arr = np.array(aligned_alt, dtype=float)
+        bench_arr = np.array(aligned_benchmark, dtype=np.float64)
+        alt_arr = np.array(aligned_alt, dtype=np.float64)
 
-        # 🚀 V22.0 ZERO-VARIANCE GUARD: Prevent NaN correlation matrices
+        # 🚀 ZERO-VARIANCE GUARD: Prevent NaN correlation matrices
         if np.std(bench_arr) == 0 or np.std(alt_arr) == 0:
             return 0.0
 
         # Compute true lagged Pearson correlation
         try:
-            with np.errstate(divide='ignore', invalid='ignore'):
-                correlation = float(np.corrcoef(bench_arr, alt_arr)[0, 1])
-                
-            if np.isnan(correlation):
+            r = float(np.corrcoef(bench_arr, alt_arr)[0, 1])
+            if np.isnan(r) or abs(r) >= 1.0:
                 return 0.0
+                
+            # 🚀 V22.4 STUDENT'S T SIGNIFICANCE TEST (p < 0.01 at df >= 58 requires t > 2.66)
+            t_stat = r * math.sqrt((n - 2) / (1.0 - r**2))
+            if abs(t_stat) < 2.66:
+                return 0.0  # Spurious correlation rejected
+                
+            # Compute leading momentum vector from Benchmark
+            bench_momentum = float(np.mean(bench_arr[-10:]))
+            
+            # 🛡️ ALIGNMENT FILTER: Require momentum and valid correlation
+            if abs(bench_momentum) > 0.00015 and abs(r) > 0.50:
+                # Bound alpha signal between -1.0 and +1.0
+                alpha_signal = math.copysign(min(1.0, abs(r)), bench_momentum)
+                
+                # X-Ray Telemetry Throttler (Alert once per 60 seconds per coin)
+                now = time.time()
+                if now - self._last_log_time.get(target_symbol, 0.0) > 60.0:
+                    direction = "BULLISH" if alpha_signal > 0 else "BEARISH"
+                    logger.info(
+                        f"[X-RAY] 🌌 TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
+                        f"{direction} wave. Correlation: {r:.2f} | T-Stat: {t_stat:.2f} | Momentum: {bench_momentum*10000:.1f} bps"
+                    )
+                    self._last_log_time[target_symbol] = now
+                    
+                return float(alpha_signal)
+                
         except Exception:
             return 0.0
-            
-        # Compute leading momentum vector from Benchmark
-        bench_momentum = float(np.mean(bench_arr[-10:]))
-        
-        # 🛡️ NOISE FILTER: Require minimum correlation threshold (0.45)
-        if abs(bench_momentum) > 0.00015 and correlation > 0.45:
-            # Bound alpha signal between -1.0 and +1.0
-            alpha_signal = math.copysign(min(1.0, abs(correlation)), bench_momentum)
-            
-            # X-Ray Telemetry Throttler (Alert once per 60 seconds per coin)
-            now = time.time()
-            if now - self._last_log_time.get(target_symbol, 0.0) > 60.0:
-                direction = "BULLISH" if alpha_signal > 0 else "BEARISH"
-                logger.info(
-                    f"[X-RAY] 🌌 TENSOR STRIKE // {target_symbol} following {benchmark_symbol} "
-                    f"{direction} wave. Correlation: {correlation:.2f} | Momentum: {bench_momentum*10000:.1f} bps"
-                )
-                self._last_log_time[target_symbol] = now
-                
-            return float(alpha_signal)
             
         return 0.0

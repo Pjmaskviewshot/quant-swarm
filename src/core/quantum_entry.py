@@ -1,13 +1,15 @@
 """
-💎 V22.2 APEX QUANTUM PRIME: MULTI-FACTOR ALPHA FUSION MATRIX
+💎 V22.4 APEX QUANTUM PRIME: MULTI-FACTOR ALPHA FUSION MATRIX
 ------------------------------------------------------------------------
 Fuses Cross-Asset Macro Order Flows (BTC/ETH/Alt OFI), Orderbook Convexity, 
 and Microstructure Depth Elasticity into an adaptive decision manifold.
 
 Eliminates fragile heuristics and outputs calibrated Bayesian probabilities 
-and execution weights ($w_{\text{exec}}$) conditioned on market regime.
+and execution weights (w_exec) conditioned on market regime.
 
-Audit Fixes (V22.2):
+Audit Fixes (V22.4):
+- Bounded Logit Manifold Projection: Wraps alpha modifiers in hyperbolic tangent 
+  bounds to prevent sigmoidal saturation during extreme structural divergences.
 - Minimum MLOFI Floor (Anti-FOMO Guard): Drops entries lacking >0.8σ local 
   orderbook pressure, preventing top-ticking into exhaustion structures.
 """
@@ -151,11 +153,12 @@ class QuantumEntryMatrix:
         clamped_prob = max(0.01, min(0.99, raw_prob))
         logit_raw = math.log(clamped_prob / (1.0 - clamped_prob))
         
-        # Infuse macro flows and depth convexity into the logit manifold
+        # 🚀 V22.4 BOUNDED LOGIT MANIFOLD PROJECTION
+        # Tanh-clamped additive shifts prevent divergence and sigmoidal saturation
         logit_fused = (
             logit_raw 
-            + (convexity_boost * self.depth_convexity_weight) 
-            + ((synergy_scalar - 1.0) * 1.5)
+            + (0.40 * math.tanh(convexity_boost * 2.0))
+            + (0.50 * math.tanh((synergy_scalar - 1.0) * 3.0))
         )
         
         fused_prob = 1.0 / (1.0 + math.exp(-logit_fused))
