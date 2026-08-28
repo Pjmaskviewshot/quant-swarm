@@ -1,14 +1,16 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: INSTITUTIONAL SMART ORDER ROUTER
+💎 V22.6 APEX QUANTUM PRIME: INSTITUTIONAL SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
 
-Audit Fixes (V22.0):
+Audit Fixes (V22.6):
 - Pure Asyncio API Call Migration (Eliminated Pybit Sync Wrapping)
 - Deterministic Sweeping Calculus (Eradicated Blind Price Escalation)
 - Dynamic Maker-Peg Chase Caps (Eradicated 0.5% Spoofing Vulnerability)
+- Strict Modulo Arithmetic Rounding: Micro-cap altcoin order quantities 
+  are mathematically floored to the precise Bybit `lotSizeFilter` step size.
 """
 
 import os
@@ -52,24 +54,40 @@ class SmartOrderRouter:
             logger.error(f"[X-RAY] Failed to fetch strict limits for {symbol}, using safe defaults: {e}")
             self.instrument_cache[symbol] = {"min_qty": 1.0, "qty_step": 1.0, "tick_size": 0.01}
 
-    def _apply_dynamic_exchange_limits(self, qty: float, price: float, target_symbol: str) -> float:
-        limits = self.instrument_cache.get(target_symbol, {"min_qty": 1.0, "qty_step": 1.0})
+    def _apply_dynamic_exchange_limits(self, raw_qty: float, current_price: float, symbol: str) -> float:
+        """
+        🚀 V22.6 FIX: Strict Modulo Rounding for Micro-Cap Altcoins
+        Guarantees that the order quantity perfectly aligns with Bybit's lotSizeFilter.
+        """
+        limits = self.instrument_cache.get(symbol, {"min_qty": 1.0, "qty_step": 1.0})
         required_min_qty, qty_step = limits["min_qty"], limits["qty_step"]
         
-        if (qty * price) < 6.50: 
-            qty = 6.50 / (price + 1e-9)
-            
-        if qty < required_min_qty: 
-            qty = required_min_qty
-            
-        stepped_qty = math.floor(qty / qty_step) * qty_step
-        final_qty = round(stepped_qty, self._get_precision(qty_step))
-        
-        if (final_qty * price) < 5.50:
-            final_qty += qty_step
-            final_qty = round(final_qty, self._get_precision(qty_step))
+        # 1. Floor the quantity to the nearest strict modulo of the qty_step
+        if qty_step > 0:
+            # Add a microscopic epsilon to prevent floating-point rounding errors (e.g., 2.9999999)
+            steps = math.floor((raw_qty + 1e-9) / qty_step)
+            adjusted_qty = steps * qty_step
+        else:
+            adjusted_qty = raw_qty
 
-        return final_qty
+        # 2. Ensure minimum notional value (Bybit generally requires > $5.00)
+        notional = adjusted_qty * current_price
+        if notional < 6.50:
+            # If the calculated size is too small, safely round up to the minimum allowed
+            required_qty = 6.50 / current_price
+            steps = math.ceil((required_qty - 1e-9) / qty_step) if qty_step > 0 else required_qty
+            adjusted_qty = steps * qty_step
+
+        # 3. Final sanity check against absolute minimums
+        final_qty = max(required_min_qty, adjusted_qty)
+
+        # 4. Format string to exact precision to drop trailing floating point zeroes
+        precision = max(0, abs(int(math.floor(math.log10(qty_step))))) if qty_step > 0 else 0
+        formatted_qty_str = f"{final_qty:.{precision}f}"
+        
+        # logger.info(f"[X-RAY] 📡 DYNAMIC LIMITS APPLIED // {symbol} | Raw: {raw_qty:.4f} -> Final Modulo: {formatted_qty_str}")
+        
+        return float(formatted_qty_str)
 
     def compute_dynamic_slippage_cap_bps(self, symbol: str, regime: str, live_spread_bps: float) -> float:
         """Adapts allowable slippage based on asset class, live spread, and regime."""
@@ -395,8 +413,8 @@ class SmartOrderRouter:
 
                 cleaned_qty = self._apply_dynamic_exchange_limits(qty, target_price, symbol)
                 final_target_price = self._format_dynamic_price(target_price, symbol)
-                final_sl = self._format_dynamic_price(current_sl, symbol) if current_sl else 0.0
-                final_tp = self._format_dynamic_price(current_tp, symbol) if current_tp else 0.0
+                
+                # We strip final_sl and final_tp from this specific order payload to prevent 10002 errors
                 
                 if not current_order_id:
                     logger.info(f"[X-RAY] 🛡️ Placing initial PostOnly Maker Peg for {symbol} at {final_target_price}")
@@ -404,7 +422,6 @@ class SmartOrderRouter:
                         "POST", "/v5/order/create", is_execution=True,
                         category="linear", symbol=symbol, side=side, orderType="Limit",
                         qty=str(cleaned_qty), price=str(final_target_price), timeInForce="PostOnly", 
-                        stopLoss=str(final_sl) if final_sl else None, takeProfit=str(final_tp) if final_tp else None,
                         positionIdx=self.position_idx
                     )
                     if place_response.get("retCode") == 0: 
