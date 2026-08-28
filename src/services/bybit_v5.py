@@ -121,9 +121,10 @@ class BybitUnifiedExecutor:
         logger.info(f"Initialized Pure-Async Bybit V5 Executor (Testnet: {self.testnet})")
 
     async def initialize(self):
-        """Bootstraps the HTTP session, calibrates the clock, and spawns the 15-min NTP sync daemon."""
+        """Bootstraps the HTTP session (15.0s timeout), calibrates clock, and spawns NTP sync daemon."""
         if not self.session:
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0))
+            # 🚀 DEPLOYMENT FIX: Loosen REST timeout to 15.0s to absorb Bybit API degradation
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15.0))
         await self.calibrate_server_time()
         
         if not self._clock_sync_task or self._clock_sync_task.done():
@@ -310,7 +311,8 @@ class BybitUnifiedExecutor:
         backoff = 1.0
         while not self._is_terminating:
             try:
-                async with self.session.ws_connect(self.ws_private_url, autoping=True, heartbeat=20.0) as ws:
+                # 🚀 DEPLOYMENT FIX: Tighten WebSocket heartbeat to 10.0s to prevent disconnects under extreme volatility load
+                async with self.session.ws_connect(self.ws_private_url, autoping=True, heartbeat=10.0) as ws:
                     self._ws_connection = ws
                     backoff = 1.0
 
