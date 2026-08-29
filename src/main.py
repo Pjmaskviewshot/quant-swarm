@@ -16,6 +16,8 @@ Architectural Supremacy (V25.6 - Database Schema Alignment & Bug Fixes):
 - Async Concurrency Hardening: Throttled the ThreadPoolExecutor to prevent GIL starvation, 
   applied atomic reservation locks to eradicate double-spend entry race conditions, and 
   added explicit GC task-tracking sweep protection.
+- Safe Boot Re-Arm Guard: Prevents blindly lifting the FSM emergency lock on startup 
+  if equity is compromised.
 """
 
 import os
@@ -162,7 +164,7 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
-        # 🚀 V25.6 AUDIT FIX: Throttle thread pool to prevent GIL starvation and async loop jitter
+        # Throttled thread pool to prevent GIL starvation
         safe_workers = min(4, multiprocessing.cpu_count() - 1) if multiprocessing.cpu_count() > 1 else 1
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="V25_Matrix_Workers")
         
@@ -230,7 +232,7 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] ❌ BACKGROUND TASK CRASHED: {task.exception()}", exc_info=task.exception())
 
     def track_task(self, coro: Any):
-        # 🚀 CRITICAL FIX: Explicitly clear dead tasks before evaluating the limit
+        # Explicitly clear dead tasks before evaluating the limit
         self._active_tasks = {t for t in self._active_tasks if not t.done()}
         
         if len(self._active_tasks) > 500:
@@ -655,7 +657,7 @@ class DistributedQuantEngine:
 
             actual_qty_filled = target_notional / f_price
             
-            # 🚀 V25.6 FIX: Valid UUID string for Supabase correctly unified
+            # Valid UUID string for Supabase correctly unified
             sig_id = str(uuid.uuid4())
 
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
@@ -680,7 +682,7 @@ class DistributedQuantEngine:
 
             if self.memory:
                 await self.memory.commit_prediction(
-                    sig_id,  # 🚀 EXACT MATCH: Prevents orphaned PnL resolution
+                    sig_id,  # EXACT MATCH: Prevents orphaned PnL resolution
                     time.time(), price, action, prob_success, safe_features, False
                 )
 
@@ -762,7 +764,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(300) 
             try:
                 active_syms = list(self.active_positions_map.keys())
-                current_prices = {sym: {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("lows", []))} for sym in self.asset_basket + self.shadow_basket if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices") and sym not in active_syms}
+                current_prices = {sym: {"prices": list(self.screener_memory[sym]["prices"]), "highs": list(self.screener_memory[sym].get("highs", [])), "lows": list(self.screener_memory[sym].get("highs", []))} for sym in self.asset_basket + self.shadow_basket if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices") and sym not in active_syms}
                 
                 if current_prices:
                     async with self.db_semaphore:
@@ -1084,7 +1086,7 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # 🚀 V25.6 FIX: Delegating to AdvancedIntelligentExitMatrix
+                # Delegating to AdvancedIntelligentExitMatrix
                 decision = IntelligentExitEngine.evaluate(ctx, state)
                 
                 target_sl = decision.exchange_ts_price
@@ -1151,7 +1153,25 @@ class DistributedQuantEngine:
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def run_engine_forever(self):
-        self.fsm.release_global_emergency_lock()
+        # 🚀 BOOT FIX: Fetch true balance and evaluate safety BEFORE releasing global lock
+        try:
+            boot_bal = await self._get_true_equity_usdt()
+            self.global_state_cache["start_of_day_balance"] = boot_bal
+            self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
+            self.global_state_cache["lifetime_initial_balance"] = max(boot_bal, 0.01)
+            self.global_state_cache["last_updated"] = time.time()
+            self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            
+            # Evaluate vault safety on boot; if intraday loss or drawdown limits are hit, STAY locked!
+            is_safe, reason = self.risk_vault.evaluate_portfolio_safety(boot_bal, 0.0, "")
+            if not is_safe:
+                self.fsm.trigger_global_emergency_lock()
+                logger.critical(f"🚨 BOOT SAFETY LATCH ENGAGED: Vault rejected state on startup ({reason}). Swarm remains locked.")
+            else:
+                self.fsm.release_global_emergency_lock()
+        except Exception as e:
+            logger.warning(f"[X-RAY] Boot equity validation failed ({e}). Retaining conservative emergency lock.")
+            self.fsm.trigger_global_emergency_lock()
         
         try: 
             await self.executor.connect_ws()
@@ -1172,14 +1192,6 @@ class DistributedQuantEngine:
         try: await self.sor._fetch_exchange_limits("BTCUSDT") # Initialize limits
         except Exception: pass
         try: await self.synchronize_exchange_state()
-        except Exception: pass
-            
-        try:
-            boot_bal = await self._get_true_equity_usdt()
-            self.global_state_cache["start_of_day_balance"] = boot_bal
-            self.global_state_cache["wallet_baseline"] = max(boot_bal, 0.01)
-            self.global_state_cache["last_updated"] = time.time()
-            self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         except Exception: pass
         
         await self.run_universe_refresher()
