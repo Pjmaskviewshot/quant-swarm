@@ -52,7 +52,7 @@ from ingestion.multi_feed import MarketStateMatrix
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
 from services.tensor_oracle import CrossAssetTensorOracle
-from core.sector_oracle import SectorEigenOracle
+from services.sector_oracle import SectorEigenOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
