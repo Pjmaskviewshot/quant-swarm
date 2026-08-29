@@ -1,18 +1,20 @@
 """
-💎 V25.2 APEX QUANTUM PRIME: DIRECT-DRIVE SMART ORDER ROUTER
+💎 V25.4 APEX QUANTUM PRIME: DIRECT-DRIVE SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
 
-Architectural Supremacy (V25.2):
-- Native In-Flight Trailing Stops: Added the missing `_amend_trailing_stop` method 
-  to allow the lifecycle daemon to lock in profits dynamically on the exchange.
-- Dynamic Maker Peg Refresh: Eradicated the stale orderbook bug. The chase loop now 
-  dynamically fetches the freshest L2 snapshot from the core engine to prevent 
-  posting liquidity on the wrong side of a moving market.
-- Eradication of Kelly Criterion: Replaced mathematically dangerous Kelly sizing 
-  with a strict Fixed Fractional Sizing model (1.0% - 1.5% max risk).
+Architectural Supremacy (V25.4 - Final Audit Resolutions):
+- True Precision Routing: Uses native Decimal string quantization at the API 
+  boundary to eradicate Bybit 10001 (Qty) and 10002 (Price) precision rejections.
+- Advanced Trailing Synchronization: Handles exchange-side "Not Modified" 
+  rejections gracefully, allowing the Kinetic Take-Profit Compressor to track 
+  prices perfectly without loop termination.
+- Fixed Fractional Allocation: Caps absolute portfolio risk to 1.5% 
+  with dynamic compression during high Volatility regimes.
+- HFT Throttle Fix & Jitter: Reduced trailing stop amend latency floor to 0.25s 
+  and applied micro-jitter to prevent deterministic API bans.
 """
 
 import os
@@ -20,6 +22,7 @@ import asyncio
 import logging
 import math
 import time
+import random  # 🚀 AUDIT FIX: Added for API jitter
 import numpy as np
 from typing import Dict, Any, List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
@@ -28,13 +31,13 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V25.2 DIRECT-DRIVE EXECUTION NEXUS
+    🚀 V25.4 DIRECT-DRIVE EXECUTION NEXUS
     Dynamically sizes (Fixed Fractional) and routes executions across Flash Strike (Taker), 
     Maker Peg (PostOnly), and TWAP Iceberg slices to minimize execution drag and slippage.
     """
     def __init__(self, executor: Any, max_slippage_pct: float = 0.0012, core_engine: Any = None):
         self.executor = executor
-        self.core_engine = core_engine  # 🚀 V25.2 FIX: Added to fetch dynamic L2 states
+        self.core_engine = core_engine  
         self.base_max_slippage_pct = max_slippage_pct
         self.instrument_cache: Dict[str, Dict[str, float]] = {}
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
@@ -70,29 +73,35 @@ class SmartOrderRouter:
             adjusted_qty = raw_qty
 
         notional = adjusted_qty * current_price
+        # Absolute Bybit linear minimum notional is $5.00. We pad to $6.50 to avoid slippage rejections.
         if notional < 6.50:
             required_qty = 6.50 / current_price
             steps = math.ceil((required_qty - 1e-9) / qty_step) if qty_step > 0 else required_qty
             adjusted_qty = steps * qty_step
 
-        final_qty = max(required_min_qty, adjusted_qty)
+        return max(required_min_qty, adjusted_qty)
+
+    def _format_qty_str(self, raw_qty: float, symbol: str) -> str:
+        """🚀 V25.4 API Boundary Guard: Eradicates scientific notation on micro-coins."""
+        qty_step = self.instrument_cache.get(symbol, {"qty_step": 1.0})["qty_step"]
         precision = max(0, abs(int(math.floor(math.log10(qty_step))))) if qty_step > 0 else 0
-        formatted_qty_str = f"{final_qty:.{precision}f}"
-        
-        return float(formatted_qty_str)
+        return f"{raw_qty:.{precision}f}"
+
+    def _format_price_str(self, price: float, target_symbol: str) -> str:
+        """🚀 V25.4 API Boundary Guard: Native Decimal quantization for exact tick adherence."""
+        tick_size = self.instrument_cache.get(target_symbol, {"tick_size": 0.01})["tick_size"]
+        if tick_size <= 0: return str(price)
+        precision = self._get_precision(tick_size)
+        stepped = Decimal(str(price)).quantize(Decimal(str(tick_size)), rounding=ROUND_HALF_UP)
+        return f"{stepped:.{precision}f}"
 
     def calculate_risk_adjusted_notional(self, prob_success: float, exec_weight: float, sl_pct: float, tp_pct: float, current_balance: float, inst_var: float) -> float:
         """
-        🚀 V25.1 FIX: Fixed Fractional Sizing
-        Replaces uncalibrated Kelly Criterion to prevent ruin. Risk is capped strictly 
-        at 1.5% of equity per trade, modulated down during extreme volatility.
+        🚀 Fixed Fractional Volatility-Damped Sizer (Formerly mislabeled as Kelly)
+        Capped strictly at 1.5% of equity per trade, modulated down during extreme volatility.
         """
         base_risk_pct = 0.01 # 1.0% Base Risk
-        
-        # Dampen size in extreme variance
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
-        
-        # Modulate safely by model confidence [0.5, 1.0]
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
         
         final_risk_pct = base_risk_pct * vol_scalar * confidence_scalar * exec_weight
@@ -101,7 +110,7 @@ class SmartOrderRouter:
         trade_risk_dollars = current_balance * final_risk_pct
         target_notional = trade_risk_dollars / (sl_pct + 1e-9)
         
-        max_leverage_cap = 2.0 # 🚀 V25.1 FIX: Restricted to 2x leverage to prevent liquidation sweeps
+        max_leverage_cap = 2.0 # Restricted to 2x leverage to prevent liquidation sweeps
         max_permitted_notional = current_balance * max_leverage_cap
         
         return float(np.clip(target_notional, 6.50, max_permitted_notional))
@@ -114,7 +123,7 @@ class SmartOrderRouter:
         calculated_cap = max(8.0, live_spread_bps * spread_multiplier)
         if regime == "TRENDING": calculated_cap += 5.0
             
-        if is_major: return min(15.0, calculated_cap)      
+        if is_major: return min(15.0, calculated_cap)       
         elif is_high_cap: return min(25.0, calculated_cap)      
         else: return min(40.0, calculated_cap)      
 
@@ -159,11 +168,6 @@ class SmartOrderRouter:
             except (IndexError, ValueError): continue
         return float(levels[-1][0])
 
-    def _format_dynamic_price(self, price: float, target_symbol: str) -> float:
-        tick_size = self.instrument_cache.get(target_symbol, {"tick_size": 0.01})["tick_size"]
-        stepped_price = round(price / tick_size) * tick_size
-        return round(stepped_price, self._get_precision(tick_size))
-
     def _get_meaningful_tob(self, ob_data: Dict, side: str, min_notional: float = 5.0) -> float:
         levels = ob_data.get("bids" if side == "BUY" else "asks", [[0, 0]])
         for level in levels:
@@ -199,34 +203,48 @@ class SmartOrderRouter:
         except Exception: return {}
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
-        """🚀 V25.2 FIX: Native in-flight trailing stop amendment."""
+        """🚀 V25.4 FIX: Robust Trailing Stop with Not-Modified bypass, Tick-Exact formatting, and Jitter."""
         now = time.time()
         
-        # 5-second rate limit to prevent Bybit API bans
-        if now - self._last_amend_time.get(symbol, 0.0) < 5.0:
+        # 🚀 CRITICAL FIX: Added 0.0 to 0.1s random jitter to avoid deterministic API bans
+        throttle_window = 0.25 + random.uniform(0.0, 0.1)
+        if now - self._last_amend_time.get(symbol, 0.0) < throttle_window:
             return False
+
+        sl_str = self._format_price_str(new_sl, symbol)
+        tp_str = self._format_price_str(new_tp, symbol)
 
         try:
             res = await self.executor.safe_call(
                 "POST", "/v5/position/trading-stop", is_execution=True,
                 category="linear", symbol=symbol, positionIdx=self.position_idx,
-                takeProfit=str(self._format_dynamic_price(new_tp, symbol)),
-                stopLoss=str(self._format_dynamic_price(new_sl, symbol)),
+                takeProfit=tp_str, stopLoss=sl_str,
                 tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
             )
-            if res.get("retCode") == 0:
+            
+            ret_code = res.get("retCode")
+            ret_msg = res.get("retMsg", "").lower()
+
+            # "Not Modified" or "Same" means the stop is already exactly where we want it.
+            if ret_code == 0 or "not modified" in ret_msg or "same" in ret_msg:
                 self._last_amend_time[symbol] = now
                 return True
             return False
+            
         except Exception as e:
+            err_str = str(e).lower()
+            if "not modified" in err_str or "same" in err_str:
+                self._last_amend_time[symbol] = now
+                return True
+                
             logger.debug(f"[X-RAY] Trailing stop amend failed for {symbol}: {e}")
             return False
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: Optional[float] = None, tp: Optional[float] = None, depth_snapshot: dict = None, regime: str = "TRENDING") -> Tuple[bool, float, float]:
         logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing deterministic momentum escalation.")
         
-        final_sl = self._format_dynamic_price(sl, symbol) if sl else 0.0
-        final_tp = self._format_dynamic_price(tp, symbol) if tp else 0.0
+        final_sl = self._format_price_str(sl, symbol) if sl else None
+        final_tp = self._format_price_str(tp, symbol) if tp else None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
 
         remaining_qty = qty
@@ -234,6 +252,8 @@ class SmartOrderRouter:
 
         for attempt in range(3):
             cleaned_qty = self._apply_dynamic_exchange_limits(remaining_qty, current_mid_price, symbol)
+            qty_str = self._format_qty_str(cleaned_qty, symbol)
+            
             sweeping_price = self.get_sweeping_price(depth_snapshot, side, cleaned_qty, current_mid_price)
             
             best_bid = float(depth_snapshot.get("bids", [[current_mid_price]])[0][0]) if depth_snapshot else current_mid_price
@@ -248,13 +268,13 @@ class SmartOrderRouter:
                 max_allowed_price = current_mid_price * (1.0 - (dynamic_cap_bps / 10000.0))
                 target_price = max(sweeping_price, max_allowed_price)
                 
-            final_price = self._format_dynamic_price(target_price, symbol)
+            final_price_str = self._format_price_str(target_price, symbol)
 
             try:
                 response = await self.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True,
                     category="linear", symbol=symbol, side=side, orderType="Limit", 
-                    qty=str(cleaned_qty), price=str(final_price), timeInForce="IOC", 
+                    qty=qty_str, price=final_price_str, timeInForce="IOC", 
                     positionIdx=self.position_idx
                 )
                 
@@ -274,18 +294,20 @@ class SmartOrderRouter:
 
                             if remaining_qty <= self.instrument_cache.get(symbol, {}).get("min_qty", 0.001):
                                 final_avg = weighted_cost / total_executed_qty
-                                logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {total_executed_qty} units at {final_avg}.")
+                                logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {total_executed_qty} units at {final_avg:.4f}.")
                                 
                                 if final_sl or final_tp:
                                     try:
                                         await self.executor.safe_call(
                                             "POST", "/v5/position/trading-stop", is_execution=True,
                                             category="linear", symbol=symbol, positionIdx=self.position_idx, 
-                                            stopLoss=str(final_sl) if final_sl else None, takeProfit=str(final_tp) if final_tp else None
+                                            stopLoss=final_sl, takeProfit=final_tp,
+                                            tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
                                         )
-                                    except Exception as e: logger.error(f"[X-RAY] 🛑 FATAL: Failed to attach stops for {symbol}: {e}")
+                                    except Exception as e: 
+                                        logger.error(f"[X-RAY] 🛑 FATAL: Failed to attach stops for {symbol}: {e}")
                                 return True, final_avg, total_executed_qty
-                        else: logger.warning(f"[X-RAY] ⚠️ Flash Strike IOC missed (Liquidity vanished). Escalating...")
+                    else: logger.warning(f"[X-RAY] ⚠️ Flash Strike IOC missed (Liquidity vanished). Escalating...")
                 else:
                     logger.warning(f"[X-RAY] ⚠️ API rejection (Attempt {attempt+1}): {response.get('retMsg')}")
                     await asyncio.sleep(0.1) 
@@ -321,12 +343,12 @@ class SmartOrderRouter:
         max_chase_deviation = max(0.001, dynamic_cap_bps / 10000.0)
 
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, best_bid, symbol)
+        qty_str = self._format_qty_str(cleaned_qty, symbol)
 
         while time.time() - start_time < timeout:
             loop_delay = 0.5
 
             try:
-                # 🚀 V25.2 STATELESS TOXICITY SPONGING & DYNAMIC L2 REFRESH
                 is_toxic = False
                 
                 # Fetch fresh snapshot dynamically instead of relying on the stale parameter
@@ -340,6 +362,7 @@ class SmartOrderRouter:
                     ask_vols = sum(float(l[1]) for l in fresh_ob["asks"][:3])
                     imbalance = (bid_vols - ask_vols) / (bid_vols + ask_vols + 1e-9)
 
+                    # Toxicity guard: Huge imbalance supporting us usually means spoofing risk (Vacuum trap)
                     if direction.upper() == "BUY" and imbalance > 0.80: is_toxic = True
                     elif direction.upper() == "SELL" and imbalance < -0.80: is_toxic = True
 
@@ -355,27 +378,29 @@ class SmartOrderRouter:
                         if is_toxic: ideal_target = live_best_ask + (tick_size * 2)
                         safe_target = max(ideal_target, live_best_bid + tick_size)
 
-                    target_price = self._format_dynamic_price(safe_target, symbol)
-                    if anchor_price is None: anchor_price = target_price
+                    target_price_str = self._format_price_str(safe_target, symbol)
+                    target_price_float = float(target_price_str)
+                    
+                    if anchor_price is None: anchor_price = target_price_float
 
-                    if side == "Buy" and target_price > anchor_price * (1 + max_chase_deviation):
+                    if side == "Buy" and target_price_float > anchor_price * (1 + max_chase_deviation):
                         logger.warning(f"[X-RAY] 🏃 CHASE ABORTED // {symbol} ran +{max_chase_deviation:.2%} beyond signal anchor.")
                         break
-                    if side == "Sell" and target_price < anchor_price * (1 - max_chase_deviation):
+                    if side == "Sell" and target_price_float < anchor_price * (1 - max_chase_deviation):
                         logger.warning(f"[X-RAY] 🏃 CHASE ABORTED // {symbol} ran -{max_chase_deviation:.2%} beyond signal anchor.")
                         break
 
                 if not current_order_id:
-                    logger.info(f"[X-RAY] 🛡️ Dispatching Maker Peg for {symbol} clamped at {target_price}")
+                    logger.info(f"[X-RAY] 🛡️ Dispatching Maker Peg for {symbol} clamped at {target_price_str}")
                     place_response = await self.executor.safe_call(
                         "POST", "/v5/order/create", is_execution=True,
                         category="linear", symbol=symbol, side=side, orderType="Limit",
-                        qty=str(cleaned_qty), price=str(target_price), timeInForce="PostOnly", 
+                        qty=qty_str, price=target_price_str, timeInForce="PostOnly", 
                         positionIdx=self.position_idx
                     )
                     if place_response.get("retCode") == 0: 
                         current_order_id = place_response["result"]["orderId"]
-                        current_peg_price = target_price
+                        current_peg_price = target_price_float
                     else:
                         logger.warning(f"[X-RAY] Peg placement rejected: {place_response.get('retMsg')}")
                         await asyncio.sleep(loop_delay); continue
@@ -389,7 +414,7 @@ class SmartOrderRouter:
                         if fill_report:
                             raw_exec, raw_avg = fill_report.get("cumExecQty"), fill_report.get("avgPrice")
                             cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
-                            avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else target_price
+                            avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else target_price_float
 
                             if cum_exec > 0:
                                 logger.critical(f"✅ MAKER PEG RESOLVED // {symbol} secured {cum_exec} units at {avg_price}. Spread Captured!")
@@ -416,15 +441,15 @@ class SmartOrderRouter:
                             return True, avg_price, cum_exec_qty
                             
                     elif order_status in ["New", "PartiallyFilled"]:
-                        if abs(target_price - current_peg_price) >= tick_size:
-                            logger.debug(f"[X-RAY] 🔄 Amending {symbol} Maker Peg: {current_peg_price} -> {target_price}")
+                        if abs(target_price_float - current_peg_price) >= tick_size:
+                            logger.debug(f"[X-RAY] 🔄 Amending {symbol} Maker Peg: {current_peg_price} -> {target_price_str}")
                             amend_res = await self.executor.safe_call(
                                 "POST", "/v5/order/amend", is_execution=True, 
                                 category="linear", symbol=symbol, orderId=current_order_id, 
-                                price=str(target_price)
+                                price=target_price_str
                             )
                             if amend_res.get("retCode") == 0:
-                                current_peg_price = target_price
+                                current_peg_price = target_price_float
                             else:
                                 err_msg = amend_res.get("retMsg", "")
                                 if "not modified" not in err_msg.lower():
@@ -483,9 +508,6 @@ class SmartOrderRouter:
             avg_fill_price = weighted_notional_sum / total_executed_qty
             
             side = "Buy" if direction.upper() == "BUY" else "Sell"
-            tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
-            def align_price(p: float) -> str: return str(Decimal(str(p)).quantize(Decimal(str(tick_size)), rounding=ROUND_HALF_UP))
-            
             sl_dist_pct = abs(sl - current_mid_price) / (current_mid_price + 1e-9)
             tp_dist_pct = abs(tp - current_mid_price) / (current_mid_price + 1e-9)
             
@@ -494,11 +516,15 @@ class SmartOrderRouter:
             else:
                 actual_sl, actual_tp = avg_fill_price * (1.0 + sl_dist_pct), avg_fill_price * (1.0 - tp_dist_pct)
             
+            actual_sl_str = self._format_price_str(actual_sl, symbol)
+            actual_tp_str = self._format_price_str(actual_tp, symbol)
+            
             try:
                 await self.executor.safe_call(
                     "POST", "/v5/position/trading-stop", is_execution=True,
                     category="linear", symbol=symbol, positionIdx=self.position_idx, 
-                    takeProfit=align_price(actual_tp), stopLoss=align_price(actual_sl)
+                    takeProfit=actual_tp_str, stopLoss=actual_sl_str,
+                    tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
                 )
             except Exception as e:
                 logger.warning(f"[X-RAY] 🧊 Failed to reattach bracket to TWAP position: {e}")
@@ -523,7 +549,7 @@ class SmartOrderRouter:
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        🚀 V25.1 DIRECT-DRIVE EXECUTION NEXUS
+        🚀 V25.4 DIRECT-DRIVE EXECUTION NEXUS
         Combines Risk Sizing, Firewall Assessment, and Topology Routing into a 
         single high-speed passthrough to eliminate Python Call-Stack overhead.
         """

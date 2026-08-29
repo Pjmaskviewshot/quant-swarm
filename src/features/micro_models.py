@@ -5,13 +5,14 @@ The undisputed apex predator of High-Frequency Microstructure execution.
 Shifts from defensive signal filtration to aggressive adversarial exploitation.
 
 Architectural Supremacy (V25.4 - Final Audit Resolutions):
-1. Calibrated Logistic RLS (Online Platt Scaling): Replaced the invalid MSE-on-binary 
-   target update. The RLS filter now explicitly optimizes for log-loss via a Gauss-Newton 
-   approximation, producing true calibrated probabilities for the Kelly/Fractional sizing engine.
-2. Realized PnL Feedback Loop: The prediction buffer is no longer resolved using a 
-   synthetic 60-second time horizon. `micro_models.py` now exposes a `resolve_trade_outcome` 
-   method that accepts actual execution PnL from the lifecycle daemon, completely 
-   eliminating path-dependent label noise.
+1. Calibrated Logistic RLS (Online Platt Scaling): Explicitly optimizes for log-loss 
+   via a Gauss-Newton approximation, producing true calibrated probabilities.
+2. Realized PnL Feedback Loop: Exposes `resolve_trade_outcome` for true labels.
+3. Gradient Contamination Fix: RLS updates are now explicitly weighted by Markov 
+   Belief likelihoods inside the gradient step to prevent regime degradation.
+4. Conformal Prediction Gating: Drops rigid thresholds for dynamic empirical quantile gating.
+5. Joseph Form Stability: Uses true Fisher Information (logistic variance) as measurement 
+   noise to prevent covariance matrix drift and deflation bias.
 """
 
 import math
@@ -163,7 +164,12 @@ class AdversarialSpoofingKernel:
         else: delta_W_raw += prev_ask_vol
 
         cutoff = now - self.fleeting_window
-        while self.quote_history and self.quote_history[0][0] < cutoff: self.quote_history.popleft()
+        while self.quote_history and self.quote_history[0][0] < cutoff: 
+            self.quote_history.popleft()
+            
+        # 🚀 BUG FIX: Prevent memory leak & linear scan CPU spike
+        while self.recent_cancels and self.recent_cancels[0][0] < cutoff:
+            self.recent_cancels.popleft()
 
         fleeting_cancel_vol = sum(c[2] for c in self.recent_cancels if c[0] >= cutoff)
         total_depth = (bid_vol + ask_vol) + 1e-9
@@ -270,9 +276,10 @@ class StreamingTikhonovCholeskyWhitener:
 
 class LogisticVFF_RLS:
     """
-    🚀 V25.4 LOGISTIC RLS UPGRADE
-    Replaces the flawed linear MSE update. Implements a Gauss-Newton step for 
-    logistic regression to properly optimize log-loss and yield calibrated probabilities.
+    🚀 V25.4 LOGISTIC RLS UPGRADE & MATHEMATICAL RECTIFICATION
+    Implements a Gauss-Newton step for logistic regression to optimize log-loss.
+    Includes the critical audit fixes for Kalman Gain formulation, Gradient Contamination,
+    and True Joseph Form covariance stabilization.
     """
     def __init__(self, dim: int = 18, p_init: float = 1.0):
         self.dim = dim
@@ -281,7 +288,7 @@ class LogisticVFF_RLS:
         self.I = np.eye(dim, dtype=np.float64)
         self.error_history = deque(maxlen=50)
 
-    def update(self, x: np.ndarray, y_target: float, p_pred: float) -> float:
+    def update(self, x: np.ndarray, y_target: float, p_pred: float, weight: float = 1.0) -> float:
         # y_target must be exactly 1.0 or 0.0 for logistic loss
         raw_error = float(y_target - p_pred)
         self.error_history.append(abs(raw_error))
@@ -291,9 +298,7 @@ class LogisticVFF_RLS:
 
         x_vec = x.reshape(-1, 1)
         
-        # 🚀 Logistic Gradient Step (Gauss-Newton Approximation)
-        # Derivative of logistic loss w.r.t w is x * (y - p)
-        # Hessian (Fisher Information) is x * x.T * p * (1-p)
+        # Logistic Variance (Fisher Information approximation)
         variance = p_pred * (1.0 - p_pred) + 1e-4  # Prevent zero variance
         
         Px = self.P @ x_vec
@@ -301,11 +306,16 @@ class LogisticVFF_RLS:
         
         if denom < 1e-9: return raw_error
 
+        # 🚀 MATHEMATICAL FIX: Correct Kalman Gain formulation
         K = (Px * variance) / denom
-        self.w = self.w + (self.P @ x_vec * raw_error).flatten() / denom
+        
+        # 🚀 GRADIENT CONTAMINATION FIX: Scale weight update strictly by regime likelihood
+        self.w = self.w + (K.flatten() * raw_error * weight)
 
         IKx = self.I - (K @ x_vec.T)
-        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * (raw_error**2 + 1e-5)) / dynamic_lambda
+        
+        # 🚀 CRITICAL FIX: Replaced constant 1.0 with true measurement noise (variance)
+        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * variance) / dynamic_lambda
         self.P = 0.5 * (self.P + self.P.T) + (self.I * 1e-4)
 
         trace_P = np.trace(self.P)
@@ -351,9 +361,12 @@ class ContinuousMicrostructureEngine:
         
         self.rls_trend.w, self.rls_range.w, self.rls_spoof.w, self.rls_cascade.w = wt.copy(), wr.copy(), ws.copy(), wc.copy()
 
-        self.pending_trade_outcomes: Dict[str, dict] = {} # 🚀 V25.4 FIX: Tracks live trades awaiting PnL resolution
+        self.pending_trade_outcomes: Dict[str, dict] = {} # Tracks live trades awaiting PnL resolution
         self.historical_probs = deque(maxlen=2000)
         self.ewma_mse = 0.20
+        
+        # 🚀 ENHANCEMENT: Conformal Prediction Calibration Buffer
+        self.calibration_errors = deque(maxlen=300)
 
     def update_orderbook_pressure(self, best_bid: float, bid_vol: float, best_ask: float, ask_vol: float):
         now = time.time()
@@ -414,9 +427,8 @@ class ContinuousMicrostructureEngine:
 
     def resolve_trade_outcome(self, signal_id: str, net_pnl: float):
         """
-        🚀 V25.4 FIX: Pure Realized PnL Feedback Loop
-        Replaces the synthetic 60-second time-horizon label generator. The execution engine
-        now explicitly passes the actual realized outcome back to the RLS filter.
+        🚀 V25.4 FIX: RLS Gradient Contamination & Conformal Error Tracking
+        Isolates learning by injecting the Markov belief directly into the gradient step.
         """
         if signal_id not in self.pending_trade_outcomes:
             return
@@ -427,29 +439,35 @@ class ContinuousMicrostructureEngine:
         old_p_up = trade_context["p_up"]
         beliefs = trade_context["beliefs"]
 
-        # Binary directional target (1.0 = Win, 0.0 = Loss)
+        # Logistic Target (1.0 = Win if BUY / Loss if SELL -> market went UP)
         is_win = net_pnl > 0
         if action_dir == "BUY":
-            y_target = 1.0 if is_win else 0.0
+            y_up = 1.0 if is_win else 0.0
         else:
-            y_target = 0.0 if is_win else 1.0 # If SELL and won, the market went down (y=0)
+            y_up = 0.0 if is_win else 1.0 
 
-        # 🚀 Logistic Update
-        e_t = self.rls_trend.update(feats, y_target, old_p_up)
-        e_r = self.rls_range.update(feats, y_target, old_p_up)
-        e_s = self.rls_spoof.update(feats, y_target, old_p_up)
-        e_c = self.rls_cascade.update(feats, y_target, old_p_up)
+        # Update Conformal Error Buffer
+        non_conformity = abs(y_up - old_p_up)
+        self.calibration_errors.append(non_conformity)
 
+        # 🚀 Gradient-Attributed RLS Update
+        # The update signature natively scales the learning rate by the belief probability 
+        e_t = self.rls_trend.update(feats, y_up, old_p_up, weight=beliefs[0]) 
+        e_r = self.rls_range.update(feats, y_up, old_p_up, weight=beliefs[1]) 
+        e_s = self.rls_spoof.update(feats, y_up, old_p_up, weight=beliefs[2]) 
+        e_c = self.rls_cascade.update(feats, y_up, old_p_up, weight=beliefs[3]) 
+
+        # The global MSE is weighted by the regime beliefs
         err = (e_t * beliefs[0]) + (e_r * beliefs[1]) + (e_s * beliefs[2]) + (e_c * beliefs[3])
         self.ewma_mse = (0.98 * self.ewma_mse) + (0.02 * (err ** 2))
         
-        logger.debug(f"[X-RAY] 🧠 RLS Neural Weights Updated for {self.symbol} | PnL: {net_pnl:.4f} | Target: {y_target}")
+        logger.debug(f"[X-RAY] 🧠 RLS Neural Weights Updated for {self.symbol} | PnL: {net_pnl:.4f} | Target: {y_up}")
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float) -> Dict[str, Any]:
         beliefs = self.regime_detector.update_beliefs(self.kaufman_er, self.shannon_entropy, self.anti_spoof_kernel.fleeting_ratio, self.jump_z)
         p_t, p_r, p_s, p_c = beliefs
 
-        # 🚀 11-Dimensional Baseline Input Vector
+        # 11-Dimensional Baseline Input Vector
         raw_vec = np.array([
             log_mlofi_z,
             self.rough_hawkes_z, 
@@ -476,7 +494,7 @@ class ContinuousMicrostructureEngine:
         volterra = np.array([
             f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11,
             exploit_spoof, predict_iceberg, kinetic_reversal, survive_cascade, exploit_macro, exploit_reversion,
-            1.0 # 18th Dimension (Bias)
+            1.0 # Bias
         ], dtype=np.float64)
 
         norm = np.linalg.norm(volterra) + 1e-9
@@ -499,8 +517,14 @@ class ContinuousMicrostructureEngine:
         if p_c > 0.5 and prob > 0.65:
             logger.warning(f"[X-RAY] 🌊 VOLATILITY CASCADE // {self.symbol} | Flash crash elasticity identified. Dampening exposure.")
 
-        baseline_gate = float(np.percentile(np.array(self.historical_probs), 60)) if len(self.historical_probs) > 30 else 0.54
-        dyn_gate = float(np.clip(baseline_gate * (1.0 + max(0.0, (self.ewma_mse - 0.20) * 0.5)), 0.51, 0.72))
+        # 🚀 ENHANCEMENT: Conformal Prediction Gating (Dynamic Confidence Hurdle)
+        if len(self.calibration_errors) >= 50:
+            # Require confidence to exceed the 85th percentile of recent model errors
+            q_threshold = float(np.percentile(self.calibration_errors, 85))
+        else:
+            q_threshold = 0.12
+            
+        conformal_floor = 0.50 + (q_threshold * 0.5)
 
         virt_sl = current_price * (1.0 - sl_dist_pct) if action_dir == "BUY" else current_price * (1.0 + sl_dist_pct)
         virt_tp = current_price * (1.0 + tp_dist_pct) if action_dir == "BUY" else current_price * (1.0 - tp_dist_pct)
@@ -510,10 +534,11 @@ class ContinuousMicrostructureEngine:
         return {
             "p_up": p_up, "p_down": 1.0 - p_up, "action_dir": action_dir,
             "entropy": self.shannon_entropy, "r_blend": p_t, 
-            "dynamic_gate": dyn_gate, "virtual_sl": virt_sl, "virtual_tp": virt_tp,
+            "dynamic_gate": conformal_floor, 
+            "virtual_sl": virt_sl, "virtual_tp": virt_tp,
             "markov_beliefs": {"trend": float(p_t), "range": float(p_r), "disloc": float(p_s), "cascade": float(p_c)},
             "dominant_regime": dominant_regime,
             "ou_divergence_z": self.ou_kernel.ou_divergence_z, "cfi_z": self.anti_spoof_kernel.cfi_z,
             "fleeting_ratio": self.anti_spoof_kernel.fleeting_ratio, "clean_ofi_z": self.clean_ofi_z,
-            "raw_features": volterra_att # 🚀 V25.4 FIX: Passed back for real PnL labeling later
+            "raw_features": volterra_att 
         }

@@ -3,17 +3,19 @@
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 
-Architectural Supremacy (V25.6 - Database Schema Alignment):
+Architectural Supremacy (V25.6 - Database Schema Alignment & Bug Fixes):
+- Forensic Ledger Synchronization: Fixed a critical UUID desync bug that orphaned 
+  database records from their live execution contexts, restoring PnL feedback loops.
+- Centralized Exit Matrix Integration: Stripped out all redundant manual trailing 
+  stop logic in the lifecycle daemon. The daemon now inherently trusts the 
+  `AdvancedIntelligentExitMatrix` to handle Kinetic TP Compression and AT-SL trails natively.
 - Valid UUID Generation: Replaced truncated 16-character hex digests with standard 
-  36-character UUID strings (`uuid.uuid4()`) to perfectly satisfy Supabase's 
-  strict UUID primary key column type constraints.
-- Legacy Leverage Footgun Eradication: Cleaned up the `target_leverage` signature  
-  default in the lifecycle daemon to strictly align with the 2.0x system cap.
-- Hot-Swap Convergence Warm-Up Guard: Enforces a strict 50-tick minimum warm-up  
+  36-character UUID strings (`uuid.uuid4()`) to perfectly satisfy Supabase's constraints.
+- Hot-Swap Convergence Warm-Up Guard: Enforces a strict 50-tick minimum warm-up 
   window for newly hot-swapped assets before the evaluation gate allows live execution.
-- Realized PnL Feedback Loop: Wired the `resolve_trade_outcome` telemetry  
-  from the settlement lifecycle back into the Microstructure Engine. RLS  
-  models now learn from actual execution PnL instead of time-based proxies.
+- Async Concurrency Hardening: Throttled the ThreadPoolExecutor to prevent GIL starvation, 
+  applied atomic reservation locks to eradicate double-spend entry race conditions, and 
+  added explicit GC task-tracking sweep protection.
 """
 
 import os
@@ -27,6 +29,7 @@ import uuid
 import datetime
 import numpy as np
 import concurrent.futures
+import multiprocessing
 from collections import deque
 from typing import Dict, List, Any, Callable
 from dataclasses import dataclass
@@ -159,7 +162,9 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="V25_Matrix_Workers")
+        # 🚀 V25.6 AUDIT FIX: Throttle thread pool to prevent GIL starvation and async loop jitter
+        safe_workers = min(4, multiprocessing.cpu_count() - 1) if multiprocessing.cpu_count() > 1 else 1
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="V25_Matrix_Workers")
         
         self.db_semaphore = asyncio.Semaphore(5)
         self.execution_semaphore = asyncio.Semaphore(10)
@@ -225,6 +230,9 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] ❌ BACKGROUND TASK CRASHED: {task.exception()}", exc_info=task.exception())
 
     def track_task(self, coro: Any):
+        # 🚀 CRITICAL FIX: Explicitly clear dead tasks before evaluating the limit
+        self._active_tasks = {t for t in self._active_tasks if not t.done()}
+        
         if len(self._active_tasks) > 500:
             logger.critical("[X-RAY] 🛑 FATAL: TASK LIMIT EXCEEDED (>500). Dropping background task to prevent memory overflow.")
             dummy = asyncio.Future()
@@ -330,7 +338,6 @@ class DistributedQuantEngine:
                 self.telegram_queue.task_done()
 
     async def run_correlation_engine(self):
-        """🚀 V25.4 FIX: High-Frequency Covariance Tracking (Decoupled from Heartbeat)"""
         logger.info("🧠 CORRELATION ENGINE ONLINE: 15s High-Frequency Covariance Tracking.")
         while True:
             await asyncio.sleep(15.0)
@@ -371,7 +378,6 @@ class DistributedQuantEngine:
                 self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}
                 
-                # 🚀 V25.6 FIX: Valid UUID string for Supabase
                 sig_id = str(uuid.uuid4())
                 
                 self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
@@ -417,7 +423,6 @@ class DistributedQuantEngine:
                         self.state_actor.dispatch(ex_sym, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                         risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}
                         
-                        # 🚀 V25.6 FIX: Valid UUID string for Supabase
                         sig_id = str(uuid.uuid4())
                         
                         self.daemon_tasks[ex_sym] = self.track_task(self._position_lifecycle_daemon(
@@ -542,12 +547,13 @@ class DistributedQuantEngine:
             
         if self.fsm.is_emergency_locked() or self.fsm.is_asset_locked(symbol): return
         
-        # 🚀 V25.5 FIX: Enforce minimum 50-tick warm-up on hot-swapped symbols
+        # Enforce minimum 50-tick warm-up on hot-swapped symbols
         if not stat_engine or len(stat_engine.tick_prices) < 50:
             return
 
-        is_active = symbol in self.active_positions_map or symbol in self.in_flight_symbols
-        if is_active:
+        # Early fast check to skip heavy math if already active
+        is_active_fast = symbol in self.active_positions_map or symbol in self.in_flight_symbols
+        if is_active_fast:
             if now - self.last_eval_time.get(symbol + "_learning_throttle", 0.0) < 1.0:
                 return
             self.last_eval_time[symbol + "_learning_throttle"] = now
@@ -581,7 +587,8 @@ class DistributedQuantEngine:
                 exchange_timestamp=ob_payload["timestamp"]
             )
             
-            if is_active:
+            # If already active, we just update context for the lifecycle daemon and exit
+            if is_active_fast:
                 if symbol in self.active_contexts:
                     self.active_contexts[symbol]["latest_state"] = state
                 return
@@ -617,12 +624,16 @@ class DistributedQuantEngine:
             is_safe, risk_reason = self.risk_vault.evaluate_portfolio_safety(current_bal, target_notional, symbol)
             if not is_safe: return
             
-            if symbol in self.active_positions_map or symbol in self.in_flight_symbols: return
+            # 🚀 V25.6 AUDIT FIX: Atomic reservation to prevent race-condition double entries
+            async with self.circuit_breaker_lock:
+                if symbol in self.active_positions_map or symbol in self.in_flight_symbols:
+                    return
+                # Optimistic local lock before dispatch across the event loop
+                self.in_flight_symbols[symbol] = time.time() + 60.0
 
             self.state_actor.dispatch(symbol, "RESERVE_IN_FLIGHT", {})
             logger.critical(f"🚀 TENSOR ALPHA DETECTED // {symbol} {action} | Prob: {prob_success:.2%} | ExecWt: {exec_weight:.2f}x | Size: ${target_notional:.2f}")
 
-            # 🚀 V25.4 FIX: Enforce 2.0x Leverage physically on the exchange API
             try:
                 await self.executor.adjust_leverage(symbol, 2)
             except Exception as e:
@@ -644,10 +655,9 @@ class DistributedQuantEngine:
 
             actual_qty_filled = target_notional / f_price
             
-            # 🚀 V25.6 FIX: Valid UUID string for Supabase
+            # 🚀 V25.6 FIX: Valid UUID string for Supabase correctly unified
             sig_id = str(uuid.uuid4())
 
-            # 🚀 V25.4 FIX: Register Trade Context for Realized PnL Feedback
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
                 stat_engine.pending_trade_outcomes[sig_id] = {
                     "action": action,
@@ -670,7 +680,7 @@ class DistributedQuantEngine:
 
             if self.memory:
                 await self.memory.commit_prediction(
-                    str(uuid.uuid4()),  # 🚀 V25.6 FIX: Valid UUID string for Supabase
+                    sig_id,  # 🚀 EXACT MATCH: Prevents orphaned PnL resolution
                     time.time(), price, action, prob_success, safe_features, False
                 )
 
@@ -680,7 +690,6 @@ class DistributedQuantEngine:
             )
             self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
 
-            # 🚀 V25.5 FIX: Cleaned up signature footgun (target_leverage=2 enforced)
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
                 symbol, sig_id, action, f_price, atr, 
                 {"allocated_value_usdt": target_notional, "size": actual_qty_filled, "arrival_price": arrival_price}, 
@@ -872,7 +881,7 @@ class DistributedQuantEngine:
             await asyncio.sleep(2)
 
     # ==============================================================================
-    # 🚀 V25.0 LIFECYCLE DAEMON
+    # 🚀 V25.6 CENTRALIZED LIFECYCLE DAEMON
     # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
@@ -979,14 +988,19 @@ class DistributedQuantEngine:
         if self.memory:
             await self.memory.log_live_execution_result(ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"])
             
-        # 🚀 V25.4 FIX: Plumb Realized PnL Back to RLS Filters
+        # Plumb Realized PnL Back to RLS Filters
         if ctx.get("stat_engine") and hasattr(ctx["stat_engine"], "resolve_trade_outcome"):
             ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl)
             
         self._safe_telegram_dispatch_sync(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=True)
         self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 2, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
+    async def _position_lifecycle_daemon(
+        self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, 
+        risk_matrix: dict, target_leverage: int = 2, market_regime: str = "TRENDING", 
+        is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, 
+        realigned_sl: float = None, historical_favorable_price: float = None
+    ):
         ctx = {
             "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
             "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
@@ -1066,51 +1080,28 @@ class DistributedQuantEngine:
                 ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
                 ctx["active_positions_count"] = len(self.active_positions_map)
                 ctx["last_ob"] = ob
+                ctx["initial_risk_dist"] = abs(ctx["actual_entry"] - initial_sl)
+                ctx["current_sl"] = current_active_sl
+                ctx["current_tp"] = current_active_tp
 
-                if ctx["safe_c_price"] != current_price:
-                    if ctx["is_buy"] and ctx["safe_c_price"] > ctx.get("max_favorable_price", 0.0):
-                        ctx["max_favorable_price"] = ctx["safe_c_price"]
-                    elif not ctx["is_buy"] and ctx["safe_c_price"] < ctx.get("max_favorable_price", 999999.0):
-                        ctx["max_favorable_price"] = ctx["safe_c_price"]
-
+                # 🚀 V25.6 FIX: Delegating to AdvancedIntelligentExitMatrix
                 decision = IntelligentExitEngine.evaluate(ctx, state)
-
-                notional = ctx["actual_qty_filled"] * ctx["actual_entry"]
-                profit_hurdle = notional * 0.0020  
                 
-                if state.profit_state.peak_pnl > profit_hurdle:
-                    fee_buffer_pnl = notional * 0.0015
-                    locked_gain = max(fee_buffer_pnl, state.profit_state.peak_pnl * 0.70)
-                    
-                    if locked_gain > state.profit_state.locked_pnl:
-                        state.profit_state.locked_pnl = locked_gain
-                        self.state_actor.dispatch(symbol, "UPDATE_PROFIT_PEAK", {
-                            "peak_pnl": state.profit_state.peak_pnl, 
-                            "locked_pnl": locked_gain
-                        })
-                    
-                    if ctx["is_buy"]:
-                        target_ts_price = state.entry_price + (state.profit_state.locked_pnl / state.actual_qty)
-                    else:
-                        target_ts_price = state.entry_price - (state.profit_state.locked_pnl / state.actual_qty)
-                    
-                    if ctx["is_buy"] and current_price <= target_ts_price:
-                        logger.critical(f"[X-RAY] 🎯 PROFIT PRESERVATION TRIGGERED // {symbol} Market dropped below lock ({current_price:.4f} <= {target_ts_price:.4f}). Ejecting!")
-                        ctx["exit_trigger_price"] = current_price
-                        break
-                    elif not ctx["is_buy"] and current_price >= target_ts_price:
-                        logger.critical(f"[X-RAY] 🎯 PROFIT PRESERVATION TRIGGERED // {symbol} Market spiked above lock ({current_price:.4f} >= {target_ts_price:.4f}). Ejecting!")
-                        ctx["exit_trigger_price"] = current_price
-                        break
-                    
-                    if ctx["is_buy"] and target_ts_price > current_active_sl and target_ts_price < current_price:
-                        current_active_sl = target_ts_price
-                        logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
-                        await self.sor._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
-                    elif not ctx["is_buy"] and target_ts_price < current_active_sl and target_ts_price > current_price:
-                        current_active_sl = target_ts_price
-                        logger.info(f"[X-RAY] 🛡️ TRAILING SL STEPPED // {symbol} new floor: {current_active_sl:.4f}")
-                        await self.sor._amend_trailing_stop(symbol, current_active_sl, current_active_tp)
+                target_sl = decision.exchange_ts_price
+                target_tp = decision.dynamic_tp_price
+
+                if target_sl > 0 and target_tp > 0:
+                    # Prevent rate limit spam: Only amend if SL moved by 15% ATR or TP compressed
+                    if abs(target_sl - current_active_sl) > (ctx["atr"] * 0.15) or abs(target_tp - current_active_tp) > (ctx["atr"] * 0.05):
+                        if await self.sor._amend_trailing_stop(symbol, target_sl, target_tp):
+                            current_active_sl = target_sl
+                            current_active_tp = target_tp
+                            logger.info(f"[X-RAY] 🛡️ TRAILING SL/TP STEPPED // {symbol} SL: {current_active_sl:.4f} | TP: {current_active_tp:.4f}")
+
+                if decision.action in ["EXIT", "CLOSE", "EMERGENCY"]:
+                    logger.critical(f"[X-RAY] 🎯 POSITION TERMINATED // {symbol}: {decision.reason}")
+                    ctx["exit_trigger_price"] = current_price
+                    break
 
                 await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
@@ -1202,7 +1193,7 @@ class DistributedQuantEngine:
             self.run_omni_swarm_director,            
             self.run_fast_state_invariant_reconciliation,
             self.yield_engine.run_yield_scanner_daemon,
-            self.run_correlation_engine # 🚀 V25.4 FIX
+            self.run_correlation_engine 
         ]
         
         tasks = [asyncio.create_task(safe_daemon_wrapper(d, self)) for d in daemons]

@@ -7,9 +7,10 @@ Features:
 - Intraday High-Watermark Circuit Breaker (2%) & Systemic Drawdown (5%)
 - Exact Matrix Invertibility Guards & Exposure Heat Allocation
 
-Architectural Supremacy (V25.5):
-- Stabilized Correlation Lookback: Raised the minimum observation threshold from 10 
-  to 60 periods to eliminate spurious correlation spikes during fast market regimes.
+Architectural Supremacy (V25.5 - Final Audit Resolutions):
+- Beta-Stripped Correlation Lookback: Subtracts the cross-sectional market mean 
+  before computing the covariance matrix to prevent false positive correlation 
+  vetoes driven purely by Bitcoin's macro beta.
 - Pure NumPy Covariance Engine: Vectorized matrix computation operating lightning-fast 
   inside the 15-second high-frequency tracking loop.
 """
@@ -59,7 +60,7 @@ class InstitutionalRiskVault:
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
         """
-        🚀 V25.5 FIX: Vectorized NumPy Covariance with Stabilized Lookback
+        🚀 V25.5 FIX: Vectorized NumPy Covariance with Beta-Stripped Lookback
         Computes pairwise correlations using pure NumPy arrays for high-frequency execution 
         while requiring at least 60 periods to prevent noise-driven matrix distortion.
         """
@@ -80,8 +81,14 @@ class InstitutionalRiskVault:
             # Fast vectorized log returns
             returns_arr = np.log(price_arr[:, 1:] / (price_arr[:, :-1] + 1e-9))
             
-            # Fast Pearson Correlation Matrix
-            corr = np.corrcoef(returns_arr)
+            # 🚀 AUDIT FIX: Beta-Stripping (Excess Returns)
+            # Subtract cross-sectional market mean per time step.
+            # This isolates true asset correlation and prevents BTC-beta from skewing the matrix.
+            market_mean = np.mean(returns_arr, axis=0, keepdims=True)
+            excess_returns = returns_arr - market_mean
+            
+            # Fast Pearson Correlation Matrix on Excess Returns
+            corr = np.corrcoef(excess_returns)
             
             # Handle NaNs from zero-variance arrays (e.g., dead pairs or halted trading)
             corr = np.nan_to_num(corr, nan=0.0)
@@ -157,7 +164,7 @@ class InstitutionalRiskVault:
                 corrs = [self.correlation_matrix.loc[symbol, s] for s in active_symbols]
                 avg_corr = float(np.mean(corrs)) if corrs else 0.0
                 if avg_corr > 0.70:
-                    logger.warning(f"[RISK_VAULT] 🛑 CORRELATION VETO // {symbol} has {avg_corr:.2f} avg correlation with active portfolio. Aborting.")
+                    logger.warning(f"[RISK_VAULT] 🛑 CORRELATION VETO // {symbol} has {avg_corr:.2f} avg excess correlation with active portfolio. Aborting.")
                     return False, f"PORTFOLIO_CORRELATION_VETO ({avg_corr:.2f} > 0.70)"
 
         max_heat_dollars = max(self.exchange_min_notional * 5.0, current_balance * self.absolute_max_leverage)

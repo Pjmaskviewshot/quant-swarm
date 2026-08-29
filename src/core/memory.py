@@ -7,9 +7,10 @@ Hyper-optimized Supabase connector featuring:
 - Holographic Memory Fallback (Zero-Downtime NumPy Local Tensor Matrix)
 - Pure NumPy vectorization for shadow OHLC forensics and KNN Distance
 
-Architectural Upgrades (V25.0):
+Architectural Upgrades (V25.0 & Bug Fixes):
 - Purged all local SQLite (`quant_memory.db`) dependencies to enforce a Single Source of Truth (SSOT).
 - Aligned payload schema with the new 18-D Volterra-Hermite Tensor features (`log_mlofi_z`, `hawkes_z`, `sector_impulse`).
+- Signal ID Unification: Completely eradicated the orphaned record bug by passing the exact `signal_id` from the FSM into the database row creation, perfectly bridging the execution loop with forensic PnL attribution.
 """
 
 import os
@@ -192,7 +193,7 @@ class MemoryBank:
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
         payload = {
-            "signal_id": str(signal_id),
+            "signal_id": str(signal_id), # 🚀 FIX: Links explicitly to execution loop
             "timestamp": iso_timestamp,
             "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN",
             "predicted_direction": str(direction).upper(),

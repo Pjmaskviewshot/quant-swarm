@@ -11,6 +11,11 @@ Architectural Supremacy (V25.4 - Final Audit Resolutions):
   is computed on the fly using exact price coordinates directly from the L2 delta stream.
 - Zero-Tick-Loss Resync: Maintains absolute sequence gap intolerance with 
   Seamless REST Bridging and L2 Delta Staging Buffers.
+- Bounded Delta Memory Leak Fix: Caps isolated resync buffers at 1,000 deltas to 
+  prevent RAM exhaustion during extreme volatility REST stalls.
+- GC Task Tracker Fix: Actively sweeps dead tasks from the active tracker set to 
+  prevent artificial limit exhaustion.
+- Alert Shedding Visibility: `QueueFull` silent failures upgraded to Warning visibility.
 """
 
 import asyncio
@@ -66,7 +71,6 @@ class MarketStateMatrix:
         self.l2_bids: Dict[str, Dict[float, float]] = {}
         self.l2_asks: Dict[str, Dict[float, float]] = {}
         
-        # 🚀 V25.4 FIX: Sorted Cache Arrays for O(1) Lookups
         self._sorted_bids_cache: Dict[str, List[float]] = {}
         self._sorted_asks_cache: Dict[str, List[float]] = {}
         
@@ -76,9 +80,8 @@ class MarketStateMatrix:
         self.log_mlofi_z: Dict[str, float] = {}
         self.micro_prices: Dict[str, float] = {}
         
-        # Synchronization Memory
         self.orderbook_sequences: Dict[str, int] = {}
-        self.delta_buffer: Dict[str, List[Dict[str, Any]]] = {}
+        self.delta_buffer: Dict[str, deque] = {} 
         self.is_resyncing: Dict[str, bool] = {}
         
         self.active_ws = None  
@@ -88,7 +91,15 @@ class MarketStateMatrix:
         self.consumer_tasks: Dict[str, asyncio.Task] = {}
 
     def track_task(self, coro: Coroutine) -> asyncio.Task:
-        """Safely tracks fire-and-forget daemon tasks to prevent GC mid-flight."""
+        """🚀 CRITICAL FIX: Safely sweeps dead tasks before evaluating the limit."""
+        self._active_tasks = {t for t in self._active_tasks if not t.done()}
+        
+        if len(self._active_tasks) > 500:
+            logger.critical("[X-RAY] 🛑 FATAL: TASK LIMIT EXCEEDED (>500). Dropping background task to prevent memory overflow.")
+            dummy = asyncio.Future()
+            dummy.set_result(None)
+            return dummy
+            
         task = asyncio.create_task(coro)
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
@@ -124,7 +135,6 @@ class MarketStateMatrix:
         bids_arr = self._sorted_bids_cache[symbol]
         asks_arr = self._sorted_asks_cache[symbol]
         
-        # 🚀 V25.4 FIX: O(log N) Bisect Updates replacing O(N log K) heapq sorts
         for p, v in parsed_bids:
             if v <= 0:
                 if p in bids_dict:
@@ -171,7 +181,6 @@ class MarketStateMatrix:
         
         best_bid, best_ask = top_bids[0], top_asks[0]
         
-        # 🚀 SANITY PRECONDITION: Reject crossed books
         if best_bid >= best_ask:
             return None
 
@@ -364,7 +373,7 @@ class MarketStateMatrix:
                                 "ts": int(data.get("ts", time.time() * 1000))
                             }))
                         except asyncio.QueueFull:
-                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full during REST resync. Load shedding snapshot.")
+                            logger.warning(f"[X-RAY] ⚠️ {symbol} queue full during REST resync. Load shedding snapshot.")
 
                         self.orderbook_sequences[symbol] = snap_seq
                         
@@ -495,7 +504,9 @@ class MarketStateMatrix:
                                             self.orderbook_sequences[symbol] = u_sequence
                                         elif msg_type == "delta":
                                             if self.is_resyncing.get(symbol, False):
-                                                self.delta_buffer.setdefault(symbol, []).append(data)
+                                                if symbol not in self.delta_buffer:
+                                                    self.delta_buffer[symbol] = deque(maxlen=1000)
+                                                self.delta_buffer[symbol].append(data)
                                                 continue
                                                 
                                             last_seq = self.orderbook_sequences.get(symbol)
@@ -506,7 +517,9 @@ class MarketStateMatrix:
                                                     logger.critical(f"[X-RAY] ❌ SEVERE SEQUENCE BREAK // {symbol} (Gap | PrevSeq:{prev_seq} != Stored:{last_seq}). Initiating buffered REST resync.")
                                                     
                                                     self.is_resyncing[symbol] = True
-                                                    self.delta_buffer.setdefault(symbol, []).append(data)
+                                                    if symbol not in self.delta_buffer:
+                                                        self.delta_buffer[symbol] = deque(maxlen=1000)
+                                                    self.delta_buffer[symbol].append(data)
                                                     
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue 
@@ -521,7 +534,8 @@ class MarketStateMatrix:
                                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding orderbook tick.")
+                                            # 🚀 CRITICAL FIX: Upgraded visibility to explicit Warning
+                                            logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping L2 Orderbook tick.")
                                             
                                     elif topic.startswith("publicTrade"):
                                         symbol = topic.split(".")[-1]
@@ -538,7 +552,7 @@ class MarketStateMatrix:
                                             try:
                                                 target_queue.put_nowait(("trade", tick_payload))
                                             except asyncio.QueueFull:
-                                                logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding trade tick.")
+                                                logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping trade tick.")
                                                 
                                     elif topic.startswith("tickers"):
                                         symbol = data.get("symbol")
@@ -547,7 +561,7 @@ class MarketStateMatrix:
                                             try:
                                                 target_queue.put_nowait(("tickers", data))
                                             except asyncio.QueueFull:
-                                                logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding tickers tick.")
+                                                logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping tickers tick.")
                                             
                                     elif topic.startswith("kline"):
                                         symbol = topic.split(".")[2]
@@ -557,7 +571,7 @@ class MarketStateMatrix:
                                                 "interval": topic.split(".")[1], "symbol": symbol, "candle_data": data[0]
                                             }))
                                         except asyncio.QueueFull:
-                                            logger.debug(f"[X-RAY] ⚠️ {symbol} queue full. Shedding kline tick.")
+                                            logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping kline tick.")
 
                                 except Exception as e:
                                     logger.error(f"[X-RAY] 🚨 OVERLOAD OR ROUTING ERROR: {e}")
