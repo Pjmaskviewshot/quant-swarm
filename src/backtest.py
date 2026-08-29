@@ -1,10 +1,18 @@
 """
-💎 V17.0 APEX TITANIUM OMEGA: NEURAL BACKTESTER
+💎 V25.2 APEX QUANTUM PRIME: NEURAL BACKTESTER
 -------------------------------------
 WARNING: This backtester uses 1-Minute OHLCV data. It is an approximation
-of the live V17 L2-tick engine and cannot simulate true Order Flow Imbalance.
-Upgraded with True 4D Streaming Cholesky Whitening (1:1 Production Parity),
-Joseph-Stabilized RLS, C-Vectorized Shannon Entropy, and Exact Optimization Emulation.
+of the live V25 L2-tick engine and cannot simulate true Order Flow Imbalance.
+
+Architectural Supremacy (V25.2):
+1. Fixed Fractional Parity: Aligned backtest sizing with the live SOR (1.0% - 1.5% max risk),
+   abandoning the ruinous Kelly Criterion.
+2. Pure Directional RLS Target: RLS filters now train strictly on binary directional 
+   classification rather than path-dependent R-multiples.
+3. Accurate Intraday Sharpe Annualization: Corrected the Sharpe ratio calculation 
+   to scale by trades_per_day * 252 rather than raw trade count.
+4. Directional Orthogonalization: Synced the Volterra attention mechanism with the 
+   live engine's L2 vector normalization.
 """
 
 import argparse
@@ -44,101 +52,133 @@ class AdaptiveSessionClock:
 
 class ClusterWarmStartRLS:
     @staticmethod
-    def get_cluster_priors(symbol: str) -> Tuple[np.ndarray, np.ndarray, float]:
+    def get_cluster_priors(symbol: str, dim: int = 18) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        w_trend = np.zeros(dim, dtype=np.float64)
+        w_range = np.zeros(dim, dtype=np.float64)
+        w_spoof = np.zeros(dim, dtype=np.float64)
+        w_cascade = np.zeros(dim, dtype=np.float64)
+
         if any(m in symbol for m in ["BTC", "ETH", "SOL"]):
-            w_trend = np.array([0.35, 0.25, 0.30, 0.10], dtype=np.float64)
-            w_range = np.array([0.15, 0.25, 0.40, 0.20], dtype=np.float64)
             p_scale = 1.0
-        elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR"]):
-            w_trend = np.array([0.30, 0.30, 0.30, 0.10], dtype=np.float64)
-            w_range = np.array([0.20, 0.30, 0.30, 0.20], dtype=np.float64)
+        elif any(m in symbol for m in ["AVAX", "LINK", "XRP", "ADA", "DOT", "NEAR", "SUI"]):
             p_scale = 2.0
         else:
-            w_trend = np.array([0.25, 0.25, 0.35, 0.15], dtype=np.float64)
-            w_range = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float64)
-            p_scale = 0.5 
-        return w_trend, w_range, p_scale
+            p_scale = 3.0
+
+        w_trend[:] = 0.1
+        w_range[:] = 0.05
+        w_spoof[:] = -0.1
+        w_cascade[:] = 0.2
+
+        return w_trend, w_range, w_spoof, w_cascade, p_scale
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
     """C-Vectorized Shannon Permutation Entropy."""
     if len(series) < (order * delay): return 1.0
     try:
-        arr = np.asarray(series)
+        arr = np.asarray(series, dtype=np.float64)
         shape = (arr.size - (order - 1) * delay, order)
         strides = (arr.strides[0], arr.strides[0] * delay)
         
         sub_vectors = np.lib.stride_tricks.as_strided(arr, shape=shape, strides=strides)
         perms = np.argsort(sub_vectors, axis=1)
         
-        bases = np.arange(order) ** order 
+        bases = order ** np.arange(order) 
         hashed = np.sum(perms * bases, axis=1)
         
         _, counts = np.unique(hashed, return_counts=True)
         p = counts / counts.sum()
-        entropy = -np.sum(p * np.log2(p))
+        p = p[p > 0]
         
-        return float(entropy / math.log2(math.factorial(order)))
-    except Exception:
-        return 1.0
+        entropy = -np.sum(p * np.log2(p))
+        max_entropy = math.log2(math.factorial(order))
+        return float(np.clip(entropy / max_entropy, 0.0, 1.0))
+    except Exception: return 1.0
 
 
 class BacktestCholeskyWhitening:
     """
-    🚀 V17.0 AUDIT FIX: Matches production micro_models.py streaming Cholesky whitening.
-    Replaces the flawed Gram-Schmidt orthogonalization to achieve 1:1 mathematical parity
-    between live execution and backtesting.
+    🚀 V25.0 AUDIT FIX: Matches production micro_models.py streaming 11D Cholesky whitening.
     """
-    def __init__(self, n_features: int = 4, alpha: float = 0.01):
+    def __init__(self, n_features: int = 11, alpha: float = 0.001): # V25.1 Matrix Stability Fix
         self.n = n_features
         self.alpha = alpha
         self.mean = np.zeros(n_features, dtype=np.float64)
         self.cov = np.eye(n_features, dtype=np.float64) * 0.1
+        self.I = np.eye(n_features, dtype=np.float64)
 
     def update_and_whiten(self, x: np.ndarray) -> np.ndarray:
-        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * x
-        diff = (x - self.mean).reshape(-1, 1)
-        self.cov = (1.0 - self.alpha) * self.cov + self.alpha * (diff @ diff.T)
+        delta = x - self.mean
+        self.mean += self.alpha * delta
+        self.cov = (1.0 - self.alpha) * self.cov + self.alpha * np.outer(delta, delta)
+        self.cov = 0.5 * (self.cov + self.cov.T)
         
+        stable_cov = self.cov + (self.I * 1e-5)
         try:
-            L = np.linalg.cholesky(self.cov + np.eye(self.n) * 1e-6)
-            whitened = np.linalg.solve(L, x - self.mean)
-            # Clip outlier extremes for neural stability
-            return np.clip(whitened / 3.0, -1.0, 1.0)
+            L = np.linalg.cholesky(stable_cov)
+            return np.clip(np.linalg.solve(L, delta) / 3.0, -2.5, 2.5)
         except np.linalg.LinAlgError:
-            diag_stds = np.sqrt(np.diag(self.cov)) + 1e-9
-            return np.clip((x - self.mean) / (diag_stds * 3.0), -1.0, 1.0)
+            diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
+            return np.clip(delta / (diag_stds * 3.0), -2.5, 2.5)
 
 
 class JosephStabilizedRLS:
-    def __init__(self, dim: int = 4, p_init: float = 1.0):
+    def __init__(self, dim: int = 18, p_init: float = 1.0):
         self.dim = dim
         self.w = np.zeros(dim, dtype=np.float64)
         self.P = np.eye(dim, dtype=np.float64) * p_init
         self.I = np.eye(dim, dtype=np.float64)
+        self.error_history = deque(maxlen=50)
 
-    def update(self, x: np.ndarray, y_target: float, y_pred: float, lam: float = 0.995) -> float:
-        error = y_target - y_pred
+    def update(self, x: np.ndarray, y_target: float, y_pred: float) -> float:
+        raw_error = float(y_target - y_pred)
+        self.error_history.append(abs(raw_error))
+        
+        recent_err = np.mean(self.error_history) if len(self.error_history) >= 10 else abs(raw_error)
+        dynamic_lambda = max(0.90, min(0.999, 0.998 - (0.08 * recent_err)))
+        
+        bounded_error = np.clip(raw_error, -1.0, 1.0)
         x_vec = x.reshape(-1, 1)
 
         Px = self.P @ x_vec
-        denom = lam + float(x_vec.T @ Px)
-        K = Px / denom
+        denom = dynamic_lambda + float(x_vec.T @ Px)
+        if denom < 1e-9: return raw_error
 
-        self.w = self.w + (K.flatten() * error)
+        K = Px / denom
+        self.w = self.w + (K.flatten() * bounded_error)
 
         IKx = self.I - (K @ x_vec.T)
-        R_noise = error ** 2 + 1e-6
-        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * R_noise) / lam
-        self.P = 0.5 * (self.P + self.P.T) 
+        self.P = (IKx @ self.P @ IKx.T + (K @ K.T) * (bounded_error**2 + 1e-5)) / dynamic_lambda
+        self.P = 0.5 * (self.P + self.P.T) + (self.I * 1e-4)
 
         trace_P = np.trace(self.P)
-        if trace_P > 1000.0:
-            self.P = (self.P * (1000.0 / trace_P)) + (self.I * 1e-3)
-        else:
-            self.P += self.I * 1e-3
+        if trace_P > 600.0: self.P = self.P * (600.0 / trace_P)
 
-        return error
+        return raw_error
+
+
+class QuantumMarkovRegimeDetector:
+    def __init__(self):
+        self.beliefs = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float64)
+        self.TPM = np.array([
+            [0.94, 0.02, 0.02, 0.02],  
+            [0.02, 0.94, 0.02, 0.02],  
+            [0.05, 0.05, 0.85, 0.05],  
+            [0.05, 0.05, 0.05, 0.85]   
+        ], dtype=np.float64)
+
+    def update_beliefs(self, er: float, entropy: float, fleeting: float, jump_z: float) -> np.ndarray:
+        prior = self.TPM.T @ self.beliefs
+        l_trend = math.exp(-2.0 * ((1.0 - er)**2) - 1.5 * (entropy**2) - 3.0 * (fleeting**2))
+        l_range = math.exp(-2.5 * (er**2) - 1.5 * ((1.0 - entropy)**2) - 2.0 * (fleeting**2))
+        l_spoof = math.exp(-3.0 * ((1.0 - fleeting)**2) - 1.0 * (er**2))
+        l_cascade = math.exp(-1.0 * ((3.0 - min(3.0, abs(jump_z)))**2)) 
+        
+        likelihoods = np.array([l_trend, l_range, l_spoof, l_cascade], dtype=np.float64) + 1e-6
+        unnormalized = prior * likelihoods
+        self.beliefs = unnormalized / (np.sum(unnormalized) + 1e-9)
+        return self.beliefs
 
 
 def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
@@ -189,7 +229,7 @@ class Params:
     rr_ratio: float = 2.0            
     sl_atr_mult: float = 2.5         
     atr_period: int = 14
-    leverage: float = 3.0            
+    leverage: float = 2.0  # 🚀 V25.2 FIX: Enforced 2.0x Hard Cap (Matches SOR & Risk Vault)          
 
 
 def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
@@ -219,128 +259,8 @@ def compute_tensor_alpha(btc_hist: deque, alt_hist: deque) -> float:
         return float(math.copysign(min(1.0, abs(correlation)), btc_momentum))
     return 0.0
 
-def get_vpin_bucket_size(symbol: str) -> float:
-    if "BTC" in symbol: return 1_000_000.0
-    if "ETH" in symbol: return 500_000.0
-    if "SOL" in symbol: return 250_000.0
-    return 100_000.0
 
-def log_gaussian_pdf(x: float, mean: float, std: float) -> float:
-    variance = float(std)**2 + 1e-9
-    return -0.5 * math.log(2 * math.pi * variance) - ((float(x) - float(mean))**2 / (2 * variance))
-
-def _apply_kalman_smoothing(prices: np.ndarray) -> np.ndarray:
-    if len(prices) < 2: return prices
-    n = len(prices)
-    filtered = np.zeros(n)
-    Q = 1e-5
-    R = np.var(prices) * 0.05 + 1e-9 
-    x_hat = prices[0]
-    P = 1.0
-    for i in range(n):
-        x_pred = x_hat
-        P_pred = P + Q
-        K = P_pred / (P_pred + R)
-        x_hat = x_pred + K * (prices[i] - x_pred)
-        P = (1 - K) * P_pred
-        filtered[i] = x_hat
-    return filtered
-
-def detect_hmm_regime(raw_closes_arr: np.ndarray, volumes_arr: np.ndarray, current_state_probs: np.ndarray) -> Tuple[str, np.ndarray, float]:
-    if len(raw_closes_arr) < 20:
-        return "MEAN_REVERTING", current_state_probs, 0.5
-
-    closes_arr = _apply_kalman_smoothing(raw_closes_arr)
-
-    log_returns = np.diff(np.log(closes_arr + 1e-9))
-    mu_ret = float(np.mean(log_returns))
-    volatility = float(np.std(log_returns)) + 1e-9
-    
-    directional_change = abs(closes_arr[-1] - closes_arr[0])
-    absolute_changes = np.sum(np.abs(np.diff(closes_arr)))
-    er = float(directional_change / (absolute_changes + 1e-9))
-    
-    avg_vol = float(np.mean(volumes_arr))
-    vol_baseline = float(np.median(volumes_arr)) + 1e-9
-    
-    if len(log_returns) >= 5:
-        base_vol = max(0.001, float(np.median([np.std(log_returns[max(0, j-5):j]) for j in range(5, len(log_returns)+1, 5)])))
-    else:
-        base_vol = 0.005
-        
-    archetypes = {
-        "TRENDING_BULL":    {"ret": (base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
-        "TRENDING_BEAR":    {"ret": (-base_vol * 1.5, base_vol), "vol": (base_vol * 1.2, base_vol), "er": (0.7, 0.2)},
-        "HIGH_VOL_CHOP":    {"ret": (0.0, base_vol * 2.5), "vol": (base_vol * 3.0, base_vol * 1.5), "er": (0.2, 0.15)},
-        "MEAN_REVERTING":   {"ret": (0.0, base_vol * 0.8), "vol": (base_vol * 1.0, base_vol * 0.5), "er": (0.3, 0.15)},
-        "LIQUIDITY_VACUUM": {"ret": (0.0, base_vol * 0.5), "vol": (base_vol * 0.5, base_vol * 0.3), "er": (0.5, 0.2)}
-    }
-    
-    regimes = list(archetypes.keys())
-    transition_matrix = np.array([
-        [0.75, 0.05, 0.10, 0.08, 0.02], 
-        [0.05, 0.75, 0.10, 0.08, 0.02], 
-        [0.10, 0.10, 0.70, 0.05, 0.05], 
-        [0.05, 0.05, 0.05, 0.80, 0.05], 
-        [0.05, 0.05, 0.15, 0.05, 0.70]  
-    ])
-
-    log_emissions = np.zeros(5)
-    for i, regime in enumerate(regimes):
-        arch = archetypes[regime]
-        log_p_ret = log_gaussian_pdf(mu_ret, arch["ret"][0], arch["ret"][1])
-        log_p_vol = log_gaussian_pdf(volatility, arch["vol"][0], arch["vol"][1])
-        log_p_er  = log_gaussian_pdf(er, arch["er"][0], arch["er"][1])
-        
-        log_emission = log_p_ret + log_p_vol + log_p_er
-        if regime == "LIQUIDITY_VACUUM" and avg_vol < vol_baseline * 0.5:
-            log_emission += math.log(2.0) 
-            
-        log_emissions[i] = log_emission
-
-    prior = np.dot(transition_matrix.T, current_state_probs)
-    prior_log = np.log(prior + 1e-9)
-    
-    unnormalized_log_posterior = log_emissions + prior_log
-    max_log = np.max(unnormalized_log_posterior)
-    posterior = np.exp(unnormalized_log_posterior - max_log)
-    new_state_probs = posterior / np.sum(posterior)
-    
-    best_state_idx = int(np.argmax(new_state_probs))
-    detected_regime = regimes[best_state_idx]
-    
-    binary_regime = "TRENDING" if detected_regime in ["TRENDING_BULL", "TRENDING_BEAR"] else "RANGING"
-    return binary_regime, new_state_probs, er
-
-def calculate_rolling_cvar(variance_history: deque, percentile: float = 95.0) -> float:
-    if len(variance_history) < 50: return 1.0
-    
-    var_arr = np.array(variance_history)
-    var_threshold = np.percentile(var_arr, percentile)
-    
-    tail_variances = var_arr[var_arr >= var_threshold]
-    if len(tail_variances) == 0: return 1.0
-        
-    cvar = np.mean(tail_variances)
-    
-    if cvar > 0.0001:
-        penalty = min(0.65, (cvar - 0.0001) * 5000.0)
-        return max(0.35, 1.0 - penalty)
-        
-    return 1.0
-
-def calibrate_confidence(prob: float, kaufman_er: float, shannon_entropy: float, mse: float) -> float:
-    """Dynamic signal boundaries driven by ER and Entropy."""
-    er_scale = np.clip(kaufman_er, 0.1, 0.9)
-    chaos_scale = np.clip(shannon_entropy, 0.1, 1.5)
-    
-    ceiling = np.clip(0.95 - (chaos_scale * 0.10), 0.70, 0.95)
-    floor = np.clip(0.48 + (er_scale * 0.05), 0.48, 0.55)
-    
-    mse_penalty = min(0.10, mse * 0.4)
-    return max(floor, min(ceiling - mse_penalty, prob))
-
-def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v25_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
     
@@ -363,38 +283,28 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     alt_1m_history = deque(maxlen=300)
     entropy_history = deque(maxlen=200) 
     log_returns = deque(maxlen=500)
-    variance_history = deque(maxlen=300)
     inst_variance = 1e-6
     kaufman_er = 0.5
-    
-    base_vpin_bucket_size = get_vpin_bucket_size(symbol)
-    current_bucket_vol = 0.0
-    current_bucket_buy_vol = 0.0
-    vpin_history = deque(maxlen=200)
-    vol_history = deque(maxlen=1000)
-    synthetic_vpin_z = 0.0
 
-    w_t, w_r, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol)
+    w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=18)
     
-    # 🚀 AUDIT FIX: 1:1 Live Production Cholesky Whitening
-    cholesky_engine = BacktestCholeskyWhitening(n_features=4, alpha=0.02)
-    rls_trending = JosephStabilizedRLS(dim=4, p_init=p_scale)
-    rls_ranging = JosephStabilizedRLS(dim=4, p_init=p_scale)
-    rls_trending.w = w_t.copy()
-    rls_ranging.w = w_r.copy()
+    # 🚀 AUDIT FIX: 1:1 Live Production Cholesky Whitening & RLS Setup
+    cholesky_engine = BacktestCholeskyWhitening(n_features=11, alpha=0.001)
+    rls_trend = JosephStabilizedRLS(dim=18, p_init=p_scale)
+    rls_range = JosephStabilizedRLS(dim=18, p_init=p_scale)
+    rls_spoof = JosephStabilizedRLS(dim=18, p_init=p_scale)
+    rls_cascade = JosephStabilizedRLS(dim=18, p_init=p_scale)
     
-    hmm_state_probs = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+    rls_trend.w, rls_range.w, rls_spoof.w, rls_cascade.w = w_t.copy(), w_r.copy(), w_s.copy(), w_c.copy()
     
-    validation_buffer = deque(maxlen=100)
+    regime_detector = QuantumMarkovRegimeDetector()
+    
     prediction_buffer = deque()
     historical_probs = deque(maxlen=2000) 
     ewma_mse = 0.25
     
     rolling_notional_volume = 0.0
     amihud_anchor_price = 0.0
-    
-    avg_win_r = 1.5
-    avg_loss_r = 1.0
     
     if "BTC" in symbol: amihud_threshold = 2_500_000.0  
     elif "ETH" in symbol or "SOL" in symbol: amihud_threshold = 1_000_000.0   
@@ -419,7 +329,6 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         shannon_entropy = 1.0
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
-            variance_history.append(inst_variance)
             shannon_entropy = compute_permutation_entropy(list(log_returns)[-20:])
             entropy_history.append(shannon_entropy) 
 
@@ -432,35 +341,15 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             meso_slow_ema = (sim_price - meso_slow_ema) * a_slow + meso_slow_ema
         meso_momentum_z = ((meso_fast_ema - meso_slow_ema) / meso_slow_ema) / (math.sqrt(inst_variance) + 1e-9)
 
-        vol_notional = c_prev['volume'] * c_prev['close']
-        vol_history.append(vol_notional)
-        
-        current_bucket_vol += vol_notional
-        if c_prev['close'] >= c_prev['open']: current_bucket_buy_vol += vol_notional
-            
-        if len(vol_history) >= 100:
-            avg_tick_vol = float(np.mean(list(vol_history)))
-            dynamic_bucket_size = max(base_vpin_bucket_size * 0.1, min(base_vpin_bucket_size * 3.0, avg_tick_vol * 75.0))
-        else:
-            dynamic_bucket_size = base_vpin_bucket_size
-
-        if current_bucket_vol >= dynamic_bucket_size:
-            sell_vol = current_bucket_vol - current_bucket_buy_vol
-            vpin_score = abs(current_bucket_buy_vol - sell_vol) / (current_bucket_vol + 1e-9)
-            vpin_history.append(vpin_score)
-            
-            if len(vpin_history) > 20:
-                hist_arr = np.array(vpin_history)
-                synthetic_vpin_z = float((vpin_score - np.mean(hist_arr)) / (np.std(hist_arr) + 1e-9))
-            
-            current_bucket_vol = 0.0
-            current_bucket_buy_vol = 0.0
-
-        closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
-        vols_slice = np.array([cx["volume"] for cx in target_candles[max(0, i-101):i]])
-        regime, hmm_state_probs, kaufman_er = detect_hmm_regime(closes_slice, vols_slice, hmm_state_probs)
-
         vol_scalar = min(1.0, max(0.0, inst_variance * 5000.0))
+        
+        closes_slice = np.array([cx["close"] for cx in target_candles[max(0, i-101):i]])
+        if len(closes_slice) >= 20:
+            directional_change = abs(closes_slice[-1] - closes_slice[0])
+            absolute_changes = np.sum(np.abs(np.diff(closes_slice)))
+            kaufman_er = float(directional_change / (absolute_changes + 1e-9))
+        else: kaufman_er = 0.5
+            
         alpha_fast = np.clip(0.05 + (vol_scalar * 0.25) + (kaufman_er * 0.05), 0.05, 0.35)
         alpha_slow = alpha_fast / 5.0
 
@@ -475,7 +364,6 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         
         ofi_slow_mean = (1 - alpha_slow) * ofi_slow_mean + alpha_slow * mlofi_step
         ofi_slow_var = (1 - alpha_slow) * ofi_slow_var + alpha_slow * (mlofi_step - ofi_slow_mean)**2
-        ofi_slow_z = (mlofi_step - ofi_slow_mean) / (math.sqrt(ofi_slow_var) + 1e-9)
         
         vol_ewma = (1 - 0.05) * vol_ewma + 0.05 * vol_step if vol_ewma > 0 else vol_step
         normalized_volume = vol_step / (vol_ewma + 1e-9)
@@ -494,29 +382,53 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         sim_t_imb = volume_signed
         trade_imbalances.append(sim_t_imb)
         
-        # 🚀 4D ONLINE CHOLESKY WHITENING (Production Match)
-        raw_vec = np.array([ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha], dtype=np.float64)
-        features = cholesky_engine.update_and_whiten(raw_vec)
+        # Proxies for 1m offline backtesting mapped to 11D array
+        micro_elasticity_z = (c_prev['high'] - c_prev['low']) / (sim_price * math.sqrt(inst_variance) + 1e-9)
+        ou_divergence_z = (sim_price - meso_slow_ema) / (sim_price * math.sqrt(inst_variance) + 1e-9)
+        cfi_z = 0.0 # Unavailable in 1m OHLCV
+        jump_z = abs(price_step) / (sim_price * math.sqrt(inst_variance) + 1e-9)
+        swd_z = hawkes_z - (price_step / (sim_price * math.sqrt(inst_variance) + 1e-9))
+        accel_z = hawkes_acceleration
         
-        attention_temp = max(0.15, min(0.48, 0.18 + 0.30 * (1.0 - kaufman_er)))
-        feature_magnitudes = np.abs(features)
-        exp_f = np.exp(feature_magnitudes / attention_temp)
-        attended_features = features * (exp_f / (np.sum(exp_f) + 1e-9)) * 4.0
+        raw_vec = np.array([
+            ofi_fast_z, hawkes_z, meso_momentum_z, tensor_alpha,
+            micro_elasticity_z, ou_divergence_z, cfi_z,
+            jump_z, shannon_entropy, swd_z, accel_z
+        ], dtype=np.float64)
+
+        f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11 = cholesky_engine.update_and_whiten(raw_vec)
         
-        r_blend = 1.0 / (1.0 + math.exp(-12.0 * (kaufman_er - 0.35)))
+        exploit_spoof = f7 * -f3      
+        predict_iceberg = f1 * f10    
+        kinetic_reversal = f11 * f2   
+        survive_cascade = f8 * f5     
+        exploit_macro = f4 * f1       
+        exploit_reversion = f6 * f2   
+        
+        volterra = np.array([
+            f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11,
+            exploit_spoof, predict_iceberg, kinetic_reversal, survive_cascade, exploit_macro, exploit_reversion,
+            1.0
+        ], dtype=np.float64)
 
-        logit_trend = np.dot(rls_trending.w, attended_features)
-        logit_range = np.dot(rls_ranging.w, attended_features)
-        logit_fused = (r_blend * logit_trend) + ((1.0 - r_blend) * logit_range)
+        # 🚀 V25.2 FIX: L2 Vector Normalization (Replaces Ruinous Absolute Value Softmax)
+        norm = np.linalg.norm(volterra) + 1e-9
+        volterra_att = volterra / norm
+        
+        beliefs = regime_detector.update_beliefs(kaufman_er, shannon_entropy, 0.0, jump_z)
+        p_t, p_r, p_s, p_c = beliefs
 
-        logit = max(-5.0, min(5.0, logit_fused))
+        l_t = float(np.dot(rls_trend.w, volterra_att))
+        l_r = float(np.dot(rls_range.w, volterra_att))
+        l_s = float(np.dot(rls_spoof.w, volterra_att))
+        l_c = float(np.dot(rls_cascade.w, volterra_att))
+
+        logit = float(np.clip((p_t * l_t) + (p_r * l_r) + (p_s * l_s) + (p_c * l_c), -5.0, 5.0))
         p_up = 1.0 / (1.0 + math.exp(-logit))
         p_down = 1.0 - p_up
         
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
-        
-        prob_success = calibrate_confidence(prob_success, kaufman_er, shannon_entropy, ewma_mse)
         
         historical_probs.append(prob_success)
         if len(historical_probs) >= 30:
@@ -539,33 +451,29 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         dynamic_gate = max(0.515, min(dynamic_ceiling, raw_gate))  
 
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:  
-            old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_r_blend = prediction_buffer.popleft()
+            old_ts, old_price, old_features, old_p_up, virt_sl, virt_tp, old_action_dir, old_beliefs = prediction_buffer.popleft()
             
             if sim_price != old_price and old_price > 0:
                 price_delta = sim_price - old_price
                 risk_distance = abs(old_price - virt_sl) + 1e-9
                 realized_r = price_delta / risk_distance
                 
+                # 🚀 V25.2 FIX: Pure Directional RLS Target
                 if old_action_dir == "BUY":
-                    y_target = np.clip(0.5 + (realized_r / 4.0), 0.0, 1.0)
+                    y_target = 1.0 if realized_r > 0 else 0.0
                 else:
-                    y_target = np.clip(0.5 - (realized_r / 4.0), 0.0, 1.0)
+                    y_target = 1.0 if realized_r < 0 else 0.0
 
                 old_p_up_prob = old_p_up if old_action_dir == "BUY" else (1.0 - old_p_up)
                 
-                # 🚀 INVERTED ENTROPY SCALING
-                entropy_norm = min(1.0, max(0.0, shannon_entropy))
-                dynamic_lambda = max(0.965, min(0.998, 0.998 - (entropy_norm * 0.030)))
+                e_t = rls_trend.update(old_features, y_target, old_p_up_prob)
+                e_r = rls_range.update(old_features, y_target, old_p_up_prob)
+                e_s = rls_spoof.update(old_features, y_target, old_p_up_prob)
+                e_c = rls_cascade.update(old_features, y_target, old_p_up_prob)
                 
-                err_t = rls_trending.update(old_features, y_target, old_p_up_prob, lam=dynamic_lambda)
-                err_r = rls_ranging.update(old_features, y_target, old_p_up_prob, lam=dynamic_lambda)
-                
-                error = (err_t * old_r_blend) + (err_r * (1.0 - old_r_blend))
+                error = (e_t * old_beliefs[0]) + (e_r * old_beliefs[1]) + (e_s * old_beliefs[2]) + (e_c * old_beliefs[3])
                 ewma_mse = (0.98 * ewma_mse) + (0.02 * (error ** 2))
 
-        t_imb_z = (sim_t_imb - np.mean(trade_imbalances)) / (np.std(trade_imbalances) + 1e-9) if len(trade_imbalances) > 10 else 0.0
-        skew = ((c_prev['close'] - c_prev_prev['close']) / (c_prev_prev['close'] + 1e-9)) * 10000.0
-        
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         atr_proxy = vol_sigma * sim_price
         
@@ -578,7 +486,7 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         virt_sl = sim_price - (sl_dist_pct * sim_price) if action_dir == "BUY" else sim_price + (sl_dist_pct * sim_price)
         virt_tp = sim_price + (tp_dist_pct * sim_price) if action_dir == "BUY" else sim_price - (tp_dist_pct * sim_price)
         
-        prediction_buffer.append((now_ts, sim_price, attended_features, p_up, virt_sl, virt_tp, action_dir, r_blend))
+        prediction_buffer.append((now_ts, sim_price, volterra_att, p_up, virt_sl, virt_tp, action_dir, beliefs))
 
         notional_vol = c_prev['volume'] * c_prev['close']
         rolling_notional_volume += notional_vol
@@ -593,19 +501,12 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             
             if len(rolling_outcomes) >= 10:
                 p_win = np.mean(rolling_outcomes)
-                q_loss = 1.0 - p_win
-                b_payoff = avg_win_r / (avg_loss_r + 1e-9)
-                
-                if b_payoff <= 0:
-                    kelly_f = 0.003
-                else:
-                    kf = (p_win * b_payoff - q_loss) / b_payoff
-                    kelly_f = max(0.003, kf / 2.0)
             else:
                 p_win = 0.50
-                kelly_f = 0.010
                 
             routing_mode = "STANDARD"
+            regime = "TRENDING" if p_t > 0.5 else "RANGING"
+            
             if vacuum_blocked and prob_success > 0.55:
                 routing_mode = "MAKER_ONLY"
                 regime = "MEAN_REVERTING"
@@ -722,14 +623,19 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                         slippage_penalty = (dynamic_slippage_bps * 2) / 10000.0
                         applied_fee = TAKER_FEE * 2
                     
-                    base_fraction = max(0.002, kelly_f / 2.0)
-                    cvar_penalty = calculate_rolling_cvar(variance_history)
-                    edge_factor = min(1.5, max(0.5, net_edge_bps / 50.0))
+                    # 🚀 V25.2 FIX: Accurate Fixed Fractional Sizing Simulation
+                    base_risk_pct = 0.01 
+                    vol_scalar = 1.0 / (1.0 + (inst_variance * 1000.0))
+                    confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
                     
-                    fractional_risk = max(0.002, min(0.025, base_fraction * cvar_penalty * edge_factor))
+                    final_risk_pct = base_risk_pct * vol_scalar * confidence_scalar
+                    fractional_risk = min(0.015, final_risk_pct) 
+                    
+                    # Maximum allowable positional leverage modeled at 2.0x (Matches Risk Vault)
+                    position_leverage = min(p.leverage, fractional_risk / sl_dist_pct)
                     
                     net_unleveraged = gross - applied_fee - funding_drag - slippage_penalty
-                    net_leveraged = net_unleveraged * p.leverage * (fractional_risk / 0.025)
+                    net_leveraged = net_unleveraged * position_leverage
 
                     trades.append({
                         "i": i, "direction": action_dir, "regime": regime,
@@ -738,12 +644,6 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     
                     is_win = net_leveraged > 0
                     rolling_outcomes.append(1.0 if is_win else 0.0)
-                    
-                    actual_r = gross / sl_dist_pct
-                    if is_win:
-                        avg_win_r = (avg_win_r * 0.95) + (min(5.0, abs(actual_r)) * 0.05)
-                    else:
-                        avg_loss_r = (avg_loss_r * 0.95) + (min(2.5, abs(actual_r)) * 0.05)
                     
                     if net_leveraged < 0:
                         recent_losses = sum(1 for out in list(rolling_outcomes)[-2:] if out == 0.0)
@@ -754,9 +654,9 @@ def run_v17_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     else:
                         cooldown_until = i + bars_held  
 
-    return summarize(trades)
+    return summarize(trades, len(target_candles))
 
-def summarize(trades: List[Dict]) -> Dict:
+def summarize(trades: List[Dict], total_minutes: int = 0) -> Dict:
     if not trades: return {"trades": 0}
         
     nets = np.array([t["net"] for t in trades])
@@ -784,7 +684,11 @@ def summarize(trades: List[Dict]) -> Dict:
     
     mean_return = np.mean(nets)
     std_return = np.std(nets) + 1e-9
-    sharpe = (mean_return / std_return) * math.sqrt(len(trades))
+    
+    # 🚀 V25.2 FIX: Intraday Sharpe Annualization
+    assumed_days = max(1.0, total_minutes / 1440.0)
+    trades_per_day = len(trades) / assumed_days
+    sharpe = (mean_return / std_return) * math.sqrt(252 * trades_per_day)
     
     return {
         "trades": len(trades),
@@ -806,7 +710,7 @@ def summarize(trades: List[Dict]) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V17.0 APEX TITANIUM OMEGA Walk-Forward Validation (5 Folds)...")
+    print("\n⏳ Running V25.2 APEX QUANTUM PRIME Walk-Forward Validation (5 Folds)...")
     
     rr_ratios = [1.5, 2.0, 2.5]
     atr_mults = [2.0, 2.5, 3.0] 
@@ -828,7 +732,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 
                 if test_end > total_len: break
                 
-                test_result = run_v17_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v25_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
                 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -880,9 +784,9 @@ if __name__ == "__main__":
         split = int(len(t_cand) * 0.6)
         params = Params()
 
-        test = run_v17_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v25_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
                 
-        print("\n=== V17.0 APEX TITANIUM OMEGA OUT-OF-SAMPLE (last 40%) ===")
+        print("\n=== V25.2 APEX QUANTUM PRIME OUT-OF-SAMPLE (last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float): print(f"  {k}: {v:.4f}")
             else: print(f"  {k}: {v}")

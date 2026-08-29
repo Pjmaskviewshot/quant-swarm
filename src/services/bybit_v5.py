@@ -1,14 +1,17 @@
 """
-💎 V22.9 APEX QUANTUM PRIME: TITANIUM API EXECUTOR
+💎 V25.0 APEX QUANTUM PRIME: TITANIUM API EXECUTOR
 --------------------------------------------------------
 Cloud-Resilient, Zero-Latency Unified Bybit Exchange Connector.
 
-Massive Upgrades (V22.9):
-- Unmanaged WebSocket Heartbeat Catch: Disables fragile `autoping` and manually 
-  catches `aiohttp` internal transport crashes to guarantee instant stream recovery.
-- Multi-Route DNS Fallback (Auto-swaps api.bybit.com <-> api.bytick.com)
-- Advanced TCP Connection Pooling 
-- Strict Modulo Arithmetic Rounding for Micro-caps.
+Architectural Supremacy (V25.0):
+1. O(1) Memory Leak Eradication: Fixed a critical memory leak in the private WebSocket 
+   `_execution_cache` by enforcing a bounded dictionary to prevent RAM overflow during 
+   high-frequency execution.
+2. Legacy Bloat Removal: Purged the useless `LegacyAdapterClient` and streamlined 
+   the API call routing matrix into a pure Direct-Drive passthrough.
+3. Unmanaged WebSocket Heartbeat Catch: Disables fragile `autoping` and manually 
+   catches `aiohttp` internal transport crashes to guarantee instant stream recovery.
+4. Multi-Route DNS Fallback (Auto-swaps api.bybit.com <-> api.bytick.com)
 """
 
 import time
@@ -69,14 +72,6 @@ class TokenBucketRateLimiter:
             await asyncio.sleep(max(0.005, sleep_time)) 
 
 
-class LegacyAdapterClient:
-    def __getattr__(self, name):
-        def _dummy_callable(*args, **kwargs):
-            pass
-        _dummy_callable.__name__ = name
-        return _dummy_callable
-
-
 class BybitUnifiedExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key or ""
@@ -105,12 +100,14 @@ class BybitUnifiedExecutor:
         self._ws_task: Optional[asyncio.Task] = None
         self._clock_sync_task: Optional[asyncio.Task] = None  
         self._order_waiters: Dict[str, List[asyncio.Future]] = {}
+        
+        # 🚀 V25.0 Capped Execution Cache to prevent memory leaks
         self._execution_cache: Dict[str, Dict[str, Any]] = {}
+        
         self._waiter_lock = asyncio.Lock()
         self._is_terminating = False
         
-        self.client = LegacyAdapterClient()
-        logger.info(f"Initialized V22.9 Titanium Async Bybit V5 Executor (Testnet: {self.testnet})")
+        logger.info(f"Initialized V25.0 Titanium Async Bybit V5 Executor (Testnet: {self.testnet})")
 
     async def initialize(self):
         if not self.session:
@@ -162,6 +159,7 @@ class BybitUnifiedExecutor:
 
         if endpoint == "/v5/order/create" and method == "POST":
             if "orderLinkId" not in kwargs or not kwargs["orderLinkId"]: kwargs["orderLinkId"] = f"APEX_{uuid.uuid4().hex[:16]}"
+            # Strip limit brackets. V25 places `trading-stop` after order confirmation to avoid rejection errors.
             kwargs.pop("stopLoss", None)
             kwargs.pop("takeProfit", None)
 
@@ -238,32 +236,13 @@ class BybitUnifiedExecutor:
                     raise Exception(error_str)
                 await asyncio.sleep(1.0)
 
-    async def safe_call(self, *args, **kwargs) -> Any:
-        if args and isinstance(args[0], str):
-            method = args[0]
-            endpoint = args[1] if len(args) > 1 else ""
-            is_exec = kwargs.pop("is_execution", False)
-            return await self._safe_api_call(method, endpoint, is_execution=is_exec, **kwargs)
-        
-        if not args: return {"retCode": -1, "retMsg": "Empty call", "result": {}}
-        func = args[0]
-        func_name = getattr(func, '__name__', str(func)) if hasattr(func, '__name__') else str(func).split(" ")[2].split(".")[-1] if "bound method" in str(func) else str(func)
-        
-        endpoint_map = {
-            "get_tickers": ("GET", "/v5/market/tickers", False), "get_orderbook": ("GET", "/v5/market/orderbook", False),
-            "get_positions": ("GET", "/v5/position/list", False), "get_wallet_balance": ("GET", "/v5/account/wallet-balance", False),
-            "place_order": ("POST", "/v5/order/create", True), "cancel_order": ("POST", "/v5/order/cancel", True),
-            "cancel_all_orders": ("POST", "/v5/order/cancel-all", True), "set_leverage": ("POST", "/v5/position/set-leverage", True),
-            "switch_position_mode": ("POST", "/v5/position/switch-mode", True), "set_trading_stop": ("POST", "/v5/position/trading-stop", True),
-            "get_open_orders": ("GET", "/v5/order/realtime", False), "get_order_history": ("GET", "/v5/order/history", False),
-            "get_closed_pnl": ("GET", "/v5/position/closed-pnl", False), "get_kline": ("GET", "/v5/market/kline", False),
-            "get_instruments_info": ("GET", "/v5/market/instruments-info", False)
-        }
-        
-        if func_name in endpoint_map:
-            method, endpoint, is_exec = endpoint_map[func_name]
-            return await self._safe_api_call(method, endpoint, is_execution=is_exec, **kwargs)
-        else: return {"retCode": -1, "retMsg": f"Unmapped API endpoint: {func_name}", "result": {}}
+    async def safe_call(self, method: str, endpoint: str, **kwargs) -> Any:
+        """
+        🚀 V25.0 PURE DIRECT-DRIVE ROUTING
+        Bypasses legacy string-parsing and endpoint mapping. Routes directly to the Bybit V5 REST API.
+        """
+        is_exec = kwargs.pop("is_execution", False)
+        return await self._safe_api_call(method.upper(), endpoint, is_execution=is_exec, **kwargs)
 
     async def connect_ws(self):
         if not self.session: await self.initialize()
@@ -275,8 +254,8 @@ class BybitUnifiedExecutor:
         backoff = 1.0
         while not self._is_terminating:
             try:
-                # 🚀 V22.9 FIX: Disable autoping. We will rely on Bybit's organic stream to keep the socket alive.
-                # If aiohttp autoping fails, it raises an uncatchable exception that crashes the stream silently.
+                # 🚀 V25.0 FIX: Disable autoping.
+                # Rely on Bybit's organic stream to keep the socket alive. Prevents uncatchable aiohttp transport crashes.
                 async with self.session.ws_connect(self.ws_private_url, autoping=False) as ws:
                     self._ws_connection = ws
                     backoff = 1.0
@@ -324,8 +303,15 @@ class BybitUnifiedExecutor:
                 status = order.get("orderStatus")
                 if order_id:
                     self._execution_cache[order_id] = order
+                    
+                    # 🚀 V25.0 FIX: Enforce bounded cache size to prevent memory leaks
+                    if len(self._execution_cache) > 2000:
+                        for k in list(self._execution_cache.keys())[:500]:
+                            self._execution_cache.pop(k, None)
+
                     if status in ["Filled", "PartiallyFilled", "Cancelled", "Rejected"]:
                         await self._resolve_ws_future(order_id, order)
+                        
         elif topic == "execution":
             for exec_report in data:
                 order_id = exec_report.get("orderId")
@@ -428,10 +414,14 @@ class BybitUnifiedExecutor:
                     if time.time() < self.temporary_symbol_bans[symbol]: continue
                     else: del self.temporary_symbol_bans[symbol]
                     
-                turnover, bid, ask = float(t.get("turnover24h", 0.0) or 0.0), float(t.get("bid1Price", 0.0) or 0.0), float(t.get("ask1Price", 0.0) or 0.0)
+                turnover = float(t.get("turnover24h", 0.0) or 0.0)
+                bid = float(t.get("bid1Price", 0.0) or 0.0)
+                ask = float(t.get("ask1Price", 0.0) or 0.0)
+                
                 if bid <= 0 or ask <= bid or turnover < min_turnover: continue
                 
-                high, low = float(t.get("highPrice24h", ask)), float(t.get("lowPrice24h", bid))
+                high = float(t.get("highPrice24h", ask))
+                low = float(t.get("lowPrice24h", bid))
                 if low <= 0: continue
                 
                 volatility_bps = ((high - low) / low) * 10000.0
@@ -441,11 +431,12 @@ class BybitUnifiedExecutor:
                 live_spread_bps = ((ask - bid) / bid) * 10000.0
                 if live_spread_bps > dynamic_spread_cap_bps: continue 
                 
-                bid_size, ask_size = float(t.get("bid1Size", 0.0) or 0.0), float(t.get("ask1Size", 0.0) or 0.0)
+                bid_size = float(t.get("bid1Size", 0.0) or 0.0)
+                ask_size = float(t.get("ask1Size", 0.0) or 0.0)
                 top_depth_usd = min(bid * bid_size, ask * ask_size)
                 if top_depth_usd < 250.0: continue
 
-                valid_assets.append({"symbol": symbol, "spread_bps": live_spread_bps, "vol_bps": volatility_bps, "turnover": turnover, "top_depth_usd": top_depth_usd})
+                valid_assets.append({"symbol": symbol, "spread_bps": live_spread_bps, "vol_bps": volatility_bps, "turnover": turnover})
                 
             valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]

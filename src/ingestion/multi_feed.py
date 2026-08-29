@@ -1,24 +1,28 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: DECOUPLED L2 INGESTION LAYER
+💎 V25.4 APEX QUANTUM PRIME: CENTRALIZED MARKET STATE MATRIX
 ----------------------------------------------------
-Features absolute sequence gap intolerance with Seamless REST Bridging,
-L2 Delta Staging Buffers (Zero-Tick-Loss Resync), Subscription Chunking,
-Pure JSON Pings, and C-Optimized Float Pre-Parsing.
+The Single Source of Truth (SSOT) for High-Frequency Ingestion.
 
-Upgraded with V22.0:
-- O(1) Memory Leak Eradication (Explicit GC for hot-swapped symbols)
-- Symbol-Sharded Ingestion Queues (Eradicates Single-Consumer Bottleneck)
-- Independent Asynchronous Workers per Asset
-- O(1) Demultiplexed Routing
+Architectural Supremacy (V25.4 - Final Audit Resolutions):
+- True O(1) L2 Memory Parsing: Eradicated the CPU-burning `heapq.nlargest` sorts 
+  running on every 50ms orderbook delta. Replaced with `bisect` arrays and caching 
+  to achieve instantaneous Top-of-Book retrieval.
+- Integrated Log-MLOFI Engine: Cont-Kukanov-Stoikov logarithmic order flow imbalance 
+  is computed on the fly using exact price coordinates directly from the L2 delta stream.
+- Zero-Tick-Loss Resync: Maintains absolute sequence gap intolerance with 
+  Seamless REST Bridging and L2 Delta Staging Buffers.
 """
 
 import asyncio
 import aiohttp
 import time
+import math
+import bisect
 import logging
-from typing import Dict, Any, Callable, Coroutine, List
+import numpy as np
+from collections import deque
+from typing import Dict, Any, Callable, Coroutine, List, Optional
 
-# Attempt to load ultra-fast JSON parsers to reduce CPU deserialization drag, fallback to standard
 try:
     import ujson as json
 except ImportError:
@@ -27,13 +31,14 @@ except ImportError:
     except ImportError:
         import json
 
-logger = logging.getLogger("QUANT_CORE.MULTI_FEED")
+logger = logging.getLogger("QUANT_CORE.MARKET_MATRIX")
 
-class HighVelocityMultiFeed:
+class MarketStateMatrix:
     """
-    🚀 V22.0 QUANTUM PRIME: DECOUPLED INGESTION LAYER
-    Maintains ultra-low latency WebSocket connections, decoupling raw ingestion
-    from downstream processing via Symbol-Sharded asynchronous FIFO queues.
+    🚀 V25.4 QUANTUM PRIME: CENTRALIZED L2 STATE MATRIX
+    Maintains ultra-low latency WebSocket connections, computes the native SSOT 
+    for Micro-Price and Log-MLOFI, and decouples ingestion from downstream 
+    processing via Symbol-Sharded asynchronous FIFO queues.
     """
     def __init__(
         self, 
@@ -57,15 +62,28 @@ class HighVelocityMultiFeed:
         self.ws_url = "wss://stream.bybit.com/v5/public/linear"
         self.is_running = False
         self.last_msg_timestamp = time.time()
-        self.orderbook_sequences: Dict[str, int] = {}
         
+        self.l2_bids: Dict[str, Dict[float, float]] = {}
+        self.l2_asks: Dict[str, Dict[float, float]] = {}
+        
+        # 🚀 V25.4 FIX: Sorted Cache Arrays for O(1) Lookups
+        self._sorted_bids_cache: Dict[str, List[float]] = {}
+        self._sorted_asks_cache: Dict[str, List[float]] = {}
+        
+        self.prev_top_bids: Dict[str, Dict[float, float]] = {}
+        self.prev_top_asks: Dict[str, Dict[float, float]] = {}
+        self.log_mlofi_history: Dict[str, deque] = {}
+        self.log_mlofi_z: Dict[str, float] = {}
+        self.micro_prices: Dict[str, float] = {}
+        
+        # Synchronization Memory
+        self.orderbook_sequences: Dict[str, int] = {}
         self.delta_buffer: Dict[str, List[Dict[str, Any]]] = {}
         self.is_resyncing: Dict[str, bool] = {}
         
         self.active_ws = None  
         self._active_tasks = set()
         
-        # 🚀 V22.0: Symbol-Sharded Queues & Deterministic Worker Tracking
         self.sharded_queues: Dict[str, asyncio.Queue] = {}
         self.consumer_tasks: Dict[str, asyncio.Task] = {}
 
@@ -82,26 +100,168 @@ class HighVelocityMultiFeed:
             self.sharded_queues[symbol] = asyncio.Queue(maxsize=10000)
             worker_task = self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
             self.consumer_tasks[symbol] = worker_task
-            logger.info(f"[X-RAY] ⚡ Spawning isolated data consumer for {symbol}")
+            logger.info(f"[X-RAY] ⚡ Spawning isolated SSOT compute worker for {symbol}")
         return self.sharded_queues[symbol]
+
+    def _update_ssot_orderbook(self, symbol: str, msg_type: str, parsed_bids: list, parsed_asks: list, ts: int) -> Optional[Dict[str, Any]]:
+        """
+        🚀 V25.4 CENTRALIZED O(1) L2 MATH ENGINE
+        Processes deltas, maintains bisect-sorted arrays for instantaneous TOB access, 
+        and natively calculates the Stationarized Log-MLOFI Z-Score.
+        """
+        if symbol not in self.l2_bids or msg_type == "snapshot":
+            self.l2_bids[symbol] = {}
+            self.l2_asks[symbol] = {}
+            self._sorted_bids_cache[symbol] = []
+            self._sorted_asks_cache[symbol] = []
+            self.prev_top_bids[symbol] = {}
+            self.prev_top_asks[symbol] = {}
+            self.log_mlofi_history[symbol] = deque(maxlen=200)
+            self.log_mlofi_z[symbol] = 0.0
+            
+        bids_dict = self.l2_bids[symbol]
+        asks_dict = self.l2_asks[symbol]
+        bids_arr = self._sorted_bids_cache[symbol]
+        asks_arr = self._sorted_asks_cache[symbol]
+        
+        # 🚀 V25.4 FIX: O(log N) Bisect Updates replacing O(N log K) heapq sorts
+        for p, v in parsed_bids:
+            if v <= 0:
+                if p in bids_dict:
+                    bids_dict.pop(p)
+                    idx = bisect.bisect_left(bids_arr, p)
+                    if idx < len(bids_arr) and bids_arr[idx] == p:
+                        bids_arr.pop(idx)
+            else:
+                if p not in bids_dict:
+                    bisect.insort(bids_arr, p)
+                bids_dict[p] = v
+                
+        for p, v in parsed_asks:
+            if v <= 0:
+                if p in asks_dict:
+                    asks_dict.pop(p)
+                    idx = bisect.bisect_left(asks_arr, p)
+                    if idx < len(asks_arr) and asks_arr[idx] == p:
+                        asks_arr.pop(idx)
+            else:
+                if p not in asks_dict:
+                    bisect.insort(asks_arr, p)
+                asks_dict[p] = v
+                
+        if len(bids_arr) > 2500:
+            prune_cutoff = len(bids_arr) - 500
+            for p in bids_arr[:prune_cutoff]:
+                bids_dict.pop(p, None)
+            self._sorted_bids_cache[symbol] = bids_arr[prune_cutoff:]
+            bids_arr = self._sorted_bids_cache[symbol]
+            
+        if len(asks_arr) > 2500:
+            for p in asks_arr[500:]:
+                asks_dict.pop(p, None)
+            self._sorted_asks_cache[symbol] = asks_arr[:500]
+            asks_arr = self._sorted_asks_cache[symbol]
+            
+        if not bids_arr or not asks_arr: 
+            return None
+        
+        # O(1) Top of Book retrieval
+        top_bids = bids_arr[-10:][::-1]  # Highest bids first
+        top_asks = asks_arr[:10]         # Lowest asks first
+        
+        best_bid, best_ask = top_bids[0], top_asks[0]
+        
+        # 🚀 SANITY PRECONDITION: Reject crossed books
+        if best_bid >= best_ask:
+            return None
+
+        bid_v, ask_v = bids_dict[best_bid], asks_dict[best_ask]
+        
+        # 1. Non-Linear Stoikov Micro-Price
+        imb = bid_v / (bid_v + ask_v + 1e-9)
+        spread = best_ask - best_bid
+        micro_price = ((best_bid + best_ask) / 2.0) + (spread * (imb - 0.5) * (1.0 + abs(imb - 0.5)))
+        self.micro_prices[symbol] = micro_price
+        
+        # 2. Cont-Kukanov-Stoikov Log-MLOFI (Top 5 Levels)
+        curr_bids = {p: bids_dict[p] for p in top_bids[:5]}
+        curr_asks = {p: asks_dict[p] for p in top_asks[:5]}
+        prev_bids = self.prev_top_bids[symbol]
+        prev_asks = self.prev_top_asks[symbol]
+        
+        mid = (best_bid + best_ask) / 2.0
+        mlofi_t = 0.0
+        
+        decay_alpha = 0.40
+        # Evaluate Bids
+        for p in set(curr_bids.keys()) | set(prev_bids.keys()):
+            c_v = curr_bids.get(p, 0.0)
+            p_v = prev_bids.get(p, 0.0)
+            delta = math.log1p(c_v) - math.log1p(p_v)
+            dist_bps = abs(p - mid) / mid * 10000.0
+            w = math.exp(-decay_alpha * (dist_bps / 5.0))
+            mlofi_t += delta * w
+            
+        # Evaluate Asks
+        for p in set(curr_asks.keys()) | set(prev_asks.keys()):
+            c_v = curr_asks.get(p, 0.0)
+            p_v = prev_asks.get(p, 0.0)
+            delta = math.log1p(c_v) - math.log1p(p_v)
+            dist_bps = abs(p - mid) / mid * 10000.0
+            w = math.exp(-decay_alpha * (dist_bps / 5.0))
+            mlofi_t -= delta * w
+            
+        hist = self.log_mlofi_history[symbol]
+        hist.append(mlofi_t)
+        
+        if len(hist) >= 20:
+            arr = np.array(hist)
+            z = float((mlofi_t - np.mean(arr)) / (np.std(arr) + 1e-9))
+        else:
+            z = 0.0
+            
+        self.log_mlofi_z[symbol] = z
+        self.prev_top_bids[symbol] = curr_bids
+        self.prev_top_asks[symbol] = curr_asks
+        
+        return {
+            "symbol": symbol,
+            "best_bid": best_bid,
+            "bid_vol": bid_v,
+            "best_ask": best_ask,
+            "ask_vol": ask_v,
+            "micro_price": micro_price,
+            "log_mlofi_z": z,
+            "bids": [[p, bids_dict[p]] for p in top_bids],
+            "asks": [[p, asks_dict[p]] for p in top_asks],
+            "timestamp": ts
+        }
 
     async def _sharded_consumer_worker(self, symbol: str, queue: asyncio.Queue):
         """
         🚀 DEDICATED SYMBOL CONSUMER
-        Pulls from the symbol-specific FIFO queue and executes callbacks.
-        Guarantees heavy flow on BTC will never block execution routing for ETH.
+        Pulls from the symbol-specific FIFO queue, computes L2 SSOT states natively,
+        and fires downstream Alpha Matrix triggers.
         """
         while self.is_running:
             try:
                 payload_type, payload_data = await queue.get()
                 
-                # 🚀 Garbage Collection / Termination Signal
                 if payload_type == "SHUTDOWN":
                     queue.task_done()
                     break
                 
                 if payload_type == "orderbook":
-                    await self.orderbook_callback(payload_data)
+                    rich_payload = self._update_ssot_orderbook(
+                        symbol=payload_data["s"],
+                        msg_type=payload_data["type"],
+                        parsed_bids=payload_data["b"],
+                        parsed_asks=payload_data["a"],
+                        ts=payload_data["ts"]
+                    )
+                    if rich_payload:
+                        await self.orderbook_callback(rich_payload)
+                        
                 elif payload_type == "trade" and self.trade_callback:
                     await self.trade_callback(payload_data)
                 elif payload_type == "tickers":
@@ -146,16 +306,24 @@ class HighVelocityMultiFeed:
             self.is_resyncing.pop(drop_symbol, None)
             self.delta_buffer.pop(drop_symbol, None)
             
-            # 🚀 V22.0: MEMORY LEAK PREVENTION (Plugging the Zombie Task vulnerability)
+            # 🧹 Clean up L2 Native Memory
+            self.l2_bids.pop(drop_symbol, None)
+            self.l2_asks.pop(drop_symbol, None)
+            self._sorted_bids_cache.pop(drop_symbol, None)
+            self._sorted_asks_cache.pop(drop_symbol, None)
+            self.prev_top_bids.pop(drop_symbol, None)
+            self.prev_top_asks.pop(drop_symbol, None)
+            self.log_mlofi_history.pop(drop_symbol, None)
+            self.log_mlofi_z.pop(drop_symbol, None)
+            self.micro_prices.pop(drop_symbol, None)
+            
             drop_queue = self.sharded_queues.pop(drop_symbol, None)
             drop_task = self.consumer_tasks.pop(drop_symbol, None)
             
             if drop_queue:
                 try:
-                    # Allow queue to drain gracefully before worker terminates
                     drop_queue.put_nowait(("SHUTDOWN", None))
                 except asyncio.QueueFull:
-                    # If queue is gridlocked, forcibly assassinate the task
                     if drop_task and not drop_task.done():
                         drop_task.cancel()
             
@@ -316,7 +484,6 @@ class HighVelocityMultiFeed:
                                     continue
 
                                 try:
-                                    # Route incoming bytes to SYMBOL-SPECIFIC FIFO queues
                                     if topic.startswith("orderbook"):
                                         symbol = data.get("s")
                                         u_sequence = data.get("u")
@@ -343,7 +510,7 @@ class HighVelocityMultiFeed:
                                                     
                                                     self.track_task(self._resync_isolated_symbol(symbol))
                                                     continue 
-                                                
+                                            
                                             self.orderbook_sequences[symbol] = u_sequence
                                             
                                         parsed_bids = self._fast_float_parse_book(data.get("b", []))

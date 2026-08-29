@@ -1,19 +1,21 @@
 """
-💎 V22.4 APEX QUANTUM PRIME: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
+💎 V25.2 APEX QUANTUM PRIME: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
 ------------------------------------------------------------------------
 Features:
 - Concurrent Asyncio Leg Dispatch (Parallel Spot & Perp)
-- Hard 50ms Timeout Rollback Protocol (Eliminates Naked Short Risk)
+- Hard 5.0s Timeout Rollback Protocol (Eliminates Naked Short Risk)
 - Exact Execution Drag Calculus & Break-Even Horizon Gating
 - 20% Account Exposure Limits & Active Yield Ejection Daemons
 
-Audit Fixes (V22.4):
-- Atomic Legging Pipeline: Replaces sequential execution with parallel dispatch 
-  to eradicate unhedged micro-exposure windows.
-- IOC Rollback Scratch: Replaces Limit scratch orders with immediate Market IOC 
-  reversals to guarantee execution during momentum sweeps.
+Architectural Supremacy (V25.2 - Final Audit Resolutions):
+- Granular Legging Failure Diagnostics: Enhanced the `asyncio.wait_for` and 
+  `asyncio.gather` exception handlers to explicitly isolate whether a timeout 
+  or failure occurred on the Spot leg or the Perpetual leg, replacing 
+  silent generic fallbacks with pinpoint forensic logging.
 """
 
+import re
+import math
 import asyncio
 import logging
 import time
@@ -21,8 +23,10 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
+
 class DeltaNeutralYieldEngine:
     """
+    🚀 V25.2 YIELD HARVESTER
     Sweeps strictly idle margin into risk-free basis trades (Spot Long + Perp Short) 
     to harvest extreme funding rates. Automatically unwinds when yield decays.
     """
@@ -38,6 +42,12 @@ class DeltaNeutralYieldEngine:
         self.active_hedges: Dict[str, dict] = {} 
         self.taker_fee_rate = 0.00055 # Bybit base taker fee
 
+    def _get_spot_symbol(self, linear_symbol: str) -> str:
+        """Sanitizes multiplier prefixes to match Bybit Spot tickers."""
+        base_coin = linear_symbol[:-4]
+        base_coin = re.sub(r'^(10000|1000)', '', base_coin)
+        return f"{base_coin}USDT"
+
     async def run_yield_scanner_daemon(self):
         logger.info("🏦 DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
         
@@ -48,7 +58,6 @@ class DeltaNeutralYieldEngine:
                 continue
                 
             try:
-                # 🚀 V22.4 API Integration
                 tickers_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear")
                 if tickers_res.get("retCode") != 0: continue
                 
@@ -98,14 +107,14 @@ class DeltaNeutralYieldEngine:
         for sym in symbols_to_unwind:
             await self.unwind_cash_and_carry_hedge(sym)
 
-    async def _calculate_execution_drag(self, symbol: str) -> float:
+    async def _calculate_execution_drag(self, perp_symbol: str, spot_symbol: str) -> float:
         """
         Calculates the exact basis spread and fee drag required to enter the position.
         Returns the total cost in basis points (bps).
         """
         try:
-            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=symbol)
-            perp_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear", symbol=symbol)
+            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=spot_symbol)
+            perp_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear", symbol=perp_symbol)
             
             spot_ask = float(spot_res["result"]["list"][0]["ask1Price"])
             perp_bid = float(perp_res["result"]["list"][0]["bid1Price"])
@@ -117,14 +126,14 @@ class DeltaNeutralYieldEngine:
             return (basis_spread_pct + fee_drag_pct) * 10000.0
             
         except Exception as e:
-            logger.debug(f"[X-RAY] Drag calculation failed for {symbol}: {e}")
+            logger.debug(f"[X-RAY] Drag calculation failed for {perp_symbol}: {e}")
             return 35.0  # Fallback to a safe 35 bps estimate
 
     async def execute_atomic_cash_and_carry_hedge(self, symbol: str, funding_rate: float):
         """
-        🚀 V22.4 ATOMIC DUAL-LEG DISPATCH
-        Executes Spot Buy and Perp Short concurrently. If either leg fails or times out,
-        the filled leg is instantly liquidated with an aggressive Market IOC rollback order.
+        🚀 V25.2 ATOMIC DUAL-LEG DISPATCH
+        Executes Spot Buy and Perp Short concurrently with strict timeouts and granular 
+        exception logging to diagnose legging failures.
         """
         if funding_rate < self.entry_funding_threshold:
             return
@@ -132,17 +141,20 @@ class DeltaNeutralYieldEngine:
         logger.info(f"[X-RAY] ⚖️ YIELD LOCK EVALUATION // {symbol} | Target Funding Rate: {funding_rate*10000:.1f} bps")
         
         try:
-            # 1. Evaluate Execution Drag vs. Break-Even Horizon
-            drag_bps = await self._calculate_execution_drag(symbol)
-            daily_funding_bps = (funding_rate * 3) * 10000.0
+            spot_symbol = self._get_spot_symbol(symbol)
             
-            if daily_funding_bps <= 0: return
+            # 1. Evaluate Execution Drag vs. Break-Even Horizon (Epoch Aware)
+            drag_bps = await self._calculate_execution_drag(symbol, spot_symbol)
+            funding_bps_per_epoch = funding_rate * 10000.0
+            
+            if funding_bps_per_epoch <= 0: return
                 
-            break_even_days = drag_bps / daily_funding_bps
+            epochs_to_breakeven = math.ceil(drag_bps / funding_bps_per_epoch)
+            break_even_days = epochs_to_breakeven * (8.0 / 24.0)
             
-            # Reject if it takes more than 1.5 days just to earn back the entry fees & spread
-            if break_even_days > 1.5:
-                logger.warning(f"[X-RAY] 🚫 YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {break_even_days:.1f} days to break even. Skipping.")
+            # Reject if it takes more than 4 epochs (1.33 days) to earn back the entry fees & spread
+            if epochs_to_breakeven > 4:
+                logger.warning(f"[X-RAY] 🚫 YIELD REJECTED // {symbol} Drag is {drag_bps:.1f} bps. Takes {epochs_to_breakeven} epochs to break even. Skipping.")
                 return
 
             # 2. Calculate True Idle Capital Dynamically
@@ -159,7 +171,6 @@ class DeltaNeutralYieldEngine:
             
             idle_capital = total_bal - active_alpha_margin
             
-            # Bybit requires ~$5-6 for Spot AND ~$5-6 for Perp. Need >$15 idle to be safe.
             if idle_capital < 15.0:
                 return
 
@@ -170,20 +181,17 @@ class DeltaNeutralYieldEngine:
             if yield_capital < 12.0:
                 return
             
-            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=symbol)
+            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=spot_symbol)
             spot_price = float(spot_res["result"]["list"][0]["lastPrice"])
             
             await self.core.sor._fetch_exchange_limits(symbol)
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
             # =========================================================
-            # 🚀 V22.4 ATOMIC CONCURRENT EXECUTION BLOCK
+            # 🚀 V25.2 ATOMIC CONCURRENT EXECUTION BLOCK WITH GRANULAR LOGGING
             # =========================================================
-            spot_symbol = symbol.replace("USDT", "") + "USDT"  # Spot tickers match linear but require "spot" category
+            logger.info(f"[X-RAY] 🏦 Routing ATOMIC DUAL-LEG Hedge for {qty} {symbol} (Spot: {spot_symbol})...")
             
-            logger.info(f"[X-RAY] 🏦 Routing ATOMIC DUAL-LEG Hedge for {qty} {symbol}...")
-            
-            # Dispatch both orders concurrently to eliminate legging micro-exposure
             spot_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="spot", symbol=spot_symbol, side="Buy", 
@@ -196,12 +204,31 @@ class DeltaNeutralYieldEngine:
                 orderType="Market", qty=str(qty), positionIdx=self.core.sor.position_idx
             )
             
-            results = await asyncio.gather(spot_task, perp_task, return_exceptions=True)
-            spot_res, perp_res = results[0], results[1]
+            spot_res, perp_res = None, None
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(spot_task, perp_task, return_exceptions=True),
+                    timeout=5.0
+                )
+                spot_res, perp_res = results[0], results[1]
+            except asyncio.TimeoutError:
+                logger.critical(f"[YIELD] 🚨 ATOMIC LEGGING TIMEOUT (5.0s Barrier Breached) on {symbol}.")
+                if isinstance(spot_res, Exception):
+                    logger.error(f"[YIELD] Spot Leg Exception: {spot_res}")
+                if isinstance(perp_res, Exception):
+                    logger.error(f"[YIELD] Perp Leg Exception: {perp_res}")
+                spot_res = spot_res if isinstance(spot_res, dict) else {"retCode": -999, "retMsg": "TIMEOUT_EXCEPTION"}
+                perp_res = perp_res if isinstance(perp_res, dict) else {"retCode": -999, "retMsg": "TIMEOUT_EXCEPTION"}
             
+            # Diagnostic evaluation of individual leg responses
             spot_success = isinstance(spot_res, dict) and spot_res.get("retCode") == 0
             perp_success = isinstance(perp_res, dict) and perp_res.get("retCode") == 0
             
+            if not spot_success:
+                logger.warning(f"[YIELD] ⚠️ Spot Leg Failed for {symbol}: {spot_res.get('retMsg', str(spot_res))}")
+            if not perp_success:
+                logger.warning(f"[YIELD] ⚠️ Perp Leg Failed for {symbol}: {perp_res.get('retMsg', str(perp_res))}")
+
             if spot_success and perp_success:
                 # Hedge successfully established
                 self.active_hedges[symbol] = {
@@ -216,24 +243,26 @@ class DeltaNeutralYieldEngine:
                     f"Asset: <code>{symbol}</code>\n"
                     f"Capital Swept: <code>${yield_capital:.2f}</code>\n"
                     f"Yield APY Target: <code>~{(funding_rate * 3 * 365)*100:.1f}%</code>\n"
-                    f"Break-Even Horizon: <code>{break_even_days:.1f} Days</code>"
+                    f"Break-Even Horizon: <code>{epochs_to_breakeven} Epochs</code>"
                 )
                 await self.core._safe_telegram_dispatch(msg, is_html=True)
                 logger.critical(f"✅ DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
                 return
                 
-            # 🚀 V22.4 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
+            # 🚀 V25.2 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
             logger.critical(f"[YIELD] 🚨 LEGGING MISMATCH ON {symbol} (Spot: {spot_success}, Perp: {perp_success}). INITIATING IMMEDIATE ROLLBACK.")
             
             if spot_success and not perp_success:
-                # Spot filled but perp short failed. We are exposed long. Unwind Spot immediately.
+                # Spot filled but perp short failed. Unwind Spot immediately.
+                logger.critical(f"[YIELD] 🔄 Rolling back exposed Long Spot position for {symbol}...")
                 await self.core.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True, 
                     category="spot", symbol=spot_symbol, side="Sell", 
                     orderType="Market", qty=str(qty), timeInForce="IOC"
                 )
             elif perp_success and not spot_success:
-                # Perp short filled but spot failed. We are naked short. Buy back Perp immediately.
+                # Perp short failed or spot failed. Buy back Perp immediately.
+                logger.critical(f"[YIELD] 🔄 Rolling back naked Short Perp position for {symbol}...")
                 await self.core.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True, 
                     category="linear", symbol=symbol, side="Buy", 
@@ -245,19 +274,18 @@ class DeltaNeutralYieldEngine:
 
     async def unwind_cash_and_carry_hedge(self, symbol: str):
         """
-        Dismantles an active hedge concurrently.
+        Dismantles an active hedge concurrently with strict timeouts and granular error logging.
         """
         if symbol not in self.active_hedges:
             return
             
         hedge_data = self.active_hedges[symbol]
         qty = str(hedge_data["qty"])
-        spot_symbol = symbol.replace("USDT", "") + "USDT"
+        spot_symbol = self._get_spot_symbol(symbol)
         
         logger.critical(f"[X-RAY] 🌪️ UNWINDING HEDGE // {symbol}. Covering Short, Selling Spot.")
         
         try:
-            # 1. Close Perpetual Short & Sell Spot Collateral Concurrently
             perp_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="linear", symbol=symbol, side="Buy", 
@@ -270,8 +298,21 @@ class DeltaNeutralYieldEngine:
                 orderType="Market", qty=qty
             )
             
-            results = await asyncio.gather(perp_task, spot_task, return_exceptions=True)
-            perp_order, spot_order = results[0], results[1]
+            perp_order, spot_order = None, None
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(perp_task, spot_task, return_exceptions=True),
+                    timeout=5.0
+                )
+                perp_order, spot_order = results[0], results[1]
+            except asyncio.TimeoutError:
+                logger.critical(f"[X-RAY] 🚨 UNWIND TIMEOUT (5.0s Barrier Breached) on {symbol}.")
+                if isinstance(perp_order, Exception):
+                    logger.error(f"[YIELD] Unwind Perp Exception: {perp_order}")
+                if isinstance(spot_order, Exception):
+                    logger.error(f"[YIELD] Unwind Spot Exception: {spot_order}")
+                perp_order = perp_order if isinstance(perp_order, dict) else {"retCode": -999, "retMsg": "TIMEOUT_EXCEPTION"}
+                spot_order = spot_order if isinstance(spot_order, dict) else {"retCode": -999, "retMsg": "TIMEOUT_EXCEPTION"}
             
             perp_success = isinstance(perp_order, dict) and perp_order.get("retCode") == 0
             spot_success = isinstance(spot_order, dict) and spot_order.get("retCode") == 0

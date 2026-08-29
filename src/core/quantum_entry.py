@@ -1,69 +1,57 @@
 """
-💎 V22.4 APEX QUANTUM PRIME: MULTI-FACTOR ALPHA FUSION MATRIX
+💎 V25.0 APEX QUANTUM PRIME: CROSS-ASSET EXECUTION TENSOR
 ------------------------------------------------------------------------
-Fuses Cross-Asset Macro Order Flows (BTC/ETH/Alt OFI), Orderbook Convexity, 
-and Microstructure Depth Elasticity into an adaptive decision manifold.
+Fuses Cross-Asset Macro Order Flows (BTC/ETH) and Orderbook Convexity 
+to dynamically shape execution sizing (w_exec) and Sector Impulse.
 
-Eliminates fragile heuristics and outputs calibrated Bayesian probabilities 
-and execution weights (w_exec) conditioned on market regime.
-
-Audit Fixes (V22.4):
-- Bounded Logit Manifold Projection: Wraps alpha modifiers in hyperbolic tangent 
-  bounds to prevent sigmoidal saturation during extreme structural divergences.
-- Minimum MLOFI Floor (Anti-FOMO Guard): Drops entries lacking >0.8σ local 
-  orderbook pressure, preventing top-ticking into exhaustion structures.
+Architectural Supremacy (V25.0):
+1. Eradication of Probability Tampering: Stripped out the Bounded Logit 
+   Manifold Projection. We now trust the 18-D Volterra-Hermite RLS tensor 
+   to output pure, mathematically calibrated probabilities. This module 
+   acts as a strict passthrough for `fused_prob`.
+2. Focus on Kelly Sizing: Re-engineered to calculate `execution_weight` 
+   based on real-time Orderbook Convexity and Macro Synergy, scaling 
+   capital allocation up only when all vectors align.
+3. Sector Impulse Generation: Derives the instantaneous `sector_impulse` 
+   to be fed directly back into `micro_models.py`.
 """
 
 import math
 import logging
 import numpy as np
 from collections import deque
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 
 logger = logging.getLogger("QUANT_CORE.QUANTUM_ENTRY")
 
 
 class QuantumEntryMatrix:
     """
-    Multi-Factor Alpha Fusion Engine:
-    Evaluates real-time macro OFI cross-correlation, orderbook curvature, 
-    and micro-momentum vectors to dynamically shape entry probabilities.
+    🚀 V25.0 Multi-Factor Alpha Fusion Engine:
+    Evaluates real-time macro OFI cross-correlation and orderbook curvature
+    to dynamically scale execution weights without distorting Bayesian probability.
     """
 
-    def __init__(self, window_size: int = 1000):
-        self.window_size = window_size
-        
-        # Macro Order Flow Tracking (Z-scores)
-        self.asset_ofi_history = deque(maxlen=window_size)
+    def __init__(self, window_size: int = 10):
+        # 🚀 V25.0: Massively reduced window size. We only care about instantaneous macro flow.
         self.btc_ofi_history = deque(maxlen=window_size)
         self.eth_ofi_history = deque(maxlen=window_size)
-        
-        # Convexity & Depth Manifolds
-        self.convexity_history = deque(maxlen=window_size)
-        self.micro_spread_history = deque(maxlen=window_size)
-        
-        # Adaptive Coupling Weights
-        self.macro_coupling_weight = 0.25
-        self.depth_convexity_weight = 0.35
-        self.local_ofi_weight = 0.40
 
     def update_macro_flows(self, asset_ofi_z: float, btc_ofi_z: float, eth_ofi_z: float):
         """Ingests synchronized tick-level OFI Z-scores across macro drivers."""
-        if not math.isnan(asset_ofi_z) and not math.isinf(asset_ofi_z):
-            self.asset_ofi_history.append(asset_ofi_z)
-        if not math.isnan(btc_ofi_z) and not math.isinf(btc_ofi_z):
+        if math.isfinite(btc_ofi_z):
             self.btc_ofi_history.append(btc_ofi_z)
-        if not math.isnan(eth_ofi_z) and not math.isinf(eth_ofi_z):
+        if math.isfinite(eth_ofi_z):
             self.eth_ofi_history.append(eth_ofi_z)
 
     def update_mlofi_state(self, mlofi_z: float):
-        """Maintains tracking of local order flow state."""
-        if not math.isnan(mlofi_z) and not math.isinf(mlofi_z):
-            self.asset_ofi_history.append(mlofi_z)
+        """🚀 V25.0 DEPRECATED: Local OFI is now handled natively inside micro_models.py."""
+        pass
 
-    def _compute_orderbook_convexity(self, bids: List[List[float]], asks: List[List[float]]) -> float:
+    @staticmethod
+    def _compute_orderbook_convexity(bids: List[List[float]], asks: List[List[float]]) -> float:
         """
-        Calculates non-linear slope/curvature of top-5 book depth.
+        Calculates non-linear slope/curvature of top-5 book depth in pure O(1) time.
         Positive (>0) = Bid-heavy convexity (support thickening deeper in book).
         Negative (<0) = Ask-heavy convexity (resistance thickening deeper in book).
         """
@@ -74,8 +62,9 @@ class QuantumEntryMatrix:
             bid_vols = [float(b[1]) for b in bids[:5]]
             ask_vols = [float(a[1]) for a in asks[:5]]
             
-            # Linear decay weighting to measure cumulative depth density
-            weights = np.exp(-0.35 * np.arange(len(bid_vols)))
+            # Linear decay weighting to measure cumulative depth density. Precomputed exp(-0.35 * x)
+            weights = np.array([1.0, 0.704, 0.496, 0.349, 0.246])
+            
             weighted_bids = np.sum(np.array(bid_vols) * weights[:len(bid_vols)])
             weighted_asks = np.sum(np.array(ask_vols) * weights[:len(ask_vols)])
             
@@ -85,29 +74,22 @@ class QuantumEntryMatrix:
         except Exception:
             return 0.0
 
-    def _calculate_macro_synergy(self, intended_action: str) -> Tuple[float, float]:
+    def _calculate_macro_synergy(self, intended_action: str) -> float:
         """
-        Computes directional alignment between local asset OFI and BTC/ETH drivers.
-        Returns (Synergy Factor [0.6 - 1.4], Macro Multiplier).
+        Computes directional alignment between local asset and BTC/ETH drivers.
+        Returns a normalized Macro Z-Score.
         """
-        if len(self.btc_ofi_history) < 5 or len(self.eth_ofi_history) < 5:
-            return 1.0, 0.0
+        if len(self.btc_ofi_history) < 3 or len(self.eth_ofi_history) < 3:
+            return 0.0
 
-        btc_z = float(np.mean(list(self.btc_ofi_history)[-5:]))
-        eth_z = float(np.mean(list(self.eth_ofi_history)[-5:]))
+        btc_z = float(np.mean(self.btc_ofi_history))
+        eth_z = float(np.mean(self.eth_ofi_history))
+        
+        # 65% BTC / 35% ETH Beta Weighting
         macro_z = (0.65 * btc_z) + (0.35 * eth_z)
 
         is_buy = intended_action.upper() == "BUY"
-        
-        # If macro drivers agree with trade direction, boost conviction
-        if is_buy:
-            alignment = macro_z
-        else:
-            alignment = -macro_z
-
-        # Smooth sigmoidal scaling for macro synergy
-        synergy_scalar = 1.0 + (math.tanh(alignment * 0.5) * 0.35)
-        return float(np.clip(synergy_scalar, 0.65, 1.35)), macro_z
+        return macro_z if is_buy else -macro_z
 
     def fuse_signal_probability(
         self, 
@@ -118,62 +100,30 @@ class QuantumEntryMatrix:
         asks: List[List[float]]
     ) -> Dict[str, Any]:
         """
-        🚀 UNIFIED ALPHA FUSION MANIFOLD
-        Blends raw statistical probability with Macro Synergy, Depth Convexity,
-        and Microstructure Elasticity to output the fused probability & execution weight.
+        🚀 V25.0 EXECUTION SIZING MANIFOLD
+        Probabilities are passed through cleanly. Calculates Orderbook Convexity 
+        and Macro Synergy to dynamically scale the execution weight (Kelly fraction).
         """
-        # 🚀 V22.2 FIX: Minimum MLOFI Floor (Anti-FOMO Guard)
-        # Reject entries where local orderbook pressure does not support momentum
-        local_mlofi_z = self.asset_ofi_history[-1] if self.asset_ofi_history else 0.0
-        if raw_prob > 0.50 and abs(local_mlofi_z) < 0.80:
-            logger.debug(f"[X-RAY] 🛑 ANTI-FOMO GUARD // Vetoing {intended_action} on {symbol} (Weak MLOFI: {local_mlofi_z:.2f}σ)")
-            return {
-                "symbol": symbol,
-                "fused_prob": 0.45,  # Force rejection below dynamic gate
-                "execution_weight": 0.0,
-                "convexity_score": 0.0,
-                "macro_z_score": 0.0,
-                "synergy_multiplier": 1.0,
-                "action": intended_action
-            }
-
-        # 1. Orderbook Curvature & Convexity
+        # 1. Stateless Orderbook Convexity
         convexity = self._compute_orderbook_convexity(bids, asks)
-        self.convexity_history.append(convexity)
-
-        # 2. Macro Driver Synergy
-        synergy_scalar, macro_z = self._calculate_macro_synergy(intended_action)
-
-        # 3. Directional Convexity Alignment
         is_buy = intended_action.upper() == "BUY"
         convexity_boost = convexity if is_buy else -convexity
-        
-        # 4. Bayesian Probability Fusion
-        # Logit-space transformation to prevent probability saturation at extremes
-        clamped_prob = max(0.01, min(0.99, raw_prob))
-        logit_raw = math.log(clamped_prob / (1.0 - clamped_prob))
-        
-        # 🚀 V22.4 BOUNDED LOGIT MANIFOLD PROJECTION
-        # Tanh-clamped additive shifts prevent divergence and sigmoidal saturation
-        logit_fused = (
-            logit_raw 
-            + (0.40 * math.tanh(convexity_boost * 2.0))
-            + (0.50 * math.tanh((synergy_scalar - 1.0) * 3.0))
-        )
-        
-        fused_prob = 1.0 / (1.0 + math.exp(-logit_fused))
-        fused_prob = float(np.clip(fused_prob, 0.48, 0.94))
 
-        # 5. Dynamic Execution Sizing Weight
-        # Scales allocation up when all dimensions converge cleanly
-        exec_weight = float(np.clip(synergy_scalar * (1.0 + abs(convexity) * 0.4), 0.50, 1.75))
+        # 2. Macro Driver Synergy
+        macro_z = self._calculate_macro_synergy(intended_action)
+        synergy_scalar = 1.0 + (math.tanh(macro_z * 0.5) * 0.35)
+
+        # 3. Dynamic Execution Sizing Weight (w_exec)
+        # Scales allocation up when Macro Flow and Local Book Convexity agree
+        exec_weight = float(np.clip(synergy_scalar * (1.0 + (convexity_boost * 0.4)), 0.50, 1.75))
 
         return {
             "symbol": symbol,
-            "fused_prob": fused_prob,
+            "fused_prob": raw_prob,  # 🚀 V25.0 FIX: Pure passthrough. Do not distort RLS probabilities.
             "execution_weight": exec_weight,
             "convexity_score": convexity,
             "macro_z_score": macro_z,
             "synergy_multiplier": synergy_scalar,
-            "action": intended_action
+            "action": intended_action,
+            "sector_impulse": macro_z  # 🚀 Outputs directly to micro_models.py
         }

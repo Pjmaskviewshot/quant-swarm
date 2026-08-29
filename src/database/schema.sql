@@ -1,7 +1,7 @@
 -- ====================================================================
--- 💎 V58.0 TITANIUM APEX ARCHITECTURAL SCHEMA
+-- 💎 V25.0 APEX QUANTUM PRIME ARCHITECTURAL SCHEMA
 -- SAFE MIGRATION PIPELINE: Nuking live historical data is forbidden.
--- Automatically upgrades legacy tables to V58.0 specifications.
+-- Automatically upgrades legacy tables to V59.0 specifications.
 -- ====================================================================
 
 -- 1. Create the ultimate advanced forensic ledger table safely (For fresh deployments)
@@ -15,10 +15,12 @@ CREATE TABLE IF NOT EXISTS quantitative_ledger (
     
     -- Feature Engine Analytics (The "Why")
     market_regime TEXT DEFAULT 'UNKNOWN',
-    z_obi NUMERIC DEFAULT 0.0,                -- Legacy (V20-V57) Object Book Imbalance
-    log_mlofi_z NUMERIC DEFAULT 0.0,          -- V58.0 Stationarized MLOFI
-    hawkes_z NUMERIC DEFAULT 0.0,             -- V58.0 Hawkes Cascade Intensity
-    sector_impulse NUMERIC DEFAULT 0.0,       -- V58.0 Cross-Asset SVD Eigenvector
+    z_obi NUMERIC DEFAULT 0.0,                -- Legacy (V25) Object Book Imbalance
+    log_mlofi_z NUMERIC DEFAULT 0.0,          -- Stationarized MLOFI
+    hawkes_z NUMERIC DEFAULT 0.0,             -- Hawkes Cascade Intensity
+    sector_impulse NUMERIC DEFAULT 0.0,       -- Cross-Asset SVD Eigenvector
+    swd_z NUMERIC DEFAULT 0.0,                -- V25.0 Structural Work Deficit (Iceberg Tracker)
+    accel_z NUMERIC DEFAULT 0.0,              -- V25.0 Kinematic Acceleration
     vol_mult NUMERIC DEFAULT 1.0,
     spread NUMERIC DEFAULT 0.0,
 
@@ -45,14 +47,15 @@ CREATE TABLE IF NOT EXISTS quantitative_ledger (
 );
 
 -- ====================================================================
--- 1b. V58.0 HOT-MIGRATION EXECUTION (For Existing Databases)
+-- 1b. V25.0 HOT-MIGRATION EXECUTION (For Existing Databases)
 -- These commands guarantee existing data is kept intact while attaching 
--- the new V58.0 Deep-Book and Matrix columns.
+-- the new V25.0 Deep-Book and Matrix columns.
 -- ====================================================================
 ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS log_mlofi_z NUMERIC DEFAULT 0.0;
 ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS hawkes_z NUMERIC DEFAULT 0.0;
 ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS sector_impulse NUMERIC DEFAULT 0.0;
-
+ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS swd_z NUMERIC DEFAULT 0.0;
+ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS accel_z NUMERIC DEFAULT 0.0;
 
 -- 2. Create high-speed indexes for the reporting engines safely
 CREATE INDEX IF NOT EXISTS idx_ledger_resolved ON quantitative_ledger(resolved);

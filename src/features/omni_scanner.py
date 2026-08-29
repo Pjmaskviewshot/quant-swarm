@@ -1,31 +1,33 @@
 """
-💎 V22.0 TITANIUM APEX: OMNI-SWARM CROSS-SECTIONAL SCANNER
+💎 V25.3 APEX QUANTUM PRIME: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
 Upgraded with Relaxed Hot-Swap Thresholds to eradicate liquidity stagnation,
 ensuring the Swarm continuously rotates into high-RVOL, high-Alpha nodes.
 
-Audit Fixes (V22.0):
-- SVD Thread Isolation: CPU-bound SVD computation offloaded to background threads to prevent async event loop starvation.
-- Pure Asyncio API Compliance: Natively calls V22.0 pure aiohttp executor endpoints.
+Architectural Supremacy (V25.3 - Audit Resolutions):
+- Boot Crash Eradication: Removed broken `AdaptiveSessionClock` import. Turnover 
+  thresholds are now computed natively within the scanner to ensure a safe boot.
+- SVD Thread Isolation: CPU-bound SVD computation offloaded to background threads 
+  to prevent async event loop starvation.
+- Pure Asyncio API Compliance: Natively calls V25.0 pure aiohttp executor endpoints.
 - Titanium Blocklist filtering and Adaptive Session Volume Thresholds.
 """
 
 import math
 import time
+import datetime
 import numpy as np
 import logging
 import asyncio
 from typing import List, Dict, Tuple, Set, Optional
-
-from features.micro_models import AdaptiveSessionClock
 
 logger = logging.getLogger("QUANT_CORE.OMNI_SWARM")
 
 
 def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
     """
-    🚀 V22.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
+    🚀 V25.0 QUANTUM MICRO-CORE: 60-Bar PCA Eigenvector Beta-Stripping
     Computes the top Principal Component (PC1) representing the global market factor
     across a stable 60-period return window, returning idiosyncratic alpha residuals.
     NOTE: This is a heavy CPU-bound SVD calculation and MUST be called via asyncio.to_thread.
@@ -59,7 +61,7 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V22.0 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V25.3 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit perpetual universe with live microstructure spread gating and 
     logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
@@ -70,9 +72,15 @@ class GlobalOmniScanner:
         self.last_btc_price = 0.0
         self.last_swap_time = 0.0  
 
+    def _get_turnover_threshold(self) -> float:
+        """🚀 V25.3 FIX: Native weekend-aware volume threshold."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        is_weekend = now.weekday() in (5, 6)
+        return 5_000_000.0 if not is_weekend else 3_000_000.0
+
     async def _fetch_global_tickers(self) -> dict:
         try:
-            # 🚀 V22.0 Native Pure-Async API call mapping
+            # 🚀 V25.0 Native Pure-Async API call mapping
             res = await self.executor.safe_call("GET", "/v5/market/tickers", category="linear")
             return {item['symbol']: item for item in res.get("result", {}).get("list", []) if item['symbol'].endswith('USDT')}
         except Exception as e:
@@ -115,11 +123,11 @@ class GlobalOmniScanner:
                     self.btc_returns.pop(0)
             self.last_btc_price = current_btc_price
 
-        # 🚀 V22.0 TITANIUM BLOCKLIST
+        # 🚀 V25.0 TITANIUM BLOCKLIST
         banned_keywords = ["SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "BTCUSDT"]
         
         # 🚀 ADAPTIVE SESSION CLOCK
-        min_turnover = AdaptiveSessionClock.get_turnover_threshold()
+        min_turnover = self._get_turnover_threshold()
 
         for sym, data in tickers.items():
             try:
@@ -175,7 +183,7 @@ class GlobalOmniScanner:
 
         price_matrix = np.array(return_matrix_rows)
         
-        # 🚀 V22.0 SVD ISOLATION: Offload heavy Numpy math to background thread to preserve Event Loop latency
+        # 🚀 V25.0 SVD ISOLATION: Offload heavy Numpy math to background thread to preserve Event Loop latency
         pca_alphas = await asyncio.to_thread(compute_pca_residual_alpha, price_matrix)
 
         for idx, sym in enumerate(valid_symbols):
@@ -203,8 +211,7 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # 🚀 V1.0 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
-        # Lowered Z-Score requirement from 3.0 to 2.0. Lowered base score from 2500 to 1500.
+        # 🚀 V25.3 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
         if top_sym not in current_basket and top_z > 2.0 and top_score > 1500.0:
             basket_scores = [
                 item for item in scoring_matrix 
@@ -216,7 +223,7 @@ class GlobalOmniScanner:
             if basket_scores:
                 deadest_score, deadest_sym, deadest_z = basket_scores[-1]
                 
-                # Only execute swap if the candidate is 3x stronger than the weakest active symbol (Was 5x)
+                # Only execute swap if the candidate is 3x stronger than the weakest active symbol
                 if top_score > (deadest_score * 3.0):
                     logger.critical(
                         f"[X-RAY] 🌪️ OMNI-SWARM HOT-SWAP TRIGGERED: Dropping {deadest_sym} (Score: {deadest_score:.2f}) -> "

@@ -1,9 +1,14 @@
 """
-💎 V21.0 APEX QUANTUM PRIME: TELEGRAM MISSION CONTROL
+💎 V25.0 APEX QUANTUM PRIME: TELEGRAM MISSION CONTROL
 -----------------------------------------------------------------
 Upgraded with Cryptographic HTML Escaping (Zero-Drop Guarantee),
 Unicode Sparkline Generators for visual momentum tracking, and
 Native aiohttp Timeout Client parameters to prevent coroutine context faults.
+
+Architectural Supremacy (V25.0):
+- Matrix X-Ray Parity: The Entry Ticket formatter now natively decrypts and 
+  displays the 18-D Volterra-Hermite Tensor features (Log-MLOFI, Rough Hawkes, 
+  Sector Impulse, and Quantum-Markov Beliefs) instead of legacy HMM regimes.
 """
 
 import os
@@ -39,7 +44,7 @@ class AsyncTelegramReporter:
         """Starts the background worker that processes the message queue out-of-band."""
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._queue_worker())
-            logger.info("📡 V21.0 Telegram Background Dispatch Worker ONLINE.")
+            logger.info("📡 V25.0 Telegram Background Dispatch Worker ONLINE.")
 
     async def _queue_worker(self):
         """Background worker that continuously pulls from the queue and dispatches payloads."""
@@ -77,7 +82,7 @@ class AsyncTelegramReporter:
         return re.sub(cleaner, '', text)
         
     def _generate_sparkline(self, data: List[float], length: int = 8) -> str:
-        """🚀 V21.0 FEATURE: Generates an institutional Unicode sparkline from a float array."""
+        """🚀 V25.0 FEATURE: Generates an institutional Unicode sparkline from a float array."""
         if not data: return "∅"
         bars = " ▂▃▄▅▆▇█"
         
@@ -98,7 +103,7 @@ class AsyncTelegramReporter:
 
         session = await self._get_session()
         
-        # 🚀 V21.0 HOTFIX: Use native aiohttp timeout object instead of asyncio.wait_for wrapper
+        # 🚀 V25.0 HOTFIX: Use native aiohttp timeout object instead of asyncio.wait_for wrapper
         req_timeout = aiohttp.ClientTimeout(total=4.0)
 
         for attempt in range(max_retries):
@@ -177,29 +182,36 @@ class AsyncTelegramReporter:
             pass
 
     # ====================================================================
-    # 🚀 V21.0 APEX: X-RAY FORENSIC FORMATTERS (100% Escaped Standard)
+    # 🚀 V25.0 APEX: X-RAY FORENSIC FORMATTERS (100% Escaped Standard)
     # ====================================================================
 
     def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
-        """Formats the Deep-Dive Entry Ticket with X-Ray Diagnostics and Strict Escaping."""
+        """Formats the Deep-Dive Entry Ticket with X-Ray Diagnostics mapped to the V25.0 Tensor."""
         notional_value = price * size
         sl_price = features.get("virtual_sl", price)
         sl_pct = (abs(price - sl_price) / price) if price > 0 else 0.0
-        spread_bps = features.get("bid_ask_spread", 0.0) * 10000.0
         
-        micro_status = "STABLE"
+        # 🚀 V25.0: Extract Volterra-Hermite Tensor Dynamics
+        log_mlofi_z = features.get('log_mlofi_z', 0.0)
+        hawkes_z = features.get('hawkes_z', 0.0)
+        sector_impulse = features.get('sector_impulse', 0.0)
+        reasoning = str(features.get('reasoning', 'TENSOR_FUSION'))
         
-        log_mlofi_z = features.get('log_mlofi_z', features.get('adaptive_obi_z', 0.0))
-        reasoning = str(features.get('reasoning', 'ALPHA_FUSION'))
+        # Determine dominant Quantum-Markov belief
+        beliefs = features.get("markov_beliefs", {})
+        if beliefs:
+            dominant_regime = max(beliefs, key=beliefs.get).upper()
+        else:
+            dominant_regime = str(regime).upper()
         
+        micro_status = "LAMINAR FLOW"
         if log_mlofi_z > 2.0: micro_status = "TOXIC BUY PRESSURE"
         elif log_mlofi_z < -2.0: micro_status = "TOXIC SELL PRESSURE"
-        elif "ABSORBED" in reasoning: micro_status = "PASSIVE ABSORPTION WALL"
-        elif "DARK_POOL" in reasoning: micro_status = "ICEBERG ABSORPTION"
-        elif "MAKER_ONLY" in reasoning: micro_status = "WIDE SPREAD (MAKER PEG)"
+        elif abs(hawkes_z) > 2.5: micro_status = "INSTITUTIONAL ICEBERG"
+        elif abs(sector_impulse) > 1.5: micro_status = "MACRO DISLOCATION"
 
         safe_reasoning = html.escape(reasoning[:45])
-        safe_regime = html.escape(str(regime))
+        safe_regime = html.escape(dominant_regime)
 
         return (
             f"🎯 <b>X-RAY DISPATCH // {symbol}</b>\n"
@@ -208,13 +220,14 @@ class AsyncTelegramReporter:
             f"• Fill Price: <code>{price:.5f}</code>\n"
             f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
             f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
-            f"🔬 <b>V21 X-RAY DIAGNOSTICS:</b>\n"
-            f"• HMM Regime: <code>{safe_regime}</code>\n"
-            f"• Net Edge (EV): <code>{edge_bps:.1f} bps</code>\n"
-            f"• Est. Spread: <code>{spread_bps:.1f} bps</code>\n"
+            f"🔬 <b>V25.0 MATRIX DIAGNOSTICS:</b>\n"
+            f"• Markov Belief: <code>{safe_regime}</code>\n"
+            f"• Alpha Tensor: <code>{edge_bps:.1f} bps</code>\n"
+            f"• Log-MLOFI (Z): <code>{log_mlofi_z:+.2f}σ</code>\n"
+            f"• Hawkes (Z): <code>{hawkes_z:+.2f}σ</code>\n"
+            f"• Sector Vector: <code>{sector_impulse:+.2f}σ</code>\n"
             f"• Stop Loss: <code>{sl_pct:.2%}</code>\n"
-            f"• Edge Logic: <code>{safe_reasoning}</code>\n"
-            f"• Depth Radar: <code>{micro_status}</code>"
+            f"• Topology: <code>{micro_status}</code>"
         )
 
     def format_execution_receipt(self, symbol: str, net_pnl: float, slippage_bps: float, fees: float, duration_mins: float, is_win: bool) -> str:
@@ -248,7 +261,7 @@ class AsyncTelegramReporter:
         if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN 🟥"
         
         return (
-            f"💎 <b>QUANTUM SWARM (V21.0 APEX PRIME)</b>\n"
+            f"💎 <b>QUANTUM SWARM (V25.0 OMEGA-FRAMEWORK)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
             f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"

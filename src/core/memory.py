@@ -1,11 +1,15 @@
 """
-💎 V22.0 APEX QUANTUM PRIME: PURE-ASYNC MEMORY LEDGER
+💎 V25.0 APEX QUANTUM PRIME: PURE-ASYNC MEMORY LEDGER
 ----------------------------------------------------------------
 Hyper-optimized Supabase connector featuring:
 - 100% Non-blocking Cloud execution via Asyncio Event Loop Offloading
 - Guaranteed Data Retention via Synchronous Queue Flushing on Shutdown
 - Holographic Memory Fallback (Zero-Downtime NumPy Local Tensor Matrix)
 - Pure NumPy vectorization for shadow OHLC forensics and KNN Distance
+
+Architectural Upgrades (V25.0):
+- Purged all local SQLite (`quant_memory.db`) dependencies to enforce a Single Source of Truth (SSOT).
+- Aligned payload schema with the new 18-D Volterra-Hermite Tensor features (`log_mlofi_z`, `hawkes_z`, `sector_impulse`).
 """
 
 import os
@@ -22,8 +26,9 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
+    🚀 V25.0 PURE-ASYNC FORENSIC LEDGER
     Serves as the ultimate forensic ledger and probabilistic memory engine.
-    Upgraded to V22.0 Pure Async I/O to prevent execution loop starvation.
+    Ensures zero high-frequency loop starvation by offloading all I/O.
     """
     def __init__(self, db_path: str = None):
         url = os.environ.get("SUPABASE_URL")
@@ -141,7 +146,8 @@ class MemoryBank:
         for r in rows:
             idx = self.holo_pointer % self.holo_capacity
             self.holo_features[idx, 0] = min(float(r.get("vol_mult", 1.0)), 10.0)
-            self.holo_features[idx, 1] = float(r.get("z_obi", 0.0))
+            # V25.0 FIX: Map to new log_mlofi_z vector instead of legacy z_obi
+            self.holo_features[idx, 1] = float(r.get("log_mlofi_z", 0.0))
             
             h_price = float(r.get("price_at_prediction", 1.0))
             h_spread_raw = float(r.get("spread", 0.0))
@@ -172,7 +178,11 @@ class MemoryBank:
         if features is None: features = {}
             
         market_regime = features.get("market_regime", "UNKNOWN")
-        log_mlofi_z = features.get("log_mlofi_z", features.get("adaptive_obi_z", 0.0))
+        # 🚀 V25.0 FIX: Support new Advanced Schema definitions
+        log_mlofi_z = features.get("log_mlofi_z", 0.0)
+        hawkes_z = features.get("hawkes_z", 0.0)
+        sector_impulse = features.get("sector_impulse", 0.0)
+        
         vol_mult = features.get("liquidity_density_ratio", 1.0)
         spread = features.get("bid_ask_spread", 0.0)
         symbol = features.get("symbol", "UNKNOWN")
@@ -189,7 +199,9 @@ class MemoryBank:
             "price_at_prediction": float(price),
             "ai_confidence": float(confidence),
             "market_regime": str(market_regime),
-            "z_obi": float(log_mlofi_z),
+            "log_mlofi_z": float(log_mlofi_z),
+            "hawkes_z": float(hawkes_z),
+            "sector_impulse": float(sector_impulse),
             "vol_mult": float(vol_mult),
             "spread": float(spread),
             "resolved": False,
@@ -426,7 +438,8 @@ class MemoryBank:
 
     async def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         c_vol = min(float(current_dna.get("vol_mult", 1.0)), 10.0) 
-        c_log_mlofi = float(current_dna.get("log_mlofi_z", current_dna.get("z_obi", 0.0)))
+        # V25.0 FIX: Map new schema explicitly
+        c_log_mlofi = float(current_dna.get("log_mlofi_z", 0.0))
         c_spread = float(current_dna.get("spread_pct", 0.001)) * 1000 
         target_symbol = current_dna.get("symbol", "UNKNOWN")
         
@@ -445,7 +458,8 @@ class MemoryBank:
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
-                .select("is_correct, vol_mult, z_obi, spread, price_at_prediction")
+                # V25.0 FIX: Extract log_mlofi_z instead of z_obi
+                .select("is_correct, vol_mult, log_mlofi_z, spread, price_at_prediction")
                 .eq("resolved", True)
                 .eq("symbol", target_symbol)
                 .order("timestamp", desc=True)
@@ -468,7 +482,7 @@ class MemoryBank:
                 }
 
             h_vols = np.array([min(float(r.get("vol_mult", 1.0)), 10.0) for r in historical_data])
-            h_mlofis = np.array([float(r.get("z_obi", 0.0)) for r in historical_data])
+            h_mlofis = np.array([float(r.get("log_mlofi_z", 0.0)) for r in historical_data])
             h_spreads_raw = np.array([float(r.get("spread", 0.0)) for r in historical_data])
             h_prices = np.array([float(r.get("price_at_prediction", 1.0)) for r in historical_data])
             
