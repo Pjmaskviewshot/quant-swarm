@@ -1,5 +1,5 @@
 """
-💎 V25.4 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
+💎 V25.5 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
 - Live Portfolio Correlation Stress Guard (Rejects trades if avg pairwise corr > 0.70)
@@ -7,11 +7,11 @@ Features:
 - Intraday High-Watermark Circuit Breaker (2%) & Systemic Drawdown (5%)
 - Exact Matrix Invertibility Guards & Exposure Heat Allocation
 
-Architectural Supremacy (V25.4 - Final Audit Resolutions):
-- Pure NumPy Covariance Engine: Eradicated the CPU-blocking Pandas DataFrame 
-  instantiation and `shift()` operations. The correlation matrix is now computed 
-  using ultra-fast vectorized NumPy arrays, perfectly complementing the new 
-  15-second high-frequency tracking loop in the Core Engine.
+Architectural Supremacy (V25.5):
+- Stabilized Correlation Lookback: Raised the minimum observation threshold from 10 
+  to 60 periods to eliminate spurious correlation spikes during fast market regimes.
+- Pure NumPy Covariance Engine: Vectorized matrix computation operating lightning-fast 
+  inside the 15-second high-frequency tracking loop.
 """
 
 import math
@@ -26,7 +26,7 @@ logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
 class InstitutionalRiskVault:
     """
-    🚀 V25.4 PURE SYSTEMIC GUARDIAN
+    🚀 V25.5 PURE SYSTEMIC GUARDIAN
     Strictly governs portfolio contagion, absolute drawdowns, and correlation clustering.
     Stripped of all trade-sizing logic to act purely as an invariant firewall.
     """
@@ -59,9 +59,9 @@ class InstitutionalRiskVault:
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
         """
-        🚀 V25.4 FIX: Pure NumPy Covariance Computation
-        Replaces blocking Pandas DataFrame operations for lightning-fast 
-        execution inside the 15-second high-frequency tracking loop.
+        🚀 V25.5 FIX: Vectorized NumPy Covariance with Stabilized Lookback
+        Computes pairwise correlations using pure NumPy arrays for high-frequency execution 
+        while requiring at least 60 periods to prevent noise-driven matrix distortion.
         """
         try:
             if not price_histories:
@@ -70,8 +70,8 @@ class InstitutionalRiskVault:
             symbols = list(price_histories.keys())
             min_len = min(len(prices) for prices in price_histories.values())
             
-            # Require at least 10 observations to form a meaningful variance
-            if min_len < 10: 
+            # Require at least 60 observations for statistical stability
+            if min_len < 60: 
                 return
             
             # Vectorized O(1) Memory layout using pure NumPy
@@ -105,7 +105,7 @@ class InstitutionalRiskVault:
         symbol: str = ""
     ) -> Tuple[bool, str]:
         """
-        🚀 V25.1 FAIL-CLOSED LATCH MATRIX
+        🚀 V25.5 FAIL-CLOSED LATCH MATRIX
         Evaluates the aggregate systemic health of the portfolio before allowing any order routing.
         """
         if self.emergency_circuit_breaker:

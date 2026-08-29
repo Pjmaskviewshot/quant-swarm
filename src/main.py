@@ -1,18 +1,16 @@
 """
-💎 V25.4 APEX QUANTUM PRIME: BARE-METAL CORE
+💎 V25.5 APEX QUANTUM PRIME: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 
-Architectural Supremacy (V25.4 - Final Audit Resolutions):
+Architectural Supremacy (V25.5 - Final Hardening):
+- Legacy Leverage Footgun Eradication: Cleaned up the `target_leverage` signature 
+  default in the lifecycle daemon to strictly align with the 2.0x system cap.
+- Hot-Swap Convergence Warm-Up Guard: Enforces a strict 50-tick minimum warm-up 
+  window for newly hot-swapped assets before the evaluation gate allows live execution.
 - Realized PnL Feedback Loop: Wired the `resolve_trade_outcome` telemetry 
   from the settlement lifecycle back into the Microstructure Engine. RLS 
   models now learn from actual execution PnL instead of time-based proxies.
-- High-Frequency Correlation Engine: Decoupled the Portfolio Correlation Matrix 
-  from the 5-minute heartbeat. It now runs on a dedicated 15-second tracking loop 
-  to instantly veto clustering during flash crashes.
-- Exchange Leverage Enforcement: Explicitly pushes the 2.0x max leverage cap 
-  to the Bybit API right before routing to guarantee we do not consume excess 
-  maintenance margin due to inherited account settings.
 """
 
 import os
@@ -50,7 +48,7 @@ from portfolio.risk_vault import InstitutionalRiskVault
 from execution.delta_neutral import DeltaNeutralYieldEngine 
 
 # External Connectors
-from ingestion.market_matrix import MarketStateMatrix
+from ingestion.multi_feed import MarketStateMatrix
 from services.bybit_v5 import BybitUnifiedExecutor
 from services.telegram_ops import AsyncTelegramReporter
 from services.tensor_oracle import CrossAssetTensorOracle
@@ -80,7 +78,7 @@ class GlobalStateActor:
 
     async def start(self):
         self._is_running = True
-        logger.info("🛡️ V25.4 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
+        logger.info("🛡️ V25.5 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
         while self._is_running:
             try:
                 cmd: MutationCommand = await self.mutation_queue.get()
@@ -150,7 +148,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("💎 LIVE MODE: V25.4 APEX BARE-METAL CORE ACTIVE.")
+        else: logger.critical("💎 LIVE MODE: V25.5 APEX BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -536,6 +534,10 @@ class DistributedQuantEngine:
             
         if self.fsm.is_emergency_locked() or self.fsm.is_asset_locked(symbol): return
         
+        # 🚀 V25.5 FIX: Enforce minimum 50-tick warm-up on hot-swapped symbols
+        if not stat_engine or len(stat_engine.tick_prices) < 50:
+            return
+
         is_active = symbol in self.active_positions_map or symbol in self.in_flight_symbols
         if is_active:
             if now - self.last_eval_time.get(symbol + "_learning_throttle", 0.0) < 1.0:
@@ -669,10 +671,11 @@ class DistributedQuantEngine:
             )
             self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
 
+            # 🚀 V25.5 FIX: Cleaned up signature footgun (target_leverage=2 enforced)
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
                 symbol, sig_id, action, f_price, atr, 
                 {"allocated_value_usdt": target_notional, "size": actual_qty_filled, "arrival_price": arrival_price}, 
-                5, "TRENDING", realigned_tp=(price * (1+tp_dist_pct) if action=="BUY" else price * (1-tp_dist_pct)),
+                2, "TRENDING", realigned_tp=(price * (1+tp_dist_pct) if action=="BUY" else price * (1-tp_dist_pct)),
                 dynamic_rr_ratio=dynamic_rr, realigned_sl=(price * (1-sl_dist_pct) if action=="BUY" else price * (1+sl_dist_pct))
             ))
 
@@ -974,7 +977,7 @@ class DistributedQuantEngine:
         self._safe_telegram_dispatch_sync(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=True)
         self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
 
-    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 8, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
+    async def _position_lifecycle_daemon(self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float, risk_matrix: dict, target_leverage: int = 2, market_regime: str = "TRENDING", is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0, realigned_sl: float = None, historical_favorable_price: float = None):
         ctx = {
             "symbol": symbol, "signal_id": signal_id, "direction": direction, "is_buy": direction == "BUY",
             "current_price": current_price, "atr": atr, "target_leverage": target_leverage,
