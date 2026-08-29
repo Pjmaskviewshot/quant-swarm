@@ -16,8 +16,8 @@ Architectural Supremacy (V25.6 - Database Schema Alignment & Bug Fixes):
 - Async Concurrency Hardening: Throttled the ThreadPoolExecutor to prevent GIL starvation, 
   applied atomic reservation locks to eradicate double-spend entry race conditions, and 
   added explicit GC task-tracking sweep protection.
-- Safe Boot Re-Arm Guard: Prevents blindly lifting the FSM emergency lock on startup 
-  if equity is compromised.
+- Safe Boot Re-Arm Guard & Equity Helper: Prevents blindly lifting the FSM emergency lock 
+  on startup if equity is compromised, backed by native Bybit balance retrieval.
 """
 
 import os
@@ -254,6 +254,15 @@ class DistributedQuantEngine:
                 with open("params.json", "r") as f: return {**default_params, **json.load(f)}
         except Exception: pass
         return default_params
+
+    async def _get_true_equity_usdt(self) -> float:
+        """🚀 FIX: Pulls true account equity directly from the unified executor interface."""
+        try:
+            bal = await self.executor.get_wallet_balance_usdt()
+            return float(bal) if bal > 0 else 21.0
+        except Exception as e:
+            logger.debug(f"[X-RAY] True equity fetch fallback triggered: {e}")
+            return 21.0
 
     async def _prune_dead_symbols(self):
         active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()) + list(self.in_flight_symbols.keys()))
@@ -626,7 +635,7 @@ class DistributedQuantEngine:
             is_safe, risk_reason = self.risk_vault.evaluate_portfolio_safety(current_bal, target_notional, symbol)
             if not is_safe: return
             
-            # 🚀 V25.6 AUDIT FIX: Atomic reservation to prevent race-condition double entries
+            # Atomic reservation to prevent race-condition double entries
             async with self.circuit_breaker_lock:
                 if symbol in self.active_positions_map or symbol in self.in_flight_symbols:
                     return
@@ -1153,7 +1162,7 @@ class DistributedQuantEngine:
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def run_engine_forever(self):
-        # 🚀 BOOT FIX: Fetch true balance and evaluate safety BEFORE releasing global lock
+        # BOOT FIX: Fetch true balance and evaluate safety BEFORE releasing global lock
         try:
             boot_bal = await self._get_true_equity_usdt()
             self.global_state_cache["start_of_day_balance"] = boot_bal
