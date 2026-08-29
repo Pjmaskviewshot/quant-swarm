@@ -1,15 +1,18 @@
 """
-💎 V25.5 APEX QUANTUM PRIME: BARE-METAL CORE
+💎 V25.6 APEX QUANTUM PRIME: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 
-Architectural Supremacy (V25.5 - Final Hardening):
-- Legacy Leverage Footgun Eradication: Cleaned up the `target_leverage` signature 
+Architectural Supremacy (V25.6 - Database Schema Alignment):
+- Valid UUID Generation: Replaced truncated 16-character hex digests with standard 
+  36-character UUID strings (`uuid.uuid4()`) to perfectly satisfy Supabase's 
+  strict UUID primary key column type constraints.
+- Legacy Leverage Footgun Eradication: Cleaned up the `target_leverage` signature  
   default in the lifecycle daemon to strictly align with the 2.0x system cap.
-- Hot-Swap Convergence Warm-Up Guard: Enforces a strict 50-tick minimum warm-up 
+- Hot-Swap Convergence Warm-Up Guard: Enforces a strict 50-tick minimum warm-up  
   window for newly hot-swapped assets before the evaluation gate allows live execution.
-- Realized PnL Feedback Loop: Wired the `resolve_trade_outcome` telemetry 
-  from the settlement lifecycle back into the Microstructure Engine. RLS 
+- Realized PnL Feedback Loop: Wired the `resolve_trade_outcome` telemetry  
+  from the settlement lifecycle back into the Microstructure Engine. RLS  
   models now learn from actual execution PnL instead of time-based proxies.
 """
 
@@ -20,6 +23,7 @@ import math
 import asyncio
 import logging
 import hashlib
+import uuid
 import datetime
 import numpy as np
 import concurrent.futures
@@ -79,7 +83,7 @@ class GlobalStateActor:
 
     async def start(self):
         self._is_running = True
-        logger.info("🛡️ V25.5 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
+        logger.info("🛡️ V25.6 LOCK-FREE STATE ACTOR ONLINE. (Disruptor Pattern Active)")
         while self._is_running:
             try:
                 cmd: MutationCommand = await self.mutation_queue.get()
@@ -149,7 +153,7 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("💎 LIVE MODE: V25.5 APEX BARE-METAL CORE ACTIVE.")
+        else: logger.critical("💎 LIVE MODE: V25.6 APEX BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -367,7 +371,8 @@ class DistributedQuantEngine:
                 self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}
                 
-                sig_id = hashlib.sha256(f"RECOVERY_{symbol}_{time.time()}".encode()).hexdigest()[:16]
+                # 🚀 V25.6 FIX: Valid UUID string for Supabase
+                sig_id = str(uuid.uuid4())
                 
                 self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
                     symbol, sig_id, direction, entry_price, atr, risk_matrix, 2, "RANGING"
@@ -411,7 +416,9 @@ class DistributedQuantEngine:
                             
                         self.state_actor.dispatch(ex_sym, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                         risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}
-                        sig_id = hashlib.sha256(f"RECOVERY_{ex_sym}_{time.time()}".encode()).hexdigest()[:16]
+                        
+                        # 🚀 V25.6 FIX: Valid UUID string for Supabase
+                        sig_id = str(uuid.uuid4())
                         
                         self.daemon_tasks[ex_sym] = self.track_task(self._position_lifecycle_daemon(
                             ex_sym, sig_id, direction, entry_price, atr, risk_matrix, 2, "RANGING"
@@ -637,7 +644,8 @@ class DistributedQuantEngine:
 
             actual_qty_filled = target_notional / f_price
             
-            sig_id = hashlib.sha256(f"{symbol}_{time.time()}".encode()).hexdigest()[:16]
+            # 🚀 V25.6 FIX: Valid UUID string for Supabase
+            sig_id = str(uuid.uuid4())
 
             # 🚀 V25.4 FIX: Register Trade Context for Realized PnL Feedback
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
@@ -662,7 +670,7 @@ class DistributedQuantEngine:
 
             if self.memory:
                 await self.memory.commit_prediction(
-                    str(hashlib.sha256(f"SIG_{symbol}_{time.time()}".encode()).hexdigest()[:16]), 
+                    str(uuid.uuid4()),  # 🚀 V25.6 FIX: Valid UUID string for Supabase
                     time.time(), price, action, prob_success, safe_features, False
                 )
 
