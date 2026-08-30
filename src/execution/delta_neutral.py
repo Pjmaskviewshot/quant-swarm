@@ -20,7 +20,7 @@ import logging
 import time
 import numpy as np
 from collections import deque
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple  # 🚀 FIX: Tuple imported here
 
 logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
