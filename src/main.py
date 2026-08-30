@@ -558,10 +558,14 @@ class DistributedQuantEngine:
             elif symbol in eth_cluster: parent_flow = self.stream_feed_instance.log_mlofi_z.get("ETHUSDT", 0.0) if self.stream_feed_instance else 0.0
             else: parent_flow = self.stream_feed_instance.log_mlofi_z.get("BTCUSDT", 0.0) if self.stream_feed_instance else 0.0
 
-            # 🚀 V36.3 FIX: Macro Synergy Cross-Wiring
+            # 🚀 V36.3 FIX: Macro Synergy Cross-Wiring correctly passes expected arguments
             fusion_engine = self.entry_matrices.get(symbol)
             if fusion_engine and hasattr(fusion_engine, 'update_macro_flows'):
-                fusion_engine.update_macro_flows(asset_ofi_z=log_mlofi_z, btc_ofi_z=parent_flow, eth_ofi_z=parent_flow)
+                fusion_engine.update_macro_flows(
+                    asset_ofi_z=log_mlofi_z, 
+                    btc_ofi_z=parent_flow, 
+                    eth_ofi_z=parent_flow
+                )
 
             extract_args = {
                 "current_price": price, "log_mlofi_z": log_mlofi_z, 
