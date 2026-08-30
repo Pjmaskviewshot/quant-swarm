@@ -1,17 +1,19 @@
 """
-💎 V36.0 EMPIRICAL HARDENING: BARE-METAL CORE
+💎 V36.1 WIRING & PERSISTENCE PATCH: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 
-Architectural Supremacy (V36.0 Integration):
-- Daemon Throttling & Connection Pooling: Dialed back aggressive background polling loops 
-  (position/wallet sync) from 5s to 15s, and universe scanning to 60s, to prevent 
-  self-DDOS of the REST connection pool under extreme volatility.
-- GIL-Aware Pool Isolation: Splits concurrent execution into dedicated Math and I/O pools. 
-  Exploits NumPy's native GIL-release for matrix math without breaking shared memory state.
-- Ecosystem Matrix Routing: Binds Altcoins to their respective Layer-1 liquidity parent.
-- Perpetuals Squeeze Pipeline: Streams live Funding Rates directly into the matrix.
-- Obizhaeva-Wang Surveillance Sentry: Actively tracks LOB resilience on live positions.
+Architectural Supremacy (V36.1 Integration):
+- Target Sizing Passthrough: The main evaluation gate now passes the explicit 
+  Merton-Kelly dynamic sizing directly to the SOR.
+- True Slippage TCA: Execution tuple destructuring correctly isolates arrival price vs 
+  average fill price to prevent TCA hallucination.
+- True Kelly Normalization: Settled trades report back exact position notional to the 
+  stat engine to ensure accurate fractional Kelly magnitude updates.
+- RLS Weight Persistence: Dead-symbol pruning no longer wipes neural network memory. 
+  Continuous state correctly serializes to and hydrates from disk on boot.
+- Daemon Throttling: Aggressive background polling loops dialed back to prevent self-DDOS.
+- GIL-Aware Pool Isolation: Dedicated Math and I/O ThreadPoolExecutors.
 """
 
 import os
@@ -152,16 +154,13 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("💎 LIVE MODE: V36.0 EMPIRICAL HARDENING BARE-METAL CORE ACTIVE.")
+        else: logger.critical("💎 LIVE MODE: V36.1 WIRING & PERSISTENCE PATCH BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
         # 🚀 V36.0 EMPIRICAL HARDENING: GIL-Aware Pool Isolation
-        # NumPy natively releases the GIL during vectorized C-math. We use a ThreadPoolExecutor 
-        # to maximize CPU utilization without breaking RiskVault's continuous shared-memory state, 
-        # while isolating slow disk writes to a separate IO pool.
         safe_workers = min(4, multiprocessing.cpu_count() - 1) if multiprocessing.cpu_count() > 1 else 1
         self.math_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="V36_Math")
         self.io_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="V36_IO")
@@ -265,17 +264,24 @@ class DistributedQuantEngine:
         active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()) + list(self.in_flight_symbols.keys()))
         for key in list(self.stat_engines.keys()):
             if key not in active_set:
-                self.stat_engines.pop(key, None)
-                self.feature_engines.pop(key, None)
-                self.entry_matrices.pop(key, None) 
+                # 🚀 V36.1 FIX: Do NOT delete `stat_engines` or `feature_engines`. 
+                # Keep them in memory so RLS weights survive asset rotations.
+                # Only prune the heavy high-frequency arrays to save RAM.
                 self.symbol_locks.pop(key, None)
                 self.tick_history.pop(key, None)
-                self.ram_dna_cache.pop(key, None)
                 self.screener_memory.pop(key, None)
-                self.screener_metrics.pop(key, None)
-                self.volatility_baseline.pop(key, None)
-                self.last_eval_time.pop(key, None)
                 self.orderbook_snapshots.pop(key, None) 
+
+    def _load_sgd_state_from_disk(self) -> dict:
+        import os, json
+        try:
+            storage_path = os.getenv("PERSISTENT_STORAGE_PATH", ".")
+            target_path = os.path.join(storage_path, "sgd_state.json")
+            if os.path.exists(target_path):
+                with open(target_path, "r") as f:
+                    return json.load(f)
+        except Exception as e: logger.debug(f"[X-RAY] No previous RLS state found: {e}")
+        return {}
 
     async def _save_sgd_state(self):
         state_snapshot = {}
@@ -301,8 +307,20 @@ class DistributedQuantEngine:
         await loop.run_in_executor(self.io_pool, _write_file)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
+        # 🚀 V36.1 FIX: Load persistent RLS state
+        if not hasattr(self, "saved_sgd_state"): 
+            self.saved_sgd_state = self._load_sgd_state_from_disk()
+            
         for s in symbols:
-            if s not in self.stat_engines: self.stat_engines[s] = ContinuousMicrostructureEngine(symbol=s)
+            if s not in self.stat_engines: 
+                engine = ContinuousMicrostructureEngine(symbol=s)
+                # Rehydrate weights if they exist
+                if s in self.saved_sgd_state:
+                    saved = self.saved_sgd_state[s]
+                    engine.rls_trend.w = np.array(saved.get("weights_trending", engine.rls_trend.w))
+                    engine.rls_range.w = np.array(saved.get("weights_ranging", engine.rls_range.w))
+                self.stat_engines[s] = engine
+                
             if s not in self.feature_engines: self.feature_engines[s] = AdaptiveFeatureEngine(memory_window_long=1800)
             if s not in self.entry_matrices: self.entry_matrices[s] = QuantumEntryMatrix(window_size=10)
             if s not in self.symbol_locks: self.symbol_locks[s] = asyncio.Lock()
@@ -672,18 +690,23 @@ class DistributedQuantEngine:
             if state.get("execution_style") == "MAKER_ONLY":
                 dominant_regime = "RANGING"
 
-            success, arrival_price, f_price = await self.sor.execute_alpha_signal(
+            # 🚀 V36.1 FIX 2: Capture true arrival price BEFORE execution
+            arrival_price = price
+
+            # 🚀 V36.1 FIX 1 & 2: Pass exact Kelly size directly to SOR and destructure accurately
+            success, avg_fill_price, actual_qty_filled = await self.sor.execute_alpha_signal(
                 symbol=symbol, direction=action, prob_success=prob_success, exec_weight=exec_weight,
                 current_mid_price=price, sl_price=(price * (1-sl_dist_pct) if action=="BUY" else price * (1+sl_dist_pct)),
                 tp_price=(price * (1+tp_dist_pct) if action=="BUY" else price * (1-tp_dist_pct)),
-                inst_var=stat_engine.inst_variance, depth_snapshot=ob_payload, regime=dominant_regime
+                inst_var=stat_engine.inst_variance, depth_snapshot=ob_payload, 
+                target_notional=target_notional,
+                regime=dominant_regime
             )
 
-            if not success or f_price <= 0:
+            if not success or actual_qty_filled <= 0:
                 self.state_actor.dispatch(symbol, "RELEASE_IN_FLIGHT", {})
                 return
 
-            actual_qty_filled = target_notional / f_price
             sig_id = str(uuid.uuid4())
 
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
@@ -712,13 +735,13 @@ class DistributedQuantEngine:
                 )
 
             ticket_msg = self.telegram.format_entry_ticket(
-                symbol, action, f_price, actual_qty_filled, 0.0, 
+                symbol, action, avg_fill_price, actual_qty_filled, 0.0, 
                 (target_notional / current_bal), dominant_regime, safe_features
             )
             self.track_task(self._safe_telegram_dispatch(ticket_msg, is_html=True))
 
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
-                symbol, sig_id, action, f_price, atr, 
+                symbol, sig_id, action, avg_fill_price, atr, 
                 {"allocated_value_usdt": target_notional, "size": actual_qty_filled, "arrival_price": arrival_price}, 
                 2, "TRENDING", realigned_tp=(price * (1+tp_dist_pct) if action=="BUY" else price * (1-tp_dist_pct)),
                 dynamic_rr_ratio=dynamic_rr, realigned_sl=(price * (1-sl_dist_pct) if action=="BUY" else price * (1+sl_dist_pct))
@@ -1018,8 +1041,10 @@ class DistributedQuantEngine:
         if self.memory:
             await self.memory.log_live_execution_result(ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"])
             
+        # 🚀 V36.1 FIX 4: True Percentage Return normalization against actual allocated capital
         if ctx.get("stat_engine") and hasattr(ctx["stat_engine"], "resolve_trade_outcome"):
-            ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl)
+            allocated_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", 21.0)
+            ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl, allocated_notional)
             
         self._safe_telegram_dispatch_sync(self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0), is_html=True)
         self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
@@ -1043,6 +1068,7 @@ class DistributedQuantEngine:
             "latest_tick_price": current_price,
             "current_vault_balance": self.global_state_cache.get("current_vault_balance", 21.0),
             "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
+            "max_drawdown_pct": self.risk_vault.max_drawdown_pct, # 🚀 V36.1 FIX: Send True Vault Limit
             "active_positions_count": len(self.active_positions_map),
             "payload_features": {},
             "exec_details": {}

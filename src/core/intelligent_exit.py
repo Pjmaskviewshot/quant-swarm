@@ -1,10 +1,13 @@
 """
-💎 V25.4 APEX QUANTUM PRIME: ADVANCED INTELLIGENT EXIT MATRIX
+💎 V36.1 APEX TITAN: ADVANCED INTELLIGENT EXIT MATRIX
 -----------------------------------------------------------------------------------------
 Continuous-Time Non-Reactive, Predictive Optimal-Stopping Matrix.
 Mathematically anchored to Position Notional (Zero Equity-Bleed).
 
-Architectural Supremacy (V25.4 - Final Audit Resolutions):
+Architectural Supremacy (V36.1 Integration):
+- Single Source of Truth (SSOT) Risk Sync: The exit engine now strictly inherits the 
+  dynamic `max_drawdown_pct` from the Institutional Risk Vault, eliminating hardcoded 
+  divergent constants.
 - Kinetic TP Compression: Pulls Take-Profit limits directly into the current price 
   if microstructure momentum (Meso-Z) stalls in deep profit, front-running orderbook collapse.
 - Adaptive Chandelier AT-SL: Replaces static profit locks with dynamic ATR trailing stops 
@@ -13,7 +16,6 @@ Architectural Supremacy (V25.4 - Final Audit Resolutions):
   tensor flips its probability conviction (>0.65) against the active position.
 - Hawkes Cascade Exhaustion: Ejects positions into strength when anomalous aggressive 
   order flow (|z_hawkes| > 2.8) triggers a climactic volatility blowout.
-- Circuit Breaker Consolidation: Defers purely to the Risk Vault for systemic drawdown halts.
 """
 
 import math
@@ -23,12 +25,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, Any, Tuple, Optional
 
-logger = logging.getLogger("QUANT_CORE.V25_EXIT")
-
-@dataclass
-class ThesisVector:
-    """Retained purely for backward compatibility with existing main.py instantiations."""
-    features: Any = None 
+logger = logging.getLogger("QUANT_CORE.V36_EXIT")
 
 @dataclass
 class ProfitProtectionState:
@@ -78,9 +75,10 @@ class ExitDecision:
 class PortfolioCommander:
     @staticmethod
     def evaluate(ctx: Dict[str, Any]) -> Tuple[bool, str]:
-        # 🚀 CRITICAL FIX: Defers to risk_vault.py for systemic drawdown logic.
-        # Removes the conflicting 4% / 8% hardcoded thresholds to ensure a Single Source of Truth.
-        if ctx.get("drawdown_pct", 0.0) >= 0.05:
+        # 🚀 V36.1 CRITICAL FIX: Defers to the dynamic Risk Vault limit passed in `ctx`.
+        # Removes the conflicting hardcoded 0.05 threshold to ensure a Single Source of Truth.
+        max_dd = ctx.get("max_drawdown_pct", 0.05)
+        if ctx.get("drawdown_pct", 0.0) >= max_dd:
             return True, "SYSTEMIC_DRAWDOWN_BREACH (Risk Vault Lock)"
             
         return False, "SAFE"
@@ -88,7 +86,7 @@ class PortfolioCommander:
 
 class IntelligentExitEngine:
     """
-    🚀 V25.4 DROP-IN REPLACEMENT: Advanced Intelligent Exit Matrix
+    🚀 V36.1 DROP-IN REPLACEMENT: Advanced Intelligent Exit Matrix
     Fully backward compatible with main.py calls to IntelligentExitEngine.evaluate().
     """
     @staticmethod

@@ -1,5 +1,5 @@
 """
-💎 V36.0 APEX TITAN: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
+💎 V36.2 APEX TITAN: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
 ------------------------------------------------------------------------
 Features:
 - Concurrent Asyncio Leg Dispatch (Parallel Spot & Perp)
@@ -7,10 +7,14 @@ Features:
 - Exact Execution Drag Calculus & Break-Even Horizon Gating
 - Synthetic Basis Dislocation Sentry (Prevents Arbitrage into Decoupled Markets)
 
-Architectural Supremacy (V36.0 Integration):
+Architectural Supremacy (V36.2 Integration):
+- API Boundary Precision Guard: Routes all Spot and Perp quantities through the 
+  SOR's native Decimal formatter, completely eradicating Bybit 10001 (Qty) 
+  scientific-notation rejections on micro-cap altcoins.
+- Ghost-Pair Sentry: Gracefully intercepts unsupported Spot tickers (e.g., NESAUSDT) 
+  without throwing stack-trace errors during the execution drag calculation.
 - Basis Dislocation Sentry: Added statistical surveillance over the Spot-Perp premium.
-  Refuses to initiate yield locks if the basis spread exceeds 3.0 standard deviations, 
-  preventing directional mark-to-market losses on theoretically "delta-neutral" trades.
+  Refuses to initiate yield locks if the basis spread exceeds 3.0 standard deviations.
 """
 
 import re
@@ -20,14 +24,14 @@ import logging
 import time
 import numpy as np
 from collections import deque
-from typing import Dict, Any, List, Tuple  # 🚀 FIX: Tuple imported here
+from typing import Dict, Any, List, Tuple
 
 logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
 
 class DeltaNeutralYieldEngine:
     """
-    🚀 V36.0 YIELD HARVESTER
+    🚀 V36.2 YIELD HARVESTER
     Sweeps strictly idle margin into risk-free basis trades (Spot Long + Perp Short) 
     to harvest extreme funding rates. Automatically unwinds when yield decays.
     """
@@ -52,7 +56,7 @@ class DeltaNeutralYieldEngine:
 
     def _check_basis_dislocation(self, spot_price: float, perp_price: float, symbol: str) -> bool:
         """
-        🚀 V36.0 EMPIRICAL HARDENING: Basis Dislocation Sentry.
+        🚀 V36.2 EMPIRICAL HARDENING: Basis Dislocation Sentry.
         Prevents Delta-Neutral engine from executing if the Perp-Spot 
         premium has structurally decoupled.
         """
@@ -142,8 +146,19 @@ class DeltaNeutralYieldEngine:
             spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=spot_symbol)
             perp_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear", symbol=perp_symbol)
             
-            spot_ask = float(spot_res["result"]["list"][0]["ask1Price"])
-            perp_bid = float(perp_res["result"]["list"][0]["bid1Price"])
+            spot_list = spot_res.get("result", {}).get("list", [])
+            perp_list = perp_res.get("result", {}).get("list", [])
+            
+            # 🚀 V36.2 FIX: Prevent IndexError on missing Spot markets (e.g., NESAUSDT)
+            if not spot_list:
+                logger.debug(f"[YIELD_SENTRY] No Spot market exists for {spot_symbol}. Cannot establish basis hedge.")
+                return 35.0, 0.0, 0.0
+                
+            if not perp_list:
+                return 35.0, 0.0, 0.0
+                
+            spot_ask = float(spot_list[0]["ask1Price"])
+            perp_bid = float(perp_list[0]["bid1Price"])
             
             # We BUY Spot Ask and SELL Perp Bid
             basis_spread_pct = abs(spot_ask - perp_bid) / spot_ask
@@ -158,7 +173,7 @@ class DeltaNeutralYieldEngine:
 
     async def execute_atomic_cash_and_carry_hedge(self, symbol: str, funding_rate: float):
         """
-        🚀 V36.0 ATOMIC DUAL-LEG DISPATCH
+        🚀 V36.2 ATOMIC DUAL-LEG DISPATCH
         Executes Spot Buy and Perp Short concurrently with strict timeouts and granular 
         exception logging to diagnose legging failures. Defended by Basis Sentry.
         """
@@ -177,7 +192,7 @@ class DeltaNeutralYieldEngine:
                 logger.warning(f"[YIELD_SENTRY] 🚫 Invalid price extraction for {symbol}. Aborting hedge.")
                 return
                 
-            # 🚀 V36.0 BASIS SENTRY: Reject structurally dislocated premiums
+            # 🚀 V36.2 BASIS SENTRY: Reject structurally dislocated premiums
             if self._check_basis_dislocation(spot_price, perp_price, symbol):
                 return
                 
@@ -219,21 +234,24 @@ class DeltaNeutralYieldEngine:
             await self.core.sor._fetch_exchange_limits(symbol)
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
+            # 🚀 V36.2 FIX: Use Native SOR Formatter to prevent scientific notation rejections
+            qty_str = self.core.sor._format_qty_str(qty, symbol)
+            
             # =========================================================
-            # 🚀 V36.0 ATOMIC CONCURRENT EXECUTION BLOCK WITH GRANULAR LOGGING
+            # 🚀 V36.2 ATOMIC CONCURRENT EXECUTION BLOCK WITH GRANULAR LOGGING
             # =========================================================
-            logger.info(f"[X-RAY] 🏦 Routing ATOMIC DUAL-LEG Hedge for {qty} {symbol} (Spot: {spot_symbol})...")
+            logger.info(f"[X-RAY] 🏦 Routing ATOMIC DUAL-LEG Hedge for {qty_str} {symbol} (Spot: {spot_symbol})...")
             
             spot_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="spot", symbol=spot_symbol, side="Buy", 
-                orderType="Market", qty=str(qty), marketUnit="baseCoin"
+                orderType="Market", qty=qty_str, marketUnit="baseCoin"
             )
             
             perp_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="linear", symbol=symbol, side="Sell", 
-                orderType="Market", qty=str(qty), positionIdx=self.core.sor.position_idx
+                orderType="Market", qty=qty_str, positionIdx=self.core.sor.position_idx
             )
             
             spot_res, perp_res = None, None
@@ -281,7 +299,7 @@ class DeltaNeutralYieldEngine:
                 logger.critical(f"✅ DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
                 return
                 
-            # 🚀 V36.0 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
+            # 🚀 V36.2 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
             logger.critical(f"[YIELD] 🚨 LEGGING MISMATCH ON {symbol} (Spot: {spot_success}, Perp: {perp_success}). INITIATING IMMEDIATE ROLLBACK.")
             
             if spot_success and not perp_success:
@@ -290,7 +308,7 @@ class DeltaNeutralYieldEngine:
                 await self.core.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True, 
                     category="spot", symbol=spot_symbol, side="Sell", 
-                    orderType="Market", qty=str(qty), timeInForce="IOC"
+                    orderType="Market", qty=qty_str, timeInForce="IOC"
                 )
             elif perp_success and not spot_success:
                 # Perp short failed or spot failed. Buy back Perp immediately.
@@ -298,7 +316,7 @@ class DeltaNeutralYieldEngine:
                 await self.core.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True, 
                     category="linear", symbol=symbol, side="Buy", 
-                    orderType="Market", qty=str(qty), timeInForce="IOC", reduceOnly=True
+                    orderType="Market", qty=qty_str, timeInForce="IOC", reduceOnly=True
                 )
             
         except Exception as e:
@@ -312,8 +330,11 @@ class DeltaNeutralYieldEngine:
             return
             
         hedge_data = self.active_hedges[symbol]
-        qty = str(hedge_data["qty"])
+        qty_val = float(hedge_data["qty"])
         spot_symbol = self._get_spot_symbol(symbol)
+        
+        # 🚀 V36.2 FIX: Native String Quantization
+        qty_str = self.core.sor._format_qty_str(qty_val, symbol)
         
         logger.critical(f"[X-RAY] 🌪️ UNWINDING HEDGE // {symbol}. Covering Short, Selling Spot.")
         
@@ -321,13 +342,13 @@ class DeltaNeutralYieldEngine:
             perp_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="linear", symbol=symbol, side="Buy", 
-                orderType="Market", qty=qty, reduceOnly=True, positionIdx=self.core.sor.position_idx
+                orderType="Market", qty=qty_str, reduceOnly=True, positionIdx=self.core.sor.position_idx
             )
             
             spot_task = self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True, 
                 category="spot", symbol=spot_symbol, side="Sell", 
-                orderType="Market", qty=qty
+                orderType="Market", qty=qty_str
             )
             
             perp_order, spot_order = None, None

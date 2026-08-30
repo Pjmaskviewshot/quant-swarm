@@ -1,16 +1,16 @@
 """
-💎 V36.0 APEX TITAN: DIRECT-DRIVE SMART ORDER ROUTER
+💎 V36.1 APEX TITAN: DIRECT-DRIVE SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
 
-Architectural Supremacy (V36.0 Integration):
+Architectural Supremacy (V36.1 Integration):
+- Upstream Sizing Passthrough: The SOR now strictly accepts the dynamically 
+  penalized Merton Jump-Diffusion Kelly notional from the Alpha Engine, 
+  eradicating the redundant internal sizing override.
 - True Precision Routing: Uses native Decimal string quantization at the API 
   boundary to eradicate Bybit 10001 (Qty) and 10002 (Price) precision rejections.
-- Advanced Trailing Synchronization: Handles exchange-side "Not Modified" 
-  rejections gracefully, allowing the Kinetic Take-Profit Compressor to track 
-  prices perfectly without loop termination.
 - Maker Queue Preservation: Amends PostOnly bounds exclusively at 1.5x tick deviation 
   to prevent queue-priority reset spam during microscopic spread adjustments.
 - Adaptive Sweep-to-Peg: Eradicates the dangerous 3-attempt IOC loop. Fires a single 
@@ -34,8 +34,8 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V36.0 DIRECT-DRIVE EXECUTION NEXUS
-    Dynamically sizes (Fixed Fractional) and routes executions across Sweep-to-Peg (Taker/Maker Hybrid), 
+    🚀 V36.1 DIRECT-DRIVE EXECUTION NEXUS
+    Dynamically routes executions across Sweep-to-Peg (Taker/Maker Hybrid), 
     Maker Peg (PostOnly), and TWAP Iceberg slices to minimize execution drag and slippage.
     """
     def __init__(self, executor: Any, max_slippage_pct: float = 0.0012, core_engine: Any = None):
@@ -97,6 +97,9 @@ class SmartOrderRouter:
         return f"{stepped:.{precision}f}"
 
     def calculate_risk_adjusted_notional(self, prob_success: float, exec_weight: float, sl_pct: float, tp_pct: float, current_balance: float, inst_var: float) -> float:
+        """
+        Maintained as a fallback utility. V36.1 architecture uses upstream Kelly sizing directly.
+        """
         base_risk_pct = 0.01 
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
@@ -200,9 +203,10 @@ class SmartOrderRouter:
         except Exception: return {}
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
-        """🚀 V36.0 FIX: Reduced throttle to 0.08s for flash-crash reactivity with jitter."""
+        """🚀 V36.1 FIX: Reduced throttle to 0.08s for flash-crash reactivity with jitter."""
         now = time.time()
         
+        # Jitter applied to trace rapid liquidations without hitting deterministic API limits
         throttle_window = 0.08 + random.uniform(0.0, 0.05)
         if now - self._last_amend_time.get(symbol, 0.0) < throttle_window:
             return False
@@ -237,7 +241,7 @@ class SmartOrderRouter:
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: Optional[float] = None, tp: Optional[float] = None, depth_snapshot: dict = None, regime: str = "TRENDING") -> Tuple[bool, float, float]:
         """
-        🚀 V36.0 EMPIRICAL HARDENING: Adaptive Sweep-to-Peg.
+        🚀 V36.1 EMPIRICAL HARDENING: Adaptive Sweep-to-Peg.
         Fires a single deep IOC. Any unfilled remainder instantly converts to a Maker Peg.
         """
         logger.critical(f"[X-RAY] ⚡ SWEEP-TO-PEG AUTHORIZED // {symbol} executing deterministic momentum escalation.")
@@ -445,7 +449,7 @@ class SmartOrderRouter:
                             return True, avg_price, cum_exec_qty
                             
                     elif order_status in ["New", "PartiallyFilled"]:
-                        # 🚀 V36.0 FIX: Require 1.5x tick deviation to amend to preserve Queue Priority
+                        # 🚀 V36.1 FIX: Require 1.5x tick deviation to amend to preserve Queue Priority
                         if abs(target_price_float - current_peg_price) >= (tick_size * 1.5):
                             logger.debug(f"[X-RAY] 🔄 Amending {symbol} Maker Peg: {current_peg_price} -> {target_price_str}")
                             amend_res = await self.executor.safe_call(
@@ -551,28 +555,18 @@ class SmartOrderRouter:
         tp_price: float,
         inst_var: float,
         depth_snapshot: dict, 
+        target_notional: float, # 🚀 V36.1 FIX: Passed strictly from upstream Kelly Sizer
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        🚀 V36.0 DIRECT-DRIVE EXECUTION NEXUS
+        🚀 V36.1 DIRECT-DRIVE EXECUTION NEXUS
         Combines Risk Sizing, Firewall Assessment, and Topology Routing into a 
         single high-speed passthrough to eliminate Python Call-Stack overhead.
         """
         # 1. Capital & Risk Sizing
-        try:
-            raw_bal = await self.executor.get_wallet_balance_usdt()
-            current_bal = max(1.0, raw_bal)
-        except Exception:
-            current_bal = 10.0
-
-        sl_pct = abs(current_mid_price - sl_price) / current_mid_price
-        tp_pct = abs(current_mid_price - tp_price) / current_mid_price
-        
-        target_notional = self.calculate_risk_adjusted_notional(
-            prob_success, exec_weight, sl_pct, tp_pct, current_bal, inst_var
-        )
-
         await self._fetch_exchange_limits(symbol)
+        
+        # Calculate exact unit quantity based strictly on upstream Kelly/Jump-Diffusion target
         total_qty = self._apply_dynamic_exchange_limits(target_notional / current_mid_price, current_mid_price, symbol)
 
         if (total_qty * current_mid_price) < 6.0:

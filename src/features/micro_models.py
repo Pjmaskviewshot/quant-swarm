@@ -1,15 +1,16 @@
 """
-💎 V35.0 APEX TITAN: THE ULTIMATE MICROSTRUCTURE ENGINE
+💎 V36.1 APEX TITAN: THE ULTIMATE MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
-Resuming the main branch from V34.0. Integrates advanced continuous-time alignment, 
+Resuming the main branch. Integrates advanced continuous-time alignment, 
 exact Bayesian Changepoint Detection, Obizhaeva-Wang LOB Resilience, and 
 Merton Jump-Diffusion optimal control into the 25D Volterra-Riemannian Manifold.
 
-Architectural Supremacy (V35.0):
-1. O(1) Asynchronous State Alignment: Eradicates O(N) loops; uses continuous Laplace decay.
-2. Adams-MacKay BOCD: Exact Normal-Gamma conjugate Bayesian flash-crash detection.
-3. Obizhaeva-Wang Execution Sentry: Models Transient LOB impact & liquidity replenishment.
-4. Merton Jump-Diffusion Kelly: Penalizes optimal bet sizing based on Hawkes jump intensity.
+Architectural Supremacy (V36.1 Integration):
+- L1-Regularized Riemannian RLS: Applies Proximal Soft-Thresholding to force sparsity.
+- Dynamic BOCD Hazard: Scales changepoint hazard rate dynamically via jump volatility.
+- True Return Normalization: Exact Kelly sizing penalization using dynamic notional sizing.
+- HMM Regime Integration: Properly routes features through the Quantum Markov TPM.
+- Deadlock Resolution: RLS weights initialized with gaussian noise to break 0.5 parity.
 """
 
 import math
@@ -46,11 +47,12 @@ class AsynchronousStateAligner:
 
 class AdamsMacKayBOCD:
     """
-    🚀 V35.0 SUPERIORITY: Exact Vectorized Bayesian Online Changepoint Detection.
-    Uses Normal-Gamma conjugate priors for true statistical flash-crash detection.
+    🚀 V36.0 SUPERIORITY: Exact Vectorized Bayesian Online Changepoint Detection.
+    Uses Normal-Gamma conjugate priors for true statistical flash-crash detection,
+    now featuring Dynamic Hazard scaling.
     """
-    def __init__(self, hazard_rate: float = 0.01):
-        self.hazard_rate = hazard_rate
+    def __init__(self, base_hazard: float = 0.01):
+        self.base_hazard = base_hazard
         self.run_length_probs = np.array([1.0], dtype=np.float64)
         
         # Conjugate Base Priors
@@ -62,7 +64,10 @@ class AdamsMacKayBOCD:
         self.alphaT = np.array([self.alpha0])
         self.betaT = np.array([self.beta0])
         
-    def update(self, x: float) -> float:
+    def update(self, x: float, jump_z: float = 0.0) -> float:
+        # 🚀 V36.0 FIX: Dynamic Hazard Rate based on jump volatility
+        hazard = float(np.clip(self.base_hazard * (1.0 + abs(jump_z)), 0.001, 0.2))
+
         # Student-T predictive likelihood
         pred_probs = np.zeros(len(self.muT), dtype=np.float64)
         for i in range(len(self.muT)):
@@ -78,8 +83,8 @@ class AdamsMacKayBOCD:
             )
             pred_probs[i] = math.exp(max(-20.0, log_pred))
         
-        growth_probs = self.run_length_probs * pred_probs * (1.0 - self.hazard_rate)
-        cp_prob = float(np.sum(self.run_length_probs * pred_probs * self.hazard_rate))
+        growth_probs = self.run_length_probs * pred_probs * (1.0 - hazard)
+        cp_prob = float(np.sum(self.run_length_probs * pred_probs * hazard))
         
         self.run_length_probs = np.insert(growth_probs, 0, cp_prob)
         self.run_length_probs /= (np.sum(self.run_length_probs) + 1e-12)
@@ -461,11 +466,18 @@ class QuantumMarkovRegimeDetector:
         return self.beliefs
 
 class InformationGeometricRLS:
-    def __init__(self, dim: int, p_init: float = 1.0):
+    """
+    🚀 V36.1 EMPIRICAL HARDENING: L1-Regularized Riemannian Natural Gradient.
+    Applies Proximal Soft-Thresholding to force sparsity, crushing overfit Volterra 
+    interaction weights to exactly zero if they lack persistent predictive power.
+    """
+    def __init__(self, dim: int, p_init: float = 1.0, l1_penalty: float = 1e-4):
         self.dim = dim
-        self.w = np.zeros(dim, dtype=np.float64)
+        # 🚀 V36.1 FIX: Initialize with tiny random noise to break the 0.5 probability deadlock
+        self.w = np.random.normal(0, 0.01, dim).astype(np.float64)
         self.F_inv = np.eye(dim, dtype=np.float64) * p_init
         self.I = np.eye(dim, dtype=np.float64)
+        self.l1_penalty = l1_penalty
 
     def update(self, x: np.ndarray, y_target: float, p_pred: float, weight: float = 1.0) -> float:
         err = float(y_target - p_pred)
@@ -473,19 +485,25 @@ class InformationGeometricRLS:
         
         fisher_var = p_pred * (1.0 - p_pred) + 1e-6
         Fx = self.F_inv @ x_vec
-        denom = 0.995 + float(x_vec.T @ Fx) * fisher_var
+        lambda_reg = 0.999 # Extended memory to ~1000 ticks
+        denom = lambda_reg + float(x_vec.T @ Fx) * fisher_var
         
         if denom < 1e-9: return err
 
+        # Riemannian Natural Gradient step
         natural_grad = (Fx * fisher_var) / denom
-        self.w = self.w + (natural_grad.flatten() * err * weight)
+        w_temp = self.w + (natural_grad.flatten() * err * weight)
 
+        # 🚀 V36.0 L1 Soft-Thresholding (Proximal Operator for Sparsity)
+        self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - self.l1_penalty, 0.0)
+
+        # Sherman-Morrison Fisher Inverse Update
         IFx = self.I - (natural_grad @ x_vec.T)
-        self.F_inv = (IFx @ self.F_inv @ IFx.T + (natural_grad @ natural_grad.T) * fisher_var) / 0.995
+        self.F_inv = (IFx @ self.F_inv @ IFx.T + (natural_grad @ natural_grad.T) * fisher_var) / lambda_reg
         self.F_inv = 0.5 * (self.F_inv + self.F_inv.T) + (self.I * 1e-5)
 
         tr = np.trace(self.F_inv)
-        if tr > 1000.0: self.F_inv *= (1000.0 / tr)
+        if tr > 2000.0: self.F_inv *= (2000.0 / tr)
 
         return err
 
@@ -540,7 +558,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 class ContinuousMicrostructureEngine:
     """
-    🚀 V35.0 APEX TITAN: ASYNC-ALIGNED MASTER ENGINE
+    🚀 V36.1 APEX TITAN: ASYNC-ALIGNED MASTER ENGINE
     """
     def __init__(self, symbol: str = "GENERIC", memory_depth: int = 1000):
         self.symbol = symbol
@@ -644,14 +662,15 @@ class ContinuousMicrostructureEngine:
         self.hurst_h, self.rough_vol = self.hurst_estimator.update(price)
         self.marked_hawkes_z = self.marked_hawkes.update(volume, is_buy, now)
 
+        self.jump_z = abs(dp) / (math.sqrt(self.inst_variance) * price + 1e-9)
+
         if len(self.tick_prices) > 1:
             ret = math.log(max(1e-9, price) / max(1e-9, self.tick_prices[-2]))
             if math.isfinite(ret):
                 self.inst_variance = (0.95 * self.inst_variance) + (0.05 * (ret ** 2))
-                # Exact Normal-Gamma BOCD
-                self.changepoint_prob = self.bocd.update(ret)
-
-        self.jump_z = abs(dp) / (math.sqrt(self.inst_variance) * price + 1e-9)
+                self.jump_z = abs(dp) / (math.sqrt(self.inst_variance) * price + 1e-9)
+                # 🚀 V36.0: Pass jump_z to BOCD
+                self.changepoint_prob = self.bocd.update(ret, self.jump_z)
 
         if self.meso_fast_ema is None: 
             self.meso_fast_ema = self.meso_slow_ema = price
@@ -670,25 +689,23 @@ class ContinuousMicrostructureEngine:
 
     def evaluate_active_trade_stress(self, is_buy: bool) -> Tuple[bool, str]:
         spread_bps = ((self.prev_ask - self.prev_bid) / (self.prev_bid + 1e-9)) * 10000.0
-        # Obizhaeva-Wang Limit Order Book Resilience Tracker replaces static Almgren-Chriss
         return self.obizhaeva_wang_sentry.evaluate_trajectory(is_buy, spread_bps, self.rough_vol, self.marked_hawkes_z, 1.0)
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float, parent_mlofi_z: float = 0.0) -> Dict[str, Any]:
         now = time.time()
         
-        # 1. BOCD-Modulated Dynamic Regime Likelihoods
-        l_trend = math.exp(2.0 * (self.hurst_h - 0.5)) * math.exp(-1.5 * (self.rough_vol * 100))
-        l_range = math.exp(-2.0 * (self.hurst_h - 0.5)) * math.exp(-2.0 * abs(self.clean_ofi_z))
-        l_spoof = math.exp(-3.0 * ((1.0 - getattr(self, 'fleeting_ratio', 0.0))**2))
-        l_casc = math.exp(3.0 * self.changepoint_prob) * math.exp(-1.0 * ((3.0 - min(3.0, abs(self.marked_hawkes_z)))**2))
-        
-        regime_weights = np.array([l_trend, l_range, l_spoof, l_casc], dtype=np.float64) + 1e-6
-        p_t, p_r, p_s, p_c = regime_weights / np.sum(regime_weights)
+        # 🚀 V36.1 FIX: Actually use the QuantumMarkovRegimeDetector
+        regime_weights = self.regime_detector.update_beliefs(
+            self.kaufman_er, 
+            self.shannon_entropy, 
+            getattr(self, 'fleeting_ratio', 0.0), 
+            self.jump_z
+        )
+        p_t, p_r, p_s, p_c = regime_weights
 
         funding_bias, squeeze_risk = self.funding_oracle.get_squeeze_vector()
         ecosystem_alpha = self.ecosystem_propagator.update(parent_mlofi_z)
 
-        # 2. O(1) Asynchronous State Alignment (replaces O(N) looping)
         raw_updates = [
             log_mlofi_z, self.marked_hawkes_z, self.meso_momentum_z, sector_impulse,
             self.micro_elasticity_z, self.ou_divergence_z, getattr(self, 'cfi_z', 0),
@@ -702,24 +719,21 @@ class ContinuousMicrostructureEngine:
         
         aligned_raw_vec = self.async_aligner.get_aligned_vector(now)
 
-        # Bounded Adaptive Whitening
         f = self.whitening_engine.orthogonalize(aligned_raw_vec, self.inst_variance)
 
-        # 3. 25-Dimensional Dense Volterra Manifold
         volterra = np.array([
             f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], 
             f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18],
-            f[11] * f[1],  # 19: Hurst x Hawkes (Persistent Liquidation Cascade)
-            f[17] * f[0],  # 20: Squeeze Risk x MLOFI (Squeeze Ignition!)
-            f[18] * f[0],  # 21: Ecosystem Propagator x Local MLOFI (Cluster Confirmation)
-            f[14] * f[2],  # 22: Absorption Divergence x Micro-Velocity (Exhaustion Reversal)
-            f[5] * f[1],   # 23: OU x Hawkes (Mean-Reversion Climax)
+            f[11] * f[1],  # 19: Hurst x Hawkes 
+            f[17] * f[0],  # 20: Squeeze Risk x MLOFI
+            f[18] * f[0],  # 21: Ecosystem Propagator x Local MLOFI
+            f[14] * f[2],  # 22: Absorption Divergence x Micro-Velocity
+            f[5] * f[1],   # 23: OU x Hawkes
             1.0            # 24: Bias
         ], dtype=np.float64)
 
         v_att = volterra / (np.linalg.norm(volterra) + 1e-9)
 
-        # 4. Information-Geometric Natural Gradient Inference
         l_t = float(np.dot(self.rls_trend.w, v_att))
         l_r = float(np.dot(self.rls_range.w, v_att))
         l_s = float(np.dot(self.rls_spoof.w, v_att))
@@ -734,7 +748,6 @@ class ContinuousMicrostructureEngine:
         prob = max(p_up, 1.0 - p_up)
         self.historical_probs.append(prob)
 
-        # 5. Tuned Conformal Gate
         if len(self.calibration_errors) >= 30:
             q_threshold = float(np.percentile(self.calibration_errors, 70))
         else:
@@ -742,7 +755,6 @@ class ContinuousMicrostructureEngine:
             
         conformal_floor = float(np.clip(0.50 + (q_threshold * 0.3), 0.52, 0.65))
 
-        # Jump-Diffusion Kelly Computation
         kelly_target = self.jump_kelly_sizer.compute(self.inst_variance, self.marked_hawkes_z)
 
         virt_sl = current_price * (1.0 - sl_dist_pct) if action_dir == "BUY" else current_price * (1.0 + sl_dist_pct)
@@ -761,7 +773,8 @@ class ContinuousMicrostructureEngine:
             "raw_features": v_att 
         }
 
-    def resolve_trade_outcome(self, signal_id: str, net_pnl: float):
+    # 🚀 V36.1 FIX 3: Accept allocated_notional to compute exact return percentage
+    def resolve_trade_outcome(self, signal_id: str, net_pnl: float, allocated_notional: float = 21.0):
         if signal_id not in self.pending_trade_outcomes:
             return
 
@@ -777,11 +790,10 @@ class ContinuousMicrostructureEngine:
         non_conformity = abs(y_up - old_p)
         self.calibration_errors.append(non_conformity)
 
-        # Update Jump-Diffusion Kelly
-        return_pct = net_pnl / 21.0  # Approx norm
-        self.jump_kelly_sizer.update(net_pnl, return_pct)
+        # 🚀 V36.1 FIX 3: True percentage return against capital at risk
+        true_return_pct = net_pnl / max(allocated_notional, 1.0)
+        self.jump_kelly_sizer.update(net_pnl, true_return_pct)
 
-        # Riemannian Natural Gradient Updates
         self.rls_trend.update(feats, y_up, old_p, weight=beliefs[0]) 
         self.rls_range.update(feats, y_up, old_p, weight=beliefs[1]) 
         self.rls_spoof.update(feats, y_up, old_p, weight=beliefs[2]) 

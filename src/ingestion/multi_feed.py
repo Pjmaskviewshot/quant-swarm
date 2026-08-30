@@ -1,11 +1,11 @@
 """
-💎 V36.0 APEX TITAN: CENTRALIZED MARKET STATE MATRIX
+💎 V36.2 APEX TITAN: CENTRALIZED MARKET STATE MATRIX
 ----------------------------------------------------
 The Single Source of Truth (SSOT) for High-Frequency Ingestion.
 
-Architectural Supremacy (V36.0 Integration):
+Architectural Supremacy (V36.2 Integration):
 - REST Concurrency Gate: Prevents Self-DDOS connection pool exhaustion during massive 
-  WebSocket packet drops by queuing snapshot recoveries behind a strict Semaphore.
+  WebSocket packet drops by queuing snapshot recoveries behind a strict asyncio.Semaphore(2).
 - Extreme Volatility Buffer Expansion: Symbol-sharded queues expanded to 50,000 and 
   REST-bridge delta buffers expanded to 5,000 to survive massive liquidation cascades 
   without dropping a single Level-2 websocket tick.
@@ -41,7 +41,7 @@ logger = logging.getLogger("QUANT_CORE.MARKET_MATRIX")
 
 class MarketStateMatrix:
     """
-    🚀 V36.0 APEX TITAN: CENTRALIZED L2 STATE MATRIX
+    🚀 V36.2 APEX TITAN: CENTRALIZED L2 STATE MATRIX
     Maintains ultra-low latency WebSocket connections, computes the native SSOT 
     for Micro-Price and Log-MLOFI, and decouples ingestion from downstream 
     processing via Symbol-Sharded asynchronous FIFO queues.
@@ -83,7 +83,7 @@ class MarketStateMatrix:
         
         self.orderbook_sequences: Dict[str, int] = {}
         
-        # 🚀 V36.0 FIX: Expanded delta buffer memory to 5000 to survive API lag
+        # 🚀 V36.2 FIX: Expanded delta buffer memory to 5000 to survive API lag
         self.delta_buffer: Dict[str, deque] = {} 
         self.is_resyncing: Dict[str, bool] = {}
         
@@ -93,11 +93,11 @@ class MarketStateMatrix:
         self.sharded_queues: Dict[str, asyncio.Queue] = {}
         self.consumer_tasks: Dict[str, asyncio.Task] = {}
 
-        # 🚀 V36.0 FIX: Global Resync Semaphore to prevent connection pool exhaustion
+        # 🚀 V36.2 FIX: Global Resync Semaphore to prevent connection pool exhaustion
         self.resync_semaphore = asyncio.Semaphore(2)
 
     def track_task(self, coro: Coroutine) -> asyncio.Task:
-        """🚀 V36.0 CRITICAL FIX: Safely sweeps dead tasks before evaluating the limit."""
+        """🚀 V36.2 CRITICAL FIX: Safely sweeps dead tasks before evaluating the limit."""
         self._active_tasks = {t for t in self._active_tasks if not t.done()}
         
         if len(self._active_tasks) > 500:
@@ -114,7 +114,7 @@ class MarketStateMatrix:
     def _get_or_create_queue(self, symbol: str) -> asyncio.Queue:
         """Dynamically provisions a queue and an isolated consumer worker per symbol."""
         if symbol not in self.sharded_queues:
-            # 🚀 V36.0 FIX: Expanded queue maxsize to 50,000 for extreme liquidation cascades
+            # 🚀 V36.2 FIX: Expanded queue maxsize to 50,000 for extreme liquidation cascades
             self.sharded_queues[symbol] = asyncio.Queue(maxsize=50000)
             worker_task = self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
             self.consumer_tasks[symbol] = worker_task
@@ -123,7 +123,7 @@ class MarketStateMatrix:
 
     def _update_ssot_orderbook(self, symbol: str, msg_type: str, parsed_bids: list, parsed_asks: list, ts: int) -> Optional[Dict[str, Any]]:
         """
-        🚀 V36.0 CENTRALIZED O(1) L2 MATH ENGINE
+        🚀 V36.2 CENTRALIZED O(1) L2 MATH ENGINE
         Processes deltas, maintains bisect-sorted arrays for instantaneous Deep-Book access, 
         and natively calculates the Stationarized Log-MLOFI Z-Score.
         """
@@ -360,7 +360,7 @@ class MarketStateMatrix:
         self.orderbook_sequences.pop(symbol, None)
         symbol_queue = self._get_or_create_queue(symbol)
         
-        # 🚀 V36.0 FIX: Protect Connection Pool. Only 2 concurrent REST resyncs allowed.
+        # 🚀 V36.2 FIX: Protect Connection Pool. Only 2 concurrent REST resyncs allowed.
         async with self.resync_semaphore:
             try:
                 if self.engine_reference and hasattr(self.engine_reference, "executor"):
@@ -514,6 +514,7 @@ class MarketStateMatrix:
                                         elif msg_type == "delta":
                                             if self.is_resyncing.get(symbol, False):
                                                 if symbol not in self.delta_buffer:
+                                                    # 🚀 V36.2 FIX: Expanded delta buffer memory to 5000
                                                     self.delta_buffer[symbol] = deque(maxlen=5000)
                                                 self.delta_buffer[symbol].append(data)
                                                 continue
@@ -543,7 +544,7 @@ class MarketStateMatrix:
                                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                             }))
                                         except asyncio.QueueFull:
-                                            # 🚀 V36.0 CRITICAL FIX: Upgraded visibility to explicit Warning
+                                            # 🚀 V36.2 CRITICAL FIX: Upgraded visibility to explicit Warning
                                             logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping L2 Orderbook tick.")
                                             
                                     elif topic.startswith("publicTrade"):
