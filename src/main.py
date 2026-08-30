@@ -43,7 +43,8 @@ class EmergencyShutdown(Exception):
 from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.quantum_entry import QuantumEntryMatrix  
-from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ThesisVector
+# 🚀 V36.1 FIX: Removed 'ThesisVector' from imports as it was pruned from the exit engine
+from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.omni_scanner import GlobalOmniScanner   
 from features.micro_models import ContinuousMicrostructureEngine
@@ -264,9 +265,6 @@ class DistributedQuantEngine:
         active_set = set(self.asset_basket + self.shadow_basket + list(self.active_positions_map.keys()) + list(self.in_flight_symbols.keys()))
         for key in list(self.stat_engines.keys()):
             if key not in active_set:
-                # 🚀 V36.1 FIX: Do NOT delete `stat_engines` or `feature_engines`. 
-                # Keep them in memory so RLS weights survive asset rotations.
-                # Only prune the heavy high-frequency arrays to save RAM.
                 self.symbol_locks.pop(key, None)
                 self.tick_history.pop(key, None)
                 self.screener_memory.pop(key, None)
@@ -307,14 +305,12 @@ class DistributedQuantEngine:
         await loop.run_in_executor(self.io_pool, _write_file)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
-        # 🚀 V36.1 FIX: Load persistent RLS state
         if not hasattr(self, "saved_sgd_state"): 
             self.saved_sgd_state = self._load_sgd_state_from_disk()
             
         for s in symbols:
             if s not in self.stat_engines: 
                 engine = ContinuousMicrostructureEngine(symbol=s)
-                # Rehydrate weights if they exist
                 if s in self.saved_sgd_state:
                     saved = self.saved_sgd_state[s]
                     engine.rls_trend.w = np.array(saved.get("weights_trending", engine.rls_trend.w))
@@ -579,7 +575,6 @@ class DistributedQuantEngine:
             
         if self.fsm.is_emergency_locked() or self.fsm.is_asset_locked(symbol): return
         
-        # Enforce minimum 50-tick warm-up on hot-swapped symbols
         if not stat_engine or len(stat_engine.tick_prices) < 50:
             return
 
@@ -690,10 +685,8 @@ class DistributedQuantEngine:
             if state.get("execution_style") == "MAKER_ONLY":
                 dominant_regime = "RANGING"
 
-            # 🚀 V36.1 FIX 2: Capture true arrival price BEFORE execution
             arrival_price = price
 
-            # 🚀 V36.1 FIX 1 & 2: Pass exact Kelly size directly to SOR and destructure accurately
             success, avg_fill_price, actual_qty_filled = await self.sor.execute_alpha_signal(
                 symbol=symbol, direction=action, prob_success=prob_success, exec_weight=exec_weight,
                 current_mid_price=price, sl_price=(price * (1-sl_dist_pct) if action=="BUY" else price * (1+sl_dist_pct)),
@@ -1041,7 +1034,6 @@ class DistributedQuantEngine:
         if self.memory:
             await self.memory.log_live_execution_result(ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"])
             
-        # 🚀 V36.1 FIX 4: True Percentage Return normalization against actual allocated capital
         if ctx.get("stat_engine") and hasattr(ctx["stat_engine"], "resolve_trade_outcome"):
             allocated_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", 21.0)
             ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl, allocated_notional)
@@ -1068,7 +1060,7 @@ class DistributedQuantEngine:
             "latest_tick_price": current_price,
             "current_vault_balance": self.global_state_cache.get("current_vault_balance", 21.0),
             "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
-            "max_drawdown_pct": self.risk_vault.max_drawdown_pct, # 🚀 V36.1 FIX: Send True Vault Limit
+            "max_drawdown_pct": self.risk_vault.max_drawdown_pct, 
             "active_positions_count": len(self.active_positions_map),
             "payload_features": {},
             "exec_details": {}
