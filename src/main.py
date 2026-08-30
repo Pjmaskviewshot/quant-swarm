@@ -561,7 +561,7 @@ class DistributedQuantEngine:
             # 🚀 V36.3 FIX: Macro Synergy Cross-Wiring
             fusion_engine = self.entry_matrices.get(symbol)
             if fusion_engine and hasattr(fusion_engine, 'update_macro_flows'):
-                fusion_engine.update_macro_flows(btc_mlofi=parent_flow, eth_mlofi=parent_flow)
+                fusion_engine.update_macro_flows(asset_ofi_z=log_mlofi_z, btc_ofi_z=parent_flow, eth_ofi_z=parent_flow)
 
             extract_args = {
                 "current_price": price, "log_mlofi_z": log_mlofi_z, 
