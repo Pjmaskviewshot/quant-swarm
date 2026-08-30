@@ -15,6 +15,8 @@ Architectural Supremacy (V36.2 Integration):
   without throwing stack-trace errors during the execution drag calculation.
 - Basis Dislocation Sentry: Added statistical surveillance over the Spot-Perp premium.
   Refuses to initiate yield locks if the basis spread exceeds 3.0 standard deviations.
+- Resilient Payload Safeguards: Soft-catches heavy ticker batch timeouts to eliminate 
+  noisy log tracebacks during transient gateway network dropouts.
 """
 
 import re
@@ -88,8 +90,14 @@ class DeltaNeutralYieldEngine:
                 continue
                 
             try:
-                tickers_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear")
-                if tickers_res.get("retCode") != 0: continue
+                # 🚀 V36.2 RESILIENT SAFE-CALL: Soft-catch batch payload timeouts to prevent traceback spam
+                try:
+                    tickers_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="linear")
+                    if not isinstance(tickers_res, dict) or tickers_res.get("retCode") != 0:
+                        continue
+                except Exception as net_err:
+                    logger.warning(f"[YIELD_SENTRY] ⚠️ Tickers batch fetch timed out or dropped. Skipping cycle: {net_err}")
+                    continue
                 
                 ticker_list = tickers_res.get("result", {}).get("list", [])
                 
@@ -117,7 +125,7 @@ class DeltaNeutralYieldEngine:
                     await self.execute_atomic_cash_and_carry_hedge(target_asset, best_funding)
                     
             except Exception as e:
-                logger.error(f"[X-RAY] Yield Scanner Fault: {e}", exc_info=True)
+                logger.error(f"[X-RAY] Yield Scanner Fault: {e}", exc_info=False)
 
     async def _evaluate_active_hedges(self, current_tickers: List[Dict[str, Any]]):
         """Monitors ongoing hedges and unwinds them if the funding rate collapses."""
@@ -149,7 +157,7 @@ class DeltaNeutralYieldEngine:
             spot_list = spot_res.get("result", {}).get("list", [])
             perp_list = perp_res.get("result", {}).get("list", [])
             
-            # 🚀 V36.2 FIX: Prevent IndexError on missing Spot markets (e.g., NESAUSDT)
+            # 🚀 V36.2 FIX: Prevent IndexError on missing Spot markets (e.g., NESAUSDT, MARAUSDT)
             if not spot_list:
                 logger.debug(f"[YIELD_SENTRY] No Spot market exists for {spot_symbol}. Cannot establish basis hedge.")
                 return 35.0, 0.0, 0.0
@@ -189,7 +197,7 @@ class DeltaNeutralYieldEngine:
             drag_bps, spot_price, perp_price = await self._calculate_execution_drag(symbol, spot_symbol)
             
             if spot_price <= 0.0 or perp_price <= 0.0:
-                logger.warning(f"[YIELD_SENTRY] 🚫 Invalid price extraction for {symbol}. Aborting hedge.")
+                logger.debug(f"[YIELD_SENTRY] 🚫 Invalid price extraction for {symbol} (likely missing spot market). Aborting hedge cleanly.")
                 return
                 
             # 🚀 V36.2 BASIS SENTRY: Reject structurally dislocated premiums
@@ -371,9 +379,9 @@ class DeltaNeutralYieldEngine:
             spot_success = isinstance(spot_order, dict) and spot_order.get("retCode") == 0
 
             if not perp_success:
-                logger.critical(f"[X-RAY]   CRITICAL: Unwind PERP Leg Failed for {symbol}: {perp_order.get('retMsg', str(perp_order))}")
+                logger.critical(f"[X-RAY] 🛑 CRITICAL: Unwind PERP Leg Failed for {symbol}: {perp_order.get('retMsg', str(perp_order))}")
             if not spot_success:
-                logger.critical(f"[X-RAY]   CRITICAL: Unwind SPOT Leg Failed for {symbol}: {spot_order.get('retMsg', str(spot_order))}")
+                logger.critical(f"[X-RAY] 🛑 CRITICAL: Unwind SPOT Leg Failed for {symbol}: {spot_order.get('retMsg', str(spot_order))}")
 
             if perp_success and spot_success:
                 del self.active_hedges[symbol]
