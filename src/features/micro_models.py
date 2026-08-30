@@ -1,14 +1,17 @@
 """
-💎 V36.1 APEX TITAN: THE ULTIMATE MICROSTRUCTURE ENGINE
+💎 V36.3 APEX TITAN: THE ULTIMATE MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Resuming the main branch. Integrates advanced continuous-time alignment, 
 exact Bayesian Changepoint Detection, Obizhaeva-Wang LOB Resilience, and 
 Merton Jump-Diffusion optimal control into the 25D Volterra-Riemannian Manifold.
 
-Architectural Supremacy (V36.1 Integration):
+Architectural Supremacy (V36.3 Integration):
+- Volterra Indexing Resolution: Repaired the Ecosystem Propagator cross-product 
+  (Index 15) to restore the primary cross-asset alpha vector.
+- True Kelly Rejection: The Merton Jump-Diffusion Kelly formula now accurately returns 
+  0.0 for negative edge states, actively rejecting trades rather than defaulting to 0.1%.
 - L1-Regularized Riemannian RLS: Applies Proximal Soft-Thresholding to force sparsity.
 - Dynamic BOCD Hazard: Scales changepoint hazard rate dynamically via jump volatility.
-- True Return Normalization: Exact Kelly sizing penalization using dynamic notional sizing.
 - HMM Regime Integration: Properly routes features through the Quantum Markov TPM.
 - Deadlock Resolution: RLS weights initialized with gaussian noise to break 0.5 parity.
 """
@@ -142,7 +145,7 @@ class ObizhaevaWangExecutionSentry:
 
 class MertonJumpKellySizer:
     """
-    🚀 V35.0 SUPERIORITY: Continuous-Time Merton Jump-Diffusion Kelly.
+    🚀 V36.3 SUPERIORITY: Continuous-Time Merton Jump-Diffusion Kelly.
     Dynamically shrinks the Kelly fraction during Hawkes-identified liquidation cascades.
     """
     def __init__(self):
@@ -173,6 +176,10 @@ class MertonJumpKellySizer:
         
         f_star = kelly_f * variance_penalty - jump_penalty
         
+        # 🚀 V36.3 FIX: Refuse to allocate size if negative edge is detected
+        if f_star <= 0.0:
+            return 0.0
+            
         # Fractional limit mapping to max 1.5% risk allowed by Risk Vault
         return float(np.clip(f_star * 0.25, 0.001, 0.015))
 
@@ -467,13 +474,13 @@ class QuantumMarkovRegimeDetector:
 
 class InformationGeometricRLS:
     """
-    🚀 V36.1 EMPIRICAL HARDENING: L1-Regularized Riemannian Natural Gradient.
+    🚀 V36.3 EMPIRICAL HARDENING: L1-Regularized Riemannian Natural Gradient.
     Applies Proximal Soft-Thresholding to force sparsity, crushing overfit Volterra 
     interaction weights to exactly zero if they lack persistent predictive power.
     """
     def __init__(self, dim: int, p_init: float = 1.0, l1_penalty: float = 1e-4):
         self.dim = dim
-        # 🚀 V36.1 FIX: Initialize with tiny random noise to break the 0.5 probability deadlock
+        # 🚀 V36.3 FIX: Initialize with tiny random noise to break the 0.5 probability deadlock
         self.w = np.random.normal(0, 0.01, dim).astype(np.float64)
         self.F_inv = np.eye(dim, dtype=np.float64) * p_init
         self.I = np.eye(dim, dtype=np.float64)
@@ -494,7 +501,7 @@ class InformationGeometricRLS:
         natural_grad = (Fx * fisher_var) / denom
         w_temp = self.w + (natural_grad.flatten() * err * weight)
 
-        # 🚀 V36.0 L1 Soft-Thresholding (Proximal Operator for Sparsity)
+        # 🚀 V36.3 L1 Soft-Thresholding (Proximal Operator for Sparsity)
         self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - self.l1_penalty, 0.0)
 
         # Sherman-Morrison Fisher Inverse Update
@@ -558,7 +565,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 class ContinuousMicrostructureEngine:
     """
-    🚀 V36.1 APEX TITAN: ASYNC-ALIGNED MASTER ENGINE
+    🚀 V36.3 APEX TITAN: ASYNC-ALIGNED MASTER ENGINE
     """
     def __init__(self, symbol: str = "GENERIC", memory_depth: int = 1000):
         self.symbol = symbol
@@ -689,6 +696,7 @@ class ContinuousMicrostructureEngine:
 
     def evaluate_active_trade_stress(self, is_buy: bool) -> Tuple[bool, str]:
         spread_bps = ((self.prev_ask - self.prev_bid) / (self.prev_bid + 1e-9)) * 10000.0
+        # Obizhaeva-Wang Limit Order Book Resilience Tracker replaces static Almgren-Chriss
         return self.obizhaeva_wang_sentry.evaluate_trajectory(is_buy, spread_bps, self.rough_vol, self.marked_hawkes_z, 1.0)
 
     def extract_statistical_state(self, current_price: float, log_mlofi_z: float, hawkes_z: float, sector_impulse: float, sl_dist_pct: float, tp_dist_pct: float, exchange_timestamp: float, parent_mlofi_z: float = 0.0) -> Dict[str, Any]:
@@ -726,7 +734,7 @@ class ContinuousMicrostructureEngine:
             f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18],
             f[11] * f[1],  # 19: Hurst x Hawkes 
             f[17] * f[0],  # 20: Squeeze Risk x MLOFI
-            f[18] * f[0],  # 21: Ecosystem Propagator x Local MLOFI
+            f[15] * f[0],  # 🚀 V36.3 FIX: Restored Ecosystem Propagator Vectorization
             f[14] * f[2],  # 22: Absorption Divergence x Micro-Velocity
             f[5] * f[1],   # 23: OU x Hawkes
             1.0            # 24: Bias

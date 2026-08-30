@@ -11,7 +11,7 @@ Architectural Supremacy (V25.0):
    the API call routing matrix into a pure Direct-Drive passthrough.
 3. Unmanaged WebSocket Heartbeat Catch: Disables fragile `autoping` and manually 
    catches `aiohttp` internal transport crashes to guarantee instant stream recovery.
-4. Multi-Route DNS Fallback (Auto-swaps api.bybit.com <-> api.bytick.com)
+4. Multi-Route DNS Fallback (Auto-swaps api.bytick.com <-> api.bybit.com)
 """
 
 import time
@@ -79,8 +79,8 @@ class BybitUnifiedExecutor:
         self.testnet = testnet
         
         self.rest_routes = [
-            "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com",
-            "https://api-testnet.bytick.com" if testnet else "https://api.bytick.com"
+            "https://api-testnet.bytick.com" if testnet else "https://api.bytick.com",
+            "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
         ]
         self.current_route_idx = 0
         self.rest_base_url = self.rest_routes[self.current_route_idx]
