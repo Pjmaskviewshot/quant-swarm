@@ -1,19 +1,17 @@
 """
-💎 V35.0 APEX TITAN: BARE-METAL CORE
+💎 V36.0 EMPIRICAL HARDENING: BARE-METAL CORE
 ------------------------------------------------------------------------
 Micro-Scalping & In-Flight Guard Execution Engine.
 
-Architectural Supremacy (V35.0 Integration):
-- Ecosystem Matrix Routing: Binds Altcoins to their respective Layer-1 liquidity parent 
-  (BTC, ETH, SOL) using continuous-time Laplace decay propagators.
-- Deep-Book Ingestion: Pipes Level-5 bid/ask depth arrays into the matrix, bypassing 
-  Top-of-Book (L1) spoofing noise.
-- Perpetual Squeeze Pipeline: Streams live Funding Rates directly into the matrix 
-  for real-time squeeze vectorization.
-- Merton Jump-Diffusion Execution: Overrides standard Kelly sizing by actively penalizing 
-  trade allocations during Hawkes-detected liquidation cascades.
-- Obizhaeva-Wang Surveillance Sentry: Actively tracks LOB resilience on live positions, 
-  triggering instant emergency ejections if the Hamiltonian work-deficit turns toxic.
+Architectural Supremacy (V36.0 Integration):
+- Daemon Throttling & Connection Pooling: Dialed back aggressive background polling loops 
+  (position/wallet sync) from 5s to 15s, and universe scanning to 60s, to prevent 
+  self-DDOS of the REST connection pool under extreme volatility.
+- GIL-Aware Pool Isolation: Splits concurrent execution into dedicated Math and I/O pools. 
+  Exploits NumPy's native GIL-release for matrix math without breaking shared memory state.
+- Ecosystem Matrix Routing: Binds Altcoins to their respective Layer-1 liquidity parent.
+- Perpetuals Squeeze Pipeline: Streams live Funding Rates directly into the matrix.
+- Obizhaeva-Wang Surveillance Sentry: Actively tracks LOB resilience on live positions.
 """
 
 import os
@@ -62,7 +60,7 @@ from services.sector_oracle import SectorEigenOracle
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - [%(levelname)s] - [%(message)s]', handlers=[logging.StreamHandler(sys.stdout)])
-logger = logging.getLogger("QUANT_CORE.V35_APEX")
+logger = logging.getLogger("QUANT_CORE.V36_APEX")
 
 
 @dataclass
@@ -154,15 +152,19 @@ class DistributedQuantEngine:
         self.test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
         
         if self.test_mode: logger.critical("⚠️ TEST MODE: Paper Trading Armed.")
-        else: logger.critical("💎 LIVE MODE: V35.0 APEX TITAN BARE-METAL CORE ACTIVE.")
+        else: logger.critical("💎 LIVE MODE: V36.0 EMPIRICAL HARDENING BARE-METAL CORE ACTIVE.")
         
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
         
-        # Throttled thread pool to prevent GIL starvation
+        # 🚀 V36.0 EMPIRICAL HARDENING: GIL-Aware Pool Isolation
+        # NumPy natively releases the GIL during vectorized C-math. We use a ThreadPoolExecutor 
+        # to maximize CPU utilization without breaking RiskVault's continuous shared-memory state, 
+        # while isolating slow disk writes to a separate IO pool.
         safe_workers = min(4, multiprocessing.cpu_count() - 1) if multiprocessing.cpu_count() > 1 else 1
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="V35_Matrix_Workers")
+        self.math_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="V36_Math")
+        self.io_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="V36_IO")
         
         self.db_semaphore = asyncio.Semaphore(5)
         self.execution_semaphore = asyncio.Semaphore(10)
@@ -296,7 +298,7 @@ class DistributedQuantEngine:
             except Exception as e: logger.debug(f"[X-RAY] Failed RLS disk serialization: {e}")
         
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self.thread_pool, _write_file)
+        await loop.run_in_executor(self.io_pool, _write_file)
 
     def _initialize_symbol_structures(self, symbols: List[str]):
         for s in symbols:
@@ -356,7 +358,7 @@ class DistributedQuantEngine:
                 
                 if price_histories:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(self.thread_pool, self.risk_vault.update_correlation_matrix, price_histories)
+                    await loop.run_in_executor(self.math_pool, self.risk_vault.update_correlation_matrix, price_histories)
             except Exception as e:
                 logger.debug(f"[X-RAY] Fast Correlation Matrix update failed: {e}")
 
@@ -392,9 +394,9 @@ class DistributedQuantEngine:
         except Exception as e: logger.error(f"[X-RAY] Failed synchronizing exchange state: {e}", exc_info=True)
 
     async def run_fast_state_invariant_reconciliation(self):
-        logger.info("🛡️ 5000ms STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
+        logger.info("🛡️ 15s STATE INVARIANT RECONCILIATION DAEMON ONLINE.")
         while True:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(15.0) 
             try:
                 now = time.time()
                 expired_flights = [sym for sym, exp in self.in_flight_symbols.items() if now > exp]
@@ -517,14 +519,12 @@ class DistributedQuantEngine:
             
             stat_engine = self.stat_engines.get(symbol)
             if stat_engine:
-                # 🚀 V35.0 TITAN FIX: Pass full Level-5 Arrays for Deep-Book Sweep Detection
                 if hasattr(stat_engine, 'update_orderbook_pressure') and 'bids' in rich_payload:
                     try:
                         stat_engine.update_orderbook_pressure(
                             rich_payload.get("bids", []), rich_payload.get("asks", [])
                         )
                     except TypeError:
-                        # Graceful fallback if micro_models.py hasn't hot-reloaded
                         stat_engine.update_orderbook_pressure(
                             rich_payload["best_bid"], rich_payload["bid_vol"],
                             rich_payload["best_ask"], rich_payload["ask_vol"]
@@ -590,7 +590,6 @@ class DistributedQuantEngine:
             dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.0)
             tp_dist_pct = sl_dist_pct * dynamic_rr
 
-            # 🚀 V35.0 ECOSYSTEM ROUTING: Match altcoins to their actual Layer-1 liquidity parent
             sol_cluster = ["SOLUSDT", "JUPUSDT", "WIFUSDT", "PYTHUSDT", "RAYUSDT", "JTOUSDT", "BONKUSDT"]
             eth_cluster = ["ETHUSDT", "PEPEUSDT", "OPUSDT", "ARBUSDT", "LDOUSDT", "ENAUSDT", "LINKUSDT"]
             
@@ -601,7 +600,6 @@ class DistributedQuantEngine:
             else:
                 parent_flow = self.stream_feed_instance.log_mlofi_z.get("BTCUSDT", 0.0) if self.stream_feed_instance else 0.0
 
-            # Safe extraction regardless of whether stat_engine has hot-reloaded yet
             extract_args = {
                 "current_price": price, 
                 "log_mlofi_z": log_mlofi_z, 
@@ -645,7 +643,6 @@ class DistributedQuantEngine:
 
             current_bal = self.global_state_cache.get("current_vault_balance", 21.0)
             
-            # 🚀 V35.0 JUMP-DIFFUSION KELLY OVERRIDE
             if "kelly_fraction" in state:
                 trade_risk_dollars = current_bal * state["kelly_fraction"] * exec_weight
                 jump_notional = trade_risk_dollars / (sl_dist_pct + 1e-9)
@@ -671,12 +668,10 @@ class DistributedQuantEngine:
             except Exception as e:
                 logger.warning(f"[X-RAY] ⚠️ Leverage adjustment bypassed for {symbol}: {e}")
 
-            # 🚀 V35.0 ADAPTIVE EXECUTION STYLE ROUTING
             dominant_regime = state.get("dominant_regime", "TRENDING")
             if state.get("execution_style") == "MAKER_ONLY":
-                dominant_regime = "RANGING"  # Forces SOR into passive pegging
+                dominant_regime = "RANGING"
 
-            # DIRECT-DRIVE ROUTING
             success, arrival_price, f_price = await self.sor.execute_alpha_signal(
                 symbol=symbol, direction=action, prob_success=prob_success, exec_weight=exec_weight,
                 current_mid_price=price, sl_price=(price * (1-sl_dist_pct) if action=="BUY" else price * (1+sl_dist_pct)),
@@ -750,7 +745,7 @@ class DistributedQuantEngine:
                 new_loop.close()
 
         loop = asyncio.get_running_loop()
-        loop.run_in_executor(self.thread_pool, _sync_db_call)
+        loop.run_in_executor(self.io_pool, _sync_db_call)
 
     async def run_dna_prewarmer(self):
         logger.info("🔥 RAM PRE-WARMER ONLINE.")
@@ -808,10 +803,10 @@ class DistributedQuantEngine:
             except Exception as e: logger.error(f"[X-RAY] Shadow resolution error: {e}")
 
     async def run_omni_swarm_director(self):
-        logger.info("🌪️ OMNI-SWARM DIRECTOR ONLINE.")
+        logger.info("🌪️ 60s OMNI-SWARM DIRECTOR ONLINE.")
         banned_keywords = ["AAPL", "TSLA", "NVDA", "AMZN", "MSFT", "GOOG", "META", "SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", "SSPCUSDT"]
         while True:
-            await asyncio.sleep(15) 
+            await asyncio.sleep(60) 
             try:
                 protected_symbols = set(self.active_positions_map.keys()) | set(self.in_flight_symbols.keys())
                 dead_sym, hot_sym = await self.omni_scanner.scan_and_rank_universe(self.asset_basket, protected_symbols=protected_symbols)
@@ -861,7 +856,6 @@ class DistributedQuantEngine:
                     if baseline > 0: self.screener_metrics[symbol]["vol_mult"] = min(10.0, max(0.1, turnover / baseline))
                     self.volatility_baseline[symbol] = (baseline * 0.99) + (turnover * 0.01)
                 
-                # 🚀 V35.0 FIX: Ingest live funding rate velocity into Matrix
                 if "fundingRate" in raw_data:
                     if symbol in self.stat_engines and hasattr(self.stat_engines[symbol], 'update_funding_metrics'):
                         self.stat_engines[symbol].update_funding_metrics(float(raw_data["fundingRate"]))
@@ -870,7 +864,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("🌌 V25.0 MATRIX REFRESH: Probing High-Velocity Universe...")
+            logger.info("🌌 V36.0 MATRIX REFRESH: Probing High-Velocity Universe...")
             await self.sor._fetch_exchange_limits("BTCUSDT") # Warmup
             
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -886,7 +880,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols() 
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set() 
-            logger.info(f"✅ V25.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
+            logger.info(f"✅ V36.0 MATRIX REFRESHED: {len(self.asset_basket)} Live Slots | {len(self.shadow_basket)} Shadow Slots Active.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}")
 
@@ -919,10 +913,6 @@ class DistributedQuantEngine:
             self.stream_restart_event.clear()
             self.last_socket_reconnect = time.time() 
             await asyncio.sleep(2)
-
-    # ==============================================================================
-    # 🚀 V35.0 CENTRALIZED LIFECYCLE DAEMON
-    # ==============================================================================
 
     async def _state_verify_entry(self, ctx: dict) -> str:
         for _ in range(5):  
@@ -1123,7 +1113,6 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # 🚀 V35.0 TITAN IN-FLIGHT SURVEILLANCE (Obizhaeva-Wang LOB Resilience Check)
                 if ctx["stat_engine"] and hasattr(ctx["stat_engine"], 'evaluate_active_trade_stress'):
                     should_eject, stress_reason = ctx["stat_engine"].evaluate_active_trade_stress(ctx["is_buy"])
                     if should_eject:
@@ -1189,7 +1178,8 @@ class DistributedQuantEngine:
         if hasattr(self, 'memory') and self.memory: await self.memory.flush_and_close()
         if hasattr(self, 'telegram'): await self.telegram.close()
         
-        self.thread_pool.shutdown(wait=False)
+        self.math_pool.shutdown(wait=False)
+        self.io_pool.shutdown(wait=False)
         logger.critical("✅ MATRIX DISCONNECTED.")
 
     async def run_engine_forever(self):

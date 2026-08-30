@@ -1,9 +1,11 @@
 """
-💎 V35.0 APEX TITAN: CENTRALIZED MARKET STATE MATRIX
+💎 V36.0 APEX TITAN: CENTRALIZED MARKET STATE MATRIX
 ----------------------------------------------------
 The Single Source of Truth (SSOT) for High-Frequency Ingestion.
 
-Architectural Supremacy (V35.0 Integration):
+Architectural Supremacy (V36.0 Integration):
+- REST Concurrency Gate: Prevents Self-DDOS connection pool exhaustion during massive 
+  WebSocket packet drops by queuing snapshot recoveries behind a strict Semaphore.
 - Extreme Volatility Buffer Expansion: Symbol-sharded queues expanded to 50,000 and 
   REST-bridge delta buffers expanded to 5,000 to survive massive liquidation cascades 
   without dropping a single Level-2 websocket tick.
@@ -39,7 +41,7 @@ logger = logging.getLogger("QUANT_CORE.MARKET_MATRIX")
 
 class MarketStateMatrix:
     """
-    🚀 V35.0 APEX TITAN: CENTRALIZED L2 STATE MATRIX
+    🚀 V36.0 APEX TITAN: CENTRALIZED L2 STATE MATRIX
     Maintains ultra-low latency WebSocket connections, computes the native SSOT 
     for Micro-Price and Log-MLOFI, and decouples ingestion from downstream 
     processing via Symbol-Sharded asynchronous FIFO queues.
@@ -81,7 +83,7 @@ class MarketStateMatrix:
         
         self.orderbook_sequences: Dict[str, int] = {}
         
-        # 🚀 V35.0 FIX: Expanded delta buffer memory to 5000 to survive API lag
+        # 🚀 V36.0 FIX: Expanded delta buffer memory to 5000 to survive API lag
         self.delta_buffer: Dict[str, deque] = {} 
         self.is_resyncing: Dict[str, bool] = {}
         
@@ -91,8 +93,11 @@ class MarketStateMatrix:
         self.sharded_queues: Dict[str, asyncio.Queue] = {}
         self.consumer_tasks: Dict[str, asyncio.Task] = {}
 
+        # 🚀 V36.0 FIX: Global Resync Semaphore to prevent connection pool exhaustion
+        self.resync_semaphore = asyncio.Semaphore(2)
+
     def track_task(self, coro: Coroutine) -> asyncio.Task:
-        """🚀 V35.0 CRITICAL FIX: Safely sweeps dead tasks before evaluating the limit."""
+        """🚀 V36.0 CRITICAL FIX: Safely sweeps dead tasks before evaluating the limit."""
         self._active_tasks = {t for t in self._active_tasks if not t.done()}
         
         if len(self._active_tasks) > 500:
@@ -109,7 +114,7 @@ class MarketStateMatrix:
     def _get_or_create_queue(self, symbol: str) -> asyncio.Queue:
         """Dynamically provisions a queue and an isolated consumer worker per symbol."""
         if symbol not in self.sharded_queues:
-            # 🚀 V35.0 FIX: Expanded queue maxsize to 50,000 for extreme liquidation cascades
+            # 🚀 V36.0 FIX: Expanded queue maxsize to 50,000 for extreme liquidation cascades
             self.sharded_queues[symbol] = asyncio.Queue(maxsize=50000)
             worker_task = self.track_task(self._sharded_consumer_worker(symbol, self.sharded_queues[symbol]))
             self.consumer_tasks[symbol] = worker_task
@@ -118,7 +123,7 @@ class MarketStateMatrix:
 
     def _update_ssot_orderbook(self, symbol: str, msg_type: str, parsed_bids: list, parsed_asks: list, ts: int) -> Optional[Dict[str, Any]]:
         """
-        🚀 V35.0 CENTRALIZED O(1) L2 MATH ENGINE
+        🚀 V36.0 CENTRALIZED O(1) L2 MATH ENGINE
         Processes deltas, maintains bisect-sorted arrays for instantaneous Deep-Book access, 
         and natively calculates the Stationarized Log-MLOFI Z-Score.
         """
@@ -344,7 +349,7 @@ class MarketStateMatrix:
 
     async def _resync_isolated_symbol(self, symbol: str):
         """
-        🚀 ZERO-TICK-LOSS SNAPSHOT RESYNC
+        🚀 ZERO-TICK-LOSS SNAPSHOT RESYNC WITH CONCURRENCY GATE
         Fetches a REST snapshot and seamlessly replays any deltas that arrived 
         over the WebSocket directly into the symbol's isolated queue.
         """
@@ -355,62 +360,64 @@ class MarketStateMatrix:
         self.orderbook_sequences.pop(symbol, None)
         symbol_queue = self._get_or_create_queue(symbol)
         
-        try:
-            if self.engine_reference and hasattr(self.engine_reference, "executor"):
-                try:
-                    rest_ob = await self.engine_reference.executor.safe_call(
-                        "GET", "/v5/market/orderbook", 
-                        category="linear", symbol=symbol, limit=50
-                    )
-                    data = rest_ob.get("result", {})
-                    if data and "b" in data and "a" in data:
-                        parsed_bids = self._fast_float_parse_book(data.get("b", []))
-                        parsed_asks = self._fast_float_parse_book(data.get("a", []))
-                        snap_seq = int(data.get("u", 0))
-                        
-                        try:
-                            symbol_queue.put_nowait(("orderbook", {
-                                "s": symbol, "b": parsed_bids, "a": parsed_asks, 
-                                "u": snap_seq, "type": "snapshot", 
-                                "ts": int(data.get("ts", time.time() * 1000))
-                            }))
-                        except asyncio.QueueFull:
-                            logger.warning(f"[X-RAY] ⚠️ {symbol} queue full during REST resync. Load shedding snapshot.")
-
-                        self.orderbook_sequences[symbol] = snap_seq
-                        
-                        buffered_deltas = self.delta_buffer.get(symbol, [])
-                        replayed = 0
-                        for delta in buffered_deltas:
-                            if int(delta.get("u", 0)) > snap_seq:
-                                try:
-                                    b_parsed = self._fast_float_parse_book(delta.get("b", []))
-                                    a_parsed = self._fast_float_parse_book(delta.get("a", []))
-                                    
-                                    symbol_queue.put_nowait(("orderbook", {
-                                        "s": symbol, "b": b_parsed, "a": a_parsed, 
-                                        "u": delta.get("u"), "type": "delta", 
-                                        "ts": int(time.time() * 1000) 
-                                    }))
-                                    self.orderbook_sequences[symbol] = delta.get("u")
-                                    replayed += 1
-                                except asyncio.QueueFull:
-                                    pass
-                        
-                        logger.info(f"[X-RAY] ✅ Resync complete for {symbol}. Replayed {replayed}/{len(buffered_deltas)} buffered deltas.")
-                except Exception as e:
-                    logger.debug(f"[X-RAY] REST bridge failed during resync for {symbol}: {e}")
-
-        finally:
-            self.is_resyncing[symbol] = False
-            self.delta_buffer.pop(symbol, None)
-            
+        # 🚀 V36.0 FIX: Protect Connection Pool. Only 2 concurrent REST resyncs allowed.
+        async with self.resync_semaphore:
             try:
-                if self.active_ws and not self.active_ws.closed:
-                    await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
-                    await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
-            except Exception:
-                pass
+                if self.engine_reference and hasattr(self.engine_reference, "executor"):
+                    try:
+                        rest_ob = await self.engine_reference.executor.safe_call(
+                            "GET", "/v5/market/orderbook", 
+                            category="linear", symbol=symbol, limit=50
+                        )
+                        data = rest_ob.get("result", {})
+                        if data and "b" in data and "a" in data:
+                            parsed_bids = self._fast_float_parse_book(data.get("b", []))
+                            parsed_asks = self._fast_float_parse_book(data.get("a", []))
+                            snap_seq = int(data.get("u", 0))
+                            
+                            try:
+                                symbol_queue.put_nowait(("orderbook", {
+                                    "s": symbol, "b": parsed_bids, "a": parsed_asks, 
+                                    "u": snap_seq, "type": "snapshot", 
+                                    "ts": int(data.get("ts", time.time() * 1000))
+                                }))
+                            except asyncio.QueueFull:
+                                logger.warning(f"[X-RAY] ⚠️ {symbol} queue full during REST resync. Load shedding snapshot.")
+
+                            self.orderbook_sequences[symbol] = snap_seq
+                            
+                            buffered_deltas = self.delta_buffer.get(symbol, [])
+                            replayed = 0
+                            for delta in buffered_deltas:
+                                if int(delta.get("u", 0)) > snap_seq:
+                                    try:
+                                        b_parsed = self._fast_float_parse_book(delta.get("b", []))
+                                        a_parsed = self._fast_float_parse_book(delta.get("a", []))
+                                        
+                                        symbol_queue.put_nowait(("orderbook", {
+                                            "s": symbol, "b": b_parsed, "a": a_parsed, 
+                                            "u": delta.get("u"), "type": "delta", 
+                                            "ts": int(time.time() * 1000) 
+                                        }))
+                                        self.orderbook_sequences[symbol] = delta.get("u")
+                                        replayed += 1
+                                    except asyncio.QueueFull:
+                                        pass
+                            
+                            logger.info(f"[X-RAY] ✅ Resync complete for {symbol}. Replayed {replayed}/{len(buffered_deltas)} buffered deltas.")
+                    except Exception as e:
+                        logger.debug(f"[X-RAY] REST bridge failed during resync for {symbol}: {e}")
+
+            finally:
+                self.is_resyncing[symbol] = False
+                self.delta_buffer.pop(symbol, None)
+                
+                try:
+                    if self.active_ws and not self.active_ws.closed:
+                        await self.active_ws.send_json({"op": "unsubscribe", "args": [f"orderbook.50.{symbol}"]})
+                        await self.active_ws.send_json({"op": "subscribe", "args": [f"orderbook.50.{symbol}"]})
+                except Exception:
+                    pass
 
     def _fast_float_parse_book(self, levels: list) -> list:
         try:
@@ -507,7 +514,6 @@ class MarketStateMatrix:
                                         elif msg_type == "delta":
                                             if self.is_resyncing.get(symbol, False):
                                                 if symbol not in self.delta_buffer:
-                                                    # 🚀 V35.0 FIX: Expanded delta buffer memory to 5000
                                                     self.delta_buffer[symbol] = deque(maxlen=5000)
                                                 self.delta_buffer[symbol].append(data)
                                                 continue
@@ -537,7 +543,7 @@ class MarketStateMatrix:
                                                 "s": symbol, "b": parsed_bids, "a": parsed_asks, "u": u_sequence, "type": msg_type, "ts": payload.get("ts", time.time()*1000)
                                             }))
                                         except asyncio.QueueFull:
-                                            # 🚀 V35.0 CRITICAL FIX: Upgraded visibility to explicit Warning
+                                            # 🚀 V36.0 CRITICAL FIX: Upgraded visibility to explicit Warning
                                             logger.warning(f"[X-RAY] ⚠️ LOAD SHEDDING: {symbol} queue full. Dropping L2 Orderbook tick.")
                                             
                                     elif topic.startswith("publicTrade"):
