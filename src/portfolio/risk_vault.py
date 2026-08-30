@@ -1,5 +1,5 @@
 """
-💎 V25.5 APEX QUANTUM PRIME: INSTITUTIONAL RISK VAULT
+💎 V36.0 APEX TITAN: INSTITUTIONAL RISK VAULT
 ------------------------------------------------------------
 Features:
 - Live Portfolio Correlation Stress Guard (Rejects trades if avg pairwise corr > 0.70)
@@ -7,12 +7,15 @@ Features:
 - Intraday High-Watermark Circuit Breaker (2%) & Systemic Drawdown (5%)
 - Exact Matrix Invertibility Guards & Exposure Heat Allocation
 
-Architectural Supremacy (V25.5 - Final Audit Resolutions):
+Architectural Supremacy (V36.0 Integration):
+- Continuous Dual-EWMA Covariance: Replaces O(N^2) rolling window computations 
+  with a memory-efficient, continuous-time exponential covariance tracker.
+- Ledoit-Wolf Linear Shrinkage: Pulls extreme high-frequency correlation noise 
+  toward the identity matrix to prevent spurious >0.70 portfolio vetoes.
+- Robust Watermark Bootstrapping: Safeguards intraday and peak balance initializations 
+  against zero/dust read loops to eliminate false positive 99.74% loss limit trips.
 - Beta-Stripped Correlation Lookback: Subtracts the cross-sectional market mean 
-  before computing the covariance matrix to prevent false positive correlation 
-  vetoes driven purely by Bitcoin's macro beta.
-- Pure NumPy Covariance Engine: Vectorized matrix computation operating lightning-fast 
-  inside the 15-second high-frequency tracking loop.
+  before computing the covariance matrix to isolate true asset correlations.
 """
 
 import math
@@ -27,7 +30,7 @@ logger = logging.getLogger("QUANT_CORE.RISK_VAULT")
 
 class InstitutionalRiskVault:
     """
-    🚀 V25.5 PURE SYSTEMIC GUARDIAN
+    🚀 V36.0 PURE SYSTEMIC GUARDIAN
     Strictly governs portfolio contagion, absolute drawdowns, and correlation clustering.
     Stripped of all trade-sizing logic to act purely as an invariant firewall.
     """
@@ -57,50 +60,67 @@ class InstitutionalRiskVault:
         
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
+        
+        # 🚀 V36.0 Continuous Covariance State
+        self.ewma_mean = None
+        self.ewma_var = None
+        self.ewma_cov = None
+        self.prev_prices = None
 
     def update_correlation_matrix(self, price_histories: Dict[str, List[float]]):
         """
-        🚀 V25.5 FIX: Vectorized NumPy Covariance with Beta-Stripped Lookback
-        Computes pairwise correlations using pure NumPy arrays for high-frequency execution 
-        while requiring at least 60 periods to prevent noise-driven matrix distortion.
+        🚀 V36.0 EMPIRICAL HARDENING: Continuous Dual-EWMA Covariance.
+        Eradicates the O(N^2) rolling window computation in favor of a 
+        memory-efficient, continuous-time exponential covariance tracker.
         """
         try:
-            if not price_histories:
-                return
-                
+            if not price_histories: return
             symbols = list(price_histories.keys())
-            min_len = min(len(prices) for prices in price_histories.values())
+            if len(symbols) < 2: return
+
+            # Get only the latest price to update the continuous state
+            latest_prices = np.array([price_histories[sym][-1] for sym in symbols], dtype=np.float64)
             
-            # Require at least 60 observations for statistical stability
-            if min_len < 60: 
+            if self.prev_prices is None or len(self.prev_prices) != len(symbols):
+                self.prev_prices = latest_prices
+                self.ewma_mean = np.zeros(len(symbols), dtype=np.float64)
+                self.ewma_var = np.ones(len(symbols), dtype=np.float64) * 1e-6
+                self.ewma_cov = np.eye(len(symbols), dtype=np.float64) * 1e-6
                 return
+
+            # Compute instant log return
+            returns = np.log(latest_prices / (self.prev_prices + 1e-9))
+            self.prev_prices = latest_prices
+
+            # Beta stripping (Cross-sectional mean)
+            market_mean = np.mean(returns)
+            excess_returns = returns - market_mean
+
+            # Continuous EWMA Updates (Alpha = 0.02 ~ 50 tick half-life)
+            alpha = 0.02
+            delta = excess_returns - self.ewma_mean
+            self.ewma_mean += alpha * delta
             
-            # Vectorized O(1) Memory layout using pure NumPy
-            price_arr = np.array([price_histories[sym][-min_len:] for sym in symbols], dtype=np.float64)
+            # Update variances and covariance matrix
+            self.ewma_var = (1.0 - alpha) * self.ewma_var + alpha * (delta ** 2)
+            self.ewma_cov = (1.0 - alpha) * self.ewma_cov + alpha * np.outer(delta, delta)
+
+            # Compute correlation from continuous covariance
+            stds = np.sqrt(np.maximum(self.ewma_var, 1e-9))
+            corr = self.ewma_cov / np.outer(stds, stds)
             
-            # Fast vectorized log returns
-            returns_arr = np.log(price_arr[:, 1:] / (price_arr[:, :-1] + 1e-9))
+            # Handle numerical instability
+            corr = np.clip(np.nan_to_num(corr, nan=0.0), -1.0, 1.0)
             
-            # 🚀 AUDIT FIX: Beta-Stripping (Excess Returns)
-            # Subtract cross-sectional market mean per time step.
-            # This isolates true asset correlation and prevents BTC-beta from skewing the matrix.
-            market_mean = np.mean(returns_arr, axis=0, keepdims=True)
-            excess_returns = returns_arr - market_mean
+            # 🚀 V36.0: Static Shrinkage to Identity (Ledoit-Wolf approximation)
+            # Pulls noisy off-diagonal extreme correlations toward 0, saving us from false >0.70 vetoes.
+            shrinkage_intensity = 0.25
+            shrunk_corr = (1.0 - shrinkage_intensity) * corr + (shrinkage_intensity * np.eye(corr.shape[0]))
             
-            # Fast Pearson Correlation Matrix on Excess Returns
-            corr = np.corrcoef(excess_returns)
-            
-            # Handle NaNs from zero-variance arrays (e.g., dead pairs or halted trading)
-            corr = np.nan_to_num(corr, nan=0.0)
-            
-            # Tikhonov Ridge regularization for invertible correlation matrix
-            reg_corr = (1.0 - 1e-4) * corr + (1e-4 * np.eye(corr.shape[0]))
-            
-            # Map back to a DataFrame purely for simple O(1) .loc lookups in the safety check
-            self.correlation_matrix = pd.DataFrame(reg_corr, index=symbols, columns=symbols)
+            self.correlation_matrix = pd.DataFrame(shrunk_corr, index=symbols, columns=symbols)
             
         except Exception as e:
-            logger.debug(f"[MATH_WARN] Correlation update failure: {e}")
+            logger.debug(f"[MATH_WARN] EWMA Correlation update failure: {e}")
 
     def get_max_allowed_slots(self) -> int:
         return 5
@@ -112,7 +132,7 @@ class InstitutionalRiskVault:
         symbol: str = ""
     ) -> Tuple[bool, str]:
         """
-        🚀 V25.5 FAIL-CLOSED LATCH MATRIX
+        🚀 V36.0 FAIL-CLOSED LATCH MATRIX WITH WATERMARK SAFEGUARDS
         Evaluates the aggregate systemic health of the portfolio before allowing any order routing.
         """
         if self.emergency_circuit_breaker:
@@ -125,6 +145,13 @@ class InstitutionalRiskVault:
 
         if current_balance > 1.0:
             self.last_valid_equity = current_balance
+
+        # 🚀 ROBUST WATERMARK BOOTSTRAP: Prevent false 99.74% loss limit trips
+        # Anchors the high-watermarks dynamically to the true balance on boot
+        if self.daily_high_watermark <= 1.0:
+            self.daily_high_watermark = current_balance
+        if self.peak_balance <= 1.0:
+            self.peak_balance = current_balance
 
         # Daily Loss Limit Protection
         now_date = datetime.now(timezone.utc).date()

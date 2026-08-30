@@ -1,17 +1,16 @@
 """
-💎 V25.2 APEX QUANTUM PRIME: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
+💎 V36.0 APEX TITAN: ATOMIC DELTA-NEUTRAL YIELD HARVESTER
 ------------------------------------------------------------------------
 Features:
 - Concurrent Asyncio Leg Dispatch (Parallel Spot & Perp)
 - Hard 5.0s Timeout Rollback Protocol (Eliminates Naked Short Risk)
 - Exact Execution Drag Calculus & Break-Even Horizon Gating
-- 20% Account Exposure Limits & Active Yield Ejection Daemons
+- Synthetic Basis Dislocation Sentry (Prevents Arbitrage into Decoupled Markets)
 
-Architectural Supremacy (V25.2 - Final Audit Resolutions):
-- Granular Legging Failure Diagnostics: Enhanced the `asyncio.wait_for` and 
-  `asyncio.gather` exception handlers to explicitly isolate whether a timeout 
-  or failure occurred on the Spot leg or the Perpetual leg, replacing 
-  silent generic fallbacks with pinpoint forensic logging.
+Architectural Supremacy (V36.0 Integration):
+- Basis Dislocation Sentry: Added statistical surveillance over the Spot-Perp premium.
+  Refuses to initiate yield locks if the basis spread exceeds 3.0 standard deviations, 
+  preventing directional mark-to-market losses on theoretically "delta-neutral" trades.
 """
 
 import re
@@ -19,6 +18,8 @@ import math
 import asyncio
 import logging
 import time
+import numpy as np
+from collections import deque
 from typing import Dict, Any, List
 
 logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
@@ -26,7 +27,7 @@ logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
 class DeltaNeutralYieldEngine:
     """
-    🚀 V25.2 YIELD HARVESTER
+    🚀 V36.0 YIELD HARVESTER
     Sweeps strictly idle margin into risk-free basis trades (Spot Long + Perp Short) 
     to harvest extreme funding rates. Automatically unwinds when yield decays.
     """
@@ -40,6 +41,7 @@ class DeltaNeutralYieldEngine:
         self.exit_funding_threshold = 0.00015   
         
         self.active_hedges: Dict[str, dict] = {} 
+        self.basis_history: Dict[str, deque] = {}
         self.taker_fee_rate = 0.00055 # Bybit base taker fee
 
     def _get_spot_symbol(self, linear_symbol: str) -> str:
@@ -47,6 +49,30 @@ class DeltaNeutralYieldEngine:
         base_coin = linear_symbol[:-4]
         base_coin = re.sub(r'^(10000|1000)', '', base_coin)
         return f"{base_coin}USDT"
+
+    def _check_basis_dislocation(self, spot_price: float, perp_price: float, symbol: str) -> bool:
+        """
+        🚀 V36.0 EMPIRICAL HARDENING: Basis Dislocation Sentry.
+        Prevents Delta-Neutral engine from executing if the Perp-Spot 
+        premium has structurally decoupled.
+        """
+        if symbol not in self.basis_history:
+            self.basis_history[symbol] = deque(maxlen=200)
+            
+        current_basis_bps = ((perp_price - spot_price) / spot_price) * 10000.0
+        self.basis_history[symbol].append(current_basis_bps)
+        
+        if len(self.basis_history[symbol]) < 50:
+            return False  # Not enough data, allow safe entry
+            
+        arr = np.array(self.basis_history[symbol])
+        basis_z = abs(current_basis_bps - np.mean(arr)) / (np.std(arr) + 1e-9)
+        
+        if basis_z > 3.0:
+            logger.warning(f"[YIELD_SENTRY] 🛑 Structural Basis Dislocation detected on {symbol} (Z: {basis_z:.1f}σ). Halting Arbitrage.")
+            return True
+            
+        return False
 
     async def run_yield_scanner_daemon(self):
         logger.info("🏦 DELTA-NEUTRAL YIELD ENGINE ONLINE: Scanning for Cash-and-Carry Arbitrage.")
@@ -107,10 +133,10 @@ class DeltaNeutralYieldEngine:
         for sym in symbols_to_unwind:
             await self.unwind_cash_and_carry_hedge(sym)
 
-    async def _calculate_execution_drag(self, perp_symbol: str, spot_symbol: str) -> float:
+    async def _calculate_execution_drag(self, perp_symbol: str, spot_symbol: str) -> Tuple[float, float, float]:
         """
         Calculates the exact basis spread and fee drag required to enter the position.
-        Returns the total cost in basis points (bps).
+        Returns Tuple[total_cost_bps, spot_price, perp_price]
         """
         try:
             spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=spot_symbol)
@@ -123,17 +149,18 @@ class DeltaNeutralYieldEngine:
             basis_spread_pct = abs(spot_ask - perp_bid) / spot_ask
             fee_drag_pct = self.taker_fee_rate * 2.0  # Fees paid on both legs
             
-            return (basis_spread_pct + fee_drag_pct) * 10000.0
+            total_drag_bps = (basis_spread_pct + fee_drag_pct) * 10000.0
+            return total_drag_bps, spot_ask, perp_bid
             
         except Exception as e:
             logger.debug(f"[X-RAY] Drag calculation failed for {perp_symbol}: {e}")
-            return 35.0  # Fallback to a safe 35 bps estimate
+            return 35.0, 0.0, 0.0  # Fallback to a safe 35 bps estimate with 0 prices
 
     async def execute_atomic_cash_and_carry_hedge(self, symbol: str, funding_rate: float):
         """
-        🚀 V25.2 ATOMIC DUAL-LEG DISPATCH
+        🚀 V36.0 ATOMIC DUAL-LEG DISPATCH
         Executes Spot Buy and Perp Short concurrently with strict timeouts and granular 
-        exception logging to diagnose legging failures.
+        exception logging to diagnose legging failures. Defended by Basis Sentry.
         """
         if funding_rate < self.entry_funding_threshold:
             return
@@ -143,10 +170,18 @@ class DeltaNeutralYieldEngine:
         try:
             spot_symbol = self._get_spot_symbol(symbol)
             
-            # 1. Evaluate Execution Drag vs. Break-Even Horizon (Epoch Aware)
-            drag_bps = await self._calculate_execution_drag(symbol, spot_symbol)
-            funding_bps_per_epoch = funding_rate * 10000.0
+            # 1. Evaluate Execution Drag vs. Break-Even Horizon
+            drag_bps, spot_price, perp_price = await self._calculate_execution_drag(symbol, spot_symbol)
             
+            if spot_price <= 0.0 or perp_price <= 0.0:
+                logger.warning(f"[YIELD_SENTRY] 🚫 Invalid price extraction for {symbol}. Aborting hedge.")
+                return
+                
+            # 🚀 V36.0 BASIS SENTRY: Reject structurally dislocated premiums
+            if self._check_basis_dislocation(spot_price, perp_price, symbol):
+                return
+                
+            funding_bps_per_epoch = funding_rate * 10000.0
             if funding_bps_per_epoch <= 0: return
                 
             epochs_to_breakeven = math.ceil(drag_bps / funding_bps_per_epoch)
@@ -181,14 +216,11 @@ class DeltaNeutralYieldEngine:
             if yield_capital < 12.0:
                 return
             
-            spot_res = await self.core.executor.safe_call("GET", "/v5/market/tickers", category="spot", symbol=spot_symbol)
-            spot_price = float(spot_res["result"]["list"][0]["lastPrice"])
-            
             await self.core.sor._fetch_exchange_limits(symbol)
             qty = self.core.sor._apply_dynamic_exchange_limits(yield_capital / spot_price, spot_price, symbol)
             
             # =========================================================
-            # 🚀 V25.2 ATOMIC CONCURRENT EXECUTION BLOCK WITH GRANULAR LOGGING
+            # 🚀 V36.0 ATOMIC CONCURRENT EXECUTION BLOCK WITH GRANULAR LOGGING
             # =========================================================
             logger.info(f"[X-RAY] 🏦 Routing ATOMIC DUAL-LEG Hedge for {qty} {symbol} (Spot: {spot_symbol})...")
             
@@ -249,7 +281,7 @@ class DeltaNeutralYieldEngine:
                 logger.critical(f"✅ DELTA-NEUTRAL LOCK SECURED // {symbol} successfully hedged using idle cash flow.")
                 return
                 
-            # 🚀 V25.2 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
+            # 🚀 V36.0 SAFETY NET: Immediate Market IOC Rollback if Legging Fails
             logger.critical(f"[YIELD] 🚨 LEGGING MISMATCH ON {symbol} (Spot: {spot_success}, Perp: {perp_success}). INITIATING IMMEDIATE ROLLBACK.")
             
             if spot_success and not perp_success:

@@ -1,20 +1,23 @@
 """
-💎 V25.4 APEX QUANTUM PRIME: DIRECT-DRIVE SMART ORDER ROUTER
+💎 V36.0 APEX TITAN: DIRECT-DRIVE SMART ORDER ROUTER
 --------------------------------------------------------
 Features Atomic Probability Routing, Arrival Price Caching (IS Tracking),
 Maker-Grid Spread Capture, Dynamic Slippage Firewalls, PostOnly Pegging, 
 and Null-Guard Parity.
 
-Architectural Supremacy (V25.4 - Final Audit Resolutions):
+Architectural Supremacy (V36.0 Integration):
 - True Precision Routing: Uses native Decimal string quantization at the API 
   boundary to eradicate Bybit 10001 (Qty) and 10002 (Price) precision rejections.
 - Advanced Trailing Synchronization: Handles exchange-side "Not Modified" 
   rejections gracefully, allowing the Kinetic Take-Profit Compressor to track 
   prices perfectly without loop termination.
-- Fixed Fractional Allocation: Caps absolute portfolio risk to 1.5% 
-  with dynamic compression during high Volatility regimes.
-- HFT Throttle Fix & Jitter: Reduced trailing stop amend latency floor to 0.25s 
-  and applied micro-jitter to prevent deterministic API bans.
+- Maker Queue Preservation: Amends PostOnly bounds exclusively at 1.5x tick deviation 
+  to prevent queue-priority reset spam during microscopic spread adjustments.
+- Adaptive Sweep-to-Peg: Eradicates the dangerous 3-attempt IOC loop. Fires a single 
+  deep IOC up to the slippage cap, and seamlessly hands off any unfilled remainder 
+  to the Maker Peg engine to capture the reversion.
+- HFT Throttle Fix & Jitter: Reduced trailing stop amend latency floor to 0.08s 
+  and applied micro-jitter to trace flash crashes without deterministic API bans.
 """
 
 import os
@@ -22,7 +25,7 @@ import asyncio
 import logging
 import math
 import time
-import random  # 🚀 AUDIT FIX: Added for API jitter
+import random  
 import numpy as np
 from typing import Dict, Any, List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
@@ -31,8 +34,8 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V25.4 DIRECT-DRIVE EXECUTION NEXUS
-    Dynamically sizes (Fixed Fractional) and routes executions across Flash Strike (Taker), 
+    🚀 V36.0 DIRECT-DRIVE EXECUTION NEXUS
+    Dynamically sizes (Fixed Fractional) and routes executions across Sweep-to-Peg (Taker/Maker Hybrid), 
     Maker Peg (PostOnly), and TWAP Iceberg slices to minimize execution drag and slippage.
     """
     def __init__(self, executor: Any, max_slippage_pct: float = 0.0012, core_engine: Any = None):
@@ -82,13 +85,11 @@ class SmartOrderRouter:
         return max(required_min_qty, adjusted_qty)
 
     def _format_qty_str(self, raw_qty: float, symbol: str) -> str:
-        """🚀 V25.4 API Boundary Guard: Eradicates scientific notation on micro-coins."""
         qty_step = self.instrument_cache.get(symbol, {"qty_step": 1.0})["qty_step"]
         precision = max(0, abs(int(math.floor(math.log10(qty_step))))) if qty_step > 0 else 0
         return f"{raw_qty:.{precision}f}"
 
     def _format_price_str(self, price: float, target_symbol: str) -> str:
-        """🚀 V25.4 API Boundary Guard: Native Decimal quantization for exact tick adherence."""
         tick_size = self.instrument_cache.get(target_symbol, {"tick_size": 0.01})["tick_size"]
         if tick_size <= 0: return str(price)
         precision = self._get_precision(tick_size)
@@ -96,21 +97,17 @@ class SmartOrderRouter:
         return f"{stepped:.{precision}f}"
 
     def calculate_risk_adjusted_notional(self, prob_success: float, exec_weight: float, sl_pct: float, tp_pct: float, current_balance: float, inst_var: float) -> float:
-        """
-        🚀 Fixed Fractional Volatility-Damped Sizer (Formerly mislabeled as Kelly)
-        Capped strictly at 1.5% of equity per trade, modulated down during extreme volatility.
-        """
-        base_risk_pct = 0.01 # 1.0% Base Risk
+        base_risk_pct = 0.01 
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
         
         final_risk_pct = base_risk_pct * vol_scalar * confidence_scalar * exec_weight
-        final_risk_pct = min(0.015, final_risk_pct) # Absolute hard cap at 1.5% risk
+        final_risk_pct = min(0.015, final_risk_pct) 
         
         trade_risk_dollars = current_balance * final_risk_pct
         target_notional = trade_risk_dollars / (sl_pct + 1e-9)
         
-        max_leverage_cap = 2.0 # Restricted to 2x leverage to prevent liquidation sweeps
+        max_leverage_cap = 2.0 
         max_permitted_notional = current_balance * max_leverage_cap
         
         return float(np.clip(target_notional, 6.50, max_permitted_notional))
@@ -203,11 +200,10 @@ class SmartOrderRouter:
         except Exception: return {}
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
-        """🚀 V25.4 FIX: Robust Trailing Stop with Not-Modified bypass, Tick-Exact formatting, and Jitter."""
+        """🚀 V36.0 FIX: Reduced throttle to 0.08s for flash-crash reactivity with jitter."""
         now = time.time()
         
-        # 🚀 CRITICAL FIX: Added 0.0 to 0.1s random jitter to avoid deterministic API bans
-        throttle_window = 0.25 + random.uniform(0.0, 0.1)
+        throttle_window = 0.08 + random.uniform(0.0, 0.05)
         if now - self._last_amend_time.get(symbol, 0.0) < throttle_window:
             return False
 
@@ -225,7 +221,6 @@ class SmartOrderRouter:
             ret_code = res.get("retCode")
             ret_msg = res.get("retMsg", "").lower()
 
-            # "Not Modified" or "Same" means the stop is already exactly where we want it.
             if ret_code == 0 or "not modified" in ret_msg or "same" in ret_msg:
                 self._last_amend_time[symbol] = now
                 return True
@@ -241,83 +236,94 @@ class SmartOrderRouter:
             return False
 
     async def _execute_flash_strike(self, symbol: str, direction: str, qty: float, current_mid_price: float, sl: Optional[float] = None, tp: Optional[float] = None, depth_snapshot: dict = None, regime: str = "TRENDING") -> Tuple[bool, float, float]:
-        logger.critical(f"[X-RAY] ⚡ FLASH STRIKE AUTHORIZED // {symbol} executing deterministic momentum escalation.")
+        """
+        🚀 V36.0 EMPIRICAL HARDENING: Adaptive Sweep-to-Peg.
+        Fires a single deep IOC. Any unfilled remainder instantly converts to a Maker Peg.
+        """
+        logger.critical(f"[X-RAY] ⚡ SWEEP-TO-PEG AUTHORIZED // {symbol} executing deterministic momentum escalation.")
         
-        final_sl = self._format_price_str(sl, symbol) if sl else None
-        final_tp = self._format_price_str(tp, symbol) if tp else None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
+        cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
+        qty_str = self._format_qty_str(cleaned_qty, symbol)
+        
+        # 1. Calculate Maximum Permissible Deep Sweep Price
+        best_bid = float(depth_snapshot.get("bids", [[current_mid_price]])[0][0]) if depth_snapshot else current_mid_price
+        best_ask = float(depth_snapshot.get("asks", [[current_mid_price]])[0][0]) if depth_snapshot else current_mid_price
+        live_spread_bps = ((best_ask - best_bid) / (best_bid + 1e-9)) * 10000.0
+        
+        dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
+        sweeping_price = self.get_sweeping_price(depth_snapshot, side, cleaned_qty, current_mid_price)
+        
+        if side == "Buy":
+            max_allowed_price = current_mid_price * (1.0 + (dynamic_cap_bps / 10000.0))
+            target_price = min(sweeping_price, max_allowed_price)
+        else:
+            max_allowed_price = current_mid_price * (1.0 - (dynamic_cap_bps / 10000.0))
+            target_price = max(sweeping_price, max_allowed_price)
+            
+        final_price_str = self._format_price_str(target_price, symbol)
 
-        remaining_qty = qty
-        total_executed_qty, weighted_cost = 0.0, 0.0
-
-        for attempt in range(3):
-            cleaned_qty = self._apply_dynamic_exchange_limits(remaining_qty, current_mid_price, symbol)
-            qty_str = self._format_qty_str(cleaned_qty, symbol)
+        # 2. Fire Single Deep IOC
+        try:
+            response = await self.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True,
+                category="linear", symbol=symbol, side=side, orderType="Limit", 
+                qty=qty_str, price=final_price_str, timeInForce="IOC", 
+                positionIdx=self.position_idx
+            )
             
-            sweeping_price = self.get_sweeping_price(depth_snapshot, side, cleaned_qty, current_mid_price)
+            total_executed_qty, avg_price = 0.0, current_mid_price
             
-            best_bid = float(depth_snapshot.get("bids", [[current_mid_price]])[0][0]) if depth_snapshot else current_mid_price
-            best_ask = float(depth_snapshot.get("asks", [[current_mid_price]])[0][0]) if depth_snapshot else current_mid_price
-            live_spread_bps = ((best_ask - best_bid) / (best_bid + 1e-9)) * 10000.0
-            dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
-            
-            if side == "Buy":
-                max_allowed_price = current_mid_price * (1.0 + (dynamic_cap_bps / 10000.0))
-                target_price = min(sweeping_price, max_allowed_price)
+            if response.get("retCode") == 0:
+                order_id = response.get("result", {}).get("orderId", "UNKNOWN")
+                fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.2)
+                
+                if fill_report:
+                    raw_exec, raw_avg = fill_report.get("cumExecQty"), fill_report.get("avgPrice")
+                    total_executed_qty = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
+                    avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
             else:
-                max_allowed_price = current_mid_price * (1.0 - (dynamic_cap_bps / 10000.0))
-                target_price = max(sweeping_price, max_allowed_price)
-                
-            final_price_str = self._format_price_str(target_price, symbol)
+                logger.warning(f"[X-RAY] ⚠️ Primary IOC Strike rejected: {response.get('retMsg')}")
 
-            try:
-                response = await self.executor.safe_call(
-                    "POST", "/v5/order/create", is_execution=True,
-                    category="linear", symbol=symbol, side=side, orderType="Limit", 
-                    qty=qty_str, price=final_price_str, timeInForce="IOC", 
-                    positionIdx=self.position_idx
-                )
-                
-                if response.get("retCode") == 0:
-                    order_id = response.get("result", {}).get("orderId", "UNKNOWN")
-                    fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.3)
+        except Exception as e:
+            logger.error(f"[X-RAY] ❌ Primary IOC Strike API fault for {symbol}: {e}")
+            total_executed_qty = 0.0
+
+        # 3. Seamless Reversion Capture (The Peg Handoff)
+        remainder = cleaned_qty - total_executed_qty
+        if remainder > self.instrument_cache.get(symbol, {}).get("min_qty", 0.001):
+            logger.warning(f"[X-RAY] ⚠️ Partial/Missed Sweep ({total_executed_qty:.4f}/{cleaned_qty:.4f}). Handing off remainder to Maker Peg.")
+            
+            # Immediately launch passive peg to catch the reversion
+            peg_success, peg_price, peg_qty = await self._execute_dynamic_maker_peg(
+                symbol, direction, remainder, sl, tp, depth_snapshot, timeout=4, regime=regime
+            )
+            
+            if peg_success and peg_qty > 0:
+                # Blended average pricing
+                total_cost = (total_executed_qty * avg_price) + (peg_qty * peg_price)
+                total_executed_qty += peg_qty
+                avg_price = total_cost / total_executed_qty
+
+        if total_executed_qty > 0:
+            logger.critical(f"✅ SWEEP-TO-PEG SUCCESS // {symbol} filled {total_executed_qty:.4f} units at blended avg {avg_price:.4f}.")
+            
+            if sl or tp:
+                final_sl = self._format_price_str(sl, symbol) if sl else None
+                final_tp = self._format_price_str(tp, symbol) if tp else None
+                try:
+                    await self.executor.safe_call(
+                        "POST", "/v5/position/trading-stop", is_execution=True,
+                        category="linear", symbol=symbol, positionIdx=self.position_idx, 
+                        stopLoss=final_sl, takeProfit=final_tp,
+                        tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
+                    )
+                except Exception as e: 
+                    logger.error(f"[X-RAY] 🛑 Failed to attach stops for {symbol}: {e}")
                     
-                    if fill_report:
-                        raw_exec, raw_avg = fill_report.get("cumExecQty"), fill_report.get("avgPrice")
-                        cum_exec = float(raw_exec) if (raw_exec is not None and str(raw_exec).strip() != "") else 0.0
-                        avg_price = float(raw_avg) if (raw_avg is not None and str(raw_avg).strip() != "") else current_mid_price
+            return True, avg_price, total_executed_qty
 
-                        if cum_exec > 0:
-                            total_executed_qty += cum_exec
-                            weighted_cost += (cum_exec * avg_price)
-                            remaining_qty -= cum_exec
-
-                            if remaining_qty <= self.instrument_cache.get(symbol, {}).get("min_qty", 0.001):
-                                final_avg = weighted_cost / total_executed_qty
-                                logger.critical(f"✅ FLASH STRIKE SUCCESS // {symbol} filled {total_executed_qty} units at {final_avg:.4f}.")
-                                
-                                if final_sl or final_tp:
-                                    try:
-                                        await self.executor.safe_call(
-                                            "POST", "/v5/position/trading-stop", is_execution=True,
-                                            category="linear", symbol=symbol, positionIdx=self.position_idx, 
-                                            stopLoss=final_sl, takeProfit=final_tp,
-                                            tpTriggerBy="LastPrice", slTriggerBy="LastPrice"
-                                        )
-                                    except Exception as e: 
-                                        logger.error(f"[X-RAY] 🛑 FATAL: Failed to attach stops for {symbol}: {e}")
-                                return True, final_avg, total_executed_qty
-                    else: logger.warning(f"[X-RAY] ⚠️ Flash Strike IOC missed (Liquidity vanished). Escalating...")
-                else:
-                    logger.warning(f"[X-RAY] ⚠️ API rejection (Attempt {attempt+1}): {response.get('retMsg')}")
-                    await asyncio.sleep(0.1) 
-                    
-            except Exception as e:
-                error_str = str(e)
-                if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]): break
-                
-        if total_executed_qty > 0: return True, weighted_cost / total_executed_qty, total_executed_qty
-        logger.error(f"[X-RAY] ❌ Flash Strike failed permanently after 3 attempts.")
+        logger.error(f"[X-RAY] ❌ Sweep-to-Peg failed entirely. Liquidity evaporated.")
         return False, 0.0, 0.0
 
     async def _execute_dynamic_maker_peg(self, symbol: str, direction: str, qty: float, sl: Optional[float], tp: Optional[float], depth_snapshot: dict=None, timeout: int = 5, regime: str = "MEAN_REVERTING") -> Tuple[bool, float, float]:
@@ -351,7 +357,6 @@ class SmartOrderRouter:
             try:
                 is_toxic = False
                 
-                # Fetch fresh snapshot dynamically instead of relying on the stale parameter
                 if self.core_engine and hasattr(self.core_engine, 'orderbook_snapshots'):
                     fresh_ob = self.core_engine.orderbook_snapshots.get(symbol, depth_snapshot)
                 else:
@@ -362,7 +367,6 @@ class SmartOrderRouter:
                     ask_vols = sum(float(l[1]) for l in fresh_ob["asks"][:3])
                     imbalance = (bid_vols - ask_vols) / (bid_vols + ask_vols + 1e-9)
 
-                    # Toxicity guard: Huge imbalance supporting us usually means spoofing risk (Vacuum trap)
                     if direction.upper() == "BUY" and imbalance > 0.80: is_toxic = True
                     elif direction.upper() == "SELL" and imbalance < -0.80: is_toxic = True
 
@@ -441,7 +445,8 @@ class SmartOrderRouter:
                             return True, avg_price, cum_exec_qty
                             
                     elif order_status in ["New", "PartiallyFilled"]:
-                        if abs(target_price_float - current_peg_price) >= tick_size:
+                        # 🚀 V36.0 FIX: Require 1.5x tick deviation to amend to preserve Queue Priority
+                        if abs(target_price_float - current_peg_price) >= (tick_size * 1.5):
                             logger.debug(f"[X-RAY] 🔄 Amending {symbol} Maker Peg: {current_peg_price} -> {target_price_str}")
                             amend_res = await self.executor.safe_call(
                                 "POST", "/v5/order/amend", is_execution=True, 
@@ -549,7 +554,7 @@ class SmartOrderRouter:
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        🚀 V25.4 DIRECT-DRIVE EXECUTION NEXUS
+        🚀 V36.0 DIRECT-DRIVE EXECUTION NEXUS
         Combines Risk Sizing, Firewall Assessment, and Topology Routing into a 
         single high-speed passthrough to eliminate Python Call-Stack overhead.
         """
