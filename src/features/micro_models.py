@@ -1,25 +1,24 @@
 """
-V39.0 APEX TITAN: ZERO-ALLOCATION STATISTICAL MICROSTRUCTURE ENGINE
+V39.1 APEX TITAN: ZERO-ALLOCATION STATISTICAL MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Ultra-low latency continuous-time microstructure forecasting engine. Integrates 
 pre-allocated zero-allocation feature buffers, closed-form Ornstein-Uhlenbeck 
 calibration, vectorized Adams-MacKay BOCD, spectrally clamped Joseph-form RLS, 
 and Bayesian-prior Merton Jump-Diffusion optimal control into the 25D Manifold.
 
-Architectural Supremacy (V39.0 Production Upgrades):
-- Invariant Unit Affine Bias: Decoupled Volterra normalization from index 24.
-  The 24 dynamic features are Euclidean-normalized while the intercept remains 
-  a stationary 1.0, eradicating volatility-induced logit bias distortion.
-- Zero-Allocation BOCD: Converted AdamsMacKayBOCD to fixed static contiguous 
-  buffers with in-place rolling slice updates, eliminating per-tick np.insert reallocations.
-- Regularized Spectral Whitener: Upgraded BoundedAdaptiveWhitener with adaptive 
-  Tikhonov diagonal loading and spectral fallback (eigh), guaranteeing invertibility.
-- Numerically Conditioned Joseph RLS: Bounded Fisher variance p(1-p) and capped 
-  observation noise injection (R) to prevent covariance explosion during regime shocks.
-- Complete In-Place Execution Pipeline: Pre-allocated aligned vector buffers and 
-  Volterra state matrices for sub-microsecond tick processing.
+Architectural Supremacy (V39.1 Production Fixes):
+- Uniform 25D Manifold Normalization: Eradicates the unit hyper-cylinder distortion
+  where dynamic feature norms inflated during volatility shocks, causing the static
+  intercept to dominate RLS predictions.
+- Conservative Bayesian Prior Anchors: Replaced overly optimistic 58% win-rate priors
+  with break-even baseline conjugate priors (50% win rate, 1.05 payoff, weight=5.0)
+  to eliminate capital oversizing and drawdown vulnerability on initial boot.
+- Production RLS Weight Freeze Gate: Introduces an execution freeze gate via
+  FREEZE_RLS_WEIGHTS to prevent parameter degradation and catastrophic forgetting
+  from high-frequency trade noise during live execution.
 """
 
+import os
 import math
 import time
 import numpy as np
@@ -132,13 +131,10 @@ class AdamsMacKayBOCD:
 
         self.muT[1:next_len] = new_mu
         self.muT[0] = self.mu0
-
         self.kappaT[1:next_len] = new_kappa
         self.kappaT[0] = self.kappa0
-
         self.alphaT[1:next_len] = new_alpha
         self.alphaT[0] = self.alpha0
-
         self.betaT[1:next_len] = new_beta
         self.betaT[0] = self.beta0
 
@@ -186,17 +182,18 @@ class ObizhaevaWangExecutionSentry:
 class MertonJumpKellySizer:
     """
     Continuous-Time Merton Jump-Diffusion Kelly Capital Allocator.
-    Anchored with Bayesian conjugate priors to eliminate boot trade starvation.
+    Anchored with conservative Bayesian conjugate priors to prevent early position oversizing.
     """
-    def __init__(self, prior_win_rate: float = 0.58, prior_payoff: float = 1.65, prior_weight: float = 20.0):
+    def __init__(self, prior_win_rate: float = 0.50, prior_payoff: float = 1.05, prior_weight: float = 5.0):
         self.prior_w = prior_weight
         self.wins_accum = prior_win_rate * prior_weight
         self.trials_accum = prior_weight
 
-        self.win_return_sum = prior_payoff * 10.0
-        self.win_return_count = 10.0
-        self.loss_return_sum = 1.0 * 10.0
-        self.loss_return_count = 10.0
+        # Symmetric baseline initial returns
+        self.win_return_sum = prior_payoff * 2.5
+        self.win_return_count = 2.5
+        self.loss_return_sum = 1.0 * 2.5
+        self.loss_return_count = 2.5
 
         self.win_rate = prior_win_rate
         self.avg_win = prior_payoff
@@ -756,7 +753,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 class ContinuousMicrostructureEngine:
     """
-    V39.0 APEX TITAN: ZERO-ALLOCATION STATISTICAL MASTER ENGINE
+    V39.1 APEX TITAN: ZERO-ALLOCATION STATISTICAL MASTER ENGINE
     """
     def __init__(self, symbol: str = "GENERIC", memory_depth: int = 1000):
         self.symbol = symbol
@@ -779,7 +776,9 @@ class ContinuousMicrostructureEngine:
 
         self.bocd = AdamsMacKayBOCD()
         self.obizhaeva_wang_sentry = ObizhaevaWangExecutionSentry()
-        self.jump_kelly_sizer = MertonJumpKellySizer(prior_win_rate=0.58, prior_payoff=1.65)
+        
+        # Conservative Bayesian Prior Anchors: 50% Win Rate, 1.05 Payoff, Weight=5.0
+        self.jump_kelly_sizer = MertonJumpKellySizer(prior_win_rate=0.50, prior_payoff=1.05, prior_weight=5.0)
         self.async_aligner = AsynchronousStateAligner(dim=self.raw_dim)
 
         self.hurst_estimator = FractionalBrownianHurstEstimator()
@@ -816,6 +815,9 @@ class ContinuousMicrostructureEngine:
         self.historical_probs = deque(maxlen=2000)
         self.calibration_errors = deque(maxlen=300)
         self.rls_updates = 0
+        
+        # Production Online Learning Gate
+        self.freeze_rls = os.getenv("FREEZE_RLS_WEIGHTS", "true").lower() == "true"
 
     def update_funding_metrics(self, funding_rate: float):
         self.funding_oracle.update(funding_rate)
@@ -952,11 +954,13 @@ class ContinuousMicrostructureEngine:
         self._volterra_vec[21] = f[15] * f[0]  # 21: Macro Spillover x MLOFI
         self._volterra_vec[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
         self._volterra_vec[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
+        self._volterra_vec[24] = 1.0          # 24: Affine Bias Intercept
 
-        # Strict Affine Invariance: Normalize ONLY dynamic dimensions (0..23)
-        dynamic_norm = math.sqrt(float(np.dot(self._volterra_vec[:24], self._volterra_vec[:24]))) + 1e-9
-        self._v_att[:24] = self._volterra_vec[:24] / dynamic_norm
-        self._v_att[24] = 1.0  # Unit Affine Bias Invariant
+        # Uniform 25D Hypersphere Projection:
+        # Normalizes the full vector across all 25 dimensions uniformly, eradicating
+        # hyper-cylinder distortion where dynamic feature collapse causes intercept dominance.
+        full_norm = math.sqrt(float(np.dot(self._volterra_vec, self._volterra_vec))) + 1e-9
+        self._v_att[:] = self._volterra_vec / full_norm
 
         l_t = float(np.dot(self.rls_trend.w, self._v_att))
         l_r = float(np.dot(self.rls_range.w, self._v_att))
@@ -1020,17 +1024,22 @@ class ContinuousMicrostructureEngine:
         true_return_pct = net_pnl / max(allocated_notional, 1.0)
         self.jump_kelly_sizer.update(net_pnl, true_return_pct)
 
-        self.rls_trend.update(feats, y_up, old_p, weight=beliefs[0])
-        self.rls_range.update(feats, y_up, old_p, weight=beliefs[1])
-        self.rls_spoof.update(feats, y_up, old_p, weight=beliefs[2])
-        self.rls_cascade.update(feats, y_up, old_p, weight=beliefs[3])
+        # Online RLS Weight Governance:
+        # Prevents parameter degradation and catastrophic forgetting on high-frequency live noise.
+        # Weights remain frozen unless explicitly commanded by configuration.
+        if not self.freeze_rls:
+            self.rls_trend.update(feats, y_up, old_p, weight=beliefs[0])
+            self.rls_range.update(feats, y_up, old_p, weight=beliefs[1])
+            self.rls_spoof.update(feats, y_up, old_p, weight=beliefs[2])
+            self.rls_cascade.update(feats, y_up, old_p, weight=beliefs[3])
 
-        self.rls_updates += 1
-        if self.rls_updates % 25 == 0:
-            logger.info(
-                f"[X-RAY] RLS Weights Health Check (Trend Norm): {np.linalg.norm(self.rls_trend.w):.4f} | "
-                f"Kelly Win Rate: {self.jump_kelly_sizer.win_rate:.1%} | "
-                f"Payoff (B): {self.jump_kelly_sizer.avg_win / max(1e-6, self.jump_kelly_sizer.avg_loss):.2f}"
-            )
-
-        logger.debug(f"[X-RAY] Riemannian FIM Weights Updated | PnL: {net_pnl:.4f} | Hurst: {self.hurst_h:.2f}")
+            self.rls_updates += 1
+            if self.rls_updates % 25 == 0:
+                logger.info(
+                    f"[X-RAY] RLS Weights Health Check (Trend Norm): {np.linalg.norm(self.rls_trend.w):.4f} | "
+                    f"Kelly Win Rate: {self.jump_kelly_sizer.win_rate:.1%} | "
+                    f"Payoff (B): {self.jump_kelly_sizer.avg_win / max(1e-6, self.jump_kelly_sizer.avg_loss):.2f}"
+                )
+            logger.debug(f"[X-RAY] Riemannian FIM Weights Updated | PnL: {net_pnl:.4f} | Hurst: {self.hurst_h:.2f}")
+        else:
+            logger.debug(f"[X-RAY] Online RLS Frozen: Evaluating out-of-sample without parameter drift.")

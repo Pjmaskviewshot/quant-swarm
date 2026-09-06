@@ -1,18 +1,19 @@
 """
-V39.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE
+V39.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE
 ------------------------------------------------------------------------
 High-Frequency Multi-Asset Micro-Scalping & Risk Governance System.
 
-Architectural Supremacy (V39.0 Production Upgrades):
+Architectural Supremacy (V39.1 Production Upgrades):
+- Institutional Capital Floor Guard: Enforces a strict minimum bankroll floor
+  ($220.00 default) to prevent single-position margin over-allocation (>1.5% max risk cap)
+  on Bybit's exchange minimum notionals ($6.50 at 2x leverage).
+- Dynamic Dual-Fee Synchronization: Synchronizes both Maker and Taker fee schedules
+  across Smart Order Router and Delta-Neutral Yield Engine upon boot.
 - Full 4-Regime RLS State Persistence: Serializes and reloads weights and covariance 
   matrices for all 4 Markov regimes (Trend, Range, Spoof, Cascade), eliminating 
   cold-start weight degradation across daemon reboots.
-- Invariant Unit Affine Bias Parity: Fully aligned with the V39.0 25D Manifold in 
-  micro_models.py (24 normalized dynamic features + unnormalized 1.0 intercept bias).
-- Dynamic Orphan State Reconciliation: Employs true feature-derived ATR and risk 
-  matrices when adopting orphaned exchange positions, eradicating static 1.5% heuristics.
-- Micro-Account Capital Governance: Enforces strict bankroll floors and leverage caps 
-  to prevent single-position margin over-allocation on exchange minimum notionals ($6.50).
+- Uniform 25D Hypersphere Parity: Integrates with micro_models.py V39.1 to maintain
+  exact feature alignment across live evaluation and recovery lifecycles.
 - Lock-Free LMAX Disruptor Pattern: Centralizes in-flight reservations, position ledgers, 
   and profit-locking mutations through a dedicated asynchronous mutation queue.
 - Zero-Window Atomic Bracket Hand-off: Enforces Bybit V5 native Stop-Loss and Take-Profit 
@@ -84,6 +85,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("QUANT_CORE.V39_APEX")
+
+# Institutional Capital Governance Parameter
+# Minimum equity to safely support exchange minimum notional ($6.50) without exceeding 1.5% max risk cap at 2x leverage:
+# Minimum Capital >= $6.50 / (0.015 * 2.0) = $216.67
+MIN_REQUIRED_EQUITY = float(os.getenv("MIN_REQUIRED_EQUITY", "220.0"))
 
 
 @dataclass
@@ -181,7 +187,7 @@ class DistributedQuantEngine:
         if self.test_mode:
             logger.critical("  TEST MODE: Paper Trading Simulation Armed.")
         else:
-            logger.critical("  LIVE MODE: V39.0 TITAN HIGH-FREQUENCY EXECUTION CORE ACTIVE.")
+            logger.critical("  LIVE MODE: V39.1 TITAN HIGH-FREQUENCY EXECUTION CORE ACTIVE.")
 
         self.asset_basket: List[str] = []
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
@@ -674,7 +680,6 @@ class DistributedQuantEngine:
         price = float(trade_data.get("price", 0.0))
         if price < 0.000001:
             return
-
         volume = float(trade_data.get("size", 0.0))
         is_buy = str(trade_data.get("side", "")).upper() == "BUY"
         exchange_timestamp = float(trade_data.get("timestamp", now * 1000)) / 1000.0
@@ -824,7 +829,14 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_weight_diag"] = now
                 return
 
-            current_bal = self.global_state_cache.get("current_vault_balance", 25.0)
+            current_bal = self.global_state_cache.get("current_vault_balance", 0.0)
+            
+            # Capital Hard-Stop: Ensure portfolio balance respects the institutional floor
+            if current_bal < MIN_REQUIRED_EQUITY:
+                if now - self.last_eval_time.get(symbol + "_equity_veto", 0.0) > 120.0:
+                    logger.warning(f"[RISK] Account equity (${current_bal:.2f}) below minimum floor (${MIN_REQUIRED_EQUITY:.2f}). Trade halted.")
+                    self.last_eval_time[symbol + "_equity_veto"] = now
+                return
 
             # Merton Jump-Diffusion Kelly allocation calculation
             if "kelly_fraction" in state:
@@ -1049,7 +1061,7 @@ class DistributedQuantEngine:
 
     async def run_universe_refresher(self):
         try:
-            logger.info("  V39.0 MATRIX REFRESH: Scanning High-Velocity Universe...")
+            logger.info("  V39.1 MATRIX REFRESH: Scanning High-Velocity Universe...")
             await self.sor._fetch_exchange_limits("BTCUSDT")
 
             dynamic_basket = await self.executor.get_top_volatile_assets(limit=35, min_turnover=15_000_000.0)
@@ -1065,7 +1077,7 @@ class DistributedQuantEngine:
             await self._prune_dead_symbols()
             self._initialize_symbol_structures(self.asset_basket + self.shadow_basket)
             self.force_dna_refresh.set()
-            logger.info(f"  V39.0 MATRIX REFRESHED: {len(self.asset_basket)} Live | {len(self.shadow_basket)} Shadow.")
+            logger.info(f"  V39.1 MATRIX REFRESHED: {len(self.asset_basket)} Live | {len(self.shadow_basket)} Shadow.")
         except Exception as e:
             logger.error(f"[X-RAY] Universe refresher error: {e}")
 
@@ -1178,7 +1190,7 @@ class DistributedQuantEngine:
         self.recent_pnl_history.append(net_pnl)
 
         # Immediate Real-Time Balance & Drawdown Recalculation
-        current_cached = self.global_state_cache.get("current_vault_balance", 25.0)
+        current_cached = self.global_state_cache.get("current_vault_balance", MIN_REQUIRED_EQUITY)
         new_balance = current_cached + net_pnl
         self.global_state_cache["current_vault_balance"] = new_balance
 
@@ -1193,7 +1205,7 @@ class DistributedQuantEngine:
             await self.memory.log_live_execution_result(ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"])
 
         if ctx.get("stat_engine") and hasattr(ctx["stat_engine"], "resolve_trade_outcome"):
-            allocated_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", 25.0)
+            allocated_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", MIN_REQUIRED_EQUITY)
             ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl, allocated_notional)
 
         self._safe_telegram_dispatch_sync(
@@ -1228,7 +1240,7 @@ class DistributedQuantEngine:
             "stat_engine": self.stat_engines.get(symbol),
             "last_ob": {},
             "latest_tick_price": current_price,
-            "current_vault_balance": self.global_state_cache.get("current_vault_balance", 25.0),
+            "current_vault_balance": self.global_state_cache.get("current_vault_balance", MIN_REQUIRED_EQUITY),
             "drawdown_pct": self.global_state_cache.get("drawdown_pct", 0.0),
             "max_drawdown_pct": self.risk_vault.max_drawdown_pct,
             "active_positions_count": len(self.active_positions_map),
@@ -1297,7 +1309,7 @@ class DistributedQuantEngine:
                 ctx["now"] = time.time()
                 
                 # Intra-Minute Drawdown Recalculation
-                vault_bal = self.global_state_cache.get("current_vault_balance", 25.0)
+                vault_bal = self.global_state_cache.get("current_vault_balance", MIN_REQUIRED_EQUITY)
                 baseline_bal = self.global_state_cache.get("wallet_baseline", vault_bal)
                 unrealized_pnl = (current_price - ctx["actual_entry"]) * ctx["actual_qty_filled"] if ctx["is_buy"] else \
                                  (ctx["actual_entry"] - current_price) * ctx["actual_qty_filled"]
@@ -1410,6 +1422,17 @@ class DistributedQuantEngine:
                 logger.critical("  FATAL BOOT FAULT: Could not verify real Bybit wallet balance. Swarm locked.")
                 raise EmergencyShutdown("Zero or unverified wallet balance on boot.")
 
+            # Institutional Capital Floor Guard
+            if boot_bal < MIN_REQUIRED_EQUITY:
+                self.fsm.trigger_global_emergency_lock()
+                logger.critical(
+                    f"  FATAL BOOT FAULT: Verified Bybit wallet balance (${boot_bal:.2f}) is below "
+                    f"the institutional risk governance floor (${MIN_REQUIRED_EQUITY:.2f}). Swarm locked."
+                )
+                raise EmergencyShutdown(
+                    f"Insufficient bankroll: ${boot_bal:.2f} < ${MIN_REQUIRED_EQUITY:.2f} min required for safe 1.5% position risk."
+                )
+
             self.global_state_cache["start_of_day_balance"] = boot_bal
             self.global_state_cache["wallet_baseline"] = boot_bal
             self.global_state_cache["lifetime_initial_balance"] = boot_bal
@@ -1448,7 +1471,10 @@ class DistributedQuantEngine:
             self.sor.taker_fee_rate = fee_schedule["taker"]
             self.sor.maker_fee_rate = fee_schedule["maker"]
             self.yield_engine.taker_fee_rate = fee_schedule["taker"]
-            logger.info(f"  EXCHANGE FEES SYNCED // Taker: {fee_schedule['taker']*10000:.1f} bps | Maker: {fee_schedule['maker']*10000:.1f} bps")
+            self.yield_engine.maker_fee_rate = fee_schedule["maker"]
+            logger.info(
+                f"  EXCHANGE FEES SYNCED // Taker: {fee_schedule['taker']*10000:.1f} bps | Maker: {fee_schedule['maker']*10000:.1f} bps"
+            )
         except Exception as e:
             logger.warning(f"[X-RAY] Dynamic fee schedule check bypassed: {e}")
 

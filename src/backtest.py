@@ -1,20 +1,20 @@
 """
-V39.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER
+V39.1 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER
 --------------------------------------------------------------------------------
-Institutional-grade historical simulation engine replicating the V39.0 
+Institutional-grade historical simulation engine replicating the V39.1 
 25D Volterra-Riemannian Manifold, exact Joseph-stabilized RLS, Bayesian-prior
 Merton Jump Kelly allocation, and Avellaneda-Stoikov execution routing.
 
-Architectural Supremacy (V39.0 Upgrades):
-1. Invariant Unit Affine Manifold Parity: Decouples Volterra normalization from 
-   index 24, strictly preserving the stationary 1.0 affine bias and matching live 
-   micro_models.py (19D orthogonalized features + 5 cross-products + 1 bias).
-2. Exact Feature Alignment: Synthesizes high-fidelity order flow imbalance 
-   (MLOFI proxy) at feature 0 and continuous analytical Hurst exponent estimation 
-   at feature 11, eliminating backtest-to-production transfer phase-inversion.
-3. Realistic Intra-Bar Directional Path Simulation: Models intra-bar price paths 
-   (O -> L -> H -> C for green bars; O -> H -> L -> C for red bars) to resolve 
-   same-candle SL/TP collisions without optimistic fill bias.
+Architectural Supremacy (V39.1 Upgrades):
+1. Uniform 25D Manifold Parity: Projects the full 25D vector (including the 
+   affine intercept at index 24) onto a uniform hypersphere, maintaining exact
+   mathematical parity with micro_models.py V39.1.
+2. Conservative Bayesian Kelly Prior: Anchors Merton Jump Kelly priors to a 
+   break-even baseline (50% win rate, 1.05 payoff, weight=5.0) to eliminate
+   unrealistic sizing inflation and match live production risk limits.
+3. Pessimistic Dual-Collision Intra-Bar Resolution: Resolves same-candle SL/TP 
+   collisions conservatively by enforcing stop-loss precedence whenever both price 
+   boundaries are penetrated within the same 1-minute bar.
 4. Numerically Conditioned Joseph-Form RLS: Enforces bounded Fisher variance, 
    clamped observation noise injection, trace ceilings, and diagonal floors.
 5. Purged & Embargoed Walk-Forward Validation: Eliminates serial correlation 
@@ -262,14 +262,15 @@ class QuantumMarkovRegimeDetector:
 
 
 class BacktestMertonJumpKelly:
-    """Continuous-Time Merton Jump Kelly Sizer with Bayesian Conjugate Priors."""
-    def __init__(self, prior_win_rate: float = 0.58, prior_payoff: float = 1.65, prior_weight: float = 20.0):
+    """Continuous-Time Merton Jump Kelly Sizer with Conservative Baseline Priors."""
+    def __init__(self, prior_win_rate: float = 0.50, prior_payoff: float = 1.05, prior_weight: float = 5.0):
+        self.prior_w = prior_weight
         self.wins_accum = prior_win_rate * prior_weight
         self.trials_accum = prior_weight
-        self.win_return_sum = prior_payoff * 10.0
-        self.win_return_count = 10.0
-        self.loss_return_sum = 1.0 * 10.0
-        self.loss_return_count = 10.0
+        self.win_return_sum = prior_payoff * 2.5
+        self.win_return_count = 2.5
+        self.loss_return_sum = 1.0 * 2.5
+        self.loss_return_count = 2.5
 
         self.win_rate = prior_win_rate
         self.avg_win = prior_payoff
@@ -438,7 +439,7 @@ def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
     hurst_estimator = BacktestHurstEstimator()
 
-    # V39.0 RLS and Feature Engines
+    # V39.1 RLS and Feature Engines
     w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=25)
     whitening_engine = BacktestAdaptiveWhitener(dim=19, base_alpha=0.001)
 
@@ -453,7 +454,7 @@ def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     rls_cascade.w = w_c.copy()
 
     regime_detector = QuantumMarkovRegimeDetector()
-    kelly_sizer = BacktestMertonJumpKelly()
+    kelly_sizer = BacktestMertonJumpKelly(prior_win_rate=0.50, prior_payoff=1.05, prior_weight=5.0)
 
     prediction_buffer = deque()
     historical_probs = deque(maxlen=2000)
@@ -593,12 +594,13 @@ def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         volterra[21] = f[15] * f[0]  # 21: Macro Spillover x MLOFI
         volterra[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
         volterra[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
+        volterra[24] = 1.0          # 24: Affine Bias Intercept
 
-        # Strict Affine Invariance: Normalize dynamic features (0..23) only
-        dynamic_norm = math.sqrt(float(np.dot(volterra[:24], volterra[:24]))) + 1e-9
-        v_att = np.empty(25, dtype=np.float64)
-        v_att[:24] = volterra[:24] / dynamic_norm
-        v_att[24] = 1.0  # Unit Affine Bias Invariant
+        # Uniform 25D Hypersphere Projection (Parity with micro_models.py V39.1)
+        # Eradicates the unit hyper-cylinder distortion where dynamic feature collapse
+        # allowed the stationary 1.0 bias to dominate logits during volatility surges.
+        full_norm = math.sqrt(float(np.dot(volterra, volterra))) + 1e-9
+        v_att = volterra / full_norm
 
         # Bayesian Markov Regime Updates
         beliefs = regime_detector.update_beliefs(kaufman_er, shannon_entropy, 0.0, jump_z)
@@ -701,11 +703,10 @@ def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     pnl_accum = 0.0
                     position_size = 1.0
 
-                    # Realistic Intra-Bar Lifecycle Simulation
+                    # Conservative Realistic Intra-Bar Lifecycle Simulation
                     for j in range(i + 1, min(i + 240, len(target_candles))):
                         bars_held = j - i
                         bar = target_candles[j]
-                        bar_open = bar["open"]
                         h, l, c_j = bar["high"], bar["low"], bar["close"]
 
                         if action_dir == "BUY" and h > max_favorable_price:
@@ -743,50 +744,23 @@ def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             be_level = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
                             current_sl = max(current_sl, be_level) if action_dir == "BUY" else min(current_sl, be_level)
 
-                        # Directional Path Resolution (Eliminates Same-Bar Collision Bias)
-                        # Green Bar (O -> L -> H -> C) vs Red Bar (O -> H -> L -> C)
-                        is_green_bar = c_j >= bar_open
+                        # Pessimistic Dual-Collision Resolution:
+                        # If both current_sl and current_tp are breached within the same bar,
+                        # institutional risk rules dictate assuming stop-loss precedence.
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
 
-                        if action_dir == "BUY":
-                            if is_green_bar:
-                                # First dips to Low, then rallies to High
-                                if hit_sl:
-                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
-                                    exit_price = current_sl
-                                    break
-                                elif hit_tp:
-                                    outcome, exit_price = "WIN", current_tp
-                                    break
-                            else:
-                                # First spikes to High, then drops to Low
-                                if hit_tp:
-                                    outcome, exit_price = "WIN", current_tp
-                                    break
-                                elif hit_sl:
-                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
-                                    exit_price = current_sl
-                                    break
-                        else:  # SELL
-                            if is_green_bar:
-                                # First dips to Low (TP), then rises to High (SL)
-                                if hit_tp:
-                                    outcome, exit_price = "WIN", current_tp
-                                    break
-                                elif hit_sl:
-                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
-                                    exit_price = current_sl
-                                    break
-                            else:
-                                # First rises to High (SL), then dips to Low (TP)
-                                if hit_sl:
-                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
-                                    exit_price = current_sl
-                                    break
-                                elif hit_tp:
-                                    outcome, exit_price = "WIN", current_tp
-                                    break
+                        if hit_sl and hit_tp:
+                            outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                            exit_price = current_sl
+                            break
+                        elif hit_sl:
+                            outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                            exit_price = current_sl
+                            break
+                        elif hit_tp:
+                            outcome, exit_price = "WIN", current_tp
+                            break
 
                     if outcome is None:
                         exit_price = target_candles[min(i + 239, len(target_candles) - 1)]["close"]
@@ -891,7 +865,7 @@ def summarize(trades: List[Dict], total_minutes: int = 0) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n  Running V39.0 Purged Walk-Forward Cross-Validation (5 Folds)...")
+    print("\n  Running V39.1 Purged Walk-Forward Cross-Validation (5 Folds)...")
 
     rr_ratios = [1.8, 2.0, 2.4]
     atr_mults = [2.0, 2.5, 3.0]
@@ -966,7 +940,7 @@ if __name__ == "__main__":
         params = Params()
         test = run_v39_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
 
-        print("\n=== V39.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40%) ===")
+        print("\n=== V39.1 APEX TITAN OUT-OF-SAMPLE TEST (Last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")
