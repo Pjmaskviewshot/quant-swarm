@@ -1,118 +1,144 @@
 """
-💎 V25.0 APEX QUANTUM PRIME: SECTOR EIGENVECTOR ORACLE
--------------------------------------------------
-Tracks cross-asset sector impulse propagation using Dynamic SVD Decomposition.
+💎 V36.5 APEX TITAN: THREAD-SAFE SECTOR EIGEN ORACLE
+--------------------------------------------------------
+O(1) Cached Cross-Asset Principal Component Analysis.
 
-Architectural Supremacy (V25.0):
-1. Stateless Pure-Async Execution: Eradicated tick-by-tick `deque` memory buffers. 
-   The Oracle now ingests matrix slices directly from the centralized MarketStateMatrix.
-2. SVD Thread Isolation: Singular Value Decomposition (SVD) is mathematically 
-   CPU-bound. The eigenvector extraction is now aggressively offloaded to an 
-   `asyncio.to_thread` worker to prevent the HFT event loop from freezing.
-3. NaN/Inf Matrix Guards: Hardened matrix standardization to prevent LAPACK 
-   singular matrix crashes during violent flash cascades.
+Architectural Supremacy (V36.5 Stability Patch):
+- LAPACK Heap-Corruption Eradication: Purged fragile C-level `np.linalg.svd`
+  which causes NTStatus 0xC0000374 heap corruption during concurrent execution.
+- Von Mises Power Iteration: Extracts the dominant eigenvector (PC1) in 8 pure
+  dot products without touching LAPACK workspace buffers.
+- High-Speed Atomic Caching: Caches global eigen-decomposition with a 1.0s TTL
+  to prevent redundant recalculations across 20+ concurrent asset feeds.
+- Thread-Safe Memory Bounds: Guards against zero-variance, singular covariance,
+  and mismatched array lengths during cold-boot periods.
 """
 
+import time
 import math
-import numpy as np
-import logging
 import asyncio
-from typing import Dict, List, Tuple
+import logging
+import numpy as np
+from typing import Dict, List, Tuple, Optional
 
 logger = logging.getLogger("QUANT_CORE.SECTOR_ORACLE")
-
-def _svd_compute_core(target_symbol: str, valid_symbols: List[str], returns_data: List[List[float]]) -> Tuple[float, float]:
-    """
-    CPU-bound SVD computation isolated from the async event loop.
-    """
-    try:
-        # R is an M x T matrix (M = assets, T = time ticks)
-        R = np.array(returns_data, dtype=np.float64)
-
-        # Standardize the returns matrix (Z-Score normalization per asset)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            stds = np.std(R, axis=1, keepdims=True) + 1e-9
-            R_norm = (R - np.mean(R, axis=1, keepdims=True)) / stds
-
-        # 🚀 SINGULAR VALUE DECOMPOSITION (SVD)
-        # U: Left-singular vectors, S: Singular values, Vt: Right-singular vectors
-        U, S, Vt = np.linalg.svd(R_norm, full_matrices=False)
-        
-        # The top right-singular vector represents the primary Sector Trend Factor
-        sector_factor = Vt[0, :] 
-
-        target_idx = valid_symbols.index(target_symbol)
-        target_rets = R_norm[target_idx, 1:]  # Current returns
-        sector_lagged = sector_factor[:-1]    # Lagged sector factor
-
-        if len(target_rets) < 20:
-            return 0.0, 0.0
-
-        # 🚀 LAGGED PEARSON CORRELATION
-        with np.errstate(divide='ignore', invalid='ignore'):
-            corr = float(np.corrcoef(sector_lagged, target_rets)[0, 1])
-
-        if np.isnan(corr) or np.isinf(corr):
-            corr = 0.0
-
-        # Compute the leading momentum of the sector itself
-        sector_momentum = float(np.mean(sector_factor[-5:]))
-        
-        # The Impulse Score combines correlation strength with the direction of the sector
-        if abs(sector_momentum) > 0.0001:
-            impulse_score = math.copysign(min(1.0, abs(corr)), sector_momentum)
-        else:
-            impulse_score = 0.0
-
-        return impulse_score, corr
-
-    except Exception as e:
-        # Swallow matrix singularity or convergence faults gracefully
-        logger.debug(f"[X-RAY] Sector SVD computation fault for {target_symbol}: {e}")
-        return 0.0, 0.0
 
 
 class SectorEigenOracle:
     """
-    🚀 V25.0 STATELESS TENSOR ORACLE
-    Computes real-time lead-lag impulse coupling by projecting target asset 
-    returns against the dominant eigenvector of its sector cohort.
+    🚀 V36.5 HIGH-PERFORMANCE SECTOR EIGENVECTOR ORACLE
+    Extracts sector momentum and market-wide beta impulses using pure
+    thread-safe linear algebra and lock-free time-bounded caching.
     """
-    
-    @staticmethod
-    async def compute_sector_impulse(target_symbol: str, cluster_returns: Dict[str, List[float]]) -> Tuple[float, float]:
-        """
-        Extracts the sector PC1 via SVD and computes the target asset's correlation
-        and leading impulse score against it.
-        
-        Args:
-            target_symbol: The asset triggering a local edge gate signal.
-            cluster_returns: Centralized mapping of symbol -> log-returns history.
-            
-        Returns:
-            Tuple[float, float]: (Impulse_Score, Sector_Correlation)
-        """
-        if not cluster_returns:
-            return 0.0, 0.0
+    _cache_lock = asyncio.Lock()
+    _last_calc_time: float = 0.0
+    _cached_eigenvector: Optional[np.ndarray] = None
+    _cached_symbols: List[str] = []
+    _cached_market_impulse: float = 0.0
+    _cached_asset_correlations: Dict[str, float] = {}
 
-        # Filter for symbols with sufficient historical data for a stable covariance matrix
+    @classmethod
+    def _power_iteration_pc1(cls, cov_matrix: np.ndarray, num_simulations: int = 8) -> np.ndarray:
+        """
+        Computes the dominant eigenvector (PC1) using pure matrix-vector multiplication.
+        100% thread-safe; completely bypasses OpenBLAS LAPACK SVD workspace corruption.
+        """
+        n = cov_matrix.shape[0]
+        # Start with a normalized uniform vector
+        b_k = np.ones(n, dtype=np.float64) / math.sqrt(n)
+
+        for _ in range(num_simulations):
+            # Matrix-vector multiplication
+            b_k1 = cov_matrix @ b_k
+            norm = np.linalg.norm(b_k1)
+            if norm < 1e-9:
+                break
+            b_k = b_k1 / norm
+
+        return b_k
+
+    @classmethod
+    def _svd_compute_core(cls, cluster_returns: Dict[str, List[float]]) -> Tuple[float, Dict[str, float]]:
+        """
+        Pure-math compute routine: Standardizes returns, forms the covariance
+        matrix, and extracts the top eigen-vector using power iteration.
+        """
         valid_symbols = [s for s, rets in cluster_returns.items() if len(rets) >= 30]
-        
-        # Require at least 3 assets to form a meaningful sector eigenvector
-        if target_symbol not in valid_symbols or len(valid_symbols) < 3:
-            return 0.0, 0.0
+        if len(valid_symbols) < 3:
+            return 0.0, {}
 
-        # Align lengths of all return arrays to the shortest available history
+        # Align length to the shortest return series
         min_len = min(len(cluster_returns[s]) for s in valid_symbols)
-        matrix_rows = [list(cluster_returns[s])[-min_len:] for s in valid_symbols]
-        
-        # 🚀 V25.0 ASYNC SVD OFFLOADING
-        # Passes the sanitized matrix to a background thread to prevent GIL lock
-        impulse_score, corr = await asyncio.to_thread(
-            _svd_compute_core, 
-            target_symbol, 
-            valid_symbols, 
-            matrix_rows
-        )
-        
-        return impulse_score, corr
+        matrix_rows = []
+        for s in valid_symbols:
+            matrix_rows.append(cluster_returns[s][-min_len:])
+
+        R = np.array(matrix_rows, dtype=np.float64)
+
+        # Standardize returns (Zero-mean, unit-variance)
+        means = np.mean(R, axis=1, keepdims=True)
+        stds = np.std(R, axis=1, keepdims=True) + 1e-9
+        norm_R = (R - means) / stds
+
+        # Covariance Matrix: (N x N)
+        T_steps = norm_R.shape[1]
+        cov_matrix = (norm_R @ norm_R.T) / max(1, T_steps - 1)
+
+        # Extract top eigenvector (PC1) via Power Iteration
+        pc1 = cls._power_iteration_pc1(cov_matrix, num_simulations=8)
+
+        # Compute instantaneous Market Factor: Projection of latest returns onto PC1
+        latest_returns = norm_R[:, -1]
+        market_factor = float(np.dot(pc1, latest_returns))
+        market_impulse = float(np.clip(market_factor / math.sqrt(len(valid_symbols)), -5.0, 5.0))
+
+        # Asset correlations with PC1
+        asset_correlations = {}
+        for idx, s in enumerate(valid_symbols):
+            asset_correlations[s] = float(np.clip(pc1[idx], -1.0, 1.0))
+
+        return market_impulse, asset_correlations
+
+    @classmethod
+    async def compute_sector_impulse(
+        cls, 
+        symbol: str, 
+        cluster_returns: Dict[str, List[float]]
+    ) -> Tuple[float, float]:
+        """
+        🚀 O(1) TIME-BOUNDED INTERFACE
+        Returns (sector_impulse, asset_correlation). Recomputes at most once
+        every 1.0 second, eliminating redundant compute cycles across all assets.
+        """
+        now = time.time()
+
+        # 1. Fast Lock-Free Read from Cache (<1.0s staleness)
+        if now - cls._last_calc_time < 1.0 and cls._cached_asset_correlations:
+            corr = cls._cached_asset_correlations.get(symbol, 0.0)
+            impulse = cls._cached_market_impulse * (1.0 if corr >= 0 else -1.0)
+            return impulse, corr
+
+        # 2. Re-compute Cache under Async Lock
+        async with cls._cache_lock:
+            # Double check condition inside lock
+            if now - cls._last_calc_time < 1.0 and cls._cached_asset_correlations:
+                corr = cls._cached_asset_correlations.get(symbol, 0.0)
+                impulse = cls._cached_market_impulse * (1.0 if corr >= 0 else -1.0)
+                return impulse, corr
+
+            try:
+                loop = asyncio.get_running_loop()
+                market_impulse, asset_corrs = await loop.run_in_executor(
+                    None, cls._svd_compute_core, cluster_returns
+                )
+                cls._cached_market_impulse = market_impulse
+                cls._cached_asset_correlations = asset_corrs
+                cls._last_calc_time = now
+
+                corr = asset_corrs.get(symbol, 0.0)
+                impulse = market_impulse * (1.0 if corr >= 0 else -1.0)
+                return impulse, corr
+
+            except Exception as e:
+                logger.debug(f"[X-RAY] Sector Eigen compute error: {e}")
+                return 0.0, 0.0
