@@ -7,8 +7,9 @@ Architectural Supremacy (V38.0 Upgrades):
 - Synchronous Micro-Handler Fast-Path: Trade ticks, klines, and screener updates
   execute synchronously in memory (<3μs), bypassing task queues to eradicate
   the task explosion and overflow errors.
-- Real-Time Trade Settlement Drawdown: Recalculates high-water marks and account
-  drawdown percentages immediately upon trade closure, eliminating stale 60s windows.
+- Real-Time Trade Settlement & Intra-Minute Drawdown: Recalculates high-water marks 
+  and account drawdown percentages immediately upon trade closure and on every 50ms 
+  evaluation tick, eliminating stale 60s windows.
 - Decoupled State Snapshotting: Copies evaluating context under symbol locks and
   releases the lock before running downstream model evaluation.
 - Clean Coroutine Disposal: Intercepts dropped coroutines in track_task and closes
@@ -804,9 +805,7 @@ class DistributedQuantEngine:
                     prob_success, exec_weight, sl_dist_pct, tp_dist_pct, current_bal, stat_engine.inst_variance
                 )
 
-            if raw_notional < 6.50:
-                return
-
+            # V38.0 Fix: Scale sub-notional signals up to the $6.50 exchange floor
             target_notional = float(np.clip(raw_notional, 6.50, current_bal * 2.0))
             is_safe, risk_reason = self.risk_vault.evaluate_portfolio_safety(current_bal, target_notional, symbol)
             if not is_safe:
@@ -1251,8 +1250,17 @@ class DistributedQuantEngine:
                     ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
 
                 ctx["now"] = time.time()
-                ctx["current_vault_balance"] = self.global_state_cache.get("current_vault_balance", ctx["current_vault_balance"])
-                ctx["drawdown_pct"] = self.global_state_cache.get("drawdown_pct", 0.0)
+                
+                # Real-Time Intra-Minute Drawdown Recalculation (Audit #9 Resolution)
+                vault_bal = self.global_state_cache.get("current_vault_balance", 25.0)
+                baseline_bal = self.global_state_cache.get("wallet_baseline", vault_bal)
+                unrealized_pnl = (current_price - ctx["actual_entry"]) * ctx["actual_qty_filled"] if ctx["is_buy"] else \
+                                 (ctx["actual_entry"] - current_price) * ctx["actual_qty_filled"]
+                live_equity = vault_bal + unrealized_pnl
+                live_drawdown = max(0.0, (baseline_bal - live_equity) / baseline_bal)
+
+                ctx["current_vault_balance"] = live_equity
+                ctx["drawdown_pct"] = live_drawdown
                 ctx["active_positions_count"] = len(self.active_positions_map)
                 ctx["last_ob"] = ob
                 ctx["initial_risk_dist"] = abs(ctx["actual_entry"] - current_active_sl)
