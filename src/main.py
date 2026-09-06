@@ -4,16 +4,17 @@ V39.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE
 High-Frequency Multi-Asset Micro-Scalping & Risk Governance System.
 
 Architectural Supremacy (V39.1 Production Upgrades):
-- Institutional Capital Floor Guard: Enforces a strict minimum bankroll floor
-  ($220.00 default) to prevent single-position margin over-allocation (>1.5% max risk cap)
-  on Bybit's exchange minimum notionals ($6.50 at 2x leverage).
-- Dynamic Dual-Fee Synchronization: Synchronizes both Maker and Taker fee schedules
-  across Smart Order Router and Delta-Neutral Yield Engine upon boot.
+- Dynamic Micro-Account Risk Scaling: Automatically adapts risk vault constraints
+  (drawdown limits and single-position caps) based on account tier, allowing 
+  micro-accounts (e.g. $15–$50) to clear exchange minimum notionals ($6.50) without veto deadlocks.
+- Configurable Capital Floor Guard: Enforces a flexible bankroll floor ($15.00 default)
+  via MIN_REQUIRED_EQUITY to verify wallet solvency without aborting viable sub-scale runs.
+- Dual-Fee Schedule Synchronization: Dynamically synchronizes Maker and Taker fee 
+  schedules across the Smart Order Router and Delta-Neutral Harvester upon boot.
 - Full 4-Regime RLS State Persistence: Serializes and reloads weights and covariance 
-  matrices for all 4 Markov regimes (Trend, Range, Spoof, Cascade), eliminating 
-  cold-start weight degradation across daemon reboots.
-- Uniform 25D Hypersphere Parity: Integrates with micro_models.py V39.1 to maintain
-  exact feature alignment across live evaluation and recovery lifecycles.
+  matrices for all 4 Markov regimes (Trend, Range, Spoof, Cascade) across daemon reboots.
+- Leak-Free Clean Shutdown Lifecycle: Closes REST/WebSocket aiohttp connector sessions 
+  on exit to eradicate C-level unclosed connector warnings.
 - Lock-Free LMAX Disruptor Pattern: Centralizes in-flight reservations, position ledgers, 
   and profit-locking mutations through a dedicated asynchronous mutation queue.
 - Zero-Window Atomic Bracket Hand-off: Enforces Bybit V5 native Stop-Loss and Take-Profit 
@@ -86,10 +87,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QUANT_CORE.V39_APEX")
 
-# Institutional Capital Governance Parameter
-# Minimum equity to safely support exchange minimum notional ($6.50) without exceeding 1.5% max risk cap at 2x leverage:
-# Minimum Capital >= $6.50 / (0.015 * 2.0) = $216.67
-MIN_REQUIRED_EQUITY = float(os.getenv("MIN_REQUIRED_EQUITY", "220.0"))
+# Capital Governance Floor: Defaults to $15.00 for micro-accounts
+MIN_REQUIRED_EQUITY = float(os.getenv("MIN_REQUIRED_EQUITY", "15.0"))
 
 
 @dataclass
@@ -214,7 +213,19 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY]   CLOUD DB OFFLINE: Supabase connection failed ({e}). Booting in Local Mode.")
             self.memory = None
 
-        self.risk_vault = InstitutionalRiskVault(max_drawdown_pct=0.05, max_single_position_risk_pct=0.015)
+        # Adaptive Risk Vault Initialization:
+        # Micro-accounts (<$100) require elevated drawdown and position limits to permit $6.50 minimum notionals.
+        default_max_dd = 0.20 if MIN_REQUIRED_EQUITY < 100.0 else 0.05
+        default_single_risk = 0.40 if MIN_REQUIRED_EQUITY < 100.0 else 0.015
+        max_dd_pct = float(os.getenv("MAX_DRAWDOWN_PCT", str(default_max_dd)))
+        single_risk_pct = float(os.getenv("MAX_SINGLE_POSITION_RISK_PCT", str(default_single_risk)))
+
+        self.risk_vault = InstitutionalRiskVault(
+            max_drawdown_pct=max_dd_pct, 
+            max_single_position_risk_pct=single_risk_pct
+        )
+        logger.info(f"  RISK VAULT INITIALIZED // Max Drawdown: {max_dd_pct:.1%} | Max Single Position Risk: {single_risk_pct:.1%}")
+
         self.yield_engine = DeltaNeutralYieldEngine(self)
 
         self.stat_engines: Dict[str, ContinuousMicrostructureEngine] = {}
@@ -831,7 +842,7 @@ class DistributedQuantEngine:
 
             current_bal = self.global_state_cache.get("current_vault_balance", 0.0)
             
-            # Capital Hard-Stop: Ensure portfolio balance respects the institutional floor
+            # Capital Hard-Stop: Ensure portfolio balance respects the active floor
             if current_bal < MIN_REQUIRED_EQUITY:
                 if now - self.last_eval_time.get(symbol + "_equity_veto", 0.0) > 120.0:
                     logger.warning(f"[RISK] Account equity (${current_bal:.2f}) below minimum floor (${MIN_REQUIRED_EQUITY:.2f}). Trade halted.")
@@ -852,13 +863,10 @@ class DistributedQuantEngine:
                     prob_success, exec_weight, sl_dist_pct, tp_dist_pct, current_bal, stat_engine.inst_variance
                 )
 
-            # Sizing Governance: Verify portfolio capacity before exchange flooring
-            max_permitted_notional = current_bal * 2.0
-            if max_permitted_notional < 6.50:
-                if now - self.last_eval_time.get(symbol + "_cap_veto", 0.0) > 120.0:
-                    logger.warning(f"[RISK] Bankroll too small for exchange min notional ($6.50): Equity=${current_bal:.2f}")
-                    self.last_eval_time[symbol + "_cap_veto"] = now
-                return
+            # Sizing Governance: Ensure notional capacity covers exchange minimum ($6.50)
+            # For micro-accounts, allow max_permitted_notional to stretch up to $15.00 or 2.5x balance.
+            leverage_factor = 2.5 if current_bal < 100.0 else 2.0
+            max_permitted_notional = max(6.50, current_bal * leverage_factor)
 
             target_notional = float(np.clip(raw_notional, 6.50, max_permitted_notional))
             is_safe, risk_reason = self.risk_vault.evaluate_portfolio_safety(current_bal, target_notional, symbol)
@@ -1410,6 +1418,13 @@ class DistributedQuantEngine:
         if hasattr(self, 'telegram'):
             await self.telegram.close()
 
+        # Cleanly disconnect Bybit executor and aiohttp connectors
+        if hasattr(self, 'executor') and self.executor and hasattr(self.executor, 'close'):
+            try:
+                await self.executor.close()
+            except Exception as e:
+                logger.debug(f"Executor close warning absorbed: {e}")
+
         self.math_pool.shutdown(wait=False)
         self.io_pool.shutdown(wait=False)
         logger.critical("  MATRIX DISCONNECTED.")
@@ -1422,15 +1437,15 @@ class DistributedQuantEngine:
                 logger.critical("  FATAL BOOT FAULT: Could not verify real Bybit wallet balance. Swarm locked.")
                 raise EmergencyShutdown("Zero or unverified wallet balance on boot.")
 
-            # Institutional Capital Floor Guard
+            # Minimum Capital Floor Verification
             if boot_bal < MIN_REQUIRED_EQUITY:
                 self.fsm.trigger_global_emergency_lock()
                 logger.critical(
                     f"  FATAL BOOT FAULT: Verified Bybit wallet balance (${boot_bal:.2f}) is below "
-                    f"the institutional risk governance floor (${MIN_REQUIRED_EQUITY:.2f}). Swarm locked."
+                    f"the configured capital floor (${MIN_REQUIRED_EQUITY:.2f}). Swarm locked."
                 )
                 raise EmergencyShutdown(
-                    f"Insufficient bankroll: ${boot_bal:.2f} < ${MIN_REQUIRED_EQUITY:.2f} min required for safe 1.5% position risk."
+                    f"Insufficient bankroll: ${boot_bal:.2f} < ${MIN_REQUIRED_EQUITY:.2f} minimum required."
                 )
 
             self.global_state_cache["start_of_day_balance"] = boot_bal
