@@ -15,6 +15,8 @@ Architectural Supremacy (V38.0 Upgrades):
   them via coro.close() to eradicate RuntimeWarning leaks.
 - Zero-Window Atomic Bracket Hand-off: Enforces Bybit V5 native Stop-Loss and
   Take-Profit attachments on order entry (tpslMode="Full", slTriggerBy="MarkPrice").
+- Automatic Cloud Keep-Alive: Binds the lightweight Flask uptime health server 
+  automatically if a cloud PORT is detected, satisfying Render and Railway requirements.
 """
 
 import os
@@ -1447,10 +1449,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    if os.getenv("ENABLE_KEEP_ALIVE", "false").lower() == "true":
+    if os.getenv("PORT") or os.getenv("ENABLE_KEEP_ALIVE", "false").lower() == "true":
         try:
             from keep_alive import keep_alive
             keep_alive()
+            logger.info("🟢 TITAN HEALTH SERVER: Automatically bound to cloud PORT interface.")
         except Exception as e:
             logger.warning(f"[HEALTH] Keep-alive daemon bypassed: {e}")
 
