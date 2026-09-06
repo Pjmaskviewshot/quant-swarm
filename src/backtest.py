@@ -1,21 +1,24 @@
 """
-💎 V37.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER
+V39.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER
 --------------------------------------------------------------------------------
-Institutional-grade historical simulation engine replicating the V37.0 
+Institutional-grade historical simulation engine replicating the V39.0 
 25D Volterra-Riemannian Manifold, exact Joseph-stabilized RLS, Bayesian-prior
 Merton Jump Kelly allocation, and Avellaneda-Stoikov execution routing.
 
-Architectural Supremacy (V37.0 Upgrades):
-1. 25D Volterra Manifold Alignment: Backtest state vectors now match live 
+Architectural Supremacy (V39.0 Upgrades):
+1. Invariant Unit Affine Manifold Parity: Decouples Volterra normalization from 
+   index 24, strictly preserving the stationary 1.0 affine bias and matching live 
    micro_models.py (19D orthogonalized features + 5 cross-products + 1 bias).
-2. Exact Joseph-Stabilized Fisher RLS: Replaced heuristic covariance updates 
-   with rank-1 Woodbury updates and L1 proximal soft-thresholding.
-3. Merton Jump Kelly Simulation: Backtester models dynamic sizing using Bayesian 
-   conjugate priors (Beta-Binomial win rate, Inverse-Gamma payoff ratio).
-4. Realistic Intra-Bar Trailing Stops: Accurately mirrors intelligent_exit.py 
-   (Breakeven at 0.75R, Profit Lock at 1.5R, Parabolic at 2.5R, and Hawkes Climax).
+2. Exact Feature Alignment: Synthesizes high-fidelity order flow imbalance 
+   (MLOFI proxy) at feature 0 and continuous analytical Hurst exponent estimation 
+   at feature 11, eliminating backtest-to-production transfer phase-inversion.
+3. Realistic Intra-Bar Directional Path Simulation: Models intra-bar price paths 
+   (O -> L -> H -> C for green bars; O -> H -> L -> C for red bars) to resolve 
+   same-candle SL/TP collisions without optimistic fill bias.
+4. Numerically Conditioned Joseph-Form RLS: Enforces bounded Fisher variance, 
+   clamped observation noise injection, trace ceilings, and diagonal floors.
 5. Purged & Embargoed Walk-Forward Validation: Eliminates serial correlation 
-   leakage across cross-validation folds.
+   leakage across rolling train/test cross-validation splits.
 """
 
 import argparse
@@ -99,7 +102,6 @@ def compute_permutation_entropy_dithered(series: list, order: int = 3, delay: in
 
         bases = order ** np.arange(order)
         hashed = np.sum(perms * bases, axis=1)
-
         _, counts = np.unique(hashed, return_counts=True)
         p = counts / counts.sum()
         p = p[p > 0]
@@ -111,8 +113,45 @@ def compute_permutation_entropy_dithered(series: list, order: int = 3, delay: in
         return 1.0
 
 
+class BacktestHurstEstimator:
+    """O(1) Analytical Hurst Exponent Estimator matching live production."""
+    def __init__(self, lags: Tuple[int, ...] = (1, 2, 4, 8, 16)):
+        self.lags = np.array(lags, dtype=np.float64)
+        self.prices = deque(maxlen=int(max(lags)) + 2)
+        self.means = {lag: 0.0 for lag in lags}
+        self.m2 = {lag: 1e-9 for lag in lags}
+        self.counts = {lag: 0 for lag in lags}
+
+        self.x_vals = np.log(self.lags)
+        self.x_mean = float(np.mean(self.x_vals))
+        self.x_diff = self.x_vals - self.x_mean
+        self.ss_x = float(np.sum(self.x_diff ** 2) + 1e-9)
+        self.hurst_h = 0.5
+
+    def update(self, price: float) -> float:
+        self.prices.append(price)
+        if len(self.prices) < int(self.lags[-1]) + 1:
+            return 0.5
+
+        variances = []
+        for lag in self.lags:
+            lag_int = int(lag)
+            ret = math.log(max(1e-9, price) / max(1e-9, self.prices[-1 - lag_int]))
+            self.counts[lag_int] += 1
+            delta = ret - self.means[lag_int]
+            self.means[lag_int] += delta / min(100, self.counts[lag_int])
+            delta2 = ret - self.means[lag_int]
+            self.m2[lag_int] = 0.98 * self.m2[lag_int] + 0.02 * (delta * delta2)
+            variances.append(max(1e-12, self.m2[lag_int]))
+
+        y_vals = np.log(variances)
+        slope = float(np.sum(self.x_diff * (y_vals - np.mean(y_vals))) / self.ss_x)
+        self.hurst_h = float(np.clip(slope / 2.0, 0.01, 0.99))
+        return self.hurst_h
+
+
 class BacktestAdaptiveWhitener:
-    """19D Streaming Cholesky Whitening Engine matching live production."""
+    """19D Streaming Regularized Whitening Engine with Spectral Fallback."""
     def __init__(self, dim: int = 19, base_alpha: float = 0.001):
         self.dim = dim
         self.base_alpha = base_alpha
@@ -131,33 +170,44 @@ class BacktestAdaptiveWhitener:
         self.cov = (1.0 - alpha) * self.cov + alpha * np.outer(delta, delta)
         self.cov = 0.5 * (self.cov + self.cov.T)
 
-        stable_cov = self.cov + (self.eye * 1e-5)
+        tr = np.trace(self.cov)
+        reg = max(1e-5, (tr / self.dim) * 1e-4)
+        stable_cov = self.cov + (self.eye * reg)
+
         try:
             l = np.linalg.cholesky(stable_cov)
             return np.clip(np.linalg.solve(l, delta) / 3.0, -3.0, 3.0)
         except np.linalg.LinAlgError:
-            diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
-            return np.clip(delta / (diag_stds * 3.0), -3.0, 3.0)
+            try:
+                evals, evecs = np.linalg.eigh(stable_cov)
+                evals_clamped = np.maximum(evals, 1e-6)
+                inv_sqrt = 1.0 / np.sqrt(evals_clamped)
+                whitened = (evecs @ np.diag(inv_sqrt) @ evecs.T) @ delta
+                return np.clip(whitened / 3.0, -3.0, 3.0)
+            except Exception:
+                diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
+                return np.clip(delta / (diag_stds * 3.0), -3.0, 3.0)
 
 
 class BacktestRiemannianRLS:
-    """25D Joseph-Stabilized Recursive Least Squares with L1 Proximal Sparsity."""
+    """25D Joseph-Stabilized RLS with Bounded Observation Noise & L1 Sparsity."""
     def __init__(self, dim: int = 25, p_init: float = 1.0, l1_penalty: float = 1e-4):
         self.dim = dim
         self.w = np.zeros(dim, dtype=np.float64)
         self.f_inv = np.eye(dim, dtype=np.float64) * p_init
         self.eye = np.eye(dim, dtype=np.float64)
         self.l1_penalty = l1_penalty
+        self.lambda_reg = 0.9995
 
     def update(self, x: np.ndarray, y_target: float, p_pred: float, weight: float = 1.0) -> float:
         err = float(y_target - p_pred)
         x_vec = x.reshape(-1, 1)
 
-        fisher_var = max(1e-5, p_pred * (1.0 - p_pred))
-        lambda_reg = 0.999
+        p_clamped = float(np.clip(p_pred, 0.01, 0.99))
+        fisher_var = max(1e-4, p_clamped * (1.0 - p_clamped))
 
         fx = self.f_inv @ x_vec
-        denom = lambda_reg + float(x_vec.T @ fx) * fisher_var
+        denom = self.lambda_reg + float(x_vec.T @ fx) * fisher_var
         if denom < 1e-9:
             return err
 
@@ -167,14 +217,22 @@ class BacktestRiemannianRLS:
         # Proximal L1 Soft-Thresholding
         self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - self.l1_penalty, 0.0)
 
-        # Joseph-form covariance update
+        # Joseph-form covariance update with bounded observation noise
         i_kx = self.eye - (kalman_gain @ x_vec.T)
-        self.f_inv = (i_kx @ self.f_inv @ i_kx.T + (kalman_gain @ kalman_gain.T) * (1.0 / fisher_var)) / lambda_reg
-        self.f_inv = 0.5 * (self.f_inv + self.f_inv.T) + (self.eye * 1e-6)
+        bounded_r = min(1000.0, 1.0 / fisher_var)
+        noise_cov = (kalman_gain @ kalman_gain.T) * bounded_r
 
-        tr = np.trace(self.f_inv)
+        self.f_inv = (i_kx @ self.f_inv @ i_kx.T + noise_cov) / self.lambda_reg
+        self.f_inv = 0.5 * (self.f_inv + self.f_inv.T)
+
+        np.fill_diagonal(self.f_inv, np.maximum(np.diag(self.f_inv), 1e-5))
+        tr = float(np.trace(self.f_inv))
         if tr > 1500.0:
             self.f_inv *= (1500.0 / tr)
+
+        w_norm = float(np.linalg.norm(self.w))
+        if w_norm > 50.0:
+            self.w *= (50.0 / w_norm)
 
         return err
 
@@ -284,12 +342,12 @@ def fetch_klines_1m(symbol: str, days: int) -> List[Dict]:
 
 
 def fetch_aligned_data(symbol: str, days: int) -> Tuple[List[Dict], List[Dict]]:
-    print(f"📡 Fetching target asset 1-Minute Data ({symbol})...")
+    print(f"  Fetching target asset 1-Minute Data ({symbol})...")
     target_candles = fetch_klines_1m(symbol, days)
     if symbol == "BTCUSDT":
         return target_candles, target_candles
 
-    print("📡 Fetching global BTC lead-lag matrix context...")
+    print("  Fetching global BTC lead-lag matrix context...")
     btc_raw = fetch_klines_1m("BTCUSDT", days)
     btc_dict = {c["ts"]: c for c in btc_raw}
     aligned_btc = []
@@ -346,14 +404,15 @@ def compute_lead_lag_cross_alpha(btc_hist: deque, alt_hist: deque) -> float:
     return 0.0
 
 
-def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
+def run_v39_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Params, symbol: str) -> Dict:
     trades = []
     cooldown_until = -1
 
-    # Hawkes intensity trackers
+    # Order flow and Hawkes intensity state
     hawkes_mean, hawkes_var, hawkes_z = 0.0, 1.0, 0.0
     hawkes_velocity, hawkes_acceleration = 0.0, 0.0
     hawkes_z_prev, hawkes_v_prev = 0.0, 0.0
+    mlofi_mean, mlofi_var, mlofi_z = 0.0, 1.0, 0.0
 
     # Moving equilibrium filters
     meso_fast_ema = None
@@ -367,7 +426,7 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     cvd_history = deque(maxlen=60)
     price_history = deque(maxlen=60)
 
-    # Microstructure moments
+    # Microstructure moments & estimators
     amihud_history = deque(maxlen=100)
     rolling_outcomes = deque(maxlen=100)
     btc_1m_history = deque(maxlen=300)
@@ -377,7 +436,9 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
     inst_variance = 1e-6
     kaufman_er = 0.5
 
-    # V37.0 19D Whitener and 25D RLS Engines
+    hurst_estimator = BacktestHurstEstimator()
+
+    # V39.0 RLS and Feature Engines
     w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=25)
     whitening_engine = BacktestAdaptiveWhitener(dim=19, base_alpha=0.001)
 
@@ -423,6 +484,8 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         ret_prev = math.log(safe_curr_prev / safe_prev_prev)
         log_returns.append(ret_prev)
 
+        hurst_h = hurst_estimator.update(c_prev["close"])
+
         shannon_entropy = 1.0
         if len(log_returns) > 10:
             inst_variance = np.var(list(log_returns)[-10:]) + 1e-9
@@ -466,6 +529,15 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         hawkes_acceleration = hawkes_velocity - hawkes_v_prev
         hawkes_z_prev, hawkes_v_prev = hawkes_z, hawkes_velocity
 
+        # High-Fidelity Flow / MLOFI Simulation (Parity with Feature 0)
+        candle_range = max(1e-9, c_prev["high"] - c_prev["low"])
+        intra_flow_raw = ((c_prev["close"] - c_prev["open"]) + 0.5 * (c_prev["close"] - (c_prev["high"] + c_prev["low"]) * 0.5)) / candle_range
+        candle_mlofi_step = intra_flow_raw * math.log1p(max(0.0, norm_vol))
+        d_mlofi = candle_mlofi_step - mlofi_mean
+        mlofi_mean += 0.05 * d_mlofi
+        mlofi_var = (1.0 - 0.05) * mlofi_var + 0.05 * (d_mlofi ** 2)
+        mlofi_z = float(np.clip((candle_mlofi_step - mlofi_mean) / (math.sqrt(mlofi_var) + 1e-9), -5.0, 5.0))
+
         # CVD divergence calculation
         trade_dir = 1.0 if price_step >= 0 else -1.0
         cvd_delta = vol_step * trade_dir
@@ -487,7 +559,7 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
             elif c_diff > 0 and p_diff <= 0:
                 div_z = -abs(c_diff) / (np.std(list(cvd_history)) + 1e-9)
 
-        # Construct V37.0 19D Raw Microstructure State Vector
+        # 19D Raw Microstructure State Vector
         sector_impulse = compute_lead_lag_cross_alpha(btc_1m_history, alt_1m_history)
         micro_elasticity_z = (c_prev["high"] - c_prev["low"]) / (sim_price * math.sqrt(inst_variance) + 1e-9)
         ou_divergence_z = (sim_price - meso_slow_ema) / (sim_price * math.sqrt(inst_variance) + 1e-9)
@@ -495,8 +567,8 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         jump_z = abs(price_step) / (sim_price * math.sqrt(inst_variance) + 1e-9)
         swd_z = hawkes_z - (price_step / (sim_price * math.sqrt(inst_variance) + 1e-9))
         accel_z = hawkes_acceleration
-        hurst_h_diff = 0.0  # Normalized Hurst displacement
-        p_bid_deplete = (c_prev["close"] - c_prev["low"]) / (max(1e-6, c_prev["high"] - c_prev["low"]))
+        hurst_h_diff = hurst_h - 0.5
+        p_bid_deplete = (c_prev["close"] - c_prev["low"]) / candle_range
         ecosystem_alpha = sector_impulse * 0.8
         funding_bias = 0.0
         squeeze_risk = float(np.clip(abs(hawkes_z) * kaufman_er * 0.5, 0.0, 1.0))
@@ -504,7 +576,7 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         micro_dislocation_z = (typical_price - sim_price) / (sim_price * math.sqrt(inst_variance) + 1e-9)
 
         raw_vec_19 = np.array([
-            hawkes_z * 0.7, hawkes_z, meso_momentum_z, sector_impulse,
+            mlofi_z, hawkes_z, meso_momentum_z, sector_impulse,
             micro_elasticity_z, ou_divergence_z, cfi_z, jump_z,
             shannon_entropy, swd_z, accel_z, hurst_h_diff,
             p_bid_deplete, cvd_z, div_z, ecosystem_alpha,
@@ -514,18 +586,19 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
         f = whitening_engine.orthogonalize(raw_vec_19, inst_variance)
 
         # 25D Volterra Manifold Expansion
-        volterra = np.array([
-            f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
-            f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18],
-            f[11] * f[1],  # 19: Hurst x Hawkes
-            f[17] * f[0],  # 20: Squeeze Risk x MLOFI
-            f[15] * f[0],  # 21: Macro Spillover x MLOFI
-            f[14] * f[2],  # 22: CVD Divergence x Meso Momentum
-            f[5] * f[1],   # 23: OU Mean Reversion x Hawkes
-            1.0            # 24: Intercept Bias
-        ], dtype=np.float64)
+        volterra = np.empty(25, dtype=np.float64)
+        volterra[:19] = f
+        volterra[19] = f[11] * f[1]  # 19: Hurst x Hawkes interaction
+        volterra[20] = f[17] * f[0]  # 20: Squeeze Risk x MLOFI
+        volterra[21] = f[15] * f[0]  # 21: Macro Spillover x MLOFI
+        volterra[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
+        volterra[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
 
-        v_att = volterra / (np.linalg.norm(volterra) + 1e-9)
+        # Strict Affine Invariance: Normalize dynamic features (0..23) only
+        dynamic_norm = math.sqrt(float(np.dot(volterra[:24], volterra[:24]))) + 1e-9
+        v_att = np.empty(25, dtype=np.float64)
+        v_att[:24] = volterra[:24] / dynamic_norm
+        v_att[24] = 1.0  # Unit Affine Bias Invariant
 
         # Bayesian Markov Regime Updates
         beliefs = regime_detector.update_beliefs(kaufman_er, shannon_entropy, 0.0, jump_z)
@@ -542,10 +615,9 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
 
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
-
         historical_probs.append(prob_success)
 
-        # Split-Conformal Prediction Coverage Gate
+        # Split-Conformal Prediction Coverage Gate (85% Coverage)
         if len(calibration_errors) >= 30:
             q_threshold = float(np.percentile(calibration_errors, 85))
         else:
@@ -633,6 +705,7 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                     for j in range(i + 1, min(i + 240, len(target_candles))):
                         bars_held = j - i
                         bar = target_candles[j]
+                        bar_open = bar["open"]
                         h, l, c_j = bar["high"], bar["low"], bar["close"]
 
                         if action_dir == "BUY" and h > max_favorable_price:
@@ -670,20 +743,50 @@ def run_v37_backtest(target_candles: List[Dict], btc_candles: List[Dict], p: Par
                             be_level = entry + (entry * 0.0015) if action_dir == "BUY" else entry - (entry * 0.0015)
                             current_sl = max(current_sl, be_level) if action_dir == "BUY" else min(current_sl, be_level)
 
-                        # Physical Breach Checks
+                        # Directional Path Resolution (Eliminates Same-Bar Collision Bias)
+                        # Green Bar (O -> L -> H -> C) vs Red Bar (O -> H -> L -> C)
+                        is_green_bar = c_j >= bar_open
                         hit_tp = h >= current_tp if action_dir == "BUY" else l <= current_tp
                         hit_sl = l <= current_sl if action_dir == "BUY" else h >= current_sl
 
-                        if hit_tp and hit_sl:
-                            outcome, exit_price = "LOSS", current_sl
-                            break
-                        if hit_tp:
-                            outcome, exit_price = "WIN", current_tp
-                            break
-                        if hit_sl:
-                            outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
-                            exit_price = current_sl
-                            break
+                        if action_dir == "BUY":
+                            if is_green_bar:
+                                # First dips to Low, then rallies to High
+                                if hit_sl:
+                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                                    exit_price = current_sl
+                                    break
+                                elif hit_tp:
+                                    outcome, exit_price = "WIN", current_tp
+                                    break
+                            else:
+                                # First spikes to High, then drops to Low
+                                if hit_tp:
+                                    outcome, exit_price = "WIN", current_tp
+                                    break
+                                elif hit_sl:
+                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                                    exit_price = current_sl
+                                    break
+                        else:  # SELL
+                            if is_green_bar:
+                                # First dips to Low (TP), then rises to High (SL)
+                                if hit_tp:
+                                    outcome, exit_price = "WIN", current_tp
+                                    break
+                                elif hit_sl:
+                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                                    exit_price = current_sl
+                                    break
+                            else:
+                                # First rises to High (SL), then dips to Low (TP)
+                                if hit_sl:
+                                    outcome = "WIN" if r_multiple >= 0.75 else "LOSS"
+                                    exit_price = current_sl
+                                    break
+                                elif hit_tp:
+                                    outcome, exit_price = "WIN", current_tp
+                                    break
 
                     if outcome is None:
                         exit_price = target_candles[min(i + 239, len(target_candles) - 1)]["close"]
@@ -788,7 +891,7 @@ def summarize(trades: List[Dict], total_minutes: int = 0) -> Dict:
 
 def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List[Dict]:
     results = []
-    print("\n⏳ Running V37.0 Purged Walk-Forward Cross-Validation (5 Folds)...")
+    print("\n  Running V39.0 Purged Walk-Forward Cross-Validation (5 Folds)...")
 
     rr_ratios = [1.8, 2.0, 2.4]
     atr_mults = [2.0, 2.5, 3.0]
@@ -809,7 +912,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 if test_end > total_len:
                     break
 
-                test_result = run_v37_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
+                test_result = run_v39_backtest(t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol)
 
                 if test_result.get("trades", 0) > 2:
                     fold_sharpes.append(test_result.get("sharpe_ratio", 0.0))
@@ -841,13 +944,13 @@ if __name__ == "__main__":
     parser.add_argument("--optimize", action="store_true")
     args = parser.parse_args()
 
-    print(f"📥 Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
+    print(f"  Building matrix mapping for {args.days}d of 1-Minute High-Resolution Data...")
     t_cand, b_cand = fetch_aligned_data(args.symbol, args.days)
-    print(f"✅ Matrix synchronized. ({len(t_cand)} true 1m blocks)")
+    print(f"  Matrix synchronized. ({len(t_cand)} true 1m blocks)")
 
     if args.optimize:
         best_params = parameter_sweep(t_cand, b_cand, args.symbol)
-        print("\n🏆 Top Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
+        print("\n  Top Walk-Forward Configurations (Sorted by Avg OOS Sharpe):")
         for idx, res in enumerate(best_params, 1):
             print(f" {idx}. RR: {res['RR']} | SL ATR: {res['ATR']} "
                   f"--> Avg Sharpe: {res['OOS_Avg_Sharpe']:.2f} | Min Fold Sharpe: {res['Min_Fold_Sharpe']:.2f}")
@@ -856,14 +959,14 @@ if __name__ == "__main__":
             best = best_params[0]
             with open("params.json", "w") as f:
                 json.dump({"rr_ratio": best["RR"], "sl_atr_mult": best["ATR"]}, f)
-            print("💾 Saved optimal parameters to params.json for live engine synchronization.")
+            print("  Saved optimal parameters to params.json for live engine synchronization.")
 
     else:
         split = int(len(t_cand) * 0.6)
         params = Params()
-        test = run_v37_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
+        test = run_v39_backtest(t_cand[split:], b_cand[split:], params, args.symbol)
 
-        print("\n=== V37.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40%) ===")
+        print("\n=== V39.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40%) ===")
         for k, v in test.items():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")

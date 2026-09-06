@@ -1,12 +1,15 @@
 """
-💎 V37.0 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+💎 V38.0 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
 Hyper-optimized Supabase connector and Transaction Cost Analysis (TCA) ledger.
 
-Architectural Supremacy (V37.0 Upgrades):
+Architectural Supremacy (V38.0 Upgrades):
+- Cold-Start Deadlock Resolution: Unseeded and freshly hot-swapped assets with
+  <30 ledger samples are armed by default with conservative Bayesian priors (0.55)
+  unless explicitly demoted by statistical underperformance.
 - Lossless Shutdown Flush (Audit #12 Resolution): Drains and dispatches all queued 
   records before canceling background worker tasks, ensuring 100% data persistence.
-- V37.0 Schema & Alpha Manifold Parity: Persists full 25D Volterra microstructure
+- V38.0 Schema & Alpha Manifold Parity: Persists full 25D Volterra microstructure
   features (micro_dislocation_z, hurst_h, bocd_cp_prob, ou_divergence_z, cvd_z).
 - Granular TCA Attribution: Captures separate entry, exit, and total execution
   slippage (bps) alongside exchange fees and funding drag for post-trade analytics.
@@ -31,7 +34,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    🚀 V37.0 PURE-ASYNC FORENSIC LEDGER
+    🚀 V38.0 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
     DNA clustering with batched, non-blocking cloud persistence.
     """
@@ -271,7 +274,7 @@ class MemoryBank:
             "price_at_prediction": float(price),
             "ai_confidence": float(confidence),
 
-            # V37.0 25D Volterra-Riemannian Microstructure Schema
+            # 25D Volterra-Riemannian Microstructure Schema
             "market_regime": str(market_regime),
             "log_mlofi_z": float(log_mlofi_z),
             "hawkes_z": float(hawkes_z),
@@ -586,14 +589,20 @@ class MemoryBank:
             self._ingest_hologram_data(historical_data)
             promo_eval = await self.evaluate_shadow_promotion(target_symbol)
 
+            # Cold-Start Unlocking: Allow live trading if not explicitly demoted
             if len(historical_data) < k_neighbors:
-                is_armed_default = promo_eval["should_promote"]
-                return {
-                    "bayesian_edge": 0.50, "is_armed": is_armed_default,
-                    "matched_samples": len(historical_data), "cluster_win_rate": 0.50,
-                    "win_rate": 0.50, "shadow_sharpe": promo_eval["shadow_sharpe"],
-                    "promotion_event": "PROMOTED" if is_armed_default else "INSUFFICIENT_DATA"
+                is_armed_default = not promo_eval.get("should_demote", False)
+                result_payload = {
+                    "bayesian_edge": 0.55,
+                    "is_armed": is_armed_default,
+                    "matched_samples": len(historical_data),
+                    "cluster_win_rate": 0.50,
+                    "win_rate": 0.50,
+                    "shadow_sharpe": promo_eval.get("shadow_sharpe", 0.0),
+                    "promotion_event": "COLD_START_ARMED" if is_armed_default else "COLD_START_DISARMED"
                 }
+                self.dna_cache[dna_hash] = (current_time, result_payload)
+                return result_payload
 
             h_vols = np.array([min(float(r.get("vol_mult", 1.0) or 1.0), 10.0) for r in historical_data])
             h_mlofis = np.array([float(r.get("log_mlofi_z", 0.0) or 0.0) for r in historical_data])

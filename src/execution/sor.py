@@ -1,5 +1,5 @@
-r"""
-💎 V38.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER
+"""
+V39.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER
 --------------------------------------------------------------------------------
 Institutional-grade execution nexus featuring atomic inline bracket orders,
 post-fill exchange bracket verification sentries, Avellaneda-Stoikov inventory
@@ -7,20 +7,22 @@ reservation pricing, sub-millisecond WebSocket execution telemetry, Perold (1988
 Implementation Shortfall (IS) tracking, strict floor lot-quantization, and dynamic
 slippage firewalls.
 
-Architectural Supremacy (V38.0 Upgrades):
-- Post-Fill Bracket Integrity Sentry (Audit #7 Resolution): Inspects exchange 
-  position state immediately after fills; forcibly anchors MarkPrice stops if Bybit 
-  silently dropped the bracket parameters during fast-moving market sweeps.
-- Zero-Window Atomic Brackets: Injects Stop-Loss and Take-Profit parameters
-  directly into Bybit V5 /v5/order/create (tpslMode="Full", slTriggerBy="MarkPrice").
-- Strict Decimal Floor Quantization: Quantizes base-asset order lots with ROUND_FLOOR,
-  eliminating Bybit Error 10001 (Qty step overflow) and 110007 (Margin exhaustion).
-- Avellaneda-Stoikov Micro-Quoting: Dynamically offsets maker quotes based on
-  real-time inventory skew ($q$) and continuous orderbook variance ($\sigma^2$).
-- Perold Implementation Shortfall (IS): Computes arrival-price execution drag in
-  basis points across all order topologies for post-trade transaction cost analysis.
-- Non-Blocking Token-Bucket Pacing: Smooths high-frequency amendments and order
-  dispatches, preventing Bybit 10006 rate-limit connection throttling.
+Architectural Supremacy (V39.0 Production Upgrades):
+- Queue-Preserving Order Pegging: Enforces a 3.0-tick displacement deadband before
+  triggering order amendments, eliminating FIFO matching priority degradation
+  and avoiding public-WAN adverse selection.
+- Atomic Inline Bracket Attachment: Injects MarkPrice Stop-Loss and LastPrice
+  Take-Profit parameters directly into /v5/order/create with Full TP/SL mode.
+- Post-Fill Bracket Integrity Sentry: Actively verifies position state on Bybit
+  post-fill; forcibly anchors MarkPrice stops via /v5/position/trading-stop if
+  the exchange matching engine dropped bracket parameters during liquidity sweeps.
+- Mathematical Avellaneda-Stoikov Micro-Quoting: Calculates continuous reservation
+  prices r(s, q) and optimal half-spreads based on inventory skew (q), local
+  microstructure variance (sigma^2), and liquidity density (kappa).
+- Strict Floor Lot Quantization: Quantizes base asset quantities via ROUND_FLOOR,
+  preventing exchange error 10001 (overflow) and margin over-allocation.
+- Non-Blocking Leaky Token Bucket: Regulates REST call cadence to prevent Bybit
+  10006 IP/UID rate limit throttles while preserving zero-latency hot paths.
 """
 
 import os
@@ -38,7 +40,7 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    🚀 V38.0 DIRECT-DRIVE EXECUTION NEXUS
+    V39.0 DIRECT-DRIVE EXECUTION NEXUS
     Routes high-frequency orders across Sweep-to-Peg (IOC/Maker Hybrid),
     Avellaneda-Stoikov Maker Peg (PostOnly), and TWAP Iceberg slices with
     zero-latency WebSocket fill verification and bracket integrity sentries.
@@ -51,11 +53,15 @@ class SmartOrderRouter:
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
         self._last_amend_time: Dict[str, float] = {}
 
+        # Avellaneda-Stoikov Default Parameters
+        self.gamma = 0.08      # Inventory risk aversion parameter
+        self.k_decay = 1.5     # Orderbook liquidity density parameter
+
         # Exchange Fee Schedules (Defaults to Bybit VIP0 Linear)
         self.taker_fee_rate: float = 0.00055
         self.maker_fee_rate: float = 0.00020
 
-        # Rate Limiting Token Bucket (Max 12 calls / sec burst, 8 steady-state)
+        # Rate Limiting Token Bucket (Max 12 calls/sec burst, 8 steady-state)
         self._rate_tokens = 12.0
         self._rate_last_check = time.time()
         self._rate_lock = asyncio.Lock()
@@ -150,7 +156,7 @@ class SmartOrderRouter:
             return f"{price:.{precision}f}"
 
     # =========================================================================
-    # BRACKET INTEGRITY SENTRY (AUDIT #7 RESOLUTION)
+    # BRACKET INTEGRITY SENTRY (AUDIT #7 & #11 RESOLUTION)
     # =========================================================================
 
     async def _verify_and_anchor_stops(
@@ -163,8 +169,8 @@ class SmartOrderRouter:
     ):
         """
         Audit #7 Resolution: Verifies that the exchange position has an active Stop-Loss.
-        If Bybit accepted the order fill but silently dropped/rejected the stop bracket,
-        this sentry immediately forces bracket re-attachment via /v5/position/trading-stop.
+        If Bybit accepted the fill but silently dropped/rejected the protective stop bracket,
+        this sentry immediately forces bracket attachment via /v5/position/trading-stop.
         """
         if not sl and not tp:
             return
@@ -180,10 +186,10 @@ class SmartOrderRouter:
                 pos = positions[0]
                 active_sl = float(pos.get("stopLoss", 0.0) or 0.0)
 
-                # Stop loss dropped or missing on exchange
+                # Stop-loss dropped or missing on exchange
                 if active_sl <= 0.0 and sl:
                     logger.critical(
-                        f"[SOR_SENTRY] 🚨 NAKED POSITION BREACH // {symbol} active on exchange without Stop-Loss! "
+                        f"[SOR_SENTRY] NAKED POSITION BREACH // {symbol} active on exchange without Stop-Loss! "
                         f"Forcing immediate bracket attachment..."
                     )
                     sl_str = self._format_price_str(sl, symbol)
@@ -201,10 +207,12 @@ class SmartOrderRouter:
                         payload["takeProfit"] = tp_str
                         payload["tpTriggerBy"] = "LastPrice"
 
-                    await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
+                    attach_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
+                    if attach_res.get("retCode") == 0:
+                        logger.info(f"[SOR_SENTRY] Stops anchored successfully on {symbol} (SL: {sl_str}).")
+                        return
                 else:
                     return
-
             except Exception as e:
                 logger.debug(f"[SOR_SENTRY] Bracket integrity sentry probe fault on {symbol}: {e}")
 
@@ -221,7 +229,7 @@ class SmartOrderRouter:
         current_balance: float,
         inst_var: float
     ) -> float:
-        """Fallback sizing engine when upstream Kelly sizing is unavailable."""
+        """Fallback sizing engine when upstream Merton Kelly sizing is unavailable."""
         base_risk_pct = 0.01
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
@@ -288,7 +296,7 @@ class SmartOrderRouter:
         return max(0.0, slippage_bps)
 
     def get_sweeping_price(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
-        """Walks orderbook depth to return the boundary price needed to clear volume."""
+        """Walks orderbook depth to return the boundary price needed to clear target volume."""
         if not depth_snapshot:
             return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
 
@@ -332,12 +340,12 @@ class SmartOrderRouter:
         side: str,
         mid_price: float,
         depth_snapshot: Dict,
-        gamma: float = 0.05,
         time_horizon: float = 1.0
     ) -> float:
         """
-        Computes optimal reservation quotes based on inventory skew and orderbook pressure.
+        Computes optimal reservation quotes based on inventory skew and orderbook variance.
         r(s, q, gamma, sigma^2, t) = s - q * gamma * sigma^2 * (T - t)
+        delta_spread = gamma * sigma^2 * (T - t) + (2 / gamma) * ln(1 + gamma / kappa)
         """
         tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
         bids = depth_snapshot.get("bids", [])
@@ -345,7 +353,7 @@ class SmartOrderRouter:
         best_bid = float(bids[0][0]) if bids else mid_price
         best_ask = float(asks[0][0]) if asks else mid_price
 
-        # Retrieve continuous microstructure variance from the core engine
+        # Retrieve continuous microstructure variance from core engine
         inst_var = 1e-5
         if self.core_engine and hasattr(self.core_engine, 'stat_engines'):
             stat_eng = self.core_engine.stat_engines.get(symbol)
@@ -361,9 +369,13 @@ class SmartOrderRouter:
             elif curr_dir == "SELL":
                 q = -1.0
 
-        reservation_price = mid_price - (q * gamma * inst_var * time_horizon)
+        reservation_price = mid_price - (q * self.gamma * inst_var * time_horizon)
+        vol_cushion = self.gamma * inst_var * time_horizon
+        liquidity_cushion = (2.0 / self.gamma) * math.log1p(self.gamma / self.k_decay)
+        optimal_half_spread = max(tick_size, (vol_cushion + liquidity_cushion) / 2.0)
+
         spread = max(tick_size, best_ask - best_bid)
-        half_spread = max(tick_size, (gamma * inst_var * time_horizon) + (spread * 0.45))
+        half_spread = max(optimal_half_spread, spread * 0.45)
 
         if side.upper() == "BUY":
             optimal_quote = min(reservation_price - half_spread, best_ask - tick_size)
@@ -588,7 +600,7 @@ class SmartOrderRouter:
     ) -> Tuple[bool, float, float]:
         """
         Passive PostOnly liquidity pegging with Avellaneda-Stoikov quoting, 
-        active orderbook-walking chase bounds, and atomic stop bracket attachment.
+        active orderbook-walking chase bounds, and queue preservation.
         """
         start_time = time.time()
         current_order_id = None
@@ -619,7 +631,7 @@ class SmartOrderRouter:
 
                 # Avellaneda-Stoikov Reservation Target
                 optimal_price = self._calculate_avellaneda_stoikov_quote(
-                    symbol, side, mid, fresh_ob or {}, gamma=0.05
+                    symbol, side, mid, fresh_ob or {}
                 )
                 target_price_str = self._format_price_str(optimal_price, symbol)
                 target_price_float = float(target_price_str)
@@ -672,7 +684,7 @@ class SmartOrderRouter:
                         continue
 
                 # 2. WebSocket Fill Verification
-                fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.20)
+                fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.15)
                 if fill_report:
                     raw_exec = fill_report.get("cumExecQty")
                     raw_avg = fill_report.get("avgPrice")
@@ -691,8 +703,10 @@ class SmartOrderRouter:
                             return True, avg_price, cum_exec
                         continue
 
-                # 3. Queue-Preserving Order Amendment
-                if current_order_id and abs(target_price_float - current_peg_price) >= (tick_size * 1.5):
+                # 3. Queue-Preserving Order Amendment:
+                # Require >= 3.0 ticks displacement before modifying order to preserve queue seniority.
+                tick_displacement = abs(target_price_float - current_peg_price) / max(1e-9, tick_size)
+                if current_order_id and tick_displacement >= 3.0:
                     await self._rate_limit_acquire()
                     amend_res = await self.executor.safe_call(
                         "POST", "/v5/order/amend", is_execution=True,
@@ -792,7 +806,7 @@ class SmartOrderRouter:
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        🚀 V38.0 DIRECT-DRIVE EXECUTION PIPELINE
+        V39.0 DIRECT-DRIVE EXECUTION PIPELINE
         Validates sizing boundaries, applies slippage firewalls, and dynamically
         routes orders across Flash-Strike IOC, Maker-Peg, or TWAP Icebergs.
         """
