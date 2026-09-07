@@ -1,23 +1,28 @@
 """
-V40.0 APEX TITAN: ZERO-ALLOCATION STATISTICAL MICROSTRUCTURE ENGINE
+V40.2 APEX TITAN: ZERO-ALLOCATION STATISTICAL MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Ultra-low latency continuous-time microstructure forecasting engine. Integrates
 pre-allocated zero-allocation feature buffers, closed-form Ornstein-Uhlenbeck
-calibration, vectorized Adams-MacKay BOCD, spectrally clamped Joseph-form RLS,
-and Bayesian-prior Merton Jump-Diffusion optimal control into the 25D Manifold.
+calibration, vectorized Adams-MacKay BOCD, adaptive trace-bounded Joseph-form RLS,
+and fractional Eighth-Kelly Merton Jump-Diffusion optimal control into the 25D Manifold.
 
-Architectural Supremacy (V40.0 Production Calibration Upgrades):
-- Calibrated Bayesian Kelly Priors: Re-anchors baseline Merton Jump Kelly priors
-  to a realistic statistical edge (54% win rate, 1.20 payoff, weight=10.0),
-  eradicating the artificial zero-edge Kelly veto dead-zone.
-- Attenuated Hawkes Jump Penalty: Scales jump intensity dampening from 0.012 to
-  0.004, preserving valid capital deployment fractions during active cascade flow.
-- Enhanced Sensitivity Logit Gain (4.0x): Expands unit-hypersphere feature
-  projections into actionable probability manifolds (54%–76%) without saturation.
-- Calibrated Split-Conformal Coverage Gate: Adjusts uncalibrated default quantile
-  thresholds to 0.06 (52.5% initial gate floor) to eliminate startup filtering stalls.
-- Zero-Allocation 25D Feature Space: Preserves deterministic in-place memory
-  layouts across L2 quote streams and sub-millisecond trade cascades.
+Architectural Supremacy (V40.2 Production Upgrades):
+- Regime Hysteresis Voting Filter (Audit #5 Resolution): Enforces a rolling 5-tick
+  consensus memory (threshold=60%) to suppress sub-second regime flickering between
+  TRENDING, RANGING, and CASCADE on adjacent ticks.
+- Fractional Eighth-Kelly Capital Allocation (Audit #3 Resolution): Replaces aggressive
+  Kelly sizing with an Eighth-Kelly scale factor (0.125x) clipped to [0.001, 0.0075]
+  to protect capital against heavy-tailed crypto left-tail dislocations.
+- Non-Linear Quadratic Hawkes Jump Penalty (Audit #3 Resolution): Escalates penalty
+  quadratically when |z_hawkes| > 1.8, cutting capital allocation to zero during
+  severe liquidation cascades.
+- Deterministic Lexicographical Tie-Breaking: Replaces trigonometric sine dithering
+  with a monotonic gradient (np.linspace) in permutation entropy, eliminating
+  artificial wave harmonics during flatline orderbook conditions.
+- Competitive Softmax MoE Gating: Preserves temperature-scaled competitive gating
+  (tau=0.25) to eradicate additive logit explosion across co-activated regimes.
+- Adaptive Trace-Bounded Joseph RLS: Dynamically modulates forgetting factors
+  based on covariance trace limits to eliminate eigenvalue divergence during flash crashes.
 """
 
 import os
@@ -26,7 +31,7 @@ import time
 import numpy as np
 import logging
 from collections import deque
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Optional
 
 logger = logging.getLogger("QUANT_CORE.MICRO_MODELS")
 
@@ -245,8 +250,8 @@ class ObizhaevaWangExecutionSentry:
 class MertonJumpKellySizer:
     """
     Continuous-Time Merton Jump-Diffusion Kelly Capital Allocator.
-    Anchored with calibrated Bayesian conjugate priors to prevent early position oversizing
-    while preventing zero-edge allocation stalls.
+    Anchored with calibrated Bayesian conjugate priors, non-linear quadratic
+    cascade penalties, and fractional Eighth-Kelly capital dampening.
     """
     def __init__(self, prior_win_rate: float = 0.54, prior_payoff: float = 1.20, prior_weight: float = 10.0):
         self.prior_w = prior_weight
@@ -284,16 +289,45 @@ class MertonJumpKellySizer:
         q = 1.0 - p
 
         raw_kelly = (b * p - q) / b if b > 0.0 else 0.0
-        # Attenuated Jump Penalty: 0.004 prevents minor order flow cascades from collapsing sizing
-        jump_penalty = abs(hawkes_intensity) * 0.004
-        variance_dampener = 1.0 / (1.0 + inst_variance * 400.0)
 
+        # Non-linear quadratic penalty for extreme order-flow spikes (|z| > 1.8)
+        abs_h = abs(hawkes_intensity)
+        jump_penalty = (abs_h * 0.003) + (max(0.0, abs_h - 1.8) ** 2) * 0.015
+
+        variance_dampener = 1.0 / (1.0 + inst_variance * 600.0)
         f_star = (raw_kelly * variance_dampener) - jump_penalty
 
         if f_star <= 0.001:
             return 0.0
 
-        return float(np.clip(f_star * 0.25, 0.002, 0.015))
+        # Eighth-Kelly Scaling (0.125x): Strictly protects capital against heavy-tailed crypto jumps
+        return float(np.clip(f_star * 0.125, 0.001, 0.0075))
+
+
+class RegimeHysteresisFilter:
+    """
+    Suppresses sub-second regime oscillation via temporal voting memory.
+    Requires persistent consensus across a window of ticks before updating state.
+    """
+    def __init__(self, window_size: int = 5, consensus_threshold: float = 0.60):
+        self.window = deque(maxlen=window_size)
+        self.consensus_threshold = consensus_threshold
+        self.current_regime = "RANGING"
+
+    def filter_regime(self, raw_regime: str) -> str:
+        self.window.append(raw_regime)
+        if len(self.window) < self.window.maxlen:
+            return self.current_regime
+
+        counts: Dict[str, int] = {}
+        for r in self.window:
+            counts[r] = counts.get(r, 0) + 1
+
+        top_regime, top_count = max(counts.items(), key=lambda x: x[1])
+        if (top_count / len(self.window)) >= self.consensus_threshold:
+            self.current_regime = top_regime
+
+        return self.current_regime
 
 
 class InformationTimeClock:
@@ -374,7 +408,7 @@ class MarkedHawkesProcess:
         self.impact_ewma = 1e-6
 
     def update(self, volume: float, is_buy: bool, current_time: float) -> float:
-        dt = max(1e-4, current_time - self.last_time)
+        dt = max(1e-4, min(60.0, current_time - self.last_time))
         self.last_time = current_time
 
         decay_factor = math.exp(-self.decay * dt)
@@ -672,7 +706,8 @@ class QuantumMarkovRegimeDetector:
 class InformationGeometricRLS:
     """
     L1-Regularized Riemannian Recursive Least Squares with Exact Sherman-Morrison
-    Joseph-Stabilized Covariance Updates, O(d) Diagonal Floor & Amortized Spectral Clamping.
+    Joseph-Stabilized Covariance Updates, Adaptive Trace-Bounded Regularization,
+    O(d) Diagonal Floor & Amortized Spectral Clamping.
     """
     def __init__(self, dim: int, p_init: float = 1.0, l1_penalty: float = 1e-4):
         self.dim = dim
@@ -703,11 +738,17 @@ class InformationGeometricRLS:
         w_temp = self.w + (kalman_gain.flatten() * err * weight)
         self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - self.l1_penalty, 0.0)
 
-        # Exact Joseph Stabilized Covariance Form: (I - K x^T) F^-1 (I - K x^T)^T + K R K^T
+        # Exact Joseph Stabilized Covariance Form with Adaptive Trace-Bounded Forgetting:
+        # Prevents exponential covariance eigenvalue inflation over long horizons
         i_kx = self.eye - (kalman_gain @ x_vec.T)
         bounded_r = min(1000.0, 1.0 / fisher_var)
         noise_cov = (kalman_gain @ kalman_gain.T) * bounded_r
-        self.f_inv = (i_kx @ self.f_inv @ i_kx.T + noise_cov) / self.lambda_reg
+
+        current_tr = float(np.trace(self.f_inv))
+        trace_ratio = min(1.0, current_tr / 1200.0)
+        eff_lambda = self.lambda_reg + (1.0 - self.lambda_reg) * (trace_ratio ** 2)
+
+        self.f_inv = (i_kx @ self.f_inv @ i_kx.T + noise_cov) / eff_lambda
         self.f_inv = 0.5 * (self.f_inv + self.f_inv.T)
 
         # 1. Per-tick O(d) Diagonal Floor & Trace Ceiling
@@ -716,13 +757,13 @@ class InformationGeometricRLS:
         if tr > 1500.0:
             self.f_inv *= (1500.0 / tr)
 
-        # 2. Amortized O(d^3) Spectral Projection (Every 500 ticks off hot path)
+        # 2. Amortized O(d^3) Spectral Projection (Every 250 ticks off hot path)
         self._update_counter += 1
-        if self._update_counter % 500 == 0:
+        if self._update_counter % 250 == 0:
             try:
                 eigvals, eigvecs = np.linalg.eigh(self.f_inv)
-                if eigvals.min() < 1e-5 or eigvals.max() > 1e5:
-                    eigvals = np.clip(eigvals, 1e-5, 1e5)
+                if eigvals.min() < 1e-5 or eigvals.max() > 500.0:
+                    eigvals = np.clip(eigvals, 1e-5, 500.0)
                     self.f_inv = eigvecs @ np.diag(eigvals) @ eigvecs.T
                     self.f_inv = 0.5 * (self.f_inv + self.f_inv.T)
             except np.linalg.LinAlgError:
@@ -787,13 +828,16 @@ class BoundedAdaptiveWhitener:
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
     """
-    Permutation Shannon Entropy with Gaussian Micro-Dither to break identical price ties.
+    Shannon Permutation Entropy with deterministic lexicographical tie-breaking.
+    Eliminates periodic trigonometric artifact distortion.
     """
     if len(series) < (order * delay):
         return 1.0
     try:
         arr = np.asarray(series, dtype=np.float64)
-        tie_breaker = np.sin(np.arange(len(arr))) * 1e-11
+        # Deterministic monotonic gradient eliminates flatline tie-rank collapse
+        # without introducing artificial periodic waves.
+        tie_breaker = np.linspace(0.0, 1e-12, len(arr))
         arr_jittered = arr + tie_breaker
 
         shape = (arr_jittered.size - (order - 1) * delay, order)
@@ -816,7 +860,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 class ContinuousMicrostructureEngine:
     """
-    V40.0 APEX TITAN: ZERO-ALLOCATION STATISTICAL MASTER ENGINE
+    V40.2 APEX TITAN: ZERO-ALLOCATION STATISTICAL MASTER ENGINE
     """
     def __init__(self, symbol: str = "GENERIC", memory_depth: int = 1000):
         self.symbol = symbol
@@ -837,10 +881,13 @@ class ContinuousMicrostructureEngine:
         self.funding_oracle = PerpetualFundingOracle()
         self.regime_detector = QuantumMarkovRegimeDetector()
 
+        # Regime Temporal Consensus Filter
+        self.regime_hysteresis = RegimeHysteresisFilter(window_size=5, consensus_threshold=0.60)
+
         self.bocd = AdamsMacKayBOCD()
         self.obizhaeva_wang_sentry = ObizhaevaWangExecutionSentry()
         
-        # Calibrated Bayesian Prior Anchors: 54% Win Rate, 1.20 Payoff, Weight=10.0
+        # Fractional Eighth-Kelly Sizer with Quadratic Cascade Penalty
         self.jump_kelly_sizer = MertonJumpKellySizer(prior_win_rate=0.54, prior_payoff=1.20, prior_weight=10.0)
         self.async_aligner = AsynchronousStateAligner(dim=self.raw_dim)
 
@@ -1034,11 +1081,17 @@ class ContinuousMicrostructureEngine:
         l_s = float(np.dot(self.rls_spoof.w, self._v_att))
         l_c = float(np.dot(self.rls_cascade.w, self._v_att))
 
-        # Calibrated Logit Gain Scalar (4.0x):
-        # Compensates for Euclidean hypersphere projection damping, mapping trade flow
-        # impulses into actionable probability bounds (54%–76%) during authentic edge events.
+        # Competitive Softmax Mixture-of-Experts Gating Network (Audit #3.1 Resolution):
+        # Applies temperature-scaled competitive gating (tau=0.25) to suppress co-activated
+        # regimes, completely eliminating constructive logit saturation into +/- 5.0.
+        tau = 0.25
+        exp_weights = np.exp((regime_weights - np.max(regime_weights)) / tau)
+        gate_weights = exp_weights / (np.sum(exp_weights) + 1e-9)
+
+        regime_logits = np.array([l_t, l_r, l_s, l_c], dtype=np.float64)
+        raw_score = float(np.dot(gate_weights, regime_logits))
+
         LOGIT_GAIN = 4.0
-        raw_score = (p_t * l_t) + (p_r * l_r) + (p_s * l_s) + (p_c * l_c)
         logit = float(np.clip(raw_score * LOGIT_GAIN, -5.0, 5.0))
         p_up = 1.0 / (1.0 + math.exp(-logit))
 
@@ -1058,7 +1111,11 @@ class ContinuousMicrostructureEngine:
 
         virt_sl = current_price * (1.0 - sl_dist_pct) if action_dir == "BUY" else current_price * (1.0 + sl_dist_pct)
         virt_tp = current_price * (1.0 + tp_dist_pct) if action_dir == "BUY" else current_price * (1.0 - tp_dist_pct)
-        dominant_regime = "TRENDING" if p_t > 0.5 else "RANGING"
+
+        # 4-State Dominant Regime Resolution with Hysteresis Stability Filter
+        regime_names = ["TRENDING", "RANGING", "SPOOF", "CASCADE"]
+        raw_regime = regime_names[int(np.argmax(regime_weights))]
+        dominant_regime = self.regime_hysteresis.filter_regime(raw_regime)
 
         return {
             "p_up": p_up,
@@ -1070,7 +1127,9 @@ class ContinuousMicrostructureEngine:
             "virtual_sl": virt_sl,
             "virtual_tp": virt_tp,
             "markov_beliefs": {"trend": float(p_t), "range": float(p_r), "disloc": float(p_s), "cascade": float(p_c)},
+            "gate_weights": gate_weights.copy(),
             "dominant_regime": dominant_regime,
+            "raw_dominant_regime": raw_regime,
             "hurst_h": self.hurst_h,
             "bocd_cp_prob": self.changepoint_prob,
             "raw_features": self._v_att.copy()
@@ -1084,7 +1143,7 @@ class ContinuousMicrostructureEngine:
         action_dir = ctx["action"]
         feats = ctx["features"]
         old_p = ctx["p_up"]
-        beliefs = ctx["beliefs"]
+        beliefs = ctx.get("beliefs", [0.25, 0.25, 0.25, 0.25])
 
         is_win = net_pnl > 0.0
         y_up = 1.0 if (action_dir == "BUY" and is_win) or (action_dir == "SELL" and not is_win) else 0.0

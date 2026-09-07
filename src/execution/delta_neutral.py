@@ -1,29 +1,26 @@
 """
-V40.1 APEX TITAN: FAULT-TOLERANT ATOMIC BASIS & YIELD HARVESTER
+V40.3 APEX TITAN: FAULT-TOLERANT ATOMIC BASIS & YIELD HARVESTER
 ------------------------------------------------------------------------
 Ultra-low latency delta-neutral cash-and-carry execution engine.
 Sweeps idle margin into high-rate perpetual funding arbitrage with full
 multiplier normalization, exact Decimal lot harmonization, and multi-stage
 atomic desync recovery.
 
-Architectural Supremacy (V40.1 Upgrades):
-- TradFi & Pre-Market Exclusion Filter: Discards tokenized equities, commodities,
-  and pre-market contracts (e.g. KO, SOXL, NVDA, PURR, CLANKER) before polling.
-- Spot Market Instrument Pre-Validation: Verifies that a valid Bybit Spot trading
-  pair exists prior to querying collateral ratios or orderbooks, eradicating 404
-  REST exceptions and log spam.
-- Deterministic Decimal Math: Replaces all float-based step quantization with 
-  pure Decimal arithmetic (ROUND_FLOOR) to permanently eliminate Bybit 10001 
-  precision overflows and scientific notation serialization.
-- Explicit Bybit V5 Market Units: Enforces `marketUnit="baseCoin"` across all Spot 
-  Market buy/sell payloads to prevent ambiguous quote-vs-base execution rejections.
-- Inversion & Negative Funding Sentry: Immediately unwinds positions if funding 
-  inverts (< 0.0), protecting the Short Perp leg from paying funding fees.
-- Real-Time Collateral Decay Surveillance: Continuously monitors UTA collateral 
-  valuation ratios during the holding phase, auto-ejecting before discount haircuts 
-  induce artificial margin liquidations.
-- Self-Healing Multi-Stage Unwind: Active exponential-backoff retry sweeps across
-  both Spot and Perp legs to resolve partial fills and asymmetric network drops.
+Architectural Supremacy (V40.3 Production Upgrades):
+- Shielded Atomic Execution & Rollback: Wraps Perpetual Short placement and
+  emergency Spot liquidation in `asyncio.shield()` to permanently eliminate
+  half-hedged exposure caused by unshielded `asyncio.CancelledError` interrupts.
+- Shielded Dual-Leg Unwind Routine: Protects simultaneous Spot/Perp unwind
+  sweeps and active reconciliation retries from cancellation aborts during
+  emergency shutdown sequences.
+- 30s High-Velocity Rate Scanner: Accelerates scan cadence from 180s to 30s to
+  capture transient funding rate dislocations before cross-exchange arbitrageurs.
+- Delta Rate Pre-Filter: Caches historical rates and gates execution on >=2.0 bps
+  funding expansions, protecting REST API quotas from redundant specification probes.
+- Post-Quantization Lot Parity: Quantizes lot sizes to fixed-point strings prior
+  to evaluating exchange `min_order_qty` and `min_order_amt` limits.
+- Dynamic UTA Collateral Decay Surveillance: Reduces collateral cache TTL to 60.0s
+  on actively hedged assets to avoid stale valuations during market-wide haircuts.
 """
 
 import re
@@ -42,7 +39,7 @@ logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
 class DeltaNeutralYieldEngine:
     """
-    V40.1 APEX TITAN BASIS ENGINE
+    V40.3 APEX TITAN BASIS ENGINE
     Captures perpetual funding rate premiums via synchronized Spot Long / Perp Short
     atomic pairing with zero residual directional exposure and proactive solvency sentries.
     """
@@ -72,6 +69,7 @@ class DeltaNeutralYieldEngine:
         self.basis_history: Dict[str, deque] = {}
         self.instrument_cache: Dict[str, Optional[dict]] = {}
         self.collateral_ratio_cache: Dict[str, Tuple[float, float]] = {}
+        self.cached_funding_rates: Dict[str, float] = {}
 
         # Default Bybit VIP0 Linear & Spot Fee Schedules
         self.maker_fee_rate = 0.00020
@@ -98,7 +96,7 @@ class DeltaNeutralYieldEngine:
     async def _fetch_instrument_specs(self, symbol: str, category: str) -> Optional[Dict[str, Any]]:
         """Caches and validates lot size filters and tick specifications."""
         cache_key = f"{category}_{symbol}"
-        if cache_key in self.instrument_cache:
+        if cache_key in self.instrument_cache and self.instrument_cache[cache_key] is not None:
             return self.instrument_cache[cache_key]
 
         try:
@@ -107,7 +105,6 @@ class DeltaNeutralYieldEngine:
             )
             data_list = res.get("result", {}).get("list", [])
             if not data_list:
-                self.instrument_cache[cache_key] = None
                 return None
 
             info = data_list[0]
@@ -133,18 +130,20 @@ class DeltaNeutralYieldEngine:
             return specs
         except Exception as e:
             logger.debug(f"[YIELD_SENTRY] Spec fetch failed for {category} {symbol}: {e}")
-            self.instrument_cache[cache_key] = None
             return None
 
     async def _fetch_collateral_ratio(self, base_asset: str, bypass_cache: bool = False) -> float:
         """
         Queries Bybit UTA collateral ratio for the underlying base asset.
-        Caches results for 1 hour unless explicitly forced via bypass_cache.
+        Dynamically adjusts cache TTL: 60s during active hedges, 300s baseline.
         """
         now = time.time()
+        is_hedged = any(h.get("base_asset") == base_asset for h in self.active_hedges.values())
+        ttl_seconds = 60.0 if is_hedged else 300.0
+
         if not bypass_cache and base_asset in self.collateral_ratio_cache:
             cached_time, ratio = self.collateral_ratio_cache[base_asset]
-            if now - cached_time < 3600.0:
+            if now - cached_time < ttl_seconds:
                 return ratio
 
         try:
@@ -162,7 +161,7 @@ class DeltaNeutralYieldEngine:
         return 0.0
 
     def _quantize_value(self, value: float | Decimal, step: str | float) -> str:
-        """Deterministic floor-quantization formatted without floating-point artifacts."""
+        """Deterministic floor-quantization formatted without scientific notation."""
         step_dec = Decimal(str(step))
         if step_dec <= Decimal("0"):
             return f"{float(value):.4f}"
@@ -181,7 +180,7 @@ class DeltaNeutralYieldEngine:
     ) -> Optional[Tuple[str, str, float, float]]:
         """
         Calculates exact synchronized Spot and Linear quantities using pure Decimal logic.
-        Guarantees exact 1:1 base delta parity across multiplier regimes.
+        Validates minimum lot size and notional constraints after quantization to ensure parity.
         """
         spot_specs = await self._fetch_instrument_specs(spot_symbol, "spot")
         perp_specs = await self._fetch_instrument_specs(linear_symbol, "linear")
@@ -210,18 +209,26 @@ class DeltaNeutralYieldEngine:
 
         # 4. Backward validation for multiplier lot parity
         final_perp_contracts_dec = spot_tokens_dec / multiplier_dec
-        if float(final_perp_contracts_dec) < perp_specs["min_order_qty"]:
-            return None
 
-        # 5. Notional threshold validations
-        spot_notional = float(spot_tokens_dec * spot_price_dec)
-        if spot_notional < max(spot_specs["min_order_amt"], 5.0):
-            return None
-
+        # 5. Format to deterministic strings before boundary verification
         spot_qty_str = self._quantize_value(spot_tokens_dec, spot_specs["base_precision"])
         perp_qty_str = self._quantize_value(final_perp_contracts_dec, perp_specs["qty_step"])
 
-        return spot_qty_str, perp_qty_str, float(spot_tokens_dec), float(final_perp_contracts_dec)
+        final_spot_units = float(Decimal(spot_qty_str))
+        final_perp_contracts = float(Decimal(perp_qty_str))
+
+        # 6. Post-quantization boundary checks
+        if final_spot_units < spot_specs["min_order_qty"]:
+            return None
+
+        if final_perp_contracts < perp_specs["min_order_qty"]:
+            return None
+
+        spot_notional = final_spot_units * spot_price
+        if spot_notional < max(spot_specs["min_order_amt"], 5.0):
+            return None
+
+        return spot_qty_str, perp_qty_str, final_spot_units, final_perp_contracts
 
     # =========================================================================
     # ECONOMIC VIABILITY & BASIS DISLOCATION SENTRY
@@ -276,7 +283,6 @@ class DeltaNeutralYieldEngine:
             if spot_bid <= 0.0 or perp_bid <= 0.0:
                 return 999.0, 0.0, 0.0
 
-            # Dynamic fee schedule inheritance
             maker_fee = getattr(self.core.sor, "maker_fee_rate", self.maker_fee_rate)
             taker_fee = getattr(self.core.sor, "taker_fee_rate", self.taker_fee_rate)
 
@@ -346,11 +352,11 @@ class DeltaNeutralYieldEngine:
     # =========================================================================
 
     async def run_yield_scanner_daemon(self):
-        """Continuously scans the global universe and rotates capital into basis yield."""
-        logger.info("DELTA-NEUTRAL BASIS ENGINE ONLINE: Scanning for Altcoin Funding Yield.")
+        """High-frequency funding rate arbitrage scanner with 30s cadence and delta rate pre-filter."""
+        logger.info("DELTA-NEUTRAL BASIS ENGINE ONLINE: Scanning for Altcoin Funding Yield (30s Cadence).")
 
         while True:
-            await asyncio.sleep(180)  # 3-minute scan cycle
+            await asyncio.sleep(30)
 
             if not self.core.fsm.can_execute_trades:
                 continue
@@ -372,7 +378,7 @@ class DeltaNeutralYieldEngine:
                     if not symbol.endswith("USDT") or "BTC" in symbol or "ETH" in symbol:
                         continue
 
-                    # Filter out known synthetic/TradFi/pre-market tokens
+                    # Filter out synthetic/TradFi/pre-market tokens
                     _, base_check, _ = self._resolve_contract_scale(symbol)
                     if base_check in self.tradfi_and_premarket_tokens or any(b in symbol for b in self.tradfi_and_premarket_tokens):
                         continue
@@ -380,13 +386,17 @@ class DeltaNeutralYieldEngine:
                     funding_rate = float(t.get("fundingRate", 0.0) or 0.0)
                     if funding_rate >= self.entry_funding_threshold:
                         if symbol not in self.active_hedges and symbol not in self.core.active_positions_map:
-                            candidates.append((symbol, funding_rate))
+                            prev_rate = self.cached_funding_rates.get(symbol, 0.0)
+                            # Pre-filter: only process if newly detected or if funding expanded by >= 2.0 bps
+                            if symbol not in self.cached_funding_rates or abs(funding_rate - prev_rate) >= 0.0002:
+                                self.cached_funding_rates[symbol] = funding_rate
+                                candidates.append((symbol, funding_rate))
 
                 # Sort descending by funding rate to prioritize highest yields
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
                 # 3. Multi-Candidate Waterfall: Probe top candidates in order of yield
-                for target_asset, best_funding in candidates[:20]:
+                for target_asset, best_funding in candidates[:10]:
                     spot_symbol, base_asset, _ = self._resolve_contract_scale(target_asset)
 
                     # Pre-validation: Verify Spot market exists before network-heavy probes
@@ -451,6 +461,7 @@ class DeltaNeutralYieldEngine:
     async def execute_atomic_cash_and_carry_hedge(self, symbol: str, funding_rate: float) -> bool:
         """
         Executes Maker-Taker Hybrid cash-and-carry routing with atomic rollback.
+        Wraps phase 3 and 4 in asyncio.shield to prevent unhedged exposure on task cancellation.
         """
         spot_symbol, base_asset, multiplier = self._resolve_contract_scale(symbol)
 
@@ -583,97 +594,101 @@ class DeltaNeutralYieldEngine:
             logger.info(f"[YIELD] Spot PostOnly timed out without fills on {spot_symbol}. Clean abort.")
             return False
 
-        # 7. Phase 3: Execute Matching Linear Perpetual Short Leg
-        raw_matched_contracts = (filled_spot_qty / multiplier)
-        perp_step_dec = Decimal(perp_specs["qty_step"])
-        matched_perp_contracts_dec = (Decimal(str(raw_matched_contracts)) // perp_step_dec) * perp_step_dec
-        matched_perp_contracts = float(matched_perp_contracts_dec)
-        matched_perp_qty_str = self._quantize_value(matched_perp_contracts_dec, perp_specs["qty_step"])
+        # Shielded Critical Section: Ensure perpetual execution and emergency rollback
+        # cannot be aborted by cancellation interrupts while holding unhedged spot assets.
+        async def _execute_shielded_hedge_and_rollback() -> bool:
+            raw_matched_contracts = (filled_spot_qty / multiplier)
+            perp_step_dec = Decimal(perp_specs["qty_step"])
+            matched_perp_contracts_dec = (Decimal(str(raw_matched_contracts)) // perp_step_dec) * perp_step_dec
+            matched_perp_contracts = float(matched_perp_contracts_dec)
+            matched_perp_qty_str = self._quantize_value(matched_perp_contracts_dec, perp_specs["qty_step"])
 
-        if matched_perp_contracts < perp_specs["min_order_qty"]:
-            logger.warning(f"[YIELD] Partial spot fill ({filled_spot_qty}) below perp min order. Liquidating spot...")
-            await self._emergency_spot_unwind(spot_symbol, base_asset, spot_specs["base_precision"])
-            return False
+            if matched_perp_contracts < perp_specs["min_order_qty"]:
+                logger.warning(f"[YIELD] Partial spot fill ({filled_spot_qty}) below perp min order. Liquidating spot...")
+                await self._emergency_spot_unwind(spot_symbol, base_asset, spot_specs["base_precision"])
+                return False
 
-        perp_res = await self.core.executor.safe_call(
-            "POST", "/v5/order/create", is_execution=True,
-            category="linear", symbol=symbol, side="Sell",
-            orderType="Market", qty=matched_perp_qty_str,
-            positionIdx=self.core.sor.position_idx, timeInForce="IOC"
-        )
+            perp_res = await self.core.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True,
+                category="linear", symbol=symbol, side="Sell",
+                orderType="Market", qty=matched_perp_qty_str,
+                positionIdx=self.core.sor.position_idx, timeInForce="IOC"
+            )
 
-        perp_success = isinstance(perp_res, dict) and perp_res.get("retCode") == 0
+            perp_success = isinstance(perp_res, dict) and perp_res.get("retCode") == 0
 
-        # Successful Dual-Leg Basis Capture
-        if perp_success:
-            actual_perp_price = perp_bid_price
-            perp_fill_data = perp_res.get("result", {})
-            if "orderId" in perp_fill_data:
-                await asyncio.sleep(0.15)
-                p_info = await self.core.executor.safe_call(
-                    "GET", "/v5/order/realtime", category="linear", symbol=symbol, orderId=perp_fill_data["orderId"]
-                )
-                p_list = p_info.get("result", {}).get("list", [])
-                if p_list:
-                    actual_perp_price = float(p_list[0].get("avgPrice", perp_bid_price) or perp_bid_price)
+            # Successful Dual-Leg Basis Capture
+            if perp_success:
+                actual_perp_price = perp_bid_price
+                perp_fill_data = perp_res.get("result", {})
+                if "orderId" in perp_fill_data:
+                    await asyncio.sleep(0.15)
+                    p_info = await self.core.executor.safe_call(
+                        "GET", "/v5/order/realtime", category="linear", symbol=symbol, orderId=perp_fill_data["orderId"]
+                    )
+                    p_list = p_info.get("result", {}).get("list", [])
+                    if p_list:
+                        actual_perp_price = float(p_list[0].get("avgPrice", perp_bid_price) or perp_bid_price)
 
-            hedge_id = str(uuid.uuid4())
-            hedge_data = {
-                "hedge_id": hedge_id,
-                "spot_symbol": spot_symbol,
-                "base_asset": base_asset,
-                "spot_qty_str": self._quantize_value(filled_spot_qty, spot_specs["base_precision"]),
-                "perp_qty_str": matched_perp_qty_str,
-                "spot_units": filled_spot_qty,
-                "perp_contracts": matched_perp_contracts,
-                "multiplier": multiplier,
-                "entry_spot_price": avg_spot_fill_price,
-                "entry_perp_price": actual_perp_price,
-                "funding_rate_entry": funding_rate,
-                "entry_drag_bps": drag_bps,
-                "expected_apy_pct": expected_apy,
-                "projected_breakeven_epochs": epochs_to_be,
-                "allocated_capital_usdt": filled_spot_qty * avg_spot_fill_price,
-                "timestamp": time.time()
-            }
-            self.active_hedges[symbol] = hedge_data
-
-            if hasattr(self.core, 'memory') and self.core.memory and self.core.memory.write_queue:
-                payload = {
+                hedge_id = str(uuid.uuid4())
+                hedge_data = {
                     "hedge_id": hedge_id,
-                    "symbol": symbol,
                     "spot_symbol": spot_symbol,
-                    "contract_multiplier": multiplier,
-                    "allocated_capital_usdt": filled_spot_qty * avg_spot_fill_price,
+                    "base_asset": base_asset,
+                    "spot_qty_str": self._quantize_value(filled_spot_qty, spot_specs["base_precision"]),
+                    "perp_qty_str": matched_perp_qty_str,
                     "spot_units": filled_spot_qty,
                     "perp_contracts": matched_perp_contracts,
+                    "multiplier": multiplier,
                     "entry_spot_price": avg_spot_fill_price,
                     "entry_perp_price": actual_perp_price,
                     "funding_rate_entry": funding_rate,
+                    "entry_drag_bps": drag_bps,
                     "expected_apy_pct": expected_apy,
                     "projected_breakeven_epochs": epochs_to_be,
-                    "entry_drag_bps": drag_bps,
-                    "status": "ACTIVE"
+                    "allocated_capital_usdt": filled_spot_qty * avg_spot_fill_price,
+                    "timestamp": time.time()
                 }
-                self.core.memory.write_queue.put_nowait(("INSERT", "delta_neutral_ledger", payload, None, None))
+                self.active_hedges[symbol] = hedge_data
 
-            msg = (
-                f"<b>MAKER-TAKER BASIS LOCK SECURED</b>\n"
-                f"Perp Asset: <code>{symbol}</code>\n"
-                f"Spot Pair: <code>{spot_symbol}</code>\n"
-                f"Allocated: <code>${filled_spot_qty * avg_spot_fill_price:.2f}</code>\n"
-                f"Collateral Ratio: <code>{collateral_ratio:.0%}</code>\n"
-                f"Target Net APY: <code>~{expected_apy:.1f}%</code>\n"
-                f"Break-Even Horizon: <code>{epochs_to_be} Epoch</code>"
-            )
-            await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.info(f"Basis hedge secured: {symbol} Short / {spot_symbol} Long.")
-            return True
+                if hasattr(self.core, 'memory') and self.core.memory and self.core.memory.write_queue:
+                    payload = {
+                        "hedge_id": hedge_id,
+                        "symbol": symbol,
+                        "spot_symbol": spot_symbol,
+                        "contract_multiplier": multiplier,
+                        "allocated_capital_usdt": filled_spot_qty * avg_spot_fill_price,
+                        "spot_units": filled_spot_qty,
+                        "perp_contracts": matched_perp_contracts,
+                        "entry_spot_price": avg_spot_fill_price,
+                        "entry_perp_price": actual_perp_price,
+                        "funding_rate_entry": funding_rate,
+                        "expected_apy_pct": expected_apy,
+                        "projected_breakeven_epochs": epochs_to_be,
+                        "entry_drag_bps": drag_bps,
+                        "status": "ACTIVE"
+                    }
+                    self.core.memory.write_queue.put_nowait(("INSERT", "delta_neutral_ledger", payload, None, None))
 
-        # Phase 4: Atomic Emergency Rollback if Perpetual Leg Fails
-        logger.critical(f"[YIELD] PERP HEDGE FAILED FOR {symbol}. Rolling back naked Spot Long immediately...")
-        await self._emergency_spot_unwind(spot_symbol, base_asset, spot_specs["base_precision"])
-        return False
+                msg = (
+                    f"<b>MAKER-TAKER BASIS LOCK SECURED</b>\n"
+                    f"Perp Asset: <code>{symbol}</code>\n"
+                    f"Spot Pair: <code>{spot_symbol}</code>\n"
+                    f"Allocated: <code>${filled_spot_qty * avg_spot_fill_price:.2f}</code>\n"
+                    f"Collateral Ratio: <code>{collateral_ratio:.0%}</code>\n"
+                    f"Target Net APY: <code>~{expected_apy:.1f}%</code>\n"
+                    f"Break-Even Horizon: <code>{epochs_to_be} Epoch</code>"
+                )
+                await self.core._safe_telegram_dispatch(msg, is_html=True)
+                logger.info(f"Basis hedge secured: {symbol} Short / {spot_symbol} Long.")
+                return True
+
+            # Phase 4: Atomic Emergency Rollback if Perpetual Leg Fails
+            logger.critical(f"[YIELD] PERP HEDGE FAILED FOR {symbol}. Rolling back naked Spot Long immediately...")
+            await self._emergency_spot_unwind(spot_symbol, base_asset, spot_specs["base_precision"])
+            return False
+
+        return await asyncio.shield(_execute_shielded_hedge_and_rollback())
 
     async def _emergency_spot_unwind(self, spot_symbol: str, base_asset: str, base_precision: str):
         """Sweeps remaining Spot asset balance with retries to resolve naked exposure."""
@@ -683,6 +698,8 @@ class DeltaNeutralYieldEngine:
             if free_spot <= 0.0:
                 break
             sell_qty = self._quantize_value(free_spot, base_precision)
+            if float(Decimal(sell_qty)) <= 0.0:
+                break
             res = await self.core.executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True,
                 category="spot", symbol=spot_symbol, side="Sell",
@@ -695,105 +712,109 @@ class DeltaNeutralYieldEngine:
     async def unwind_cash_and_carry_hedge(self, symbol: str, reason: str = "Rate Reversion"):
         """
         Unwinds both legs with active reconciliation retry routines.
+        Shielded against asyncio.CancelledError to guarantee positions close cleanly during shutdowns.
         """
         if symbol not in self.active_hedges:
             return
 
-        data = self.active_hedges[symbol]
-        spot_symbol = data["spot_symbol"]
-        base_asset = data["base_asset"]
-        perp_qty_str = data["perp_qty_str"]
-        hedge_id = data.get("hedge_id")
+        async def _execute_shielded_unwind():
+            data = self.active_hedges[symbol]
+            spot_symbol = data["spot_symbol"]
+            base_asset = data["base_asset"]
+            perp_qty_str = data["perp_qty_str"]
+            hedge_id = data.get("hedge_id")
 
-        logger.critical(f"[YIELD] UNWINDING BASIS HEDGE // {symbol}. Closing Perp Short, Selling Spot Long. Reason: {reason}")
+            logger.critical(f"[YIELD] UNWINDING BASIS HEDGE // {symbol}. Closing Perp Short, Selling Spot Long. Reason: {reason}")
 
-        free_spot = await self._fetch_free_spot_balance(base_asset)
-        spot_specs = await self._fetch_instrument_specs(spot_symbol, "spot")
-        base_precision = spot_specs["base_precision"] if spot_specs else "0.0001"
-        actual_spot_qty_str = self._quantize_value(free_spot, base_precision) if free_spot > 0.0 else data["spot_qty_str"]
+            free_spot = await self._fetch_free_spot_balance(base_asset)
+            spot_specs = await self._fetch_instrument_specs(spot_symbol, "spot")
+            base_precision = spot_specs["base_precision"] if spot_specs else "0.0001"
+            actual_spot_qty_str = self._quantize_value(free_spot, base_precision) if free_spot > 0.0 else data["spot_qty_str"]
 
-        perp_task = self.core.executor.safe_call(
-            "POST", "/v5/order/create", is_execution=True,
-            category="linear", symbol=symbol, side="Buy",
-            orderType="Market", qty=perp_qty_str,
-            reduceOnly=True, positionIdx=self.core.sor.position_idx, timeInForce="IOC"
-        )
-        spot_task = self.core.executor.safe_call(
-            "POST", "/v5/order/create", is_execution=True,
-            category="spot", symbol=spot_symbol, side="Sell",
-            orderType="Market", qty=actual_spot_qty_str, marketUnit="baseCoin"
-        )
-
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(perp_task, spot_task, return_exceptions=True),
-                timeout=6.0
+            perp_task = self.core.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True,
+                category="linear", symbol=symbol, side="Buy",
+                orderType="Market", qty=perp_qty_str,
+                reduceOnly=True, positionIdx=self.core.sor.position_idx, timeInForce="IOC"
             )
-            perp_res, spot_res = results[0], results[1]
-        except asyncio.TimeoutError:
-            logger.critical(f"[YIELD] UNWIND TIMEOUT (6.0s) ON {symbol}! Triggering Active Reconciliation...")
-            perp_res = {"retCode": -999}
-            spot_res = {"retCode": -999}
+            spot_task = self.core.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True,
+                category="spot", symbol=spot_symbol, side="Sell",
+                orderType="Market", qty=actual_spot_qty_str, marketUnit="baseCoin"
+            )
 
-        perp_ok = isinstance(perp_res, dict) and perp_res.get("retCode") == 0
-        spot_ok = isinstance(spot_res, dict) and spot_res.get("retCode") == 0
-
-        # Self-Healing Reconciliation: Handle Asymmetric Execution
-        if not perp_ok and spot_ok:
-            logger.critical(f"[YIELD] ASYMMETRIC STATE // Spot sold, Perp Short pending on {symbol}. Retrying Perp close...")
-            for _ in range(3):
-                await asyncio.sleep(0.5)
-                retry_perp = await self.core.executor.safe_call(
-                    "POST", "/v5/order/create", is_execution=True,
-                    category="linear", symbol=symbol, side="Buy",
-                    orderType="Market", qty=perp_qty_str,
-                    reduceOnly=True, positionIdx=self.core.sor.position_idx, timeInForce="IOC"
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(perp_task, spot_task, return_exceptions=True),
+                    timeout=6.0
                 )
-                if isinstance(retry_perp, dict) and retry_perp.get("retCode") == 0:
-                    perp_ok = True
-                    break
+                perp_res, spot_res = results[0], results[1]
+            except asyncio.TimeoutError:
+                logger.critical(f"[YIELD] UNWIND TIMEOUT (6.0s) ON {symbol}! Triggering Active Reconciliation...")
+                perp_res = {"retCode": -999}
+                spot_res = {"retCode": -999}
 
-        elif perp_ok and not spot_ok:
-            logger.critical(f"[YIELD] ASYMMETRIC STATE // Perp closed, naked Spot Long remaining on {spot_symbol}. Retrying Spot sell...")
-            for _ in range(3):
-                await asyncio.sleep(0.5)
-                current_free_spot = await self._fetch_free_spot_balance(base_asset)
-                if current_free_spot <= 0.0:
-                    spot_ok = True
-                    break
-                retry_qty_str = self._quantize_value(current_free_spot, base_precision)
-                retry_spot = await self.core.executor.safe_call(
-                    "POST", "/v5/order/create", is_execution=True,
-                    category="spot", symbol=spot_symbol, side="Sell",
-                    orderType="Market", qty=retry_qty_str, marketUnit="baseCoin"
+            perp_ok = isinstance(perp_res, dict) and perp_res.get("retCode") == 0
+            spot_ok = isinstance(spot_res, dict) and spot_res.get("retCode") == 0
+
+            # Self-Healing Reconciliation: Handle Asymmetric Execution
+            if not perp_ok and spot_ok:
+                logger.critical(f"[YIELD] ASYMMETRIC STATE // Spot sold, Perp Short pending on {symbol}. Retrying Perp close...")
+                for _ in range(3):
+                    await asyncio.sleep(0.5)
+                    retry_perp = await self.core.executor.safe_call(
+                        "POST", "/v5/order/create", is_execution=True,
+                        category="linear", symbol=symbol, side="Buy",
+                        orderType="Market", qty=perp_qty_str,
+                        reduceOnly=True, positionIdx=self.core.sor.position_idx, timeInForce="IOC"
+                    )
+                    if isinstance(retry_perp, dict) and retry_perp.get("retCode") == 0:
+                        perp_ok = True
+                        break
+
+            elif perp_ok and not spot_ok:
+                logger.critical(f"[YIELD] ASYMMETRIC STATE // Perp closed, naked Spot Long remaining on {spot_symbol}. Retrying Spot sell...")
+                for _ in range(3):
+                    await asyncio.sleep(0.5)
+                    current_free_spot = await self._fetch_free_spot_balance(base_asset)
+                    if current_free_spot <= 0.0:
+                        spot_ok = True
+                        break
+                    retry_qty_str = self._quantize_value(current_free_spot, base_precision)
+                    retry_spot = await self.core.executor.safe_call(
+                        "POST", "/v5/order/create", is_execution=True,
+                        category="spot", symbol=spot_symbol, side="Sell",
+                        orderType="Market", qty=retry_qty_str, marketUnit="baseCoin"
+                    )
+                    if isinstance(retry_spot, dict) and retry_spot.get("retCode") == 0:
+                        spot_ok = True
+                        break
+
+            if perp_ok and spot_ok:
+                del self.active_hedges[symbol]
+                duration_days = (time.time() - data["timestamp"]) / 86400.0
+
+                if hasattr(self.core, 'memory') and self.core.memory and self.core.memory.write_queue and hedge_id:
+                    update_payload = {
+                        "status": "CLOSED",
+                        "holding_hours": round(duration_days * 24.0, 2),
+                        "close_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                    }
+                    self.core.memory.write_queue.put_nowait(("UPDATE", "delta_neutral_ledger", update_payload, "hedge_id", hedge_id))
+
+                msg = (
+                    f"<b>DELTA-NEUTRAL HEDGE CLOSED</b>\n"
+                    f"Asset: <code>{symbol}</code>\n"
+                    f"Holding Time: <code>{duration_days:.2f} Days</code>\n"
+                    f"Reason: <code>{reason}</code>"
                 )
-                if isinstance(retry_spot, dict) and retry_spot.get("retCode") == 0:
-                    spot_ok = True
-                    break
+                await self.core._safe_telegram_dispatch(msg, is_html=True)
+                logger.info(f"Hedge closed cleanly for {symbol}.")
+            else:
+                self.active_hedges[symbol]["status"] = "UNWIND_DESYNC_REQUIRES_MANUAL_AUDIT"
+                logger.critical(
+                    f"[YIELD] UNWIND ASYMMETRY DETECTED // Perp OK: {perp_ok}, Spot OK: {spot_ok}. "
+                    f"Retained in memory for audit."
+                )
 
-        if perp_ok and spot_ok:
-            del self.active_hedges[symbol]
-            duration_days = (time.time() - data["timestamp"]) / 86400.0
-
-            if hasattr(self.core, 'memory') and self.core.memory and self.core.memory.write_queue and hedge_id:
-                update_payload = {
-                    "status": "CLOSED",
-                    "holding_hours": round(duration_days * 24.0, 2),
-                    "close_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-                }
-                self.core.memory.write_queue.put_nowait(("UPDATE", "delta_neutral_ledger", update_payload, "hedge_id", hedge_id))
-
-            msg = (
-                f"<b>DELTA-NEUTRAL HEDGE CLOSED</b>\n"
-                f"Asset: <code>{symbol}</code>\n"
-                f"Holding Time: <code>{duration_days:.2f} Days</code>\n"
-                f"Reason: <code>{reason}</code>"
-            )
-            await self.core._safe_telegram_dispatch(msg, is_html=True)
-            logger.info(f"Hedge closed cleanly for {symbol}.")
-        else:
-            self.active_hedges[symbol]["status"] = "UNWIND_DESYNC_REQUIRES_MANUAL_AUDIT"
-            logger.critical(
-                f"[YIELD] UNWIND ASYMMETRY DETECTED // Perp OK: {perp_ok}, Spot OK: {spot_ok}. "
-                f"Retained in memory for audit."
-            )
+        await asyncio.shield(_execute_shielded_unwind())

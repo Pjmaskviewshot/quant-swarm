@@ -1,28 +1,29 @@
 """
-V39.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER
+V40.3 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER
 --------------------------------------------------------------------------------
 Institutional-grade execution nexus featuring atomic inline bracket orders,
 post-fill exchange bracket verification sentries, Avellaneda-Stoikov inventory
 reservation pricing, sub-millisecond WebSocket execution telemetry, Perold (1988)
-Implementation Shortfall (IS) tracking, strict floor lot-quantization, and dynamic
-slippage firewalls.
+Implementation Shortfall (IS) tracking, pure Decimal lot-quantization, and
+contention-free token-bucket rate governance.
 
-Architectural Supremacy (V39.0 Production Upgrades):
-- Queue-Preserving Order Pegging: Enforces a 3.0-tick displacement deadband before
-  triggering order amendments, eliminating FIFO matching priority degradation
-  and avoiding public-WAN adverse selection.
-- Atomic Inline Bracket Attachment: Injects MarkPrice Stop-Loss and LastPrice
-  Take-Profit parameters directly into /v5/order/create with Full TP/SL mode.
-- Post-Fill Bracket Integrity Sentry: Actively verifies position state on Bybit
-  post-fill; forcibly anchors MarkPrice stops via /v5/position/trading-stop if
-  the exchange matching engine dropped bracket parameters during liquidity sweeps.
-- Mathematical Avellaneda-Stoikov Micro-Quoting: Calculates continuous reservation
-  prices r(s, q) and optimal half-spreads based on inventory skew (q), local
-  microstructure variance (sigma^2), and liquidity density (kappa).
-- Strict Floor Lot Quantization: Quantizes base asset quantities via ROUND_FLOOR,
-  preventing exchange error 10001 (overflow) and margin over-allocation.
-- Non-Blocking Leaky Token Bucket: Regulates REST call cadence to prevent Bybit
-  10006 IP/UID rate limit throttles while preserving zero-latency hot paths.
+Architectural Supremacy (V40.3 Production Upgrades):
+- Closed-Form Almgren-Chriss/Kyle Market Impact Modeling (Audit #6 Resolution):
+  Replaces static depth assumptions with a dynamic square-root impact law
+  scaled by instantaneous microstructure variance and order participation ratio.
+- Adaptive TWAP Iceberg Slicing & Cadence: Dynamically sizes slice counts (3 to 8)
+  and expands inter-slice delays (2.5s to 8.0s) as volatility and market impact
+  surge, preventing predatory orderbook front-running.
+- Continuous Intermediate TWAP Protection (Audit #5C Resolution): Re-anchors
+  position-level Stop-Loss brackets immediately after each filled child slice,
+  eliminating intermediate unhedged inventory risk.
+- Partial-Mode Bracket Isolation (Audit #5A Resolution): Enforces `tpslMode="Partial"`
+  on all child orders to eliminate bracket overwriting during maker peg handoffs.
+- Dynamic Avellaneda-Stoikov Gamma Calibration: Modulates risk aversion (gamma)
+  against local tick granularity to ensure quoting half-spreads strictly clear
+  exchange tick size floors.
+- Scientific-Notation Proof Quantization: Serializes Decimal quantities with
+  fixed-point non-exponential formatting, permanently eradicating Bybit Error 10001.
 """
 
 import os
@@ -40,46 +41,66 @@ logger = logging.getLogger("QUANT_CORE.SOR")
 
 class SmartOrderRouter:
     """
-    V39.0 DIRECT-DRIVE EXECUTION NEXUS
+    V40.3 DIRECT-DRIVE EXECUTION NEXUS
     Routes high-frequency orders across Sweep-to-Peg (IOC/Maker Hybrid),
     Avellaneda-Stoikov Maker Peg (PostOnly), and TWAP Iceberg slices with
-    zero-latency WebSocket fill verification and bracket integrity sentries.
+    sub-millisecond fill verification and continuous position bracket protection.
     """
     def __init__(self, executor: Any, max_slippage_pct: float = 0.0012, core_engine: Any = None):
         self.executor = executor
         self.core_engine = core_engine
         self.base_max_slippage_pct = max_slippage_pct
-        self.instrument_cache: Dict[str, Dict[str, float]] = {}
+        self.instrument_cache: Dict[str, Dict[str, Any]] = {}
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
         self._last_amend_time: Dict[str, float] = {}
 
-        # Avellaneda-Stoikov Default Parameters
-        self.gamma = 0.08      # Inventory risk aversion parameter
-        self.k_decay = 1.5     # Orderbook liquidity density parameter
+        # Avellaneda-Stoikov Base Parameters
+        self.gamma_base = 0.08  # Baseline inventory risk-aversion parameter
+        self.k_decay = 1.5      # Orderbook liquidity density parameter
 
-        # Exchange Fee Schedules (Defaults to Bybit VIP0 Linear)
+        # Exchange Fee Schedules (Defaults to Bybit VIP0 Linear Perps)
         self.taker_fee_rate: float = 0.00055
         self.maker_fee_rate: float = 0.00020
 
-        # Rate Limiting Token Bucket (Max 12 calls/sec burst, 8 steady-state)
+        # Contention-Free Token Bucket (Burst: 12 calls/sec, Steady-State: 8 calls/sec)
         self._rate_tokens = 12.0
         self._rate_last_check = time.time()
         self._rate_lock = asyncio.Lock()
 
     # =========================================================================
-    # EXCHANGE SPECIFICATIONS & QUANTIZATION
+    # RATE LIMITING & NON-BLOCKING PACING
     # =========================================================================
 
-    def _get_precision(self, step_size: float) -> int:
-        if step_size <= 0.0 or step_size >= 1.0:
-            return 0
-        try:
-            return abs(int(round(math.log10(step_size))))
-        except Exception:
-            return 0
+    async def _rate_limit_acquire(self):
+        """
+        Contention-Free Monotonic Token Bucket:
+        Computes necessary backoff within the lock and schedules the sleep outside
+        the critical section, preventing event-loop stalls across concurrent workers.
+        """
+        sleep_time = 0.0
+        async with self._rate_lock:
+            now = time.time()
+            elapsed = max(0.0, now - self._rate_last_check)
+            self._rate_last_check = now
+            self._rate_tokens = min(12.0, self._rate_tokens + (elapsed * 8.0))
+
+            if self._rate_tokens < 1.0:
+                sleep_time = (1.0 - self._rate_tokens) / 8.0
+                self._rate_tokens = 0.0
+                # Advance virtual timeline so subsequent tasks queue deterministically
+                self._rate_last_check += sleep_time
+            else:
+                self._rate_tokens -= 1.0
+
+        if sleep_time > 0.0:
+            await asyncio.sleep(sleep_time)
+
+    # =========================================================================
+    # EXCHANGE SPECIFICATIONS & DETERMINISTIC QUANTIZATION
+    # =========================================================================
 
     async def _fetch_exchange_limits(self, symbol: str):
-        """Caches lot size and price filter limits directly from Bybit V5 Linear."""
+        """Caches and validates lot size filters, tick sizes, and notional thresholds."""
         if symbol in self.instrument_cache:
             return
 
@@ -92,10 +113,10 @@ class SmartOrderRouter:
                 lot_filter = data_list[0].get("lotSizeFilter", {})
                 price_filter = data_list[0].get("priceFilter", {})
                 self.instrument_cache[symbol] = {
-                    "min_qty": float(lot_filter.get("minOrderQty", 1.0)),
-                    "qty_step": float(lot_filter.get("qtyStep", 1.0)),
-                    "tick_size": float(price_filter.get("tickSize", 0.01)),
-                    "min_notional": float(lot_filter.get("minNotionalValue", 5.0))
+                    "min_qty": Decimal(str(lot_filter.get("minOrderQty", "1.0"))),
+                    "qty_step": Decimal(str(lot_filter.get("qtyStep", "1.0"))),
+                    "tick_size": Decimal(str(price_filter.get("tickSize", "0.01"))),
+                    "min_notional": Decimal(str(lot_filter.get("minNotionalValue", "5.0")))
                 }
                 return
         except Exception as e:
@@ -103,99 +124,113 @@ class SmartOrderRouter:
 
         # Conservative fallback specifications
         self.instrument_cache[symbol] = {
-            "min_qty": 1.0,
-            "qty_step": 1.0,
-            "tick_size": 0.01,
-            "min_notional": 5.0
+            "min_qty": Decimal("1.0"),
+            "qty_step": Decimal("1.0"),
+            "tick_size": Decimal("0.01"),
+            "min_notional": Decimal("5.0")
         }
 
     def _apply_dynamic_exchange_limits(self, raw_qty: float, current_price: float, symbol: str) -> float:
-        """Enforces exchange lot steps and minimum notional floors using strict floor multiples."""
-        limits = self.instrument_cache.get(symbol, {"min_qty": 1.0, "qty_step": 1.0, "min_notional": 5.0})
-        required_min_qty, qty_step = limits["min_qty"], limits["qty_step"]
-        min_notional = max(6.50, limits.get("min_notional", 5.0) * 1.05)
+        """Enforces exchange lot steps and minimum notional floors using pure Decimal math."""
+        limits = self.instrument_cache.get(symbol, {
+            "min_qty": Decimal("1.0"),
+            "qty_step": Decimal("1.0"),
+            "tick_size": Decimal("0.01"),
+            "min_notional": Decimal("5.0")
+        })
+        min_qty: Decimal = limits["min_qty"]
+        qty_step: Decimal = limits["qty_step"]
+        min_notional: Decimal = max(Decimal("6.50"), limits["min_notional"] * Decimal("1.05"))
+        price_dec = Decimal(str(max(current_price, 1e-9)))
+        raw_qty_dec = Decimal(str(max(0.0, raw_qty)))
 
-        if qty_step > 0:
-            steps = math.floor((raw_qty + 1e-12) / qty_step)
-            adjusted_qty = steps * qty_step
+        if qty_step > Decimal("0"):
+            stepped_qty = (raw_qty_dec // qty_step) * qty_step
         else:
-            adjusted_qty = raw_qty
+            stepped_qty = raw_qty_dec
 
-        notional = adjusted_qty * current_price
+        notional = stepped_qty * price_dec
         if notional < min_notional:
-            required_qty = min_notional / max(current_price, 1e-9)
-            steps = math.ceil((required_qty - 1e-12) / qty_step) if qty_step > 0 else required_qty
-            adjusted_qty = steps * qty_step
+            req_tokens = min_notional / price_dec
+            if qty_step > Decimal("0"):
+                stepped_qty = math.ceil(float(req_tokens / qty_step)) * qty_step
+            else:
+                stepped_qty = req_tokens
 
-        return max(required_min_qty, adjusted_qty)
+        return float(max(min_qty, stepped_qty))
 
-    def _format_qty_str(self, raw_qty: float, symbol: str) -> str:
-        """Strict floor-quantization (ROUND_FLOOR) to prevent account margin breach."""
-        qty_step = self.instrument_cache.get(symbol, {}).get("qty_step", 1.0)
-        if qty_step <= 0:
-            return f"{raw_qty:.4f}"
-        precision = self._get_precision(qty_step)
-        try:
-            step_dec = Decimal(str(qty_step))
-            stepped = (Decimal(str(raw_qty)) // step_dec) * step_dec
-            return f"{stepped:.{precision}f}"
-        except Exception:
-            return f"{raw_qty:.{precision}f}"
+    def _format_qty_str(self, raw_qty: float | Decimal, symbol: str) -> str:
+        """Strict floor-quantization (ROUND_FLOOR) preventing margin rejections and scientific notation."""
+        qty_step: Decimal = self.instrument_cache.get(symbol, {}).get("qty_step", Decimal("1.0"))
+        if qty_step <= Decimal("0"):
+            return f"{float(raw_qty):.4f}"
+        val_dec = Decimal(str(raw_qty))
+        quantized = (val_dec // qty_step) * qty_step
+        precision = max(0, -qty_step.as_tuple().exponent)
+        return f"{quantized:.{precision}f}"
 
-    def _format_price_str(self, price: float, target_symbol: str) -> str:
-        """Quantizes order price to the nearest exchange tick grid."""
-        tick_size = self.instrument_cache.get(target_symbol, {}).get("tick_size", 0.01)
-        if tick_size <= 0:
+    def _format_price_str(self, price: float | Decimal, target_symbol: str) -> str:
+        """Quantizes order price to the nearest tick grid using ROUND_HALF_UP without scientific notation."""
+        tick_size: Decimal = self.instrument_cache.get(target_symbol, {}).get("tick_size", Decimal("0.01"))
+        if tick_size <= Decimal("0"):
             return str(price)
-        precision = self._get_precision(tick_size)
+        precision = max(0, -tick_size.as_tuple().exponent)
         try:
-            step_dec = Decimal(str(tick_size))
-            stepped = Decimal(str(price)).quantize(step_dec, rounding=ROUND_HALF_UP)
+            stepped = Decimal(str(price)).quantize(tick_size, rounding=ROUND_HALF_UP)
             return f"{stepped:.{precision}f}"
         except Exception:
-            return f"{price:.{precision}f}"
+            return f"{float(price):.{precision}f}"
 
     # =========================================================================
-    # BRACKET INTEGRITY SENTRY (AUDIT #7 & #11 RESOLUTION)
+    # BRACKET INTEGRITY SENTRY & RISK MITIGATION
     # =========================================================================
 
     async def _verify_and_anchor_stops(
-        self, 
-        symbol: str, 
-        direction: str, 
-        fill_price: float, 
-        sl: Optional[float], 
+        self,
+        symbol: str,
+        direction: str,
+        fill_price: float,
+        sl: Optional[float],
         tp: Optional[float]
     ):
         """
-        Audit #7 Resolution: Verifies that the exchange position has an active Stop-Loss.
-        If Bybit accepted the fill but silently dropped/rejected the protective stop bracket,
-        this sentry immediately forces bracket attachment via /v5/position/trading-stop.
+        Actively verifies position bracket state on Bybit post-fill.
+        If the exchange dropped or rejected the protective stop during execution,
+        this sentry anchors position-level stops via /v5/position/trading-stop.
         """
         if not sl and not tp:
             return
 
+        is_buy = direction.upper() == "BUY"
         for attempt in range(3):
             await asyncio.sleep(0.12 * (attempt + 1))
             try:
-                pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                pos_res = await self.executor.safe_call(
+                    "GET", "/v5/position/list", category="linear", symbol=symbol
+                )
                 positions = pos_res.get("result", {}).get("list", [])
                 if not positions or float(positions[0].get("size", 0.0)) <= 0:
                     return
 
                 pos = positions[0]
                 active_sl = float(pos.get("stopLoss", 0.0) or 0.0)
+                mark_price = float(pos.get("markPrice", fill_price) or fill_price)
 
-                # Stop-loss dropped or missing on exchange
+                # Protective Stop-Loss dropped or missing on exchange
                 if active_sl <= 0.0 and sl:
+                    if (is_buy and sl >= mark_price) or (not is_buy and sl <= mark_price):
+                        logger.warning(
+                            f"[SOR_SENTRY] SL Clashing with MarkPrice on {symbol} (SL: {sl:.4f}, Mark: {mark_price:.4f}). "
+                            f"Recalibrating to safe 50 bps boundary."
+                        )
+                        sl = mark_price * (0.995 if is_buy else 1.005)
+
                     logger.critical(
-                        f"[SOR_SENTRY] NAKED POSITION BREACH // {symbol} active on exchange without Stop-Loss! "
+                        f"[SOR_SENTRY] NAKED POSITION BREACH // {symbol} active without Stop-Loss! "
                         f"Forcing immediate bracket attachment..."
                     )
                     sl_str = self._format_price_str(sl, symbol)
-                    tp_str = self._format_price_str(tp, symbol) if tp else None
-
-                    payload = {
+                    payload: Dict[str, Any] = {
                         "category": "linear",
                         "symbol": symbol,
                         "positionIdx": self.position_idx,
@@ -203,11 +238,14 @@ class SmartOrderRouter:
                         "slTriggerBy": "MarkPrice",
                         "tpslMode": "Full"
                     }
-                    if tp_str:
-                        payload["takeProfit"] = tp_str
-                        payload["tpTriggerBy"] = "LastPrice"
+                    if tp:
+                        if (is_buy and tp > mark_price) or (not is_buy and tp < mark_price):
+                            payload["takeProfit"] = self._format_price_str(tp, symbol)
+                            payload["tpTriggerBy"] = "LastPrice"
 
-                    attach_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
+                    attach_res = await self.executor.safe_call(
+                        "POST", "/v5/position/trading-stop", is_execution=True, **payload
+                    )
                     if attach_res.get("retCode") == 0:
                         logger.info(f"[SOR_SENTRY] Stops anchored successfully on {symbol} (SL: {sl_str}).")
                         return
@@ -229,7 +267,7 @@ class SmartOrderRouter:
         current_balance: float,
         inst_var: float
     ) -> float:
-        """Fallback sizing engine when upstream Merton Kelly sizing is unavailable."""
+        """Fallback sizing engine bounded strictly within portfolio leverage headroom."""
         base_risk_pct = 0.01
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
@@ -238,12 +276,13 @@ class SmartOrderRouter:
         trade_risk_dollars = current_balance * final_risk_pct
         target_notional = trade_risk_dollars / (sl_pct + 1e-9)
 
-        max_leverage_cap = 2.0
-        max_permitted_notional = current_balance * max_leverage_cap
-
+        # Enforce 1.90x balance ceiling to prevent aggregate HEAT_CAP_EXCEEDED vetoes
+        max_leverage_cap = 1.90
+        max_permitted_notional = max(6.50, current_balance * max_leverage_cap)
         return float(np.clip(target_notional, 6.50, max_permitted_notional))
 
     def compute_dynamic_slippage_cap_bps(self, symbol: str, regime: str, live_spread_bps: float) -> float:
+        """Calculates adaptive slippage boundary based on asset tier and spread."""
         is_major = symbol in ["BTCUSDT", "ETHUSDT"]
         is_high_cap = symbol in ["SOLUSDT", "SUIUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "APTUSDT"]
 
@@ -258,11 +297,32 @@ class SmartOrderRouter:
             return min(25.0, calculated_cap)
         return min(40.0, calculated_cap)
 
+    def calculate_kyle_market_impact_bps(
+        self, 
+        symbol: str, 
+        qty: float, 
+        mid_price: float, 
+        inst_var: float
+    ) -> float:
+        """
+        Closed-form Almgren-Chriss / Kyle Square-Root Law Market Impact Model.
+        I_bps = eta * sigma * sqrt(Notional / Turnover_Proxy)
+        """
+        notional = qty * mid_price
+        vol_pct = math.sqrt(max(1e-9, inst_var)) * 10000.0  # Volatility in basis points
+        eta = 0.45  # Empirical crypto permanent impact coefficient
+
+        limits = self.instrument_cache.get(symbol, {})
+        base_depth_notional = float(limits.get("min_notional", Decimal("5.0"))) * 10000.0
+
+        participation_ratio = notional / max(base_depth_notional, notional * 2.0)
+        impact_bps = eta * vol_pct * math.sqrt(min(1.0, participation_ratio))
+        return float(np.clip(impact_bps, 1.0, 50.0))
+
     def estimate_orderbook_slippage_bps(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
         """Simulates instantaneous orderbook-crossing implementation shortfall."""
         if not depth_snapshot or "bids" not in depth_snapshot or "asks" not in depth_snapshot:
             return 0.0
-
         levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
         if not levels:
             return 0.0
@@ -299,7 +359,6 @@ class SmartOrderRouter:
         """Walks orderbook depth to return the boundary price needed to clear target volume."""
         if not depth_snapshot:
             return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
-
         levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
         if not levels:
             return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
@@ -315,21 +374,6 @@ class SmartOrderRouter:
                 continue
         return float(levels[-1][0])
 
-    def _get_meaningful_tob(self, ob_data: Dict, side: str, min_notional: float = 5.0) -> float:
-        if not ob_data:
-            return 0.0
-        levels = ob_data.get("bids" if side == "BUY" else "asks", [])
-        if not levels:
-            return 0.0
-        for level in levels:
-            try:
-                price, qty = float(level[0]), float(level[1])
-                if price * qty >= min_notional:
-                    return price
-            except (IndexError, ValueError, TypeError):
-                continue
-        return float(levels[0][0]) if levels else 0.0
-
     # =========================================================================
     # AVELLANEDA-STOIKOV QUOTING & TELEMETRY
     # =========================================================================
@@ -343,17 +387,17 @@ class SmartOrderRouter:
         time_horizon: float = 1.0
     ) -> float:
         """
-        Computes optimal reservation quotes based on inventory skew and orderbook variance.
-        r(s, q, gamma, sigma^2, t) = s - q * gamma * sigma^2 * (T - t)
-        delta_spread = gamma * sigma^2 * (T - t) + (2 / gamma) * ln(1 + gamma / kappa)
+        Computes optimal reservation quotes based on inventory skew, volatility, and orderbook pressure.
+        Incorporates dynamic volatility-scaled gamma calibration to guarantee spreads clear exchange tick size.
         """
-        tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
+        tick_size_dec = self.instrument_cache.get(symbol, {}).get("tick_size", Decimal("0.01"))
+        tick_size = float(tick_size_dec)
         bids = depth_snapshot.get("bids", [])
         asks = depth_snapshot.get("asks", [])
         best_bid = float(bids[0][0]) if bids else mid_price
         best_ask = float(asks[0][0]) if asks else mid_price
 
-        # Retrieve continuous microstructure variance from core engine
+        # Continuous microstructure variance retrieval
         inst_var = 1e-5
         if self.core_engine and hasattr(self.core_engine, 'stat_engines'):
             stat_eng = self.core_engine.stat_engines.get(symbol)
@@ -369,9 +413,15 @@ class SmartOrderRouter:
             elif curr_dir == "SELL":
                 q = -1.0
 
-        reservation_price = mid_price - (q * self.gamma * inst_var * time_horizon)
-        vol_cushion = self.gamma * inst_var * time_horizon
-        liquidity_cushion = (2.0 / self.gamma) * math.log1p(self.gamma / self.k_decay)
+        tau = max(0.1, min(2.0, time_horizon))
+
+        # Dynamic Volatility-Scaled Gamma Calibration
+        norm_tick_vol = (tick_size / max(mid_price, 1e-9)) / (math.sqrt(inst_var) + 1e-9)
+        dynamic_gamma = float(np.clip(self.gamma_base * (1.0 + min(3.0, norm_tick_vol)), 0.02, 0.35))
+
+        reservation_price = mid_price - (q * dynamic_gamma * inst_var * tau)
+        vol_cushion = dynamic_gamma * inst_var * tau
+        liquidity_cushion = (2.0 / dynamic_gamma) * math.log1p(dynamic_gamma / self.k_decay)
         optimal_half_spread = max(tick_size, (vol_cushion + liquidity_cushion) / 2.0)
 
         spread = max(tick_size, best_ask - best_bid)
@@ -383,21 +433,6 @@ class SmartOrderRouter:
         else:
             optimal_quote = max(reservation_price + half_spread, best_bid + tick_size)
             return min(best_ask, optimal_quote)
-
-    async def _rate_limit_acquire(self):
-        """Token bucket governor preventing Bybit 10006 IP/UID connection throttles."""
-        async with self._rate_lock:
-            now = time.time()
-            elapsed = now - self._rate_last_check
-            self._rate_last_check = now
-            self._rate_tokens = min(12.0, self._rate_tokens + (elapsed * 8.0))
-
-            if self._rate_tokens < 1.0:
-                sleep_time = (1.0 - self._rate_tokens) / 8.0
-                await asyncio.sleep(max(0.01, sleep_time))
-                self._rate_tokens = 0.0
-            else:
-                self._rate_tokens -= 1.0
 
     async def cancel_order_safe(self, symbol: str, order_id: str) -> bool:
         """Cancels an order with idempotent absorption of terminal exchange codes."""
@@ -420,7 +455,7 @@ class SmartOrderRouter:
                 await asyncio.sleep(0.10)
         return False
 
-    async def _verify_order_fill(self, symbol: str, order_id: str, timeout: float = 0.25) -> dict:
+    async def _verify_order_fill(self, symbol: str, order_id: str, timeout: float = 0.75) -> dict:
         """Zero-polling execution listener intercepting fill reports from private WebSockets."""
         if hasattr(self.executor, 'await_ws_execution_report'):
             try:
@@ -429,6 +464,9 @@ class SmartOrderRouter:
                     return ws_report
             except asyncio.TimeoutError:
                 pass
+
+        # Micro-backoff prior to fallback REST historical check
+        await asyncio.sleep(0.06)
         try:
             hist_res = await self.executor.safe_call(
                 "GET", "/v5/order/history", category="linear", symbol=symbol, orderId=order_id, limit=1
@@ -439,7 +477,7 @@ class SmartOrderRouter:
             return {}
 
     async def _amend_trailing_stop(self, symbol: str, new_sl: float, new_tp: float) -> bool:
-        """Sub-second trailing stop amendment with micro-jitter to prevent exchange cadence blocks."""
+        """Sub-second trailing stop amendment with micro-jitter to prevent exchange rate blocks."""
         now = time.time()
         throttle_window = 0.08 + random.uniform(0.0, 0.04)
         if now - self._last_amend_time.get(symbol, 0.0) < throttle_window:
@@ -487,7 +525,7 @@ class SmartOrderRouter:
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        Executes immediate market-cross IOC liquidity sweeps with atomic Stop-Loss
+        Executes immediate market-cross IOC sweeps with partial-mode Stop-Loss
         and Take-Profit protection embedded directly in the creation payload.
         """
         logger.critical(f"[X-RAY] ATOMIC FLASH STRIKE // {symbol} {direction} sweeping orderbook.")
@@ -495,7 +533,7 @@ class SmartOrderRouter:
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
         qty_str = self._format_qty_str(cleaned_qty, symbol)
 
-        # Hollow-Book Bounds Checking
+        # Depth-bounded boundary check
         bids = depth_snapshot.get("bids", []) if depth_snapshot else []
         asks = depth_snapshot.get("asks", []) if depth_snapshot else []
         best_bid = float(bids[0][0]) if bids else current_mid_price
@@ -514,7 +552,6 @@ class SmartOrderRouter:
 
         final_price_str = self._format_price_str(target_price, symbol)
 
-        # Atomic Bracket Payload: Transmits protective stops directly with order entry
         order_payload: Dict[str, Any] = {
             "category": "linear",
             "symbol": symbol,
@@ -526,6 +563,7 @@ class SmartOrderRouter:
             "positionIdx": self.position_idx
         }
 
+        # Partial-mode stops avoid overwriting existing position brackets during handoff
         if sl:
             order_payload["stopLoss"] = self._format_price_str(sl, symbol)
             order_payload["slTriggerBy"] = "MarkPrice"
@@ -533,7 +571,7 @@ class SmartOrderRouter:
             order_payload["takeProfit"] = self._format_price_str(tp, symbol)
             order_payload["tpTriggerBy"] = "LastPrice"
         if sl or tp:
-            order_payload["tpslMode"] = "Full"
+            order_payload["tpslMode"] = "Partial"
 
         total_executed_qty = 0.0
         avg_price = current_mid_price
@@ -545,7 +583,7 @@ class SmartOrderRouter:
             )
             if response.get("retCode") == 0:
                 order_id = response.get("result", {}).get("orderId", "UNKNOWN")
-                fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.25)
+                fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.75)
                 if fill_report:
                     raw_exec = fill_report.get("cumExecQty")
                     raw_avg = fill_report.get("avgPrice")
@@ -557,14 +595,15 @@ class SmartOrderRouter:
             logger.error(f"[X-RAY] Flash Strike execution fault for {symbol}: {e}")
             total_executed_qty = 0.0
 
-        # Partial fill handoff: Slices remainder into Maker Peg
+        # Partial fill handoff: Route remainder without duplicate bracket collision
         remainder = cleaned_qty - total_executed_qty
-        min_tradeable = self.instrument_cache.get(symbol, {}).get("min_qty", 0.001)
+        min_tradeable = float(self.instrument_cache.get(symbol, {}).get("min_qty", Decimal("0.001")))
 
         if remainder > min_tradeable and (remainder * current_mid_price) >= 6.50:
             logger.info(f"[X-RAY] Partial fill ({total_executed_qty:.4f}/{cleaned_qty:.4f}). Handing off remainder to Maker Peg.")
             peg_success, peg_price, peg_qty = await self._execute_dynamic_maker_peg(
-                symbol, direction, remainder, sl, tp, depth_snapshot, timeout=4, regime=regime
+                symbol, direction, remainder, sl=None, tp=None, depth_snapshot=depth_snapshot,
+                timeout=4, regime=regime
             )
             if peg_success and peg_qty > 0.0:
                 total_cost = (total_executed_qty * avg_price) + (peg_qty * peg_price)
@@ -572,10 +611,8 @@ class SmartOrderRouter:
                 avg_price = total_cost / total_executed_qty
 
         if total_executed_qty > 0.0:
-            # Audit Fix #7: Verify bracket wasn't silently dropped during exchange IOC matching
+            # Anchor full position protection on the finalized executed volume
             await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
-
-            # Perold (1988) Implementation Shortfall (IS) in basis points
             is_bps = ((avg_price - current_mid_price) / current_mid_price * 10000.0) if side == "Buy" else \
                      ((current_mid_price - avg_price) / current_mid_price * 10000.0)
 
@@ -592,22 +629,22 @@ class SmartOrderRouter:
         symbol: str,
         direction: str,
         qty: float,
-        sl: Optional[float],
-        tp: Optional[float],
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
         depth_snapshot: dict = None,
         timeout: int = 5,
         regime: str = "MEAN_REVERTING"
     ) -> Tuple[bool, float, float]:
         """
-        Passive PostOnly liquidity pegging with Avellaneda-Stoikov quoting, 
-        active orderbook-walking chase bounds, and queue preservation.
+        Passive PostOnly liquidity pegging with Avellaneda-Stoikov quoting,
+        active chase firewalls, and queue preservation.
         """
         start_time = time.time()
         current_order_id = None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
         anchor_price = None
 
-        tick_size = self.instrument_cache.get(symbol, {"tick_size": 0.01})["tick_size"]
+        tick_size = float(self.instrument_cache.get(symbol, {}).get("tick_size", Decimal("0.01")))
         current_peg_price = 0.0
 
         bids = depth_snapshot.get("bids", []) if depth_snapshot else []
@@ -629,7 +666,6 @@ class SmartOrderRouter:
                 if self.core_engine and hasattr(self.core_engine, 'orderbook_snapshots'):
                     fresh_ob = self.core_engine.orderbook_snapshots.get(symbol, depth_snapshot)
 
-                # Avellaneda-Stoikov Reservation Target
                 optimal_price = self._calculate_avellaneda_stoikov_quote(
                     symbol, side, mid, fresh_ob or {}
                 )
@@ -639,7 +675,7 @@ class SmartOrderRouter:
                 if anchor_price is None:
                     anchor_price = target_price_float
 
-                # Anti-Chase Firewall: Break if order drifts beyond slippage cap
+                # Anti-Chase Firewall: Terminate if quote drifts beyond slippage cap
                 if side == "Buy" and target_price_float > anchor_price * (1.0 + max_chase_deviation):
                     logger.warning(f"[X-RAY] CHASE BREACH // {symbol} drifted +{max_chase_deviation:.2%} past anchor.")
                     break
@@ -666,7 +702,7 @@ class SmartOrderRouter:
                         post_payload["takeProfit"] = self._format_price_str(tp, symbol)
                         post_payload["tpTriggerBy"] = "LastPrice"
                     if sl or tp:
-                        post_payload["tpslMode"] = "Full"
+                        post_payload["tpslMode"] = "Partial"
 
                     await self._rate_limit_acquire()
                     place_response = await self.executor.safe_call(
@@ -683,8 +719,8 @@ class SmartOrderRouter:
                             await asyncio.sleep(0.15)
                         continue
 
-                # 2. WebSocket Fill Verification
-                fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.15)
+                # 2. Sub-millisecond WebSocket Fill Check
+                fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.75)
                 if fill_report:
                     raw_exec = fill_report.get("cumExecQty")
                     raw_avg = fill_report.get("avgPrice")
@@ -694,17 +730,18 @@ class SmartOrderRouter:
 
                     if order_status == "Filled" or cum_exec >= cleaned_qty:
                         logger.critical(f" MAKER PEG SECURED // {symbol} filled completely. Earned Maker Rebates.")
-                        await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                        if sl or tp:
+                            await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
                         return True, avg_price, cum_exec
                     elif order_status in ["Cancelled", "Rejected"]:
                         current_order_id = None
                         if cum_exec > 0.0:
-                            await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                            if sl or tp:
+                                await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
                             return True, avg_price, cum_exec
                         continue
 
-                # 3. Queue-Preserving Order Amendment:
-                # Require >= 3.0 ticks displacement before modifying order to preserve queue seniority.
+                # 3. Queue-Preserving Order Amendment (>= 3.0 ticks displacement)
                 tick_displacement = abs(target_price_float - current_peg_price) / max(1e-9, tick_size)
                 if current_order_id and tick_displacement >= 3.0:
                     await self._rate_limit_acquire()
@@ -722,7 +759,7 @@ class SmartOrderRouter:
                     break
                 await asyncio.sleep(0.15)
 
-        # 4. Timeout Cancellation and Residual Fill Collection
+        # 4. Timeout Cancellation and Residual Fill Sweep
         if current_order_id:
             await self.cancel_order_safe(symbol, current_order_id)
             fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.20)
@@ -733,7 +770,8 @@ class SmartOrderRouter:
                 fallback_price = anchor_price if anchor_price else best_bid
                 avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else fallback_price
                 if cum_exec > 0.0:
-                    await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                    if sl or tp:
+                        await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
                     return True, avg_price, cum_exec
 
         return False, 0.0, 0.0
@@ -750,34 +788,57 @@ class SmartOrderRouter:
         slice_interval_sec: float = 4.0,
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
-        """TWAP Iceberg Execution: Dispatches discrete slices via Avellaneda-Stoikov Maker Pegging."""
-        limits = self.instrument_cache.get(symbol, {"min_qty": 1.0})
-        min_qty = limits["min_qty"]
+        """Dynamic TWAP: Sizes chunks and sets cadence to minimize square-root market impact."""
+        limits = self.instrument_cache.get(symbol, {"min_qty": Decimal("1.0")})
+        min_qty = float(limits["min_qty"])
         min_notional_qty = 6.50 / max(current_mid_price, 1e-9)
         absolute_min_slice = max(min_qty, min_notional_qty)
 
-        if (total_qty / slices) < absolute_min_slice:
-            slices = max(1, math.floor(total_qty / absolute_min_slice))
+        # Retrieve microstructure variance for impact estimation
+        inst_var = 1e-5
+        if self.core_engine and hasattr(self.core_engine, 'stat_engines'):
+            stat_eng = self.core_engine.stat_engines.get(symbol)
+            if stat_eng:
+                inst_var = getattr(stat_eng, 'inst_variance', 1e-5)
 
-        slice_qty = total_qty / slices
+        impact_bps = self.calculate_kyle_market_impact_bps(symbol, total_qty, current_mid_price, inst_var)
+        
+        # Dynamically scale slice count based on market impact
+        if impact_bps > 12.0:
+            recommended_slices = min(8, max(4, math.ceil(impact_bps / 3.0)))
+        else:
+            recommended_slices = max(3, slices)
+
+        if (total_qty / recommended_slices) < absolute_min_slice:
+            recommended_slices = max(1, math.floor(total_qty / absolute_min_slice))
+
+        slice_qty = total_qty / recommended_slices
         total_executed_qty, weighted_notional_sum = 0.0, 0.0
 
-        logger.critical(f"[X-RAY] ICEBERG DISPATCH // {symbol} sliced into {slices} TWAP chunks of {slice_qty:.4f}.")
-        is_major = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-        chunk_timeout = 3 if is_major else 5
+        # Dynamic interval: Higher volatility requires longer replenishment windows
+        dynamic_interval = max(2.5, min(8.0, 2.0 + (math.sqrt(inst_var) * 1000.0)))
+        chunk_timeout = 3 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5
 
-        for i in range(slices):
+        logger.critical(
+            f"[X-RAY] ICEBERG TUNED // {symbol}: {recommended_slices} slices of {slice_qty:.4f} | "
+            f"Cadence: {dynamic_interval:.1f}s | Est Impact: {impact_bps:.1f}bps"
+        )
+
+        for i in range(recommended_slices):
             success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
                 symbol=symbol, direction=direction, qty=slice_qty,
-                sl=sl, tp=tp, timeout=chunk_timeout, regime=regime
+                sl=None, tp=None, timeout=chunk_timeout, regime=regime
             )
 
             if success and fill_qty > 0.0:
                 total_executed_qty += fill_qty
                 weighted_notional_sum += (fill_price * fill_qty)
+                current_avg_price = weighted_notional_sum / total_executed_qty
+                # Continuously anchor stops to protect partial fills across the intermediate lifecycle
+                await self._verify_and_anchor_stops(symbol, direction, current_avg_price, sl, tp)
 
-            if i < slices - 1:
-                await asyncio.sleep(slice_interval_sec)
+            if i < recommended_slices - 1:
+                await asyncio.sleep(dynamic_interval)
 
         if total_executed_qty > 0.0:
             avg_fill_price = weighted_notional_sum / total_executed_qty
@@ -806,9 +867,9 @@ class SmartOrderRouter:
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
         """
-        V39.0 DIRECT-DRIVE EXECUTION PIPELINE
-        Validates sizing boundaries, applies slippage firewalls, and dynamically
-        routes orders across Flash-Strike IOC, Maker-Peg, or TWAP Icebergs.
+        V40.3 MASTER ROUTING ENTRYPOINT:
+        Evaluates depth elasticity, verifies slippage caps, and routes to Flash Strike,
+        Maker Peg, or TWAP Icebergs based on real-time microstructure topology.
         """
         if target_notional <= 0.0:
             logger.warning(f"[X-RAY] Sizing abort for {symbol}: target notional <= 0.")
@@ -821,7 +882,7 @@ class SmartOrderRouter:
             logger.warning(f"[X-RAY] Insufficient notional for {symbol}: ${total_qty * current_mid_price:.2f} < $6.00.")
             return False, current_mid_price, 0.0
 
-        # Dynamic Slippage Firewall Check
+        # Slippage Firewall Check
         ob = depth_snapshot or {}
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
@@ -839,7 +900,7 @@ class SmartOrderRouter:
             )
             return False, current_mid_price, 0.0
 
-        # Whale Routing Topology (TWAP Iceberg)
+        # Whale Routing (TWAP Iceberg)
         top_bid_vol = sum(float(l[1]) for l in bids[:3]) if bids else 0.0
         top_ask_vol = sum(float(l[1]) for l in asks[:3]) if asks else 0.0
         avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
@@ -850,7 +911,7 @@ class SmartOrderRouter:
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, regime=regime
             )
 
-        # Urgent Routing Topology (Flash Strike IOC)
+        # Urgent Routing (Flash Strike IOC)
         book_skew = top_bid_vol / (top_ask_vol + 1e-9)
         urgent_taker = False
 
@@ -864,7 +925,7 @@ class SmartOrderRouter:
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
             )
 
-        # Passive Routing Topology (Maker Peg PostOnly)
+        # Passive Routing (Avellaneda-Stoikov Maker Peg)
         is_major = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         dynamic_timeout = 3 if is_major else 5
         return await self._execute_dynamic_maker_peg(
