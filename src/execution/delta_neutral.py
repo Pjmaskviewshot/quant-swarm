@@ -1,12 +1,14 @@
 """
-V40.3 APEX TITAN: FAULT-TOLERANT ATOMIC BASIS & YIELD HARVESTER
+V40.3 APEX TITAN: ATOMIC DUAL-LEG BASIS & YIELD HARVESTER
 ------------------------------------------------------------------------
-Ultra-low latency delta-neutral cash-and-carry execution engine.
-Sweeps idle margin into high-rate perpetual funding arbitrage with full
-multiplier normalization, exact Decimal lot harmonization, and multi-stage
-atomic desync recovery.
+Ultra-low latency delta-neutral basis cash-and-carry execution engine.
+Sweeps idle margin into high-rate funding arbitrage with full multiplier 
+normalization, cross-instrument lot step harmonization, and atomic rollback.
 
 Architectural Supremacy (V40.3 Production Upgrades):
+- True Spot Balance Resolution (P1 Fix): Queries `walletBalance` instead of
+  `availableToWithdraw` during emergency spot unwinds, avoiding the UTA margin
+  trap where collateral haircuts falsely report zero available spot balance.
 - Shielded Atomic Execution & Rollback: Wraps Perpetual Short placement and
   emergency Spot liquidation in `asyncio.shield()` to permanently eliminate
   half-hedged exposure caused by unshielded `asyncio.CancelledError` interrupts.
@@ -15,12 +17,8 @@ Architectural Supremacy (V40.3 Production Upgrades):
   emergency shutdown sequences.
 - 30s High-Velocity Rate Scanner: Accelerates scan cadence from 180s to 30s to
   capture transient funding rate dislocations before cross-exchange arbitrageurs.
-- Delta Rate Pre-Filter: Caches historical rates and gates execution on >=2.0 bps
-  funding expansions, protecting REST API quotas from redundant specification probes.
 - Post-Quantization Lot Parity: Quantizes lot sizes to fixed-point strings prior
   to evaluating exchange `min_order_qty` and `min_order_amt` limits.
-- Dynamic UTA Collateral Decay Surveillance: Reduces collateral cache TTL to 60.0s
-  on actively hedged assets to avoid stale valuations during market-wide haircuts.
 """
 
 import re
@@ -342,7 +340,9 @@ class DeltaNeutralYieldEngine:
                 coins = data_list[0].get("coin", [])
                 for c in coins:
                     if c.get("coin") == base_asset:
-                        return float(c.get("availableToWithdraw", c.get("walletBalance", 0.0)) or 0.0)
+                        # P1 FIX: Query true walletBalance instead of availableToWithdraw
+                        # Prevents the UTA Margin Trap from hiding owned tokens during haircuts
+                        return float(c.get("walletBalance", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"[YIELD] Failed querying spot balance for {base_asset}: {e}")
         return 0.0

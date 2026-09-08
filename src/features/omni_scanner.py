@@ -1,11 +1,15 @@
 """
-💎 V25.3 APEX QUANTUM PRIME: OMNI-SWARM CROSS-SECTIONAL SCANNER
+💎 V25.4 APEX QUANTUM PRIME: OMNI-SWARM CROSS-SECTIONAL SCANNER
 ----------------------------------------------------------
 Scans Bybit perpetual universe using Stabilized 60-Bar PCA Beta-Stripping.
 Upgraded with Relaxed Hot-Swap Thresholds to eradicate liquidity stagnation,
 ensuring the Swarm continuously rotates into high-RVOL, high-Alpha nodes.
 
-Architectural Supremacy (V25.3 - Audit Resolutions):
+Architectural Supremacy (V25.4 - Audit Resolutions):
+- Omni-Scanner Deadlock Eradication (P0 Fix): Replaced the mathematically unreachable 
+  1500.0 scoring threshold with a statistically valid 15.0 Alpha variance score. 
+  This restores dynamic universe rotation, preventing the swarm from stagnating 
+  in illiquid or decaying assets.
 - Boot Crash Eradication: Removed broken `AdaptiveSessionClock` import. Turnover 
   thresholds are now computed natively within the scanner to ensure a safe boot.
 - SVD Thread Isolation: CPU-bound SVD computation offloaded to background threads 
@@ -61,7 +65,7 @@ def compute_pca_residual_alpha(price_matrix: np.ndarray) -> np.ndarray:
 
 class GlobalOmniScanner:
     """
-    🌌 V25.3 OMNI-SWARM CROSS-SECTIONAL SCANNER
+    🌌 V25.4 OMNI-SWARM CROSS-SECTIONAL SCANNER
     Scans Bybit perpetual universe with live microstructure spread gating and 
     logarithmic liquidity weighting. Enforces a strict 30-minute swap cooldown.
     """
@@ -211,8 +215,8 @@ class GlobalOmniScanner:
 
         top_score, top_sym, top_z = scoring_matrix[0]
         
-        # 🚀 V25.3 ANTI-STARVATION UPGRADE: Relaxed Hot-Swap Trigger
-        if top_sym not in current_basket and top_z > 2.0 and top_score > 1500.0:
+        # 🚀 V25.4 P0 RESOLUTION: Corrected Deadlock Threshold from 1500.0 to 15.0
+        if top_sym not in current_basket and top_z > 2.0 and top_score > 15.0:
             basket_scores = [
                 item for item in scoring_matrix 
                 if item[1] in current_basket 

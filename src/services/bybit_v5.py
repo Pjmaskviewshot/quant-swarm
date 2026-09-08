@@ -1,22 +1,23 @@
 """
-💎 V37.0 APEX TITAN: TITANIUM API EXECUTOR
+APEX TITAN: TITANIUM API EXECUTOR (BYBIT V5)
 --------------------------------------------------------
-Cloud-Resilient, Zero-Latency Unified Bybit Exchange Connector.
+Cloud-resilient, zero-latency unified Bybit V5 exchange execution connector.
 
-Architectural Supremacy (V37.0 Network, UTA & Bracket Hardening):
-1. IPv4 DNS Enforcement: Forces socket.AF_INET in TCPConnector to eradicate
-   Windows 10/11 getaddrinfo DNS resolution timeouts and client connection aborts.
-2. Primary Gateway Anchoring: Sets https://api.bybit.com as the default primary route,
-   eliminating the broken api.bytick.com DNS failover ping-pong loop.
-3. Zero-Window Atomic Bracket Preservation: Permanently removes kwargs.pop('stopLoss')
-   and kwargs.pop('takeProfit'), ensuring atomic brackets pass directly to Bybit V5.
-4. None-Value Parameter Sanitizer: Strips None values before query-string encoding
-   or JSON serialization to eliminate Bybit Error 10002 Parameter Faults.
-5. Multi-Tier Unified Wallet Extractor: Sequentially probes UNIFIED and CONTRACT
-   account types, extracting totalEquity, totalWalletBalance, and USDT coin equity.
-   Eradicates fake fallback equity injections ($21/$25).
-6. Non-Destructive Limiter Smoothing: Proactive token-bucket pacing at <=5 requests
-   remaining to prevent exchange HTTP 429 penalties.
+Production Hardening & Bug Fixes:
+- Idempotent Order Retry Shield (Audit P0 Resolution): If a network timeout occurs 
+  during `POST /v5/order/create`, the executor inspects `/v5/order/realtime` using 
+  `orderLinkId` before retrying, preventing duplicate fill executions on the exchange.
+- Duplicate Order Link ID Reconciliation (Audit P0 Resolution): When Bybit returns 
+  error 110008 (DUPLICATE_ORDER_LINK_ID), queries the active order record by `orderLinkId` 
+  and returns the true `orderId`, preventing downstream SOR/Exit engines from receiving 
+  an invalid "UNKNOWN" order ID.
+- Dedicated WebSocket Heartbeat Ping Task: Replaces passive timeout-dependent pings 
+  with an active 20-second background ping loop. Prevents Bybit from severing private 
+  WebSocket connections during high-volume message streams.
+- IPv4 DNS Resolution Enforcement: Forces `socket.AF_INET` in `aiohttp.TCPConnector` 
+  to eliminate Windows 10/11 `getaddrinfo` socket stalls and connection timeouts.
+- None-Value Kwargs Sanitization: Strips `None` values from payloads prior to query-string 
+  serialization to prevent Bybit RetCode 10002 parameter errors.
 """
 
 import time
@@ -84,7 +85,6 @@ class BybitUnifiedExecutor:
         self.api_secret = api_secret or ""
         self.testnet = testnet
         
-        # Primary gateway anchored to api.bybit.com (bytick relegated to secondary fallback)
         if self.testnet:
             self.rest_routes = ["https://api-testnet.bybit.com"]
             self.ws_private_url = "wss://stream-testnet.bybit.com/v5/private"
@@ -110,6 +110,7 @@ class BybitUnifiedExecutor:
 
         self._ws_connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self._ws_task: Optional[asyncio.Task] = None
+        self._ws_ping_task: Optional[asyncio.Task] = None
         self._clock_sync_task: Optional[asyncio.Task] = None  
         self._order_waiters: Dict[str, List[asyncio.Future]] = {}
         self._execution_cache: Dict[str, Dict[str, Any]] = {}
@@ -117,11 +118,10 @@ class BybitUnifiedExecutor:
         self._waiter_lock = asyncio.Lock()
         self._is_terminating = False
         
-        logger.info(f"Initialized V37.0 Titanium Async Bybit V5 Executor (Testnet: {self.testnet})")
+        logger.info(f"Initialized Async Bybit V5 Unified Executor (Testnet: {self.testnet})")
 
     async def initialize(self):
         if not self.session or self.session.closed:
-            # Force IPv4 resolution to prevent Windows 10/11 getaddrinfo DNS stalls
             connector = aiohttp.TCPConnector(
                 family=socket.AF_INET,
                 limit=100, 
@@ -143,7 +143,7 @@ class BybitUnifiedExecutor:
         if len(self.rest_routes) > 1:
             self.current_route_idx = (self.current_route_idx + 1) % len(self.rest_routes)
             self.rest_base_url = self.rest_routes[self.current_route_idx]
-            logger.critical(f"[X-RAY] 🔄 NETWORK ROUTING SHIFT: Active Gateway -> {self.rest_base_url}")
+            logger.critical(f"[X-RAY] NETWORK ROUTING SHIFT: Active Gateway -> {self.rest_base_url}")
 
     async def calibrate_server_time(self) -> int:
         try:
@@ -157,7 +157,7 @@ class BybitUnifiedExecutor:
                 server_time = int(data["result"]["timeNano"]) // 1_000_000
                 latency = max(0, (end_local - start_local) // 2)
                 self._server_time_offset_ms = server_time - (end_local - latency)
-                logger.info(f"[X-RAY] 🕒 Clock Recalibrated via {self.rest_base_url}. Offset: {self._server_time_offset_ms}ms (Latency: {latency * 2}ms)")
+                logger.info(f"[X-RAY] Clock Recalibrated via {self.rest_base_url}. Offset: {self._server_time_offset_ms}ms (Latency: {latency * 2}ms)")
                 return self._server_time_offset_ms
         except Exception as e:
             logger.warning(f"Clock calibration fault on {self.rest_base_url}: {e}. Retaining prior offset.")
@@ -177,6 +177,31 @@ class BybitUnifiedExecutor:
         param_str = f"{timestamp}{self.api_key}5000{payload}"
         return hmac.new(self.api_secret.encode("utf-8"), param_str.encode("utf-8"), hashlib.sha256).hexdigest()
 
+    async def _query_order_by_link_id(self, category: str, symbol: str, order_link_id: str) -> Optional[Dict[str, Any]]:
+        """Queries order details using client order link ID to reconcile network drops."""
+        try:
+            timestamp = str(int(time.time() * 1000) + self._server_time_offset_ms)
+            params = {"category": category, "symbol": symbol, "orderLinkId": order_link_id}
+            query_str = urllib.parse.urlencode(params)
+            sig = self._generate_signature(timestamp, query_str)
+            headers = {
+                "X-BAPI-API-KEY": self.api_key,
+                "X-BAPI-TIMESTAMP": timestamp,
+                "X-BAPI-SIGN": sig,
+                "X-BAPI-RECV-WINDOW": "5000",
+                "Content-Type": "application/json"
+            }
+            url = f"{self.rest_base_url}/v5/order/realtime?{query_str}"
+            async with self.session.get(url, headers=headers) as resp:
+                data = await resp.json()
+                if data.get("retCode") == 0:
+                    orders = data.get("result", {}).get("list", [])
+                    if orders:
+                        return orders[0]
+        except Exception as e:
+            logger.debug(f"[X-RAY] Order inquiry by orderLinkId failed: {e}")
+        return None
+
     async def _safe_api_call(self, method: str, endpoint: str, is_execution: bool = False, **kwargs) -> Any:
         if not self.session or self.session.closed:
             await self.initialize()
@@ -185,15 +210,34 @@ class BybitUnifiedExecutor:
         else:
             await self.data_rate_limiter.acquire()
 
-        # Generate unique orderLinkId if not present
-        if endpoint == "/v5/order/create" and method == "POST":
+        is_order_create = (endpoint == "/v5/order/create" and method == "POST")
+        if is_order_create:
             if "orderLinkId" not in kwargs or not kwargs["orderLinkId"]:
                 kwargs["orderLinkId"] = f"APEX_{uuid.uuid4().hex[:16]}"
 
-        # Sanitize kwargs: strip None values to prevent Bybit 10002 Parameter Faults
         clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        order_link_id = clean_kwargs.get("orderLinkId")
+        category = clean_kwargs.get("category", "linear")
+        symbol = clean_kwargs.get("symbol", "")
 
         for attempt in range(3):
+            # Pre-Retry Idempotency Verification for order creation
+            if attempt > 0 and is_order_create and order_link_id and symbol:
+                logger.warning(f"[X-RAY] Verifying order existence on Bybit before retry: {order_link_id}")
+                existing_order = await self._query_order_by_link_id(category, symbol, order_link_id)
+                if existing_order:
+                    logger.info(f"[X-RAY] Order already established on exchange: {existing_order.get('orderId')}")
+                    return {
+                        "retCode": 0,
+                        "retMsg": "OK_ORDER_RECOVERED",
+                        "result": {
+                            "orderId": existing_order.get("orderId"),
+                            "orderLinkId": order_link_id,
+                            "cumExecQty": existing_order.get("cumExecQty", "0"),
+                            "avgPrice": existing_order.get("avgPrice", "0")
+                        }
+                    }
+
             try:
                 timestamp = str(int(time.time() * 1000) + self._server_time_offset_ms)
                 payload = ""
@@ -225,7 +269,7 @@ class BybitUnifiedExecutor:
                         try:
                             remaining = int(limit_status)
                             if remaining <= 4:
-                                logger.warning(f"[X-RAY] ⚠️ BYBIT LIMITER PACING: {remaining} requests remaining. Smoothing event loop.")
+                                logger.warning(f"[X-RAY] BYBIT LIMITER PACING: {remaining} requests remaining. Smoothing loop.")
                                 await asyncio.sleep(0.25)
                         except ValueError:
                             pass
@@ -234,13 +278,25 @@ class BybitUnifiedExecutor:
                     try:
                         response = json.loads(raw_text)
                     except json.JSONDecodeError:
-                        logger.warning(f"[X-RAY] ⚠️ Upstream Gateway Non-JSON ({resp.status}). Retrying...")
+                        logger.warning(f"[X-RAY] Upstream Gateway Non-JSON ({resp.status}). Retrying...")
                         response = {"retCode": -999, "retMsg": f"HTTP_{resp.status}_GATEWAY_BURST"}
 
                 ret_code = response.get("retCode", -1)
                 
-                if ret_code == BybitRetCode.DUPLICATE_ORDER_LINK_ID:
-                    return {"retCode": 0, "retMsg": "OK_DUPLICATE_RESOLVED", "result": {"orderLinkId": clean_kwargs.get("orderLinkId")}}
+                # Duplicate Order Link ID Resolution: Fetches real orderId from exchange
+                if ret_code == BybitRetCode.DUPLICATE_ORDER_LINK_ID and is_order_create and order_link_id:
+                    existing_order = await self._query_order_by_link_id(category, symbol, order_link_id)
+                    real_id = existing_order.get("orderId", order_link_id) if existing_order else order_link_id
+                    return {
+                        "retCode": 0,
+                        "retMsg": "OK_DUPLICATE_RESOLVED",
+                        "result": {
+                            "orderId": real_id,
+                            "orderLinkId": order_link_id,
+                            "cumExecQty": existing_order.get("cumExecQty", "0") if existing_order else "0",
+                            "avgPrice": existing_order.get("avgPrice", "0") if existing_order else "0"
+                        }
+                    }
 
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = clean_kwargs.get("symbol", "UNKNOWN")
@@ -249,20 +305,20 @@ class BybitUnifiedExecutor:
                     raise ValueError(f"110126 INNOVATION ZONE BAN: {symbol_banned}")
 
                 if ret_code == BybitRetCode.PARAMETER_ERROR and "timestamp" in response.get("retMsg", "").lower():
-                    logger.warning("[X-RAY] ⚠️ Timestamp Drift (Error 10002). Forcing NTP calibration...")
+                    logger.warning("[X-RAY] Timestamp Drift (Error 10002). Forcing NTP calibration...")
                     await self.calibrate_server_time()
                     await asyncio.sleep(0.15)
                     continue
 
                 if ret_code in [BybitRetCode.RATE_LIMIT_REACHED, BybitRetCode.SERVICE_UNAVAILABLE]: 
-                    logger.warning(f"[X-RAY] ⚠️ Exchange Overload (Code: {ret_code}). Backing off...")
+                    logger.warning(f"[X-RAY] Exchange Overload (Code: {ret_code}). Backing off...")
                     await asyncio.sleep(1.0)
                     continue
                 
                 return response
                 
             except (asyncio.TimeoutError, aiohttp.ClientOSError, aiohttp.ServerDisconnectedError, aiohttp.ClientConnectorError) as e:
-                logger.warning(f"[X-RAY] ⚠️ NETWORK FAULT on {endpoint}: {type(e).__name__} ({e}). Retrying ({attempt+1}/3)...")
+                logger.warning(f"[X-RAY] NETWORK FAULT on {endpoint}: {type(e).__name__} ({e}). Retrying ({attempt+1}/3)...")
                 if attempt == 1:
                     self._rotate_dns_route()
                 if attempt == 2:
@@ -271,7 +327,7 @@ class BybitUnifiedExecutor:
 
             except Exception as e:
                 if attempt == 2:
-                    logger.error(f"[X-RAY] ❌ API call critically failed: {e}")
+                    logger.error(f"[X-RAY] API call critically failed: {e}")
                     return {"retCode": -999, "retMsg": str(e)}
                 await asyncio.sleep(0.3)
 
@@ -315,7 +371,20 @@ class BybitUnifiedExecutor:
             await self.initialize()
         self._is_terminating = False
         self._ws_task = asyncio.create_task(self._ws_lifecycle_loop())
-        logger.info("📡 Bybit Private WebSocket Stream Connected. Zero-Latency Tracking Armed.")
+        logger.info("Bybit Private WebSocket Stream Connected. Telemetry Armed.")
+
+    async def _ws_ping_loop(self, ws: aiohttp.ClientWebSocketResponse):
+        """Active background heartbeat loop dispatching pings every 20 seconds."""
+        while not self._is_terminating and not ws.closed:
+            try:
+                await asyncio.sleep(20.0)
+                if not ws.closed:
+                    await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[X-RAY] WS Heartbeat ping fault: {e}")
+                break
 
     async def _ws_lifecycle_loop(self):
         backoff = 1.0
@@ -329,6 +398,7 @@ class BybitUnifiedExecutor:
                     self._ws_connection = ws
                     backoff = 1.0
 
+                    # Authenticate private feed
                     expires = int(time.time() * 1000) + self._server_time_offset_ms + 10000
                     signature = hmac.new(
                         self.api_secret.encode("utf-8"), 
@@ -356,12 +426,13 @@ class BybitUnifiedExecutor:
 
                     await ws.send_json({"op": "subscribe", "args": ["execution", "order"]})
 
+                    # Spawn dedicated ping loop to prevent disconnects during data bursts
+                    if self._ws_ping_task and not self._ws_ping_task.done():
+                        self._ws_ping_task.cancel()
+                    self._ws_ping_task = asyncio.create_task(self._ws_ping_loop(ws))
+
                     while not self._is_terminating:
-                        try:
-                            msg = await asyncio.wait_for(ws.receive(), timeout=20.0)
-                        except asyncio.TimeoutError:
-                            await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
-                            continue
+                        msg = await ws.receive()
                             
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -372,8 +443,9 @@ class BybitUnifiedExecutor:
                             if payload.get("op") == "pong" or payload.get("ret_msg") == "pong":
                                 continue
                             await self._on_ws_message(payload)
+
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            logger.warning("[X-RAY] ⚠️ WS Connection closed by exchange.")
+                            logger.warning("[X-RAY] WS Connection closed by exchange.")
                             break
                             
             except asyncio.CancelledError:
@@ -382,6 +454,9 @@ class BybitUnifiedExecutor:
                 logger.debug(f"[X-RAY] WS Transport reset ({e}). Reconnecting in {backoff:.1f}s...")
                 await asyncio.sleep(backoff)
                 backoff = min(20.0, backoff * 1.5)
+            finally:
+                if self._ws_ping_task and not self._ws_ping_task.done():
+                    self._ws_ping_task.cancel()
 
     async def _on_ws_message(self, message: dict):
         topic = message.get("topic", "")
@@ -390,34 +465,48 @@ class BybitUnifiedExecutor:
         if topic == "order":
             for order in data:
                 order_id = order.get("orderId")
+                order_link_id = order.get("orderLinkId")
                 status = order.get("orderStatus")
+                
                 if order_id:
                     self._execution_cache[order_id] = order
+                if order_link_id:
+                    self._execution_cache[order_link_id] = order
                     
-                    if len(self._execution_cache) > 2000:
-                        prune_keys = list(self._execution_cache.keys())[:500]
-                        for k in prune_keys:
-                            self._execution_cache.pop(k, None)
+                if len(self._execution_cache) > 2000:
+                    prune_keys = list(self._execution_cache.keys())[:500]
+                    for k in prune_keys:
+                        self._execution_cache.pop(k, None)
 
-                    if status in ["Filled", "PartiallyFilled", "Cancelled", "Rejected"]:
+                if status in ["Filled", "PartiallyFilled", "Cancelled", "Rejected"]:
+                    if order_id:
                         await self._resolve_ws_future(order_id, order)
+                    if order_link_id:
+                        await self._resolve_ws_future(order_link_id, order)
                         
         elif topic == "execution":
             for exec_report in data:
                 order_id = exec_report.get("orderId")
+                order_link_id = exec_report.get("orderLinkId")
+                
                 if order_id:
                     synthetic_event = {
                         "orderId": order_id, 
+                        "orderLinkId": order_link_id,
                         "cumExecQty": exec_report.get("execQty"), 
-                        "avgPrice": exec_report.get("execPrice"),
+                        "avgPrice": exec_report.get("execPrice"), 
                         "orderStatus": "PartiallyFilled", 
                         "isWsExecution": True
                     }
+                    self._execution_cache[order_id] = synthetic_event
                     await self._resolve_ws_future(order_id, synthetic_event)
+                    if order_link_id:
+                        self._execution_cache[order_link_id] = synthetic_event
+                        await self._resolve_ws_future(order_link_id, synthetic_event)
 
-    async def _resolve_ws_future(self, order_id: str, data: dict):
+    async def _resolve_ws_future(self, key_id: str, data: dict):
         async with self._waiter_lock:
-            waiters = self._order_waiters.pop(order_id, [])
+            waiters = self._order_waiters.pop(key_id, [])
             for fut in waiters:
                 if not fut.done():
                     fut.set_result(data)
@@ -462,7 +551,7 @@ class BybitUnifiedExecutor:
                         val = float(total_equity)
                         if val > 0:
                             self._last_known_equity = val
-                            logger.info(f"[X-RAY] 💰 Verified Bybit {acc_type} Total Equity: ${val:.2f} USDT")
+                            logger.info(f"[X-RAY] Verified Bybit {acc_type} Total Equity: ${val:.2f} USDT")
                             return val
 
                     total_wallet = acc.get("totalWalletBalance")
@@ -470,7 +559,7 @@ class BybitUnifiedExecutor:
                         val = float(total_wallet)
                         if val > 0:
                             self._last_known_equity = val
-                            logger.info(f"[X-RAY] 💰 Verified Bybit {acc_type} Total Wallet Balance: ${val:.2f} USDT")
+                            logger.info(f"[X-RAY] Verified Bybit {acc_type} Total Wallet Balance: ${val:.2f} USDT")
                             return val
 
                     total_margin = acc.get("totalMarginBalance")
@@ -478,7 +567,7 @@ class BybitUnifiedExecutor:
                         val = float(total_margin)
                         if val > 0:
                             self._last_known_equity = val
-                            logger.info(f"[X-RAY] 💰 Verified Bybit {acc_type} Margin Balance: ${val:.2f} USDT")
+                            logger.info(f"[X-RAY] Verified Bybit {acc_type} Margin Balance: ${val:.2f} USDT")
                             return val
 
                     # 2. Probe Granular Coin Array for USDT
@@ -489,7 +578,7 @@ class BybitUnifiedExecutor:
                                 val = float(eq)
                                 if val > 0:
                                     self._last_known_equity = val
-                                    logger.info(f"[X-RAY] 💰 Verified USDT Coin Balance: ${val:.2f}")
+                                    logger.info(f"[X-RAY] Verified USDT Coin Balance: ${val:.2f}")
                                     return val
 
             except Exception as e:
@@ -601,10 +690,10 @@ class BybitUnifiedExecutor:
                 
             valid_assets.sort(key=lambda x: (x["vol_bps"] * math.log1p(x["turnover"])), reverse=True)
             top_symbols = [asset["symbol"] for asset in valid_assets[:limit]]
-            logger.info(f"[X-RAY] 📡 NEURAL VASC RADAR DISCOVERED {len(top_symbols)} QUALIFIED LIQUID NODES.")
+            logger.info(f"[X-RAY] RADAR DISCOVERED {len(top_symbols)} QUALIFIED LIQUID NODES.")
             return top_symbols if top_symbols else ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         except Exception as e:
-            logger.error(f"[X-RAY] ❌ Failed to fetch global market tickers: {e}")
+            logger.error(f"[X-RAY] Failed to fetch global market tickers: {e}")
             return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
     async def close(self):
@@ -612,6 +701,8 @@ class BybitUnifiedExecutor:
         self._is_terminating = True
         if hasattr(self, '_clock_sync_task') and self._clock_sync_task:
             self._clock_sync_task.cancel()
+        if hasattr(self, '_ws_ping_task') and self._ws_ping_task:
+            self._ws_ping_task.cancel()
         if self._ws_task:
             self._ws_task.cancel()
         if self._ws_connection and not self._ws_connection.closed:
