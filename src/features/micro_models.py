@@ -5,16 +5,22 @@ Continuous-time microstructure forecasting engine integrating zero-allocation
 feature buffers, closed-form Ornstein-Uhlenbeck calibration, vectorized BOCD, 
 Joseph-form Adaptive Sparse RLS, and fractional Eighth-Kelly optimal control.
 
-Production Hardening & Bug Fixes:
-- Path-Aware RLS Convergence: 60-second micro-learning buffer evaluates 
-  absorbing barriers (SL/TP) before applying terminal price direction labels, 
-  eradicating short-sign learning inversions.
-- True Statistical Hawkes Z-Score: Welford EWMA mean and variance tracking 
-  enables statistically valid standard-deviation thresholds for exit sentries.
-- Vectorized BOCD: Replaced iterative lgamma comprehensions with scipy.special 
-  vectorization to prevent asyncio event-loop starvation on L2 tick ingestion.
-- ZCA Whitening Supremacy: Removed unstable Cholesky transformations to preserve 
-  rotational invariance during ill-conditioned volatility spikes.
+Production Hardening & Quantitative Upgrades:
+- Flow-Conditioned Markov Likelihood: Injects real-time MLOFI Z-scores and Hawkes 
+  intensity directly into Bayesian likelihood updates, preventing catastrophic 
+  misclassification of aggressive orderbook sweeps as benign 'RANGING' regimes.
+- Range Prior Rectification: Neutralized `w_range[0] = 0.0` to eliminate linear 
+  fading of toxic flow sweeps. Price reversion is governed strictly by Ornstein-Uhlenbeck 
+  divergence and micro-dislocation rather than absorbing directional dumps.
+- Adverse Flow Selection Veto: Blocks counter-trend entries when order flow imbalance 
+  (|MLOFI_Z| > 1.75) signals toxic book depletion, unless backed by confirmed 
+  Structural Work Deficit (SWD) iceberg absorption.
+- Micro-Horizon Bracket Grounding: Anchors online RLS replay labels directly to 
+  dynamic ATR volatility boundaries (`virt_sl`, `virt_tp`) rather than static percentages.
+- Alpha Tensor Telemetry Wire: Exports `alpha_tensor_bps`, `expected_drift`, and 
+  `topology` metrics directly to the state dictionary, eliminating 0.0 bps telemetry.
+- Vectorized BOCD & ZCA Whitening: Pure NumPy/SciPy linear algebra preserves 
+  sub-millisecond execution latency and strict rotational coordinate invariance.
 """
 
 import os
@@ -65,8 +71,8 @@ class ClusterWarmStartRLS:
         w_trend[22] = 0.30  # CVD x Momentum
         w_trend[24] = 0.05  # Intercept bias
 
-        # 2. RANGE REGIME: Fades momentum, driven by OU mean-reversion and book stretch
-        w_range[0] = -0.30  # Fade MLOFI
+        # 2. RANGE REGIME: Fades price stretch and dislocation, NOT toxic volume flow
+        w_range[0] = 0.00   # Rectified: Neutralized to eradicate fading toxic dumps
         w_range[5] = -0.70  # Strong OU reversion
         w_range[12] = 0.40  # Bid depletion
         w_range[18] = -0.50 # Fade micro-dislocation
@@ -360,9 +366,7 @@ class FractionalBrownianHurstEstimator:
 
 
 class MarkedHawkesProcess:
-    """
-    Self-Exciting Bivariate Point Process with Online Standardized Z-Score Tracking.
-    """
+    """Self-Exciting Bivariate Point Process with Online Standardized Z-Score Tracking."""
     def __init__(self, decay_rate: float = 2.0):
         self.decay = decay_rate
         self.intensity_buy = 0.0
@@ -636,7 +640,7 @@ class EcosystemPropagator:
 
 
 class MarkovRegimeDetector:
-    """4-State Markov Regime Detector using Bayesian Transition Likelihoods."""
+    """4-State Markov Regime Detector incorporating flow intensity into Bayesian likelihoods."""
     def __init__(self):
         self.beliefs = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float64)
         self.tpm = np.array([
@@ -646,13 +650,20 @@ class MarkovRegimeDetector:
             [0.05, 0.05, 0.05, 0.85]
         ], dtype=np.float64)
 
-    def update_beliefs(self, er: float, entropy: float, fleeting: float, jump_z: float) -> np.ndarray:
+    def update_beliefs(self, er: float, entropy: float, fleeting: float, jump_z: float, mlofi_z: float = 0.0, hawkes_z: float = 0.0) -> np.ndarray:
         prior = self.tpm.T @ self.beliefs
 
-        l_trend = math.exp(-2.0 * ((1.0 - er) ** 2) - 1.5 * (entropy ** 2) - 3.0 * (fleeting ** 2))
-        l_range = math.exp(-2.5 * (er ** 2) - 1.5 * ((1.0 - entropy) ** 2) - 2.0 * (fleeting ** 2))
+        abs_flow = abs(mlofi_z)
+        abs_hawkes = abs(hawkes_z)
+
+        # Flow-conditioned likelihoods: Severe orderbook flow suppresses RANGING probability
+        l_trend = math.exp(-2.0 * ((1.0 - er) ** 2) - 1.5 * (entropy ** 2) - 3.0 * (fleeting ** 2)) * (1.0 + min(2.0, abs_flow * 0.5))
+        l_range = math.exp(-2.5 * (er ** 2) - 1.5 * ((1.0 - entropy) ** 2) - 2.0 * (fleeting ** 2) - 1.2 * (min(3.0, abs_flow) ** 2))
         l_spoof = math.exp(-3.0 * ((1.0 - fleeting) ** 2) - 1.0 * (er ** 2))
-        l_cascade = math.exp(-1.0 * ((3.0 - min(3.0, abs(jump_z))) ** 2))
+        
+        # Cascades are driven by simultaneous volatility jumps and extreme flow surges
+        max_stress = max(abs(jump_z), abs_hawkes, abs_flow)
+        l_cascade = math.exp(-0.75 * ((3.0 - min(3.0, max_stress)) ** 2))
 
         likelihoods = np.array([l_trend, l_range, l_spoof, l_cascade], dtype=np.float64) + 1e-6
         unnormalized = prior * likelihoods
@@ -968,11 +979,14 @@ class ContinuousMicrostructureEngine:
     ) -> Dict[str, Any]:
         now = time.time()
 
+        # Flow-Conditioned Markov Belief Update: Extreme order flow suppresses 'RANGING' regime
         regime_weights = self.regime_detector.update_beliefs(
             self.kaufman_er,
             self.shannon_entropy,
             self.fleeting_ratio,
-            self.jump_z
+            self.jump_z,
+            mlofi_z=log_mlofi_z,
+            hawkes_z=self.marked_hawkes_z
         )
         p_t, p_r, p_s, p_c = regime_weights
 
@@ -1039,6 +1053,19 @@ class ContinuousMicrostructureEngine:
         execution_style = "MAKER_ONLY" if self.hurst_h < 0.52 else "FLASH_IOC"
         action_dir = "BUY" if p_up > 0.5 else "SELL"
         prob = max(p_up, 1.0 - p_up)
+
+        # ---------------------------------------------------------------------
+        # ADVERSE ORDER FLOW SELECTION VETO
+        # Never buy into toxic sell sweeps; never short into aggressive buyer sweeps
+        # ---------------------------------------------------------------------
+        has_iceberg_absorption = self.swd_z > 2.0
+        if action_dir == "BUY" and log_mlofi_z < -1.75 and not has_iceberg_absorption:
+            prob = 0.50
+            action_dir = "HOLD"
+        elif action_dir == "SELL" and log_mlofi_z > 1.75 and not has_iceberg_absorption:
+            prob = 0.50
+            action_dir = "HOLD"
+
         self.historical_probs.append(prob)
 
         # Split-Conformal Prediction Coverage Gate (85% Coverage)
@@ -1057,22 +1084,34 @@ class ContinuousMicrostructureEngine:
         raw_regime = regime_names[int(np.argmax(regime_weights))]
         dominant_regime = self.regime_hysteresis.filter_regime(raw_regime)
 
-        # Online Continuous Micro-Horizon Learning Updates
+        # Orderbook Flow Topology Classifier
+        if log_mlofi_z < -2.0:
+            topology = "TOXIC SELL PRESSURE"
+        elif log_mlofi_z > 2.0:
+            topology = "AGGRESSIVE BUY SWEEP"
+        elif self.swd_z > 1.5:
+            topology = "INSTITUTIONAL ICEBERG"
+        elif abs(self.marked_hawkes_z) > 2.0:
+            topology = "HAWKES CASCADE"
+        else:
+            topology = "LAMINAR FLOW"
+
+        # Online Continuous Micro-Horizon Learning Updates with True Bracket Bounds
         if self.micro_learning_enabled and not self.freeze_rls:
-            self.prediction_buffer.append((now, current_price, self._v_att.copy(), p_up, p_t, p_r, p_s, p_c))
+            self.prediction_buffer.append((now, current_price, self._v_att.copy(), p_up, p_t, p_r, p_s, p_c, virt_sl, virt_tp))
             while self.prediction_buffer and (now - self.prediction_buffer[0][0]) >= self.micro_learning_horizon_sec:
-                old_ts, old_price, old_v, old_p_up, b_t, b_r, b_s, b_c = self.prediction_buffer.popleft()
+                old_ts, old_price, old_v, old_p_up, b_t, b_r, b_s, b_c, old_virt_sl, old_virt_tp = self.prediction_buffer.popleft()
                 if current_price != old_price and old_price > 0.0:
                     old_action_dir = "BUY" if old_p_up > 0.5 else "SELL"
                     
-                    # Check if the price breached the virtual stop-loss (using a conservative 1% assumption)
-                    sl_breached = (old_action_dir == "BUY" and current_price < old_price * 0.99) or \
-                                  (old_action_dir == "SELL" and current_price > old_price * 1.01)
+                    # Direction-invariant evaluation anchored to dynamic ATR brackets
+                    sl_breached = (old_action_dir == "BUY" and current_price <= old_virt_sl) or \
+                                  (old_action_dir == "SELL" and current_price >= old_virt_sl)
                     
                     if sl_breached:
-                         y_target = 0.0 if old_p_up > 0.5 else 1.0
+                        y_target = 0.0 if old_p_up > 0.5 else 1.0
                     else:
-                         y_target = 1.0 if current_price > old_price else 0.0
+                        y_target = 1.0 if current_price > old_price else 0.0
                          
                     self.calibration_errors.append(abs(y_target - old_p_up))
                     self.rls_trend.update(old_v, y_target, old_p_up, weight=b_t)
@@ -1096,7 +1135,10 @@ class ContinuousMicrostructureEngine:
             "raw_dominant_regime": raw_regime,
             "hurst_h": self.hurst_h,
             "bocd_cp_prob": self.changepoint_prob,
-            "raw_features": self._v_att.copy()
+            "raw_features": self._v_att.copy(),
+            "alpha_tensor_bps": float(raw_score * 10000.0),
+            "expected_drift": float(raw_score),
+            "topology": topology
         }
 
     def resolve_trade_outcome(self, signal_id: str, net_pnl: float, allocated_notional: float = 21.0):

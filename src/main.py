@@ -3,24 +3,23 @@ APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR
 ------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Multi-Audit Resolutions:
-- Execution Governor Flash Exit (Critical Fix): Position exit triggers in 
-  `_position_lifecycle_daemon` await `ExecutionGovernorFSM.manage_execution` 
-  immediately before breaking, dispatching sub-10ms IOC market orders instead 
-  of waiting on slow REST loops in `_state_settle_trade`.
-- 7-Second State Settlement Stall Eliminated (P0 Resolution): Decouples PnL 
-  reconciliation from the critical execution path. Instantly frees up the 
-  `LIQUIDATE_POSITION` margin locks upon exit trigger, allowing the swarm to 
-  immediately re-enter or pivot without waiting for REST settlement queries.
-- Event-Loop Starvation & Task Shedding Veto (P0 Resolution): `track_task` 
-  now enforces backpressure strictly on entry evaluations but guarantees that 
-  lifecycle daemons and exit closures are NEVER shed during 350+ task overload.
-- Hedge-Mode Race Condition Eradicated (P1 Resolution): Explicitly enforces 
-  `positionIdx` parameters on all emergency escape and residual sweep `Market` 
-  orders, eliminating Bybit 10001 Rejections if One-Way mode switches fail.
-- Single Source of Truth for Leverage (P1 Resolution): Derives aggregate 
-  portfolio leverage headroom dynamically from `self.live_params["LEVERAGE_CAP"]`
-  ensuring RiskVault, SOR, and Engine sizes align to identical margin boundaries.
+Production Hardening & Quantitative Upgrades:
+- Macro Trend Direction Filter: Blocks counter-trend short positions on altcoins 
+  when parent macro drivers (BTC/ETH flow > +0.40) or cross-asset sector impulses 
+  (> +0.15) indicate broad market upward momentum.
+- Telemetry Wire Rectification: Seamlessly pipes `alpha_tensor_bps`, `expected_drift`, 
+  and `topology` from `extract_statistical_state` directly into dispatch payloads, 
+  eradicating the 0.0 bps alpha tensor diagnostic display.
+- Position Notional Normalization: Hard-clamps single-position notional allocations 
+  to a maximum 35% portfolio heat ceiling, preventing oversized outlier losses 
+  from neutralizing multiple winning trades.
+- State Settlement Decoupling: Releases `LIQUIDATE_POSITION` margin locks immediately 
+  upon exit trigger while offloading closed-PnL reconciliation sweeps to an asynchronous 
+  background worker, eliminating the 7-second execution freeze.
+- Hedge-Mode Resiliency: Passes explicit `position_idx` parameters through execution 
+  contexts, preventing Bybit 10001 parameter rejections during emergency market orders.
+- Task Queue Backpressure: Preserves exit and lifecycle daemons under load while 
+  shedding non-critical entry evaluations during high-volatility bursts (>350 tasks).
 """
 
 import os
@@ -299,9 +298,9 @@ class DistributedQuantEngine:
 
     def track_task(self, coro: Any, is_critical: bool = False):
         """
-        P0 FIX: Asynchronous Task Scheduler with Critical Overrides.
-        Enforces backpressure on standard L2 ingestion (shedding tasks when flooded)
-        while guaranteeing that exit routines and lifecycles are NEVER dropped.
+        Asynchronous Task Scheduler with Critical Overrides.
+        Throttles entry signals when task count exceeds 350, but guarantees that
+        lifecycle management and exit closures are never dropped.
         """
         if len(self._active_tasks) > 350 and not is_critical:
             now = time.time()
@@ -617,7 +616,7 @@ class DistributedQuantEngine:
                 if current_vault_balance <= 0.0:
                     continue
 
-                # Single Source of Truth: Centralized Risk Vault Drawdown Update
+                # Centralized Risk Vault Drawdown Update
                 daily_dd, systemic_dd, is_breached = await self.risk_vault.update_balance_atomic(current_vault_balance)
 
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -709,7 +708,7 @@ class DistributedQuantEngine:
                 except Exception:
                     pass
 
-            # P0 FIX: Strict Conflation Throttle to prevent Asyncio Event Loop Starvation
+            # Conflation Throttle to prevent Asyncio Event Loop Starvation
             if now - self.last_eval_time.get(symbol + "_eval_throttle", 0.0) < 0.20:
                 return
 
@@ -720,7 +719,6 @@ class DistributedQuantEngine:
             self._evaluating_symbols.add(symbol)
             tick_prices_copy = list(stat_engine.tick_prices) if stat_engine else []
 
-        # P0 FIX: Track entry evaluations as non-critical so they can be shed if flooded
         self.track_task(self._eval_gate_wrapper(symbol, rich_payload, stat_engine, now, tick_prices_copy), is_critical=False)
 
     async def _eval_gate_wrapper(self, symbol: str, ob_payload: dict, stat_engine: ContinuousMicrostructureEngine, now: float, tick_prices_snapshot: list):
@@ -860,10 +858,20 @@ class DistributedQuantEngine:
             action = state["action_dir"]
             dynamic_gate = state.get("dynamic_gate", 0.52)
 
-            if prob_success < dynamic_gate:
+            if action == "HOLD" or prob_success < dynamic_gate:
                 if now - self.last_eval_time.get(symbol + "_gate_diag", 0.0) > 120.0:
-                    logger.info(f"[RADAR] {symbol} Filtered: Prob {prob_success:.1%} < Gate {dynamic_gate:.1%}")
+                    logger.info(f"[RADAR] {symbol} Filtered: Action={action} | Prob {prob_success:.1%} < Gate {dynamic_gate:.1%}")
                     self.last_eval_time[symbol + "_gate_diag"] = now
+                return
+
+            # MACRO TREND DIRECTION FILTER: Veto shorting into positive macro driver regimes
+            if action == "SELL" and (parent_flow > 0.40 or sector_impulse > 0.15):
+                if now - self.last_eval_time.get(symbol + "_macro_short_veto", 0.0) > 60.0:
+                    logger.info(
+                        f"[RADAR] {symbol} SELL Vetoed: Positive Macro Tailwinds "
+                        f"(Parent OFI: {parent_flow:+.2f}, Sector: {sector_impulse:+.2f})"
+                    )
+                    self.last_eval_time[symbol + "_macro_short_veto"] = now
                 return
 
             is_armed = self.ram_dna_cache.get(symbol, {"is_armed": True}).get("is_armed", True)
@@ -910,7 +918,11 @@ class DistributedQuantEngine:
             corr_haircut = self.risk_vault.calculate_correlation_haircut(symbol)
             haircut_notional = raw_notional * corr_haircut
 
-            # P1 FIX: Atomic Pre-Flight Capacity Evaluation using SSOT Leverage Cap (1.90x safe headroom)
+            # POSITION NOTIONAL NORMALIZATION: Hard-clamp to max 35% portfolio heat per position
+            single_notional_cap = max(6.50, current_bal * 0.35)
+            clamped_notional = min(haircut_notional, single_notional_cap)
+
+            # Atomic Pre-Flight Capacity Evaluation using SSOT Leverage Cap (1.90x safe headroom)
             vault_leverage_limit = float(self.live_params.get("LEVERAGE_CAP", getattr(self.risk_vault, "max_leverage", 2.0)))
             safe_leverage_headroom = min(2.0, vault_leverage_limit) * 0.95
             max_portfolio_heat = current_bal * safe_leverage_headroom
@@ -928,7 +940,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_heat_deadlock"] = now
                 return
 
-            target_notional = float(np.clip(haircut_notional, 6.50, remaining_notional_capacity))
+            target_notional = float(np.clip(clamped_notional, 6.50, remaining_notional_capacity))
 
             # Active Single-Position Risk Cap Enforcement: Passes sl_dist_pct to vault
             is_safe, risk_reason = await self.risk_vault.evaluate_portfolio_safety(
@@ -956,7 +968,6 @@ class DistributedQuantEngine:
             )
 
             try:
-                # P1 FIX: Inject SSOT Leverage directly to Exchange
                 await self.executor.adjust_leverage(symbol, int(vault_leverage_limit))
             except Exception as e:
                 logger.warning(f"[X-RAY] Leverage adjustment bypassed for {symbol}: {e}")
@@ -992,9 +1003,21 @@ class DistributedQuantEngine:
                     ]
                 }
 
+            # TELEMETRY WIRE RECTIFICATION: Pipes alpha tensor & microstructure topology
             safe_features = {
-                "symbol": symbol, "market_regime": dominant_regime, "virtual_sl": sl_price, "virtual_tp": tp_price,
-                "log_mlofi_z": log_mlofi_z, "hawkes_z": getattr(stat_engine, 'marked_hawkes_z', 0.0), "sector_impulse": sector_impulse, "bid_ask_spread": 0.001
+                "symbol": symbol,
+                "market_regime": dominant_regime,
+                "virtual_sl": sl_price,
+                "virtual_tp": tp_price,
+                "log_mlofi_z": log_mlofi_z,
+                "hawkes_z": getattr(stat_engine, 'marked_hawkes_z', 0.0),
+                "sector_impulse": sector_impulse,
+                "bid_ask_spread": 0.001,
+                "alpha_tensor_bps": state.get("alpha_tensor_bps", 0.0),
+                "expected_drift": state.get("expected_drift", 0.0),
+                "topology": state.get("topology", "LAMINAR FLOW"),
+                "markov_beliefs": state.get("markov_beliefs", {}),
+                "bocd_cp_prob": state.get("bocd_cp_prob", 0.0)
             }
 
             if self.memory:
@@ -1008,7 +1031,6 @@ class DistributedQuantEngine:
             specs = self.sor.instrument_cache.get(symbol, {})
             qty_step_str = str(specs.get("qty_step", Decimal("0.1")))
 
-            # P0 FIX: Track position lifecycle daemon as highly critical (Never drop)
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
                 symbol, sig_id, action, avg_fill_price, atr,
                 {"allocated_value_usdt": target_notional, "size": actual_qty_filled, "arrival_price": arrival_price, "qty_step": qty_step_str},
@@ -1203,7 +1225,6 @@ class DistributedQuantEngine:
                 side = "Sell" if pos_list[0]["side"] == "Buy" else "Buy"
                 qty_str = self.sor._format_qty_str(remaining_qty, symbol)
 
-                # P1 FIX: Enforce native positionIdx on Market Sweeps to eradicate Hedge Mode Race Condition
                 await self.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True,
                     category="linear", symbol=symbol, side=side,
@@ -1313,7 +1334,8 @@ class DistributedQuantEngine:
             "max_drawdown_pct": self.risk_vault.max_drawdown_pct,
             "active_positions_count": len(self.active_positions_map),
             "payload_features": {},
-            "exec_details": {}
+            "exec_details": {},
+            "position_idx": self.sor.position_idx
         }
 
         async with self.execution_semaphore:
@@ -1396,7 +1418,6 @@ class DistributedQuantEngine:
                         logger.critical(f"[X-RAY] ADVERSE STRESS SENTRY // {symbol}: {stress_reason}. Ejecting!")
                         ctx["exit_trigger_price"] = current_price
                         self.fsm.trigger_asset_lock(symbol, 300)
-                        # Immediate market IOC execution via governor
                         await ExecutionGovernorFSM.manage_execution(
                             decision=IntelligentExitEngine.evaluate(ctx, state),
                             state=state, ctx=ctx, executor=self.executor
@@ -1420,7 +1441,6 @@ class DistributedQuantEngine:
                 if decision.action in ["EXIT", "CLOSE", "EMERGENCY"]:
                     logger.critical(f"[X-RAY] POSITION EXIT TRIGGERED // {symbol}: {decision.reason}")
                     ctx["exit_trigger_price"] = current_price
-                    # Execute flash exit order immediately before breaking
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
                     break
 
@@ -1431,11 +1451,10 @@ class DistributedQuantEngine:
                     ctx["exit_trigger_price"] = current_price
                     break
 
-            # P0 FIX: 7-Second State Settlement Stall Eliminated
             # Instantly release local execution locks so the swarm can re-enter immediately
             self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"]})
             
-            # Fire-and-forget the final residual sweeps and PnL polling into the background
+            # Offload final residual sweeps and PnL polling into the background
             self.track_task(self._state_settle_trade(ctx), is_critical=True)
 
         except Exception as e:
@@ -1448,7 +1467,6 @@ class DistributedQuantEngine:
                 side = "Sell" if is_sell else "Buy"
                 qty_str = self.sor._format_qty_str(qty, symbol)
                 logger.critical(f"[X-RAY] EMERGENCY FLATTEN // {symbol} {side} {qty_str} units via IOC Market.")
-                # P1 FIX: Enforce native positionIdx on Market Sweeps to eradicate Hedge Mode Race Condition
                 await self.executor.safe_call(
                     "POST", "/v5/order/create", is_execution=True,
                     category="linear", symbol=symbol, side=side,

@@ -1,19 +1,22 @@
 """
-V40.4 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+V40.5 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
 Hyper-optimized Supabase connector and Transaction Cost Analysis (TCA) ledger.
 
-Architectural Supremacy (V40.4 Production Upgrades):
-- Fast-Path SQLite Decoupling (P1 Resolution): Migrates the active session ledger 
-  to an in-memory SQLite database (`:memory:`) for sub-millisecond KNN lookups. 
-  Completely decouples the real-time execution gate from synchronous Supabase 
-  read latency, ensuring zero event-loop starvation during volatile spikes.
-- Lossless Shutdown Flush: Drains and dispatches all queued records in micro-batches
-  before canceling background worker tasks, ensuring zero data loss.
-- Granular TCA Attribution: Captures separate entry, exit, and total execution
-  slippage (bps) alongside exchange fees and funding drag for post-trade analytics.
-- Zero-Downtime Holographic Matrix: Pure NumPy local fallback keeps Bayesian 
-  DNA clustering and edge calculations online during network drops or Supabase outages.
+Architectural Supremacy (V40.5 Production Upgrades):
+- Metric Distortion Resolution: Corrected slippage aggregator in 
+  `get_forensic_execution_summary()`. Eradicated duplicate `* 10000.0` scalar on 
+  `slippage_drag` (which is already stored in basis points), fixing the -2622.6 bps anomaly.
+- True Bracket Shadow Forensics: Added `virtual_sl` and `virtual_tp` to the SQLite 
+  in-memory schema and sync pipeline. Shadow prediction evaluations now resolve 
+  against actual model volatility brackets rather than hardcoded 1% / 1.5% levels.
+- Thread/Async SQLite Concurrency Shield: Protected SQLite cursor executions and 
+  commits with an `asyncio.Lock()` to prevent cursor collision and state corruption 
+  across concurrent coroutines.
+- Fast-Path SQLite Decoupling: In-memory SQLite engine (`:memory:`) provides sub-millisecond 
+  KNN queries, fully isolating execution gates from cloud network jitter.
+- Lossless Shutdown Flush: Coalesces and flushes all queued mutations in micro-batches 
+  before terminating background tasks.
 """
 
 import os
@@ -32,7 +35,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    V40.4 PURE-ASYNC FORENSIC LEDGER
+    V40.5 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
     DNA clustering with batched cloud persistence and ultra-fast SQLite local reads.
     """
@@ -55,6 +58,9 @@ class MemoryBank:
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self.cache_ttl_seconds: float = 120.0
 
+        # Concurrency Lock for In-Memory SQLite
+        self._db_lock = asyncio.Lock()
+
         # Tier-2 Fast-Path Cache (SQLite In-Memory)
         self._init_sqlite()
 
@@ -71,7 +77,7 @@ class MemoryBank:
         self._is_shutting_down = False
 
     def _init_sqlite(self):
-        """Initializes the ultra-fast local SQLite in-memory replica for non-blocking reads."""
+        """Initializes the local SQLite in-memory replica with full bracket schema."""
         self.local_db = sqlite3.connect(':memory:', check_same_thread=False)
         self.local_db.row_factory = sqlite3.Row
         self.local_cursor = self.local_db.cursor()
@@ -93,11 +99,13 @@ class MemoryBank:
                 is_shadow BOOLEAN,
                 fees_usdt REAL,
                 slippage_drag REAL,
-                holding_minutes REAL
+                holding_minutes REAL,
+                virtual_sl REAL,
+                virtual_tp REAL
             )
         ''')
-        self.local_cursor.execute('CREATE INDEX idx_sym_res_ts ON quantitative_ledger(symbol, resolved, timestamp DESC)')
-        self.local_cursor.execute('CREATE INDEX idx_unresolved ON quantitative_ledger(resolved, timestamp ASC)')
+        self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_sym_res_ts ON quantitative_ledger(symbol, resolved, timestamp DESC)')
+        self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_unresolved ON quantitative_ledger(resolved, timestamp ASC)')
         self.local_db.commit()
 
     async def _warm_sqlite_from_cloud(self):
@@ -106,29 +114,31 @@ class MemoryBank:
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
-                .select("signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes")
+                .select("signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp")
                 .order("timestamp", desc=True)
                 .limit(15000)
             )
             response = await self._safe_execute_async(query)
             rows = response.data if response else []
             
-            for r in rows:
-                self.local_cursor.execute('''
-                    INSERT OR IGNORE INTO quantitative_ledger 
-                    (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    r.get("signal_id"), r.get("timestamp"), r.get("symbol"), r.get("predicted_direction"),
-                    r.get("price_at_prediction"), 1 if r.get("is_correct") else 0, r.get("vol_mult"),
-                    r.get("log_mlofi_z"), r.get("spread"), r.get("net_pnl") or 0.0, r.get("actual_outcome"),
-                    1 if r.get("resolved") else 0, 1 if r.get("is_shadow") else 0,
-                    r.get("fees_usdt") or 0.0, r.get("slippage_drag") or 0.0, r.get("holding_minutes") or 0.0
-                ))
-            self.local_db.commit()
+            async with self._db_lock:
+                for r in rows:
+                    self.local_cursor.execute('''
+                        INSERT OR IGNORE INTO quantitative_ledger 
+                        (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        r.get("signal_id"), r.get("timestamp"), r.get("symbol"), r.get("predicted_direction"),
+                        r.get("price_at_prediction"), 1 if r.get("is_correct") else 0, r.get("vol_mult"),
+                        r.get("log_mlofi_z"), r.get("spread"), r.get("net_pnl") or 0.0, r.get("actual_outcome"),
+                        1 if r.get("resolved") else 0, 1 if r.get("is_shadow") else 0,
+                        r.get("fees_usdt") or 0.0, r.get("slippage_drag") or 0.0, r.get("holding_minutes") or 0.0,
+                        r.get("virtual_sl") or 0.0, r.get("virtual_tp") or 0.0
+                    ))
+                self.local_db.commit()
             logger.info(f"✅ SQLite warm-up complete. Pre-loaded {len(rows)} historical records.")
         except Exception as e:
-            logger.warning(f"⚠️ SQLite warm-up failed, falling back to empty local cache: {e}")
+            logger.warning(f"⚠️ SQLite warm-up failed, continuing with empty local cache: {e}")
 
     async def start(self):
         """Initializes the async write queue, pre-warms SQLite, and starts the batching worker."""
@@ -322,18 +332,19 @@ class MemoryBank:
         tp_price = float(features.get("virtual_tp", price * 1.015))
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
-        # 1. Update SQLite Local Fast-Path Replica
+        # 1. Update SQLite Local Fast-Path Replica (Protected by Async Lock)
         try:
-            self.local_cursor.execute('''
-                INSERT INTO quantitative_ledger 
-                (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                str(signal_id), iso_timestamp, symbol, str(direction).upper(), float(price),
-                0, float(vol_mult), float(log_mlofi_z), float(spread), 0.0, None, 0, 1 if is_shadow else 0,
-                0.0, 0.0, 0.0
-            ))
-            self.local_db.commit()
+            async with self._db_lock:
+                self.local_cursor.execute('''
+                    INSERT INTO quantitative_ledger 
+                    (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    str(signal_id), iso_timestamp, symbol, str(direction).upper(), float(price),
+                    0, float(vol_mult), float(log_mlofi_z), float(spread), 0.0, None, 0, 1 if is_shadow else 0,
+                    0.0, 0.0, 0.0, sl_price, tp_price
+                ))
+                self.local_db.commit()
         except Exception as e:
             logger.debug(f"Local SQLite insert fault: {e}")
 
@@ -404,22 +415,23 @@ class MemoryBank:
         duration_minutes = 0.0
 
         try:
-            # P1 Upgrade: Instantly query local SQLite instead of blocking on Supabase
-            self.local_cursor.execute("SELECT timestamp FROM quantitative_ledger WHERE signal_id = ?", (str(signal_id),))
-            row = self.local_cursor.fetchone()
+            async with self._db_lock:
+                self.local_cursor.execute("SELECT timestamp FROM quantitative_ledger WHERE signal_id = ?", (str(signal_id),))
+                row = self.local_cursor.fetchone()
+
+                if row:
+                    start_dt = self._parse_iso_timestamp(row["timestamp"])
+                    duration_minutes = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
+
+                    # 1. Update SQLite Fast-Path Replica
+                    self.local_cursor.execute('''
+                        UPDATE quantitative_ledger
+                        SET resolved = 1, actual_outcome = ?, net_pnl = ?, is_correct = ?, fees_usdt = ?, slippage_drag = ?, holding_minutes = ?
+                        WHERE signal_id = ?
+                    ''', (str(outcome), float(net_pnl), 1 if is_correct else 0, fees, float(slippage), duration_minutes, str(signal_id)))
+                    self.local_db.commit()
 
             if row:
-                start_dt = self._parse_iso_timestamp(row["timestamp"])
-                duration_minutes = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
-
-                # 1. Update SQLite Fast-Path Replica
-                self.local_cursor.execute('''
-                    UPDATE quantitative_ledger
-                    SET resolved = 1, actual_outcome = ?, net_pnl = ?, is_correct = ?, fees_usdt = ?, slippage_drag = ?, holding_minutes = ?
-                    WHERE signal_id = ?
-                ''', (str(outcome), float(net_pnl), 1 if is_correct else 0, fees, float(slippage), duration_minutes, str(signal_id)))
-                self.local_db.commit()
-
                 # 2. Queue for Batched Cloud Storage
                 update_payload = {
                     "resolved": True,
@@ -454,21 +466,21 @@ class MemoryBank:
         age_cutoff: float, 
         interval_mins: float = 15.0
     ) -> int:
-        """Resolves shadow signals against price history using the local SQLite queue."""
+        """Resolves shadow signals against price history using the local SQLite queue with true volatility brackets."""
         if not self.write_queue:
             return 0
         resolved_count = 0
 
         try:
-            # P1 Upgrade: Scan unresolved rows from Local SQLite (Zero Network Latency)
-            self.local_cursor.execute('''
-                SELECT signal_id, timestamp, symbol, price_at_prediction, predicted_direction
-                FROM quantitative_ledger
-                WHERE resolved = 0
-                ORDER BY timestamp ASC
-                LIMIT 500
-            ''')
-            unresolved_rows = [dict(r) for r in self.local_cursor.fetchall()]
+            async with self._db_lock:
+                self.local_cursor.execute('''
+                    SELECT signal_id, timestamp, symbol, price_at_prediction, predicted_direction, virtual_sl, virtual_tp
+                    FROM quantitative_ledger
+                    WHERE resolved = 0
+                    ORDER BY timestamp ASC
+                    LIMIT 500
+                ''')
+                unresolved_rows = [dict(r) for r in self.local_cursor.fetchall()]
 
             if not unresolved_rows:
                 return 0
@@ -481,8 +493,9 @@ class MemoryBank:
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
 
-                sl_price = entry_price * 0.99
-                tp_price = entry_price * 1.015
+                # Evaluate using true recorded volatility brackets
+                sl_price = float(row.get("virtual_sl") or (entry_price * 0.99 if prediction == "BUY" else entry_price * 1.01))
+                tp_price = float(row.get("virtual_tp") or (entry_price * 1.02 if prediction == "BUY" else entry_price * 0.98))
                 p_data = current_prices.get(symbol)
 
                 row_time = self._parse_iso_timestamp(row["timestamp"])
@@ -571,15 +584,16 @@ class MemoryBank:
 
             if update_batch:
                 # 1. Update SQLite Replica Immediately
-                for row in update_batch:
-                    self.local_cursor.execute('''
-                        UPDATE quantitative_ledger
-                        SET resolved = 1, actual_outcome = ?, net_pnl = ?, is_correct = ?, holding_minutes = ?
-                        WHERE signal_id = ?
-                    ''', (row["actual_outcome"], row["net_pnl"], 1 if row["is_correct"] else 0, row["holding_minutes"], row["signal_id"]))
-                self.local_db.commit()
+                async with self._db_lock:
+                    for row in update_batch:
+                        self.local_cursor.execute('''
+                            UPDATE quantitative_ledger
+                            SET resolved = 1, actual_outcome = ?, net_pnl = ?, is_correct = ?, holding_minutes = ?
+                            WHERE signal_id = ?
+                        ''', (row["actual_outcome"], row["net_pnl"], 1 if row["is_correct"] else 0, row["holding_minutes"], row["signal_id"]))
+                    self.local_db.commit()
 
-                # 2. Queue for Cloud Sync
+                # 2. Queue for Batched Cloud Sync
                 chunk_size = 100
                 for i in range(0, len(update_batch), chunk_size):
                     chunk = update_batch[i:i + chunk_size]
@@ -595,14 +609,15 @@ class MemoryBank:
     async def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
         """Assesses shadow asset performance instantly via Local SQLite Fast-Path."""
         try:
-            self.local_cursor.execute('''
-                SELECT net_pnl, is_correct
-                FROM quantitative_ledger
-                WHERE resolved = 1 AND symbol = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            ''', (target_symbol, window_trades))
-            rows = self.local_cursor.fetchall()
+            async with self._db_lock:
+                self.local_cursor.execute('''
+                    SELECT net_pnl, is_correct
+                    FROM quantitative_ledger
+                    WHERE resolved = 1 AND symbol = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (target_symbol, window_trades))
+                rows = self.local_cursor.fetchall()
 
             if len(rows) < 35:
                 return {
@@ -666,15 +681,16 @@ class MemoryBank:
 
         try:
             # 2. Tier-2 SQLite Fast-Path Lookup (Instant/Zero Network)
-            self.local_cursor.execute('''
-                SELECT is_correct, vol_mult, log_mlofi_z, spread, price_at_prediction
-                FROM quantitative_ledger
-                WHERE resolved = 1 AND symbol = ?
-                ORDER BY timestamp DESC
-                LIMIT 2000
-            ''', (target_symbol,))
-            
-            rows = self.local_cursor.fetchall()
+            async with self._db_lock:
+                self.local_cursor.execute('''
+                    SELECT is_correct, vol_mult, log_mlofi_z, spread, price_at_prediction
+                    FROM quantitative_ledger
+                    WHERE resolved = 1 AND symbol = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 2000
+                ''', (target_symbol,))
+                rows = self.local_cursor.fetchall()
+
             historical_data = [{
                 "is_correct": bool(r["is_correct"]),
                 "vol_mult": r["vol_mult"],
@@ -799,15 +815,19 @@ class MemoryBank:
             }
 
     async def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
-        """Queries today's executed trades via the fast-path SQLite covering index for dashboard telemetry."""
+        """
+        Queries today's executed trades via the fast-path SQLite covering index.
+        Fixes the metric distortion bug: slippage_drag is already stored in basis points,
+        so redundant multiplication by 10,000 is eliminated.
+        """
         try:
-            self.local_cursor.execute('''
-                SELECT net_pnl, fees_usdt, slippage_drag, holding_minutes, is_correct, symbol
-                FROM quantitative_ledger
-                WHERE resolved = 1 AND is_shadow = 0 AND timestamp >= ?
-            ''', (today_iso_start,))
-            
-            rows = self.local_cursor.fetchall()
+            async with self._db_lock:
+                self.local_cursor.execute('''
+                    SELECT net_pnl, fees_usdt, slippage_drag, holding_minutes, is_correct, symbol
+                    FROM quantitative_ledger
+                    WHERE resolved = 1 AND is_shadow = 0 AND timestamp >= ?
+                ''', (today_iso_start,))
+                rows = self.local_cursor.fetchall()
 
             if not rows:
                 return {
@@ -825,7 +845,8 @@ class MemoryBank:
                 "trade_count": len(rows),
                 "net_pnl": round(sum(pnls), 4),
                 "fees_paid": round(sum(fees), 4),
-                "avg_slippage_bps": round(float(np.mean(slips)) * 10000.0, 2) if slips else 0.0,
+                # FIX: slippage_drag is already captured in basis points (bps)
+                "avg_slippage_bps": round(float(np.mean(slips)), 2) if slips else 0.0,
                 "avg_holding_mins": round(float(np.mean(durations)), 1) if durations else 0.0,
                 "win_rate": round(wins / len(rows), 4)
             }
