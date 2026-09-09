@@ -3,7 +3,10 @@ APEX TITAN: TITANIUM API EXECUTOR (BYBIT V5)
 --------------------------------------------------------
 Cloud-resilient, zero-latency unified Bybit V5 exchange execution connector.
 
-Production Hardening & Compliance Upgrades (Exchange Desk Certification):
+Production Hardening & Compliance Upgrades (V43.0 Audit Remediations):
+- Expanded Recv-Window Tolerance (Error 10002 Remediation): Broadened `X-BAPI-RECV-WINDOW` 
+  headers from 5000ms to 15000ms across all REST requests and signatures. Eradicates 
+  timestamp drift errors caused by Render cloud container clock skew.
 - Self-Trade Prevention (STP) Enforcement: Automatically injects `smpType="CancelMaker"`
   into order creation payloads to eliminate self-matching against resting inventory
   or delta-neutral cash-and-carry hedges.
@@ -139,7 +142,7 @@ class BybitUnifiedExecutor:
             )
             self.session = aiohttp.ClientSession(
                 connector=connector, 
-                timeout=aiohttp.ClientTimeout(total=10.0, connect=4.0)
+                timeout=aiohttp.ClientTimeout(total=15.0, connect=6.0)
             )
         await self.calibrate_server_time()
         
@@ -181,7 +184,8 @@ class BybitUnifiedExecutor:
                 logger.debug(f"Continuous clock sync iteration bypassed: {e}")
 
     def _generate_signature(self, timestamp: str, payload: str) -> str:
-        param_str = f"{timestamp}{self.api_key}5000{payload}"
+        # Expanded recv_window inclusion (15000ms) matches header expectation
+        param_str = f"{timestamp}{self.api_key}15000{payload}"
         return hmac.new(self.api_secret.encode("utf-8"), param_str.encode("utf-8"), hashlib.sha256).hexdigest()
 
     async def _query_order_by_link_id(self, category: str, symbol: str, order_link_id: str) -> Optional[Dict[str, Any]]:
@@ -195,7 +199,7 @@ class BybitUnifiedExecutor:
                 "X-BAPI-API-KEY": self.api_key,
                 "X-BAPI-TIMESTAMP": timestamp,
                 "X-BAPI-SIGN": sig,
-                "X-BAPI-RECV-WINDOW": "5000",
+                "X-BAPI-RECV-WINDOW": "15000",  # Expanded window to absorb container clock drift
                 "Content-Type": "application/json"
             }
             url = f"{self.rest_base_url}/v5/order/realtime?{query_str}"
@@ -221,7 +225,6 @@ class BybitUnifiedExecutor:
         if is_order_create:
             if "orderLinkId" not in kwargs or not kwargs["orderLinkId"]:
                 kwargs["orderLinkId"] = f"APEX_{uuid.uuid4().hex[:16]}"
-            # STP ENFORCEMENT: Guard against self-matching
             if "smpType" not in kwargs:
                 kwargs["smpType"] = "CancelMaker"
 
@@ -231,7 +234,6 @@ class BybitUnifiedExecutor:
         symbol = clean_kwargs.get("symbol", "")
 
         for attempt in range(3):
-            # Pre-Retry Idempotency Verification for order creation
             if attempt > 0 and is_order_create and order_link_id and symbol:
                 logger.warning(f"[X-RAY] Verifying order existence on Bybit before retry: {order_link_id}")
                 existing_order = await self._query_order_by_link_id(category, symbol, order_link_id)
@@ -268,7 +270,7 @@ class BybitUnifiedExecutor:
                     "X-BAPI-API-KEY": self.api_key,
                     "X-BAPI-TIMESTAMP": timestamp,
                     "X-BAPI-SIGN": signature,
-                    "X-BAPI-RECV-WINDOW": "5000",
+                    "X-BAPI-RECV-WINDOW": "15000",  # Expanded window prevents Error 10002 drift rejections
                     "Content-Type": "application/json"
                 }
 
@@ -293,7 +295,6 @@ class BybitUnifiedExecutor:
 
                 ret_code = response.get("retCode", -1)
                 
-                # Duplicate Order Link ID Resolution
                 if ret_code == BybitRetCode.DUPLICATE_ORDER_LINK_ID and is_order_create and order_link_id:
                     existing_order = await self._query_order_by_link_id(category, symbol, order_link_id)
                     real_id = existing_order.get("orderId", order_link_id) if existing_order else order_link_id
@@ -308,7 +309,6 @@ class BybitUnifiedExecutor:
                         }
                     }
 
-                # Non-throwing Compliance Quarantine for 110126
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = clean_kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
@@ -392,8 +392,7 @@ class BybitUnifiedExecutor:
                 await asyncio.sleep(20.0)
                 if not ws.closed:
                     await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
-                    
-                # Watchdog: Disconnect if no message/pong received for over 45 seconds
+                
                 if time.time() - self._last_ws_msg_time > 45.0:
                     logger.warning("[X-RAY] WS Watchdog Timeout (>45s inactivity). Forcing reconnect.")
                     await ws.close()
@@ -417,7 +416,6 @@ class BybitUnifiedExecutor:
                     self._last_ws_msg_time = time.time()
                     backoff = 1.0
 
-                    # Authenticate private feed
                     expires = int(time.time() * 1000) + self._server_time_offset_ms + 10000
                     signature = hmac.new(
                         self.api_secret.encode("utf-8"), 
@@ -445,7 +443,6 @@ class BybitUnifiedExecutor:
 
                     await ws.send_json({"op": "subscribe", "args": ["execution", "order"]})
 
-                    # Spawn dedicated ping loop with watchdog
                     if self._ws_ping_task and not self._ws_ping_task.done():
                         self._ws_ping_task.cancel()
                     self._ws_ping_task = asyncio.create_task(self._ws_ping_loop(ws))
@@ -565,7 +562,6 @@ class BybitUnifiedExecutor:
                     
                     acc = accounts[0]
                     
-                    # 1. Probe Top-Level UTA Portfolio Metrics
                     total_equity = acc.get("totalEquity")
                     if total_equity not in (None, "", "0"):
                         val = float(total_equity)
@@ -590,7 +586,6 @@ class BybitUnifiedExecutor:
                             logger.info(f"[X-RAY] Verified Bybit {acc_type} Margin Balance: ${val:.2f} USDT")
                             return val
 
-                    # 2. Probe Granular Coin Array for USDT
                     for coin_info in acc.get("coin", []):
                         if coin_info.get("coin") == "USDT":
                             eq = coin_info.get("equity") or coin_info.get("walletBalance")

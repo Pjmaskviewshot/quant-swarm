@@ -1,5 +1,5 @@
 """
-V42.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
+V43.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
 --------------------------------------------------------------------------------
 Institutional-grade execution nexus featuring atomic inline bracket orders,
 zero-latency post-fill stop-loss anchoring, Avellaneda-Stoikov continuous
@@ -7,7 +7,7 @@ inventory reservation pricing, sub-millisecond execution telemetry, Perold (1988
 Implementation Shortfall (IS) tracking, pure Decimal lot-quantization, and 
 contention-free token-bucket rate governance.
 
-Production Hardening & Quantitative Upgrades (V42.0):
+Production Hardening & Quantitative Upgrades (V43.0 Audit Remediations):
 - Idempotent Selective Bracket Payloads (P0 Resolution): Dynamically isolates 
   `stopLoss` and `takeProfit` attributes in `_amend_trailing_stop`. Eliminates 
   Bybit 10001 parameter errors caused by passing '0.0' for unamended take-profit levels.
@@ -18,8 +18,9 @@ Production Hardening & Quantitative Upgrades (V42.0):
   110043, 'not modified', 'same') without logging false-positive exceptions.
 - Scientific Notation Sanitization: Converts floating-point numbers into fixed-point 
   Decimal strings, eliminating exchange rejection on low-denomination meme tokens.
-- MarkPrice Clash Recalibration: Clamps stop-loss prices to a safe 35 bps cushion 
-  if market velocity causes the calculated stop to cross prevailing mark price.
+- MarkPrice Clash Recalibration (Bug Fix): Dynamically clamps trailing stop prices 
+  with an expanded 45 bps safety cushion against prevailing Mark Price before dispatch, 
+  eradicating exchange stop rejections during fast momentum surges.
 """
 
 import os
@@ -221,7 +222,6 @@ class SmartOrderRouter:
 
         await self._rate_limit_acquire()
         try:
-            # 1. Direct Anchor Fast-Path
             res = await self.executor.safe_call(
                 "POST", "/v5/position/trading-stop", is_execution=True, **payload
             )
@@ -231,7 +231,6 @@ class SmartOrderRouter:
                 logger.info(f"[SOR_SENTRY] Stops anchored directly on {symbol} (SL: {sl}, TP: {tp}).")
                 return
 
-            # 2. Resiliency Fallback: Mark Price Clash Reconciliation
             pos_res = await self.executor.safe_call(
                 "GET", "/v5/position/list", category="linear", symbol=symbol
             )
@@ -245,17 +244,17 @@ class SmartOrderRouter:
             if sl and sl > 0.0:
                 anchored_sl = sl
                 if is_buy and anchored_sl >= mark_price:
-                    anchored_sl = mark_price * 0.9965
+                    anchored_sl = mark_price * 0.9955
                 elif not is_buy and anchored_sl <= mark_price:
-                    anchored_sl = mark_price * 1.0035
+                    anchored_sl = mark_price * 1.0045
                 payload["stopLoss"] = self._format_price_str(anchored_sl, symbol)
 
             if tp and tp > 0.0:
                 anchored_tp = tp
                 if is_buy and anchored_tp <= mark_price:
-                    anchored_tp = mark_price * 1.0035
+                    anchored_tp = mark_price * 1.0045
                 elif not is_buy and anchored_tp >= mark_price:
-                    anchored_tp = mark_price * 0.9965
+                    anchored_tp = mark_price * 0.9955
                 payload["takeProfit"] = self._format_price_str(anchored_tp, symbol)
 
             fallback_res = await self.executor.safe_call(
@@ -536,6 +535,7 @@ class SmartOrderRouter:
         """
         Sub-second trailing stop amendment with rate-limit and OTR hysteresis.
         Dynamically constructs selective bracket payloads and absorbs idempotent terminal codes.
+        Includes an expanded MarkPrice safety cushion (45 bps) to prevent rejection clashes.
         """
         now = time.time()
         if not is_emergency and (now - self._last_amend_time.get(symbol, 0.0) < self._amend_throttle_sec):
@@ -579,7 +579,8 @@ class SmartOrderRouter:
                     is_buy = pos.get("side", "").upper() == "BUY"
                     mark_p = float(pos.get("markPrice", new_sl) or new_sl)
                     if new_sl > 0.0:
-                        realigned_sl = mark_p * (0.9965 if is_buy else 1.0035)
+                        # Expanded 45 bps safety cushion against MarkPrice
+                        realigned_sl = mark_p * (0.9955 if is_buy else 1.0045)
                         payload["stopLoss"] = self._format_price_str(realigned_sl, symbol)
                         retry_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
                         if retry_res.get("retCode") in [0, 34040, 34036, 110043]:

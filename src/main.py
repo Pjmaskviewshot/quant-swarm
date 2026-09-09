@@ -7,13 +7,17 @@ Production Hardening & Systemic SRE Upgrades (V43.0 Audit Remediations):
 - Whitener State Persistence on Boot & Shutdown (Bug B5 Remediation): Serializes 
   and restores 19D streaming whitening feature means and covariance matrices to 
   `sgd_state.json` alongside RLS weights, eradicating post-boot feature distribution shocks.
-- Blocking Verified Stop Amendments (Bug B2 Remediation): Converts trailing stop updates 
-  inside `_position_lifecycle_daemon` to awaitable blocking calls, ensuring failed 
-  exchange amendments trigger retries or state protection rather than running naked.
+- Blocking Verified Stop Amendments with Rejection Backoff (Bug B2 Remediation): 
+  Converts trailing stop updates to awaitable blocking calls. Enforces exponential 
+  backoff cooldowns upon exchange stop rejection (1.2s -> 15s max), eliminating 
+  API hammer loops and log spam when stops clash with MarkPrice.
+- Liquidation Sentry Cadence Optimization: Relaxes REST `/v5/position/list` polling 
+  cadence from 3.0s to 7.0s with randomized jitter, reducing cloud-to-exchange 
+  network load and preventing ServerTimeoutError storms.
 - Native Exchange Bracket Reconciliation: Intercepts zero position size reports from 
-  Bybit during intra-minute mark checks, cleanly synchronizing state when exchange-native 
+  Bybit during intra-minute checks, cleanly synchronizing state when exchange-native 
   stops or take-profits fill natively.
-- Zero-Allocation Feature Context Transmission: Feeds exact recorded signal notional 
+- Signal Notional Tracking (Bug B9 Remediation): Feeds exact recorded signal notional 
   into trade resolution callbacks to track true capital-weighted returns.
 - Obizhaeva-Wang Polling Throttle: 5.0-second gate on active trade stress evaluation.
 - Self-Trade Prevention (STP): Attaches smpType="CancelMaker" across emergency flattens.
@@ -32,6 +36,7 @@ import logging
 import uuid
 import datetime
 import json
+import random
 import numpy as np
 import concurrent.futures
 import multiprocessing
@@ -1357,6 +1362,7 @@ class DistributedQuantEngine:
             "last_stress_check_time": time.time(),
             "last_liq_check_time": time.time(),
             "last_amend_time": time.time(),
+            "amend_cooldown": 1.20,  # Adaptive cooldown hysteresis
             "last_exchange_sl": realigned_sl if realigned_sl else current_price,
             "taker_fee_rate": getattr(self.sor, "taker_fee_rate", 0.00055),
             "slippage_buffer_pct": 0.0004
@@ -1436,8 +1442,8 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # Interval-Gated Cross-Margin Liquidation Sentry (3.0s cooldown)
-                if now_sec - ctx["last_liq_check_time"] >= 3.0:
+                # Liquidation Sentry Cadence Optimization: Relaxes REST polling to 7.0s with jitter
+                if now_sec - ctx["last_liq_check_time"] >= (7.0 + random.uniform(0.0, 1.5)):
                     ctx["last_liq_check_time"] = now_sec
                     try:
                         pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
@@ -1484,22 +1490,29 @@ class DistributedQuantEngine:
                 target_sl = decision.exchange_ts_price
                 target_tp = decision.dynamic_tp_price
 
-                # Bug B2 Remediation: Blocking Verified Trailing Stop Amendments with Rate Hysteresis
+                # Blocking Verified Trailing Stop Amendments with Rate Hysteresis and Exponential Backoff
                 if target_sl > 0 and not self.test_mode:
                     atr_val = ctx["atr"]
                     displacement = abs(target_sl - ctx.get("last_exchange_sl", current_active_sl))
                     time_elapsed = now_sec - ctx.get("last_amend_time", 0.0)
+                    amend_cooldown = ctx.get("amend_cooldown", 1.20)
 
-                    if displacement >= (atr_val * 0.20) and time_elapsed >= 1.20:
+                    if displacement >= (atr_val * 0.20) and time_elapsed >= amend_cooldown:
                         ctx["last_amend_time"] = now_sec
                         amended_ok = await self.sor._amend_trailing_stop(symbol, target_sl, target_tp)
                         if amended_ok:
                             ctx["last_exchange_sl"] = target_sl
                             current_active_sl = target_sl
                             current_active_tp = target_tp
+                            ctx["amend_cooldown"] = 1.20  # Reset cooldown on success
                             logger.info(f"[CAMB] EXCHANGE STOP ADVANCED // {symbol} SL: {target_sl:.4f} | TP: {target_tp:.4f}")
                         else:
-                            logger.warning(f"[CAMB] Stop amendment rejected by exchange for {symbol}. Retaining active SL: {current_active_sl:.4f}")
+                            # Apply exponential backoff to prevent API hammering and log flooding
+                            ctx["amend_cooldown"] = min(15.0, amend_cooldown * 2.0)
+                            logger.warning(
+                                f"[CAMB] Stop amendment rejected by exchange for {symbol}. "
+                                f"Backing off for {ctx['amend_cooldown']:.1f}s. Retaining active SL: {current_active_sl:.4f}"
+                            )
 
                 # Immediate Market Exit Execution
                 if decision.action in ["EXIT", "CLOSE", "EMERGENCY"]:
