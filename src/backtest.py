@@ -1,28 +1,9 @@
 """
-V41.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER (25D FULL MANIFOLD)
+V42.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER (25D FULL MANIFOLD)
 --------------------------------------------------------------------------------
-Institutional-grade historical simulation engine replicating the V41.0
+Institutional-grade historical simulation engine replicating the V42.0
 25D Volterra-Riemannian Manifold, exact Joseph-stabilized RLS, Bayesian-prior
-Merton Jump Kelly allocation, and Avellaneda-Stoikov execution routing.
-
-Production Hardening & Quantitative Parity Upgrades:
-1. 25D Manifold Parity (P0 Resolution): Maintains full 25D feature topology
-   [19 raw microstructure moments + 5 bilinear cross-terms + affine intercept bias].
-2. Affine Bias S^23 Hypersphere Invariant (P0 Resolution): Projects only the 24 active 
-   features onto S^23 while anchoring the affine intercept uncompressed (v_att[24] = 1.0),
-   eradicating intercept collapse during volatility spikes.
-3. Decoupled RLS Expert Prediction Errors (P0 Resolution): Updates each regime-specialized
-   RLS model (trend, range, spoof, cascade) against its own independent prediction error
-   e_m = y - sigma(3.5 * w_m^T x), eliminating cross-regime error pollution.
-4. Temporal Walk-Forward Purge & Embargo (P0 Resolution): Converts purge and embargo
-   windows from discrete bar counts to millisecond timestamp durations (240m max holding
-   + 60m embargo), eradicating temporal leakage across missing bars or weekend sessions.
-5. Out-of-Sample Weight Freezing: Freezes online RLS adaptation on test splits to prevent
-   in-sample lookahead and test distribution leakage.
-6. Adverse Flow Selection Veto: Incorporates live engine toxic order flow vetoes
-   (|MLOFI_Z| > 1.75 without SWD iceberg absorption) to preserve signal parity.
-7. Scale-Out & Trailing Parity: Simulates tiered 50% partial scale-outs at 1.4R and
-   dynamic stepwise chandelier profit ratcheting.
+Merton Jump Kelly allocation, and CAMB (Continuous Adaptive Microstructure Barrier).
 """
 
 import argparse
@@ -189,7 +170,7 @@ class BacktestHurstEstimator:
 
 
 class BacktestAdaptiveWhitener:
-    """19D Streaming Regularized Whitening Engine with Eigenbasis Caching."""
+    """19D Streaming Regularized Whitening Engine with Tikhonov Ridge Stability."""
     def __init__(self, dim: int = 19, base_alpha: float = 0.001):
         self.dim = dim
         self.base_alpha = base_alpha
@@ -216,13 +197,14 @@ class BacktestAdaptiveWhitener:
 
         if self.ticks_since_eigen >= 20 or var_shift > 0.10:
             tr = np.trace(self.cov)
-            reg = max(1e-5, (tr / self.dim) * 1e-4)
-            stable_cov = self.cov + (self.eye * reg)
+            # Tikhonov Ridge Regularization matching micro_models.py
+            tikhonov_ridge = max(1e-4, (tr / self.dim) * 0.01)
+            stable_cov = self.cov + (self.eye * tikhonov_ridge)
 
             try:
                 evals, evecs = np.linalg.eigh(stable_cov)
-                evals_clamped = np.maximum(evals, 1e-6)
-                inv_sqrt = 1.0 / np.sqrt(evals_clamped)
+                evals_stabilized = np.maximum(evals, tikhonov_ridge)
+                inv_sqrt = 1.0 / np.sqrt(evals_stabilized)
                 self.cached_zca_matrix = evecs @ np.diag(inv_sqrt) @ evecs.T
                 self.ticks_since_eigen = 0
                 self.last_eigen_var = inst_variance
@@ -230,8 +212,9 @@ class BacktestAdaptiveWhitener:
                 diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
                 self.cached_zca_matrix = np.diag(1.0 / (diag_stds + 1e-9))
 
+        # P0 RESOLUTION: Preserves 1-sigma scale without distortive dividers
         whitened = self.cached_zca_matrix @ delta
-        return np.clip(whitened / 3.0, -3.0, 3.0)
+        return np.clip(whitened, -3.0, 3.0)
 
 
 class BacktestRiemannianRLS:
@@ -345,8 +328,8 @@ class BacktestMertonJumpKelly:
         abs_h = abs(hawkes_intensity)
         jump_penalty = (abs_h * 0.003) + (max(0.0, abs_h - 1.8) ** 2) * 0.015
         variance_dampener = 1.0 / (1.0 + inst_variance * 600.0)
-
         f_star = (raw_kelly * variance_dampener) - jump_penalty
+
         if f_star <= 0.001:
             return 0.0
         return float(np.clip(f_star * 0.125, 0.001, 0.0075))  # Exact Eighth-Kelly parity
@@ -492,7 +475,7 @@ def run_v40_backtest(
 
     hurst_estimator = BacktestHurstEstimator()
 
-    # V41.0 Full 25D RLS and Feature Engines
+    # V42.0 Full 25D RLS and Feature Engines
     w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=25)
     whitening_engine = BacktestAdaptiveWhitener(dim=19, base_alpha=0.001)
 
@@ -658,10 +641,10 @@ def run_v40_backtest(
         volterra[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
         volterra[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
 
-        # P0 RESOLUTION: Project ONLY active 24 features onto S^23; leave affine bias at 1.0 uncompressed
-        norm_active = math.sqrt(float(np.dot(volterra[:24], volterra[:24]))) + 1e-9
+        # P0 RESOLUTION: RMS Amplitude Scaling matching micro_models.py
+        rms_scale = math.sqrt(float(np.mean(volterra[:24] ** 2)) + 1e-9)
         v_att = np.empty(25, dtype=np.float64)
-        v_att[:24] = volterra[:24] / norm_active
+        v_att[:24] = np.clip(volterra[:24] / max(1.0, rms_scale), -3.0, 3.0)
         v_att[24] = 1.0  # Invariant Affine Intercept Bias
 
         # Bayesian Markov Regime Updates
@@ -673,7 +656,6 @@ def run_v40_backtest(
         l_s = float(np.dot(rls_spoof.w, v_att))
         l_c = float(np.dot(rls_cascade.w, v_att))
 
-        # P1 RESOLUTION: Smooth Softmax Gating (tau = 0.80) to eliminate regime discontinuities
         tau = 0.80
         exp_weights = np.exp((beliefs - np.max(beliefs)) / tau)
         gate_weights = exp_weights / (np.sum(exp_weights) + 1e-9)
@@ -690,7 +672,7 @@ def run_v40_backtest(
         prob_success = max(p_up, p_down)
         action_dir = "BUY" if p_up > p_down else "SELL"
 
-        # Adverse Order Flow Selection Veto (Parity with live micro_models.py)
+        # Adverse Order Flow Selection Veto
         has_iceberg_absorption = swd_z > 2.0
         if action_dir == "BUY" and mlofi_z < -1.75 and not has_iceberg_absorption:
             prob_success = 0.50
@@ -711,7 +693,7 @@ def run_v40_backtest(
         # Dynamic ATR Volatility Brackets
         vol_sigma = math.sqrt(inst_variance) * math.sqrt(60.0)
         atr_proxy = vol_sigma * sim_price
-        sl_distance = max(atr_proxy * p.sl_atr_mult, sim_price * 0.020)
+        sl_distance = max(atr_proxy * p.sl_atr_mult, sim_price * 0.015)
         sl_dist_pct = sl_distance / sim_price
 
         dynamic_rr_ratio = float(np.clip(p.rr_ratio + (1.5 * (kaufman_er ** 2)), 1.2, 3.5))
@@ -724,7 +706,6 @@ def run_v40_backtest(
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:
             _, old_price, old_features, old_p_up, old_virt_sl, old_virt_tp, old_action_dir, old_beliefs = prediction_buffer.popleft()
             if sim_price != old_price and old_price > 0:
-                # Path-Aware RLS Bounds Checking against dynamic ATR brackets
                 sl_breached = (old_action_dir == "BUY" and sim_price <= old_virt_sl) or \
                               (old_action_dir == "SELL" and sim_price >= old_virt_sl)
                 tp_reached = (old_action_dir == "BUY" and sim_price >= old_virt_tp) or \
@@ -739,7 +720,6 @@ def run_v40_backtest(
 
                 calibration_errors.append(abs(y_target - old_p_up))
 
-                # P0 RESOLUTION: Decouple expert predictions so each model learns its own specialized error
                 if not freeze_weights:
                     p_tr = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(rls_trend.w, old_features) * LOGIT_GAIN, -5.0, 5.0))))
                     p_ra = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(rls_range.w, old_features) * LOGIT_GAIN, -5.0, 5.0))))
@@ -789,18 +769,20 @@ def run_v40_backtest(
 
                     max_favorable_price = entry
                     current_sl = realigned_sl
+                    locked_sl = realigned_sl
                     current_tp = entry + (tp_dist_pct * entry) if action_dir == "BUY" else entry - (tp_dist_pct * entry)
 
                     outcome, exit_price, bars_held = None, entry, 0
                     pnl_accum = 0.0
                     position_size = 1.0
 
-                    # 4-Point Micro-Trajectory Intra-Bar Simulation evaluating adverse excursion first
+                    # 4-Point Micro-Trajectory Intra-Bar Simulation with CAMB Parity
                     for j in range(i + 1, min(i + 240, len(target_candles))):
                         bars_held = j - i
                         bar = target_candles[j]
                         o_j, h_j, l_j, c_j = bar["open"], bar["high"], bar["low"], bar["close"]
                         
+                        # Evaluate adverse price movement first
                         sub_path = [o_j, l_j, h_j, c_j] if action_dir == "BUY" else [o_j, h_j, l_j, c_j]
 
                         tick_break = False
@@ -813,36 +795,57 @@ def run_v40_backtest(
                             r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                             current_r = (tick_p - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - tick_p) / (initial_risk + 1e-9)
 
-                            # Scale-out 50% at 1.4R (Parity with IntelligentExitEngine)
+                            # 1. Scale-out 50% at 1.4R (Parity with IntelligentExitEngine)
                             if r_multiple >= 1.40 and position_size == 1.0:
                                 partial_return = (tick_p - entry) / entry if action_dir == "BUY" else (entry - tick_p) / entry
                                 pnl_accum += partial_return * 0.5
                                 position_size = 0.5
 
-                            # Dynamic stepwise profit ratcheting
-                            if r_multiple >= 1.8:
-                                peak_delta = abs(max_favorable_price - entry)
-                                floor_p = entry + (peak_delta * 0.80) if action_dir == "BUY" else entry - (peak_delta * 0.80)
-                                current_sl = max(current_sl, floor_p) if action_dir == "BUY" else min(current_sl, floor_p)
-                            elif r_multiple >= 1.2:
-                                peak_delta = abs(max_favorable_price - entry)
-                                floor_p = entry + (peak_delta * 0.60) if action_dir == "BUY" else entry - (peak_delta * 0.60)
-                                current_sl = max(current_sl, floor_p) if action_dir == "BUY" else min(current_sl, floor_p)
-                            elif r_multiple >= 0.60:
-                                be_floor = entry * 1.0035 if action_dir == "BUY" else entry * 0.9965
-                                current_sl = max(current_sl, be_floor) if action_dir == "BUY" else min(current_sl, be_floor)
+                            # 2. CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB Parity)
+                            h_clamped = min(0.70, max(0.30, hurst_h))
+                            r_crit = 0.45 + (h_clamped - 0.30) * 0.75
+                            round_trip_friction = (fee_rate * 2.0) + (BASE_SLIPPAGE_BPS / 10000.0)
+                            friction_be_price = entry * (1.0 + round_trip_friction) if action_dir == "BUY" else entry * (1.0 - round_trip_friction)
+
+                            if r_multiple < r_crit:
+                                # Anti-Choking Phase: Hold initial risk stop
+                                calculated_sl = realigned_sl
+                            elif r_multiple >= r_crit and r_multiple < 1.0:
+                                # Friction-Compensated Breakeven Activation
+                                calculated_sl = friction_be_price
+                            else:
+                                # Asymptotic Parabolic Trailing Chandelier
+                                decay_lambda = 0.65
+                                alpha_max, alpha_min = 2.2, 0.6
+                                cushion_mult = alpha_min + (alpha_max - alpha_min) * math.exp(-decay_lambda * (r_multiple - 1.0))
+                                dynamic_cushion = atr_proxy * cushion_mult
+
+                                if action_dir == "BUY":
+                                    trail_stop = max_favorable_price - dynamic_cushion
+                                    calculated_sl = max(friction_be_price, trail_stop)
+                                else:
+                                    trail_stop = max_favorable_price + dynamic_cushion
+                                    calculated_sl = min(friction_be_price, trail_stop)
+
+                            # Monotonic Ratchet Invariant
+                            if action_dir == "BUY":
+                                locked_sl = max(locked_sl, calculated_sl)
+                            else:
+                                locked_sl = min(locked_sl, calculated_sl)
+
+                            current_sl = locked_sl
 
                             # Physical boundary breaches
                             hit_sl = tick_p <= current_sl if action_dir == "BUY" else tick_p >= current_sl
                             hit_tp = tick_p >= current_tp if action_dir == "BUY" else tick_p <= current_tp
 
                             if hit_sl and hit_tp:
-                                outcome = "WIN" if r_multiple >= 0.60 else "LOSS"
+                                outcome = "WIN" if r_multiple >= r_crit else "LOSS"
                                 exit_price = current_sl
                                 tick_break = True
                                 break
                             elif hit_sl:
-                                outcome = "WIN" if r_multiple >= 0.60 else "LOSS"
+                                outcome = "WIN" if r_multiple >= r_crit else "LOSS"
                                 exit_price = current_sl
                                 tick_break = True
                                 break
@@ -1016,7 +1019,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
     and scores on out-of-sample test splits with strictly frozen weights.
     """
     results = []
-    print("\n  Running V41.0 Purged & Embargoed Walk-Forward Cross-Validation (5 Folds)...")
+    print("\n  Running V42.0 Purged & Embargoed Walk-Forward Cross-Validation (5 Folds)...")
 
     rr_ratios = [1.8, 2.0, 2.4]
     atr_mults = [2.0, 2.5, 3.0]
@@ -1038,7 +1041,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 train_end = (fold + 1) * fold_size
                 train_end_ts = t_cand[train_end - 1]["ts"]
 
-                # P0 RESOLUTION: Enforce timestamp duration clearance for purge + embargo
+                # Enforce timestamp duration clearance for purge + embargo
                 test_start_ts = train_end_ts + purge_ms + embargo_ms
                 test_start = next((idx for idx, c in enumerate(t_cand) if c["ts"] >= test_start_ts), total_len)
                 test_end = min(total_len, (fold + 2) * fold_size)
@@ -1056,7 +1059,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
                 test_result, _ = run_v40_backtest(
                     t_cand[test_start:test_end], b_cand[test_start:test_end], p, symbol,
                     initial_rls_state=trained_state,
-                    freeze_weights=True  # P0 RESOLUTION: Zero weight adaptation on OOS folds
+                    freeze_weights=True  # Zero weight adaptation on OOS folds
                 )
 
                 if test_result.get("trades", 0) >= 2:
@@ -1119,7 +1122,7 @@ if __name__ == "__main__":
             initial_rls_state=trained_state, freeze_weights=True
         )
 
-        print("\n=== V41.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40% Frozen) ===")
+        print("\n=== V42.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40% Frozen) ===")
         for k, v in test.items():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")

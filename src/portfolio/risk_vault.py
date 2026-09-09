@@ -1,23 +1,17 @@
 """
-V40.8 INSTITUTIONAL RISK VAULT: ASYNC PORTFOLIO RISK & CONTAGION GOVERNOR
+V43.0 INSTITUTIONAL RISK VAULT: ASYNC PORTFOLIO RISK & CONTAGION GOVERNOR
 --------------------------------------------------------------------------------
 Enforces real-time portfolio invariant firewalls, multi-tier drawdown containment,
 dual-speed cross-asset covariance clustering, and capital-at-risk limits.
 
-Production Hardening & Quantitative Resolutions:
-- Dual-Speed Covariance Engine (Audit P1 Resolution): Dynamically toggles between 
-  smooth tracking (alpha = 0.005, ~200-tick half-life) and high-stress tracking 
-  (alpha_fast = 0.05, ~20-tick half-life) during volatility spikes or changepoint 
-  surges, eliminating multi-hour covariance matrix lag during cascade events.
-- Tail Gap & Slippage Risk Modeling (Audit #3 Resolution): Eradicates the clean-stop 
-  fallacy in single-position risk evaluation by enforcing an explicit tail-risk 
-  gap buffer (20 bps minimum) on top of modeled stop-loss distances, ensuring 
-  gap-through slippage cannot breach the 1.5% capital ceiling during tail selloffs.
-- Thread-Safe Covariance & Atomic Reference Swaps: Mutex-protects running EWMA 
-  state buffers across worker pool threads while publishing correlation matrices 
-  via atomic pointer swaps for lock-free reads by asyncio coroutines.
-- Self-Correlation Filtering: Guarantees an asset is never compared against itself 
-  during portfolio correlation vetting and haircut attenuation.
+Production Hardening & Quantitative Upgrades (V43.0 Audit Remediations):
+- Thread-Safe Ledger Access (Bug B1 Remediation): Protects all reads, writes, and 
+  iterations over `active_positions` with `threading.RLock()`, eliminating data races 
+  between background thread-pool covariance calculations and asyncio event-loop dispatches.
+- Dual-Speed Covariance Engine: Dynamically toggles between smooth tracking 
+  (alpha = 0.005) and high-stress tracking (alpha_fast = 0.05) during volatility spikes.
+- Tail Gap & Slippage Risk Modeling: Enforces explicit tail-risk gap buffer (20 bps) 
+  on single-position risk evaluation to eradicate the clean-stop fallacy.
 """
 
 import math
@@ -39,7 +33,7 @@ class InstitutionalRiskVault:
     """
     def __init__(
         self, 
-        max_drawdown_pct: float = 0.10,               
+        max_drawdown_pct: float = 0.10,                  
         max_single_position_risk_pct: float = 0.015, 
         exchange_min_notional: float = 6.50,
         max_slots: int = 5,
@@ -69,13 +63,13 @@ class InstitutionalRiskVault:
         self.current_day_utc = datetime.now(timezone.utc).date()
         self.daily_loss_limit_pct: float = 0.035      
         
-        # Position Ledger (Aliased for compatibility)
+        # Position Ledger
         self.active_positions: Dict[str, float] = {}
         self.correlation_matrix: Optional[pd.DataFrame] = None
         
-        # Async and Thread Locks (Separation of Concerns)
+        # Async and Thread Locks (Bug B1 Remediation: Thread-safe ledger lock)
         self._state_lock = asyncio.Lock()
-        self._cov_thread_lock = threading.Lock()
+        self._cov_thread_lock = threading.RLock()
         
         # Continuous Covariance State (Protected by _cov_thread_lock)
         self.prev_symbols: List[str] = []
@@ -86,8 +80,9 @@ class InstitutionalRiskVault:
 
     @property
     def position_ledger(self) -> Dict[str, float]:
-        """Provides dual-interface access for core engine notional tracking."""
-        return self.active_positions
+        """Provides thread-safe access to position notional mappings."""
+        with self._cov_thread_lock:
+            return dict(self.active_positions)
 
     def reset_circuit_breaker(self):
         """Explicitly resets the emergency breaker upon verified system recovery."""
@@ -111,9 +106,6 @@ class InstitutionalRiskVault:
         """
         Dual-Speed Continuous EWMA Covariance calculation.
         Runs inside worker thread pool (math_pool).
-        Dynamically adapts learning rate:
-        - alpha_slow = 0.005 (~200 ticks) in normal regimes.
-        - alpha_fast = 0.050 (~20 ticks) during market stress/cascades.
         """
         try:
             if not price_histories:
@@ -129,7 +121,6 @@ class InstitutionalRiskVault:
             n = len(symbols)
 
             with self._cov_thread_lock:
-                # Re-index state if symbol universe changed, preserving overlapping sub-matrices
                 if self.prev_symbols != symbols or self.prev_prices is None or len(self.prev_prices) != n:
                     new_mean = np.zeros(n, dtype=np.float64)
                     new_var = np.ones(n, dtype=np.float64) * 1e-6
@@ -159,7 +150,6 @@ class InstitutionalRiskVault:
                     self.ewma_cov = new_cov
                     return
 
-                # Compute instantaneous log returns
                 returns = np.log(
                     np.maximum(latest_prices, 1e-9) / np.maximum(self.prev_prices, 1e-9)
                 )
@@ -168,11 +158,9 @@ class InstitutionalRiskVault:
                 if not np.all(np.isfinite(returns)):
                     return
 
-                # Beta stripping: Cross-sectional market mean subtraction
                 market_mean = float(np.mean(returns))
                 excess_returns = returns - market_mean
 
-                # P1 RESOLUTION: Dual-speed decay rate selection
                 alpha = 0.05 if is_market_stressed else 0.005
 
                 delta = excess_returns - self.ewma_mean
@@ -180,17 +168,14 @@ class InstitutionalRiskVault:
                 self.ewma_var = (1.0 - alpha) * self.ewma_var + alpha * (delta ** 2)
                 self.ewma_cov = (1.0 - alpha) * self.ewma_cov + alpha * np.outer(delta, delta)
 
-                # Derive correlation matrix
                 stds = np.sqrt(np.maximum(self.ewma_var, 1e-9))
                 corr = self.ewma_cov / np.outer(stds, stds)
                 corr = np.clip(np.nan_to_num(corr, nan=0.0), -1.0, 1.0)
 
-                # Ledoit-Wolf Linear Shrinkage toward Identity
                 shrinkage_intensity = 0.20
                 shrunk_corr = (1.0 - shrinkage_intensity) * corr + (shrinkage_intensity * np.eye(corr.shape[0]))
                 np.fill_diagonal(shrunk_corr, 1.0)
 
-                # Atomic Pointer Swap (Thread-Safe Publish)
                 new_df = pd.DataFrame(shrunk_corr, index=symbols, columns=symbols)
                 self.correlation_matrix = new_df
 
@@ -203,16 +188,17 @@ class InstitutionalRiskVault:
     def calculate_correlation_haircut(self, symbol: str) -> float:
         """
         Progressively attenuates notional from 1.0 down to 0.25 between 0.65 and 0.85 correlation.
-        Filters out self-correlation to ensure clean cross-asset measurements.
+        Thread-safe execution under RLock.
         """
         corr_df = self.correlation_matrix
-        if corr_df is None or len(self.active_positions) == 0:
-            return 1.0
-
-        active_syms = [
-            s for s in self.active_positions.keys() 
-            if s in corr_df.index and s != symbol
-        ]
+        with self._cov_thread_lock:
+            if corr_df is None or len(self.active_positions) == 0:
+                return 1.0
+            active_syms = [
+                s for s in self.active_positions.keys() 
+                if s in corr_df.index and s != symbol
+            ]
+        
         if not active_syms or symbol not in corr_df.index:
             return 1.0
 
@@ -236,13 +222,11 @@ class InstitutionalRiskVault:
 
             self.last_valid_equity = current_balance
 
-            # Watermark bootstrapping
             if self.daily_high_watermark <= 0.0:
                 self.daily_high_watermark = current_balance
             if self.peak_balance <= 0.0:
                 self.peak_balance = current_balance
 
-            # Intraday High-Watermark Check
             now_date = datetime.now(timezone.utc).date()
             if now_date != self.current_day_utc:
                 self.current_day_utc = now_date
@@ -253,7 +237,6 @@ class InstitutionalRiskVault:
 
             daily_drawdown = max(0.0, (self.daily_high_watermark - current_balance) / max(self.daily_high_watermark, 1e-9))
 
-            # Systemic High-Watermark Check
             if current_balance > self.peak_balance:
                 self.peak_balance = current_balance
                 self.current_drawdown_state = 0.0
@@ -275,8 +258,7 @@ class InstitutionalRiskVault:
     ) -> Tuple[bool, str]:
         """
         Evaluates portfolio health invariants before order execution.
-        Enforces 3-tier drawdown architecture, single-position risk cap with tail gap cushion, 
-        dynamic slot limits, correlation ceilings, and aggregate leverage bounds.
+        Thread-safe inspection of active positions and correlation matrices.
         """
         if self.emergency_circuit_breaker:
             return False, "EMERGENCY_CIRCUIT_BREAKER_ACTIVE"
@@ -287,34 +269,30 @@ class InstitutionalRiskVault:
 
         daily_dd, systemic_dd, _ = await self.update_balance_atomic(current_balance)
 
-        # 1. Tier-1 Intraday Loss Limit (3.5%)
         if daily_dd >= self.daily_loss_limit_pct:
             logger.warning(f"🚨 INTRADAY LOSS LIMIT REACHED ({daily_dd:.2%}). Suspending entries.")
             return False, f"DAILY_LOSS_LIMIT_REACHED_{daily_dd:.2%}"
 
-        # 2. Tier-2 Soft Allocation Freeze (5.0%): Blocks new positions; active trades continue trailing
         if systemic_dd >= self.soft_freeze_drawdown_pct and systemic_dd < self.max_drawdown_pct:
             logger.warning(f"[RISK_VAULT] ⚠️ SOFT DRAWDOWN FREEZE ({systemic_dd:.2%}). Preserving existing positions.")
             return False, f"SOFT_DRAWDOWN_FREEZE_{systemic_dd:.2%}"
 
-        # 3. Tier-3 Hard Absolute Drawdown Breach
         if systemic_dd >= self.max_drawdown_pct:
             logger.critical(f"🚨 ABSOLUTE MAX DRAWDOWN BREACHED ({systemic_dd:.2%}). SYSTEM LOCKDOWN.")
             return False, f"MAX_DRAWDOWN_BREACHED_{systemic_dd:.2%}"
 
-        # Active Symbol Deduplication Lock
-        if symbol and symbol in self.active_positions:
-            return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
+        with self._cov_thread_lock:
+            # Active Symbol Deduplication Lock
+            if symbol and symbol in self.active_positions:
+                return False, f"DUPLICATE_SYMBOL_LOCK ({symbol})"
 
-        # Dynamic Slot Count Cap
-        if len(self.active_positions) >= self.get_max_allowed_slots():
-            return False, f"DYNAMIC_SLOT_CAP_REACHED ({len(self.active_positions)}/{self.get_max_allowed_slots()})"
+            # Dynamic Slot Count Cap
+            if len(self.active_positions) >= self.get_max_allowed_slots():
+                return False, f"DYNAMIC_SLOT_CAP_REACHED ({len(self.active_positions)}/{self.get_max_allowed_slots()})"
 
         # 4. Enforce Single-Position Risk Cap with Tail Gap Cushion
         if new_position_notional > 0.0:
             base_sl_pct = max(0.005, sl_dist_pct if sl_dist_pct is not None else 0.020)
-            
-            # P1 RESOLUTION: Incorporate gap risk buffer to eradicate clean-stop illusion
             conservative_sl_pct = base_sl_pct + self.tail_gap_cushion_pct
             estimated_loss_dollars = new_position_notional * conservative_sl_pct
             max_allowed_loss_dollars = current_balance * self.max_single_position_risk_pct
@@ -329,9 +307,13 @@ class InstitutionalRiskVault:
 
         # 5. Portfolio Correlation Hard-Veto at 0.85 (Excluding self)
         corr_df = self.correlation_matrix
-        if corr_df is not None and len(self.active_positions) >= 2 and symbol:
+        with self._cov_thread_lock:
+            active_count = len(self.active_positions)
+            active_keys = list(self.active_positions.keys())
+
+        if corr_df is not None and active_count >= 2 and symbol:
             active_symbols = [
-                s for s in self.active_positions.keys() 
+                s for s in active_keys 
                 if s in corr_df.index and s != symbol
             ]
             if symbol in corr_df.index and active_symbols:
@@ -343,7 +325,8 @@ class InstitutionalRiskVault:
 
         # 6. Portfolio Leverage Headroom Bound
         max_heat_dollars = max(self.exchange_min_notional, current_balance * self.max_leverage)
-        total_exposure = sum(self.active_positions.values()) + new_position_notional
+        with self._cov_thread_lock:
+            total_exposure = sum(self.active_positions.values()) + new_position_notional
 
         if total_exposure > max_heat_dollars:
             return False, f"HEAT_CAP_EXCEEDED (Req: ${total_exposure:.2f} > Max: ${max_heat_dollars:.2f})"
@@ -351,12 +334,14 @@ class InstitutionalRiskVault:
         return True, "SAFE"
 
     def update_position_ledger(self, symbol: str, notional_value: float):
-        """Synchronous in-memory mutation called exclusively via the single-threaded GlobalStateActor."""
-        if notional_value <= 0 or math.isnan(notional_value) or math.isinf(notional_value):
-            self.active_positions.pop(symbol, None)
-        else:
-            self.active_positions[symbol] = notional_value
+        """Thread-safe mutation of position notional ledger under RLock."""
+        with self._cov_thread_lock:
+            if notional_value <= 0 or math.isnan(notional_value) or math.isinf(notional_value):
+                self.active_positions.pop(symbol, None)
+            else:
+                self.active_positions[symbol] = notional_value
 
     def clear_ledger(self):
-        """Resets the position ledger without acquiring locks."""
-        self.active_positions.clear()
+        """Resets the position ledger safely under lock."""
+        with self._cov_thread_lock:
+            self.active_positions.clear()

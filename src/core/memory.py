@@ -1,22 +1,21 @@
 """
-V40.6 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+V43.0 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
-Hyper-optimized Supabase connector and Transaction Cost Analysis (TCA) ledger.
+Hyper-optimized persistent database connector and Transaction Cost Analysis (TCA) ledger.
 
-Architectural Supremacy & Production Resolutions:
-- On-Disk WAL Persistence (SRE Resolution): Migrates local SQLite from volatile
-  ':memory:' to persistent on-disk storage with PRAGMA journal_mode=WAL and
-  synchronous=NORMAL. Protects forensic records, shadow paths, and TCA histories
-  from OOM/SIGKILL termination while preserving sub-millisecond query speed.
-- Shadow/Live Forensic Decoupling (P0 Resolution): Constrains shadow resolution
-  queries strictly to `WHERE resolved = 0 AND is_shadow = 1`. Eradicates the
-  catastrophic collision where ghost background workers prematurely resolved,
-  closed, and overwrote active live positions with synthetic candle metrics.
-- Sub-Millisecond Covering Indexes: Establishes compound indexes covering 
-  unresolved shadow batches and historical symbol evaluations, eliminating full
-  table scans during high-frequency k-NN Bayesian DNA queries.
-- Clean Resource Teardown: Extends flush_and_close to drain in-flight write 
-  queues, flush WAL checkpoints, and terminate SQLite connection handles safely.
+Production Hardening & Quantitative Upgrades (V43.0 Audit Remediations):
+1. Cold-Start Disarm Safeguard (Bug B3 Remediation): Disarms live trading (is_armed=False) 
+   when historical trade samples are below the minimum vetting threshold (<15 verified trades)
+   or when engaging the uninitialized holographic fallback, preventing unvetted live execution.
+2. Graceful SQLite-Only Degradation (§6.4 Audit Fix): Bypasses fatal boot crashes when 
+   SUPABASE_URL or SUPABASE_KEY is missing or unreachable. Gracefully operates in 
+   persistent on-disk SQLite WAL mode without interrupting real-time execution.
+3. Signal Notional Tracking (Bug B9 Remediation): Ingests and persists dollar risk and 
+   target notional directly in the quantitative ledger, eliminating downstream hardcoded defaults.
+4. Shadow/Live Forensic Decoupling: Queries strictly constrain shadow resolutions to 
+   `WHERE resolved = 0 AND is_shadow = 1` to prevent overriding active real inventory.
+5. High-Throughput Micro-Batching: Asynchronously drains write queues into batched 
+   upserts/inserts with non-blocking SQLite checkpoints and clean task cancellation teardown.
 """
 
 import os
@@ -28,31 +27,37 @@ import sqlite3
 import numpy as np
 from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any, Optional
-from supabase import create_client, Client
+
+try:
+    from supabase import create_client, Client
+    HAS_SUPABASE = True
+except ImportError:
+    HAS_SUPABASE = False
+    Client = Any
 
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 
 class MemoryBank:
     """
-    V40.6 PURE-ASYNC FORENSIC LEDGER
+    V43.0 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
-    DNA clustering with batched cloud persistence and fast-path SQLite WAL reads.
+    DNA clustering with resilient on-disk SQLite WAL reads and batched cloud persistence.
     """
     def __init__(self, db_path: Optional[str] = None):
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
 
-        if not url or not key:
-            logger.critical("❌ DB CONFIGURATION FAULT: SUPABASE_URL or SUPABASE_KEY missing.")
-            raise ValueError("Missing Supabase credentials in environment variables.")
-
-        try:
-            self.supabase: Client = create_client(url, key)
-            logger.info("🛸 CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
-        except Exception as e:
-            logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
-            raise
+        # §6.4 Audit Fix: Graceful degradation to local mode if Supabase credentials missing
+        self.supabase: Optional[Any] = None
+        if HAS_SUPABASE and url and key:
+            try:
+                self.supabase = create_client(url, key)
+                logger.info("🛸 CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
+            except Exception as e:
+                logger.warning(f"[MEMORY] Cloud connection failed ({e}). Degraded to Local SQLite-Only Mode.")
+        else:
+            logger.warning("[MEMORY] Supabase credentials missing or client unavailable. Operating in Local SQLite-Only Mode.")
 
         # Storage directory resolution for persistent on-disk WAL
         self.storage_dir = os.environ.get("PERSISTENT_STORAGE_PATH", ".")
@@ -87,7 +92,7 @@ class MemoryBank:
         self.local_db.row_factory = sqlite3.Row
         self.local_cursor = self.local_db.cursor()
 
-        # SRE Fix: Configure high-throughput WAL mode and synchronous=NORMAL
+        # High-throughput WAL mode and synchronous=NORMAL
         self.local_cursor.execute("PRAGMA journal_mode = WAL;")
         self.local_cursor.execute("PRAGMA synchronous = NORMAL;")
         self.local_cursor.execute("PRAGMA busy_timeout = 5000;")
@@ -112,7 +117,8 @@ class MemoryBank:
                 slippage_drag REAL,
                 holding_minutes REAL,
                 virtual_sl REAL,
-                virtual_tp REAL
+                virtual_tp REAL,
+                target_notional REAL DEFAULT 10.0
             )
         ''')
 
@@ -123,7 +129,10 @@ class MemoryBank:
         self.local_db.commit()
 
     async def _warm_sqlite_from_cloud(self):
-        """Pre-warms the persistent SQLite ledger from Supabase on boot if empty."""
+        """Pre-warms the persistent SQLite ledger from Supabase on boot if empty and cloud available."""
+        if not self.supabase:
+            return
+
         async with self._db_lock:
             self.local_cursor.execute("SELECT COUNT(*) FROM quantitative_ledger")
             count = self.local_cursor.fetchone()[0]
@@ -136,7 +145,7 @@ class MemoryBank:
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
-                .select("signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp")
+                .select("signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp, target_notional")
                 .order("timestamp", desc=True)
                 .limit(15000)
             )
@@ -147,15 +156,15 @@ class MemoryBank:
                 for r in rows:
                     self.local_cursor.execute('''
                         INSERT OR IGNORE INTO quantitative_ledger 
-                        (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp, target_notional)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         r.get("signal_id"), r.get("timestamp"), r.get("symbol"), r.get("predicted_direction"),
                         r.get("price_at_prediction"), 1 if r.get("is_correct") else 0, r.get("vol_mult"),
                         r.get("log_mlofi_z"), r.get("spread"), r.get("net_pnl") or 0.0, r.get("actual_outcome"),
                         1 if r.get("resolved") else 0, 1 if r.get("is_shadow") else 0,
                         r.get("fees_usdt") or 0.0, r.get("slippage_drag") or 0.0, r.get("holding_minutes") or 0.0,
-                        r.get("virtual_sl") or 0.0, r.get("virtual_tp") or 0.0
+                        r.get("virtual_sl") or 0.0, r.get("virtual_tp") or 0.0, r.get("target_notional") or 10.0
                     ))
                 self.local_db.commit()
             logger.info(f"✅ SQLite warm-up complete. Pre-loaded {len(rows)} historical records.")
@@ -163,7 +172,7 @@ class MemoryBank:
             logger.warning(f"⚠️ SQLite warm-up failed, continuing with active local cache: {e}")
 
     async def start(self):
-        """Initializes the async write queue, validates SQLite, and starts the batching worker."""
+        """Initializes the async write queue, pre-warms local state, and starts the batching worker."""
         await self._warm_sqlite_from_cloud()
         self.write_queue = asyncio.Queue(maxsize=50000)
         self._is_shutting_down = False
@@ -188,7 +197,7 @@ class MemoryBank:
                 except asyncio.QueueEmpty:
                     break
 
-            if pending_tasks:
+            if pending_tasks and self.supabase:
                 logger.info(f"💾 Flushing {len(pending_tasks)} pending execution records in batches...")
                 chunk_size = 50
                 for i in range(0, len(pending_tasks), chunk_size):
@@ -205,7 +214,6 @@ class MemoryBank:
             except asyncio.CancelledError:
                 pass
 
-        # Checkpoint WAL and close connection handle cleanly
         async with self._db_lock:
             try:
                 self.local_cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -215,7 +223,7 @@ class MemoryBank:
             except Exception as e:
                 logger.error(f"Error closing SQLite database: {e}")
 
-        logger.info("✅ Cloud ledger flush complete.")
+        logger.info("✅ Ledger teardown complete.")
 
     async def _async_sync_worker(self):
         """Processes database mutations using high-throughput micro-batching."""
@@ -236,7 +244,8 @@ class MemoryBank:
                     except asyncio.QueueEmpty:
                         break
 
-                await self._dispatch_batch(batch)
+                if self.supabase:
+                    await self._dispatch_batch(batch)
 
                 for _ in range(len(batch)):
                     self.write_queue.task_done()
@@ -249,6 +258,9 @@ class MemoryBank:
 
     async def _dispatch_batch(self, batch: List[Tuple]):
         """Groups mutations by type and table to execute batched queries."""
+        if not self.supabase:
+            return
+
         inserts_by_table: Dict[str, List[Dict[str, Any]]] = {}
         upserts_by_table: Dict[str, List[Dict[str, Any]]] = {}
         updates: List[Tuple] = []
@@ -281,6 +293,9 @@ class MemoryBank:
 
     async def _safe_execute_async(self, query_builder, max_retries: int = 2):
         """Executes Supabase queries in background threads with strict timeout guards."""
+        if not self.supabase:
+            return None
+
         for attempt in range(max_retries):
             try:
                 return await asyncio.wait_for(
@@ -299,7 +314,7 @@ class MemoryBank:
                 await asyncio.sleep(0.05)
 
     def _ingest_hologram_data(self, rows: List[Dict[str, Any]]):
-        """Organically feeds the local Hologram with verified cloud resolutions."""
+        """Organically feeds the local Hologram with verified historical records."""
         if not rows:
             return
 
@@ -360,6 +375,7 @@ class MemoryBank:
 
         sl_price = float(features.get("virtual_sl", price * 0.99))
         tp_price = float(features.get("virtual_tp", price * 1.015))
+        target_notional = float(features.get("target_notional", 10.0))
         iso_timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
         # 1. Update SQLite Local Fast-Path Replica (Protected by Async Lock)
@@ -367,61 +383,64 @@ class MemoryBank:
             async with self._db_lock:
                 self.local_cursor.execute('''
                     INSERT INTO quantitative_ledger 
-                    (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (signal_id, timestamp, symbol, predicted_direction, price_at_prediction, is_correct, vol_mult, log_mlofi_z, spread, net_pnl, actual_outcome, resolved, is_shadow, fees_usdt, slippage_drag, holding_minutes, virtual_sl, virtual_tp, target_notional)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     str(signal_id), iso_timestamp, symbol, str(direction).upper(), float(price),
                     0, float(vol_mult), float(log_mlofi_z), float(spread), 0.0, None, 0, 1 if is_shadow else 0,
-                    0.0, 0.0, 0.0, sl_price, tp_price
+                    0.0, 0.0, 0.0, sl_price, tp_price, target_notional
                 ))
                 self.local_db.commit()
         except Exception as e:
             logger.debug(f"Local SQLite insert fault: {e}")
 
-        # 2. Queue for Batched Cloud Storage
-        payload = {
-            "signal_id": str(signal_id),
-            "timestamp": iso_timestamp,
-            "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN",
-            "predicted_direction": str(direction).upper(),
-            "price_at_prediction": float(price),
-            "ai_confidence": float(confidence),
-            "market_regime": str(market_regime),
-            "log_mlofi_z": float(log_mlofi_z),
-            "hawkes_z": float(hawkes_z),
-            "sector_impulse": float(sector_impulse),
-            "swd_z": float(swd_z),
-            "accel_z": float(accel_z),
-            "micro_dislocation_z": float(micro_dislocation_z),
-            "hurst_h": float(hurst_h),
-            "bocd_cp_prob": float(bocd_cp_prob),
-            "ou_divergence_z": float(ou_divergence_z),
-            "cvd_z": float(cvd_z),
-            "vol_mult": float(vol_mult),
-            "spread": float(spread),
-            "kelly_fraction": float(kelly_fraction),
-            "conformal_gate": float(conformal_gate),
-            "virtual_sl": sl_price,
-            "virtual_tp": tp_price,
-            "is_shadow": is_shadow,
-            "execution_mode": "SHADOW" if is_shadow else str(features.get("execution_mode", "LIVE")),
-            "resolved": False,
-            "fees_usdt": 0.0,
-            "funding_usdt": 0.0,
-            "leverage": 1.0,
-            "holding_minutes": 0.0,
-            "tca_entry_slippage_bps": 0.0,
-            "tca_exit_slippage_bps": 0.0,
-            "tca_total_slippage_bps": 0.0,
-            "exec_details": {}
-        }
+        # 2. Queue for Batched Cloud Storage if Supabase is available
+        if self.supabase:
+            payload = {
+                "signal_id": str(signal_id),
+                "timestamp": iso_timestamp,
+                "symbol": symbol if symbol != "UNKNOWN" else "UNKNOWN",
+                "predicted_direction": str(direction).upper(),
+                "price_at_prediction": float(price),
+                "ai_confidence": float(confidence),
+                "market_regime": str(market_regime),
+                "log_mlofi_z": float(log_mlofi_z),
+                "hawkes_z": float(hawkes_z),
+                "sector_impulse": float(sector_impulse),
+                "swd_z": float(swd_z),
+                "accel_z": float(accel_z),
+                "micro_dislocation_z": float(micro_dislocation_z),
+                "hurst_h": float(hurst_h),
+                "bocd_cp_prob": float(bocd_cp_prob),
+                "ou_divergence_z": float(ou_divergence_z),
+                "cvd_z": float(cvd_z),
+                "vol_mult": float(vol_mult),
+                "spread": float(spread),
+                "kelly_fraction": float(kelly_fraction),
+                "conformal_gate": float(conformal_gate),
+                "virtual_sl": sl_price,
+                "virtual_tp": tp_price,
+                "target_notional": target_notional,
+                "is_shadow": is_shadow,
+                "execution_mode": "SHADOW" if is_shadow else str(features.get("execution_mode", "LIVE")),
+                "resolved": False,
+                "fees_usdt": 0.0,
+                "funding_usdt": 0.0,
+                "leverage": 1.0,
+                "holding_minutes": 0.0,
+                "tca_entry_slippage_bps": 0.0,
+                "tca_exit_slippage_bps": 0.0,
+                "tca_total_slippage_bps": 0.0,
+                "exec_details": {}
+            }
 
-        try:
-            self.write_queue.put_nowait(("INSERT", "quantitative_ledger", payload, None, None))
-            label = "🦇 SHADOW" if is_shadow else "💾 CORE"
-            logger.info(f"[X-RAY] {label} LEDGER ROUTED // ID: {signal_id[:8]}... | {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
-        except asyncio.QueueFull:
-            logger.error(f"❌ Write queue overflow. Dropping signal {signal_id[:8]}")
+            try:
+                self.write_queue.put_nowait(("INSERT", "quantitative_ledger", payload, None, None))
+            except asyncio.QueueFull:
+                logger.error(f"❌ Write queue overflow. Dropping signal {signal_id[:8]}")
+
+        label = "🦇 SHADOW" if is_shadow else "💾 CORE"
+        logger.info(f"[X-RAY] {label} LEDGER ROUTED // ID: {signal_id[:8]}... | {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
 
     async def log_live_execution_result(
         self, 
@@ -432,14 +451,13 @@ class MemoryBank:
         execution_details: Optional[Dict[str, Any]] = None
     ):
         """Resolves live trade outcomes with Transaction Cost Analysis (TCA) metrics across SQLite and Supabase."""
-        if not self.write_queue:
-            return
         is_correct = True if net_pnl > 0 else False
         if execution_details is None:
             execution_details = {}
 
         fees = float(execution_details.get("fees_usdt", 0.0))
         duration_minutes = 0.0
+        row = None
 
         try:
             async with self._db_lock:
@@ -450,7 +468,7 @@ class MemoryBank:
                     start_dt = self._parse_iso_timestamp(row["timestamp"])
                     duration_minutes = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
 
-                    # 1. Update SQLite Fast-Path Replica
+                    # Update SQLite Fast-Path Replica
                     self.local_cursor.execute('''
                         UPDATE quantitative_ledger
                         SET resolved = 1, actual_outcome = ?, net_pnl = ?, is_correct = ?, fees_usdt = ?, slippage_drag = ?, holding_minutes = ?
@@ -458,8 +476,7 @@ class MemoryBank:
                     ''', (str(outcome), float(net_pnl), 1 if is_correct else 0, fees, float(slippage), duration_minutes, str(signal_id)))
                     self.local_db.commit()
 
-            if row:
-                # 2. Queue for Batched Cloud Storage
+            if row and self.supabase and self.write_queue:
                 update_payload = {
                     "resolved": True,
                     "actual_outcome": str(outcome),
@@ -476,11 +493,8 @@ class MemoryBank:
                     "holding_minutes": round(duration_minutes, 2),
                     "exec_details": execution_details
                 }
-
                 self.write_queue.put_nowait(("UPDATE", "quantitative_ledger", update_payload, "signal_id", str(signal_id)))
                 logger.info(f"[X-RAY] 🎯 ATTRIBUTION DISPATCHED // Signal {signal_id[:8]}... PnL: ${net_pnl:.4f} | Total Slippage: {slippage:+.1f} bps")
-            else:
-                logger.warning(f"[X-RAY] ⚠️ Live execution completed but no initial signal found for ID: {signal_id}")
 
         except Exception as e:
             logger.error(f"Database update route failed: {e}")
@@ -493,18 +507,14 @@ class MemoryBank:
         interval_mins: float = 15.0
     ) -> int:
         """
-        Resolves shadow signals against price history using the local SQLite queue with true volatility brackets.
-        P0 FIX: Constrained strictly to is_shadow = 1 to prevent overriding active live trades.
+        Resolves shadow signals against price history using the local SQLite queue.
+        Constrained strictly to is_shadow = 1 to prevent overriding active live trades.
         """
-        if not self.write_queue:
-            return 0
         resolved_count = 0
-
         try:
-            # SRE/P0 Fix: Query strictly unresolved SHADOW signals
             async with self._db_lock:
                 self.local_cursor.execute('''
-                    SELECT signal_id, timestamp, symbol, price_at_prediction, predicted_direction, virtual_sl, virtual_tp
+                    SELECT signal_id, timestamp, symbol, price_at_prediction, predicted_direction, virtual_sl, virtual_tp, target_notional
                     FROM quantitative_ledger
                     WHERE resolved = 0 AND is_shadow = 1
                     ORDER BY timestamp ASC
@@ -523,7 +533,6 @@ class MemoryBank:
                 entry_price = float(row["price_at_prediction"])
                 prediction = str(row["predicted_direction"]).upper()
 
-                # Evaluate using true recorded volatility brackets
                 sl_price = float(row.get("virtual_sl") or (entry_price * 0.99 if prediction == "BUY" else entry_price * 1.01))
                 tp_price = float(row.get("virtual_tp") or (entry_price * 1.02 if prediction == "BUY" else entry_price * 0.98))
                 p_data = current_prices.get(symbol)
@@ -612,7 +621,6 @@ class MemoryBank:
                     resolved_count += 1
 
             if update_batch:
-                # 1. Update SQLite Replica Immediately
                 async with self._db_lock:
                     for row in update_batch:
                         self.local_cursor.execute('''
@@ -622,12 +630,12 @@ class MemoryBank:
                         ''', (row["actual_outcome"], row["net_pnl"], 1 if row["is_correct"] else 0, row["holding_minutes"], row["signal_id"]))
                     self.local_db.commit()
 
-                # 2. Queue for Batched Cloud Sync
-                chunk_size = 100
-                for i in range(0, len(update_batch), chunk_size):
-                    chunk = update_batch[i:i + chunk_size]
-                    self.write_queue.put_nowait(("UPSERT", "quantitative_ledger", chunk, None, None))
-                logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Enqueued {len(update_batch)} paths for batched cloud sync.")
+                if self.supabase and self.write_queue:
+                    chunk_size = 100
+                    for i in range(0, len(update_batch), chunk_size):
+                        chunk = update_batch[i:i + chunk_size]
+                        self.write_queue.put_nowait(("UPSERT", "quantitative_ledger", chunk, None, None))
+                    logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Enqueued {len(update_batch)} paths for batched cloud sync.")
 
             return resolved_count
 
@@ -688,7 +696,7 @@ class MemoryBank:
     async def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
         Computes k-NN Bayesian win probability instantly via Local SQLite Fast-Path.
-        Completely eliminates synchronous Supabase execution-gate stalling.
+        Remediates Bug B3 by enforcing conservative disarm on cold starts with zero historical evidence.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0) or 1.0), 10.0)
         c_log_mlofi = float(current_dna.get("log_mlofi_z", 0.0) or 0.0)
@@ -702,14 +710,12 @@ class MemoryBank:
         dna_hash = f"{target_symbol}_{vol_bucket}_{mlofi_bucket}_{spread_bucket}"
         current_time = time.time()
 
-        # 1. Tier-1 Hash Cache Hit
         if dna_hash in self.dna_cache:
             cached_time, cached_result = self.dna_cache[dna_hash]
             if current_time - cached_time < self.cache_ttl_seconds:
                 return cached_result
 
         try:
-            # 2. Tier-2 SQLite Fast-Path Lookup (Instant/Zero Network)
             async with self._db_lock:
                 self.local_cursor.execute('''
                     SELECT is_correct, vol_mult, log_mlofi_z, spread, price_at_prediction
@@ -729,14 +735,13 @@ class MemoryBank:
             } for r in rows]
 
             self._ingest_hologram_data(historical_data)
-
             promo_eval = await self.evaluate_shadow_promotion(target_symbol)
 
-            # Cold-Start Unlocking: Allow live trading if not explicitly demoted
+            # Bug B3 Remediation: Require at least 15 verified trades before arming live execution
             if len(historical_data) < k_neighbors:
-                is_armed_default = not promo_eval.get("should_demote", False)
+                is_armed_default = len(historical_data) >= 15 and not promo_eval.get("should_demote", False)
                 result_payload = {
-                    "bayesian_edge": 0.55,
+                    "bayesian_edge": 0.50 if len(historical_data) < 15 else 0.55,
                     "is_armed": is_armed_default,
                     "matched_samples": len(historical_data),
                     "cluster_win_rate": 0.50,
@@ -800,12 +805,13 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"[X-RAY] 🛑 LOCAL DB FAULT: SQLite lookup failed ({e}). Engaging HOLOGRAPHIC FALLBACK.")
 
+            # Bug B3 Remediation: Disarm if zero verified historical samples exist
             if not self.holo_warmed_up or self.holo_pointer == 0:
-                logger.error("[X-RAY] 💀 Hologram uninitialized. Returning conservative default arming.")
+                logger.warning("[X-RAY] 🔒 Hologram uninitialized. Disarming live execution for safety.")
                 return {
-                    "bayesian_edge": 0.55, "is_armed": True, "matched_samples": 0,
+                    "bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0,
                     "cluster_win_rate": 0.50, "win_rate": 0.50, "shadow_sharpe": 0.0,
-                    "promotion_event": "COLD_START_FAULT_SAFE"
+                    "promotion_event": "COLD_START_DISARMED_SAFE"
                 }
 
             active_size = min(self.holo_pointer, self.holo_capacity)
@@ -829,13 +835,13 @@ class MemoryBank:
             total = k_actual
 
             bayesian_edge = (wins + 2.0) / (total + 4.0)
-            is_armed = bayesian_edge >= 0.55
+            is_armed = bool(bayesian_edge >= 0.55 and total >= 15)
 
-            logger.info(f"[X-RAY] 🌌 HOLOGRAPHIC SURVIVAL // Local Edge Computed: {bayesian_edge:.2%}")
+            logger.info(f"[X-RAY] 🌌 HOLOGRAPHIC SURVIVAL // Local Edge: {bayesian_edge:.2%} | Armed: {is_armed}")
 
             return {
                 "bayesian_edge": round(float(bayesian_edge), 4),
-                "is_armed": bool(is_armed),
+                "is_armed": is_armed,
                 "matched_samples": int(total),
                 "cluster_win_rate": round(float(wins / total), 4) if total > 0 else 0.5,
                 "win_rate": round(float(wins / total), 4) if total > 0 else 0.5,

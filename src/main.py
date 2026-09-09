@@ -1,29 +1,22 @@
 """
-V41.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V43.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Systemic SRE Resolutions:
-- Obizhaeva-Wang Polling Throttle (P0 Hotfix): Replaces raw sub-second polling of
-  `evaluate_active_trade_stress` with a 5.0-second interval gate, preventing 
-  the 50ms active monitoring loop from stacking artificial transient shocks.
-- Real-Time Cross-Margin Liquidation Sentry: Actively probes exchange liquidation 
-  prices against live mark prices on every tick. Forcibly executes emergency flatten
-  routines if distance to liquidation contracts to within 2.5x ATR.
-- Verified Emergency Flatten (Eradicating Fire-and-Forget): Dispatches Market IOC 
-  flatten orders with active polling verification (up to 5 retries) confirming 
-  exchange position size reaches exactly 0.0. Automatically engages the global lock
-  if position closure fails.
-- 25D Manifold Alpha Telemetry & Shadow Recovery: Seamlessly pipes the full 25D state 
-  vector to the ledger, and routes disarmed symbols (< 0.55 Bayesian edge) to ghost 
-  shadow tracking to enable continuous forensic recovery.
-- Sizing Pipeline Unification: Positions are sized strictly via dollar-risk budgets 
-  anchored to Eighth-Kelly fractions, attenuated by correlation haircuts and protected 
-  by a mandatory tail-gap buffer (20 bps).
-- Distributed Cloud Instance Mutex: Acquires and continuously heartbeats a Supabase 
-  lease on boot to permanently eliminate twin-instance collisions across rolling deploys.
-- Full Lifecycle Test Mode Simulation: Paper-trading flows through the complete 
-  optimal stopping exit engine without early termination.
+Production Hardening & Systemic SRE Upgrades (V43.0 Audit Remediations):
+- Whitener State Persistence on Boot & Shutdown (Bug B5 Remediation): Serializes 
+  and restores 19D streaming whitening feature means and covariance matrices to 
+  `sgd_state.json` alongside RLS weights, eradicating post-boot feature distribution shocks.
+- Blocking Verified Stop Amendments (Bug B2 Remediation): Converts trailing stop updates 
+  inside `_position_lifecycle_daemon` to awaitable blocking calls, ensuring failed 
+  exchange amendments trigger retries or state protection rather than running naked.
+- Native Exchange Bracket Reconciliation: Intercepts zero position size reports from 
+  Bybit during intra-minute mark checks, cleanly synchronizing state when exchange-native 
+  stops or take-profits fill natively.
+- Zero-Allocation Feature Context Transmission: Feeds exact recorded signal notional 
+  into trade resolution callbacks to track true capital-weighted returns.
+- Obizhaeva-Wang Polling Throttle: 5.0-second gate on active trade stress evaluation.
+- Self-Trade Prevention (STP): Attaches smpType="CancelMaker" across emergency flattens.
 """
 
 import os
@@ -383,17 +376,8 @@ class DistributedQuantEngine:
             "symbols": {}
         }
         for sym, engine in self.stat_engines.items():
-            if hasattr(engine, 'rls_trend'):
-                state_snapshot["symbols"][sym] = {
-                    "weights_trending": engine.rls_trend.w.copy().tolist(),
-                    "weights_ranging": engine.rls_range.w.copy().tolist(),
-                    "weights_spoof": engine.rls_spoof.w.copy().tolist() if hasattr(engine, 'rls_spoof') else [],
-                    "weights_cascade": engine.rls_cascade.w.copy().tolist() if hasattr(engine, 'rls_cascade') else [],
-                    "P_trending": engine.rls_trend.f_inv.copy().tolist() if hasattr(engine.rls_trend, 'f_inv') else [],
-                    "P_ranging": engine.rls_range.f_inv.copy().tolist() if hasattr(engine.rls_range, 'f_inv') else [],
-                    "P_spoof": engine.rls_spoof.f_inv.copy().tolist() if hasattr(engine.rls_spoof, 'f_inv') else [],
-                    "P_cascade": engine.rls_cascade.f_inv.copy().tolist() if hasattr(engine.rls_cascade, 'f_inv') else []
-                }
+            if hasattr(engine, 'export_state'):
+                state_snapshot["symbols"][sym] = engine.export_state()
 
         def _write_file():
             import tempfile
@@ -418,28 +402,7 @@ class DistributedQuantEngine:
             if s not in self.stat_engines:
                 engine = ContinuousMicrostructureEngine(symbol=s)
                 if s in self.saved_sgd_state and isinstance(self.saved_sgd_state[s], dict):
-                    saved = self.saved_sgd_state[s]
-                    w_tr = saved.get("weights_trending")
-                    w_ra = saved.get("weights_ranging")
-                    w_sp = saved.get("weights_spoof")
-                    w_ca = saved.get("weights_cascade")
-
-                    if isinstance(w_tr, list) and len(w_tr) == 25:
-                        engine.rls_trend.w = np.array(w_tr, dtype=np.float64)
-                    if isinstance(w_ra, list) and len(w_ra) == 25:
-                        engine.rls_range.w = np.array(w_ra, dtype=np.float64)
-                    if isinstance(w_sp, list) and len(w_sp) == 25 and hasattr(engine, 'rls_spoof'):
-                        engine.rls_spoof.w = np.array(w_sp, dtype=np.float64)
-                    if isinstance(w_ca, list) and len(w_ca) == 25 and hasattr(engine, 'rls_cascade'):
-                        engine.rls_cascade.w = np.array(w_ca, dtype=np.float64)
-
-                    p_tr = saved.get("P_trending")
-                    p_ra = saved.get("P_ranging")
-                    if isinstance(p_tr, list) and len(p_tr) == 25 and hasattr(engine.rls_trend, 'f_inv'):
-                        engine.rls_trend.f_inv = np.array(p_tr, dtype=np.float64)
-                    if isinstance(p_ra, list) and len(p_ra) == 25 and hasattr(engine.rls_range, 'f_inv'):
-                        engine.rls_range.f_inv = np.array(p_ra, dtype=np.float64)
-
+                    engine.load_state(self.saved_sgd_state[s])
                 self.stat_engines[s] = engine
 
             if s not in self.feature_engines:
@@ -901,7 +864,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_macro_short_veto"] = now
                 return
 
-            # P0 RESOLUTION: Route disarmed symbols to Ghost Shadow instead of dropping them
+            # Route disarmed symbols to Ghost Shadow instead of dropping them
             is_armed = self.ram_dna_cache.get(symbol, {"is_armed": True}).get("is_armed", True)
             if not is_armed:
                 if now - self.last_eval_time.get(symbol + "_dna_diag", 0.0) > 120.0:
@@ -953,7 +916,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_equity_veto"] = now
                 return
 
-            # P1 RESOLUTION: Sizing Pipeline Unification (Risk Budget / Stop Loss + Gap Buffer)
+            # Sizing Pipeline Unification (Risk Budget / Stop Loss + Gap Buffer)
             kelly_f = state.get("kelly_fraction", 0.0)
             target_risk_pct = max(0.001, min(0.0075, kelly_f)) * exec_weight
 
@@ -1039,6 +1002,7 @@ class DistributedQuantEngine:
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
                 stat_engine.pending_trade_outcomes[sig_id] = {
                     "action": action, "features": state.get("raw_features", np.zeros(25)), "p_up": state.get("p_up", 0.5),
+                    "notional": target_notional,  # Bug B9 Remediation: Exact signal notional tracking
                     "beliefs": [
                         state.get("markov_beliefs", {}).get("trend", 0.25),
                         state.get("markov_beliefs", {}).get("range", 0.25),
@@ -1049,19 +1013,20 @@ class DistributedQuantEngine:
 
             # 25D Alpha Tensor & Topology Telemetry Dispatch
             safe_features = {
-                "symbol": symbol,
+                "symbol": symbol, 
                 "market_regime": dominant_regime,
-                "virtual_sl": sl_price,
-                "virtual_tp": tp_price,
-                "log_mlofi_z": log_mlofi_z,
+                "virtual_sl": sl_price, 
+                "virtual_tp": tp_price, 
+                "log_mlofi_z": log_mlofi_z, 
                 "hawkes_z": getattr(stat_engine, 'marked_hawkes_z', 0.0),
-                "sector_impulse": sector_impulse,
+                "sector_impulse": sector_impulse, 
                 "bid_ask_spread": 0.001,
                 "alpha_tensor_bps": state.get("alpha_tensor_bps", 0.0),
                 "expected_drift": state.get("expected_drift", 0.0),
                 "topology": state.get("topology", "LAMINAR FLOW"),
                 "markov_beliefs": state.get("markov_beliefs", {}),
-                "bocd_cp_prob": state.get("bocd_cp_prob", 0.0)
+                "bocd_cp_prob": state.get("bocd_cp_prob", 0.0),
+                "target_notional": target_notional
             }
 
             if self.memory:
@@ -1102,11 +1067,11 @@ class DistributedQuantEngine:
                 async def _safe_fetch(sym, dna):
                     try:
                         if not self.memory:
-                            return {"is_armed": True, "win_rate": 0.50}
+                            return {"is_armed": False, "win_rate": 0.50}  # Bug B3: Default disarmed on cold start without history
                         async with self.db_semaphore:
                             return await asyncio.wait_for(self.memory.compute_latent_dna_edge(dna, 30), timeout=2.0)
                     except Exception:
-                        return {"is_armed": True, "win_rate": 0.50}
+                        return {"is_armed": False, "win_rate": 0.50}
 
                 fetch_tasks = {}
                 for sym in list(self.asset_basket):
@@ -1123,7 +1088,7 @@ class DistributedQuantEngine:
                 results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
                 for sym, result in zip(list(fetch_tasks.keys()), results):
                     if isinstance(result, Exception):
-                        self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
+                        self.ram_dna_cache[sym] = {"is_armed": False, "win_rate": 0.50}
                     else:
                         self.ram_dna_cache[sym] = result
             except Exception as e:
@@ -1279,7 +1244,8 @@ class DistributedQuantEngine:
                     "POST", "/v5/order/create", is_execution=True,
                     category="linear", symbol=symbol, side=side,
                     orderType="Market", qty=qty_str, timeInForce="IOC", reduceOnly=True,
-                    positionIdx=self.sor.position_idx
+                    positionIdx=self.sor.position_idx,
+                    smpType="CancelMaker"
                 )
                 await asyncio.sleep(0.5)
 
@@ -1340,8 +1306,8 @@ class DistributedQuantEngine:
                 await self.memory.log_live_execution_result(ctx["signal_id"], net_pnl, slippage_bps, real_outcome, ctx["exec_details"])
 
             if ctx.get("stat_engine") and hasattr(ctx["stat_engine"], "resolve_trade_outcome"):
-                allocated_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", MIN_REQUIRED_EQUITY)
-                ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl, allocated_notional)
+                signal_notional = ctx.get("actual_qty_filled", 1.0) * ctx.get("actual_entry", MIN_REQUIRED_EQUITY)
+                ctx["stat_engine"].resolve_trade_outcome(ctx["signal_id"], net_pnl, signal_notional)
 
             self._safe_telegram_dispatch_sync(
                 self.telegram.format_execution_receipt(symbol, net_pnl, slippage_bps, fees, duration_mins, net_pnl > 0),
@@ -1388,7 +1354,12 @@ class DistributedQuantEngine:
             "position_idx": self.sor.position_idx,
             "dynamic_rr_ratio": dynamic_rr_ratio,
             "test_mode": self.test_mode,
-            "last_stress_check_time": time.time()
+            "last_stress_check_time": time.time(),
+            "last_liq_check_time": time.time(),
+            "last_amend_time": time.time(),
+            "last_exchange_sl": realigned_sl if realigned_sl else current_price,
+            "taker_fee_rate": getattr(self.sor, "taker_fee_rate", 0.00055),
+            "slippage_buffer_pct": 0.0004
         }
 
         async with self.execution_semaphore:
@@ -1423,6 +1394,7 @@ class DistributedQuantEngine:
             current_active_tp = realigned_tp if realigned_tp else (
                 ctx["actual_entry"] + (ctx["atr"] * 2.5 * dynamic_rr_ratio) if ctx["is_buy"] else ctx["actual_entry"] - (ctx["atr"] * 2.5 * dynamic_rr_ratio)
             )
+            ctx["last_exchange_sl"] = current_active_sl
 
             loop_state = "ACTIVE_MONITORING"
 
@@ -1445,7 +1417,8 @@ class DistributedQuantEngine:
                 if ctx["stat_engine"] and getattr(ctx["stat_engine"], "true_micro_price", 0.0) > 0:
                     ctx["safe_c_price"] = ctx["stat_engine"].true_micro_price
 
-                ctx["now"] = time.time()
+                now_sec = time.time()
+                ctx["now"] = now_sec
                 
                 # Intra-Minute Mark Drawdown Recalculation
                 vault_bal = self.global_state_cache.get("current_vault_balance", MIN_REQUIRED_EQUITY)
@@ -1463,30 +1436,36 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # Real-Time Cross-Margin Liquidation Proximity Sentry
-                try:
-                    pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
-                    pos_list = pos_res.get("result", {}).get("list", [])
-                    if pos_list and float(pos_list[0].get("size", 0.0)) > 0:
-                        liq_price = float(pos_list[0].get("liqPrice", 0.0) or 0.0)
-                        mark_price = float(pos_list[0].get("markPrice", current_price) or current_price)
-                        if liq_price > 0.0:
-                            liq_dist_pct = abs(mark_price - liq_price) / mark_price
-                            # Force emergency liquidation if within 2.5x ATR of liquidation price
-                            if liq_dist_pct <= max(0.015, (ctx["atr"] * 2.5) / mark_price):
-                                logger.critical(
-                                    f"[RISK BREACH] LIQUIDATION PROXIMITY SENTRY // {symbol} Mark: {mark_price:.4f} "
-                                    f"Liq: {liq_price:.4f} (Dist: {liq_dist_pct:.2%}). Forcing emergency liquidation!"
-                                )
+                # Interval-Gated Cross-Margin Liquidation Sentry (3.0s cooldown)
+                if now_sec - ctx["last_liq_check_time"] >= 3.0:
+                    ctx["last_liq_check_time"] = now_sec
+                    try:
+                        pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                        pos_list = pos_res.get("result", {}).get("list", [])
+                        if pos_list:
+                            pos_sz = float(pos_list[0].get("size", 0.0) or 0.0)
+                            # Native Exchange Bracket Exit Detection
+                            if pos_sz <= 0.0 and not self.test_mode:
+                                logger.info(f"[SOR_RECON] Exchange-native stop resolved position for {symbol}. Settling...")
                                 ctx["exit_trigger_price"] = current_price
-                                await self._execute_emergency_escape(symbol, current_price, ctx["actual_qty_filled"], is_sell=ctx["is_buy"])
                                 break
-                except Exception as e:
-                    logger.debug(f"[RISK] Liquidation distance probe warning: {e}")
 
-                # P0 RESOLUTION: Interval-Gated Stress Evaluation (5.0s cooldown)
-                # Prevents 50ms polling loop from self-accumulating impact shocks
-                now_sec = time.time()
+                            liq_price = float(pos_list[0].get("liqPrice", 0.0) or 0.0)
+                            mark_price = float(pos_list[0].get("markPrice", current_price) or current_price)
+                            if liq_price > 0.0:
+                                liq_dist_pct = abs(mark_price - liq_price) / mark_price
+                                if liq_dist_pct <= max(0.015, (ctx["atr"] * 2.5) / mark_price):
+                                    logger.critical(
+                                        f"[RISK BREACH] LIQUIDATION PROXIMITY SENTRY // {symbol} Mark: {mark_price:.4f} "
+                                        f"Liq: {liq_price:.4f} (Dist: {liq_dist_pct:.2%}). Forcing emergency liquidation!"
+                                    )
+                                    ctx["exit_trigger_price"] = current_price
+                                    await self._execute_emergency_escape(symbol, current_price, ctx["actual_qty_filled"], is_sell=ctx["is_buy"])
+                                    break
+                    except Exception as e:
+                        logger.debug(f"[RISK] Liquidation distance probe warning: {e}")
+
+                # Interval-Gated Stress Evaluation (5.0s cooldown)
                 if now_sec - ctx["last_stress_check_time"] >= 5.0 and ctx["stat_engine"] and hasattr(ctx["stat_engine"], 'evaluate_active_trade_stress'):
                     ctx["last_stress_check_time"] = now_sec
                     should_eject, stress_reason = ctx["stat_engine"].evaluate_active_trade_stress(ctx["is_buy"])
@@ -1500,17 +1479,27 @@ class DistributedQuantEngine:
                         )
                         break
 
+                # Continuous Adaptive Microstructure Barrier (CAMB) Evaluation
                 decision = IntelligentExitEngine.evaluate(ctx, state)
                 target_sl = decision.exchange_ts_price
                 target_tp = decision.dynamic_tp_price
 
-                # Trailing Stop Stepping (Sub-Second 100ms Amendment)
-                if target_sl > 0 and target_tp > 0 and not self.test_mode:
-                    if abs(target_sl - current_active_sl) > (ctx["atr"] * 0.15) or abs(target_tp - current_active_tp) > (ctx["atr"] * 0.05):
-                        if await self.sor._amend_trailing_stop(symbol, target_sl, target_tp):
+                # Bug B2 Remediation: Blocking Verified Trailing Stop Amendments with Rate Hysteresis
+                if target_sl > 0 and not self.test_mode:
+                    atr_val = ctx["atr"]
+                    displacement = abs(target_sl - ctx.get("last_exchange_sl", current_active_sl))
+                    time_elapsed = now_sec - ctx.get("last_amend_time", 0.0)
+
+                    if displacement >= (atr_val * 0.20) and time_elapsed >= 1.20:
+                        ctx["last_amend_time"] = now_sec
+                        amended_ok = await self.sor._amend_trailing_stop(symbol, target_sl, target_tp)
+                        if amended_ok:
+                            ctx["last_exchange_sl"] = target_sl
                             current_active_sl = target_sl
                             current_active_tp = target_tp
-                            logger.info(f"[X-RAY] TRAILING SL/TP STEPPED // {symbol} SL: {current_active_sl:.4f} | TP: {current_active_tp:.4f}")
+                            logger.info(f"[CAMB] EXCHANGE STOP ADVANCED // {symbol} SL: {target_sl:.4f} | TP: {target_tp:.4f}")
+                        else:
+                            logger.warning(f"[CAMB] Stop amendment rejected by exchange for {symbol}. Retaining active SL: {current_active_sl:.4f}")
 
                 # Immediate Market Exit Execution
                 if decision.action in ["EXIT", "CLOSE", "EMERGENCY"]:
@@ -1519,14 +1508,13 @@ class DistributedQuantEngine:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
                     break
 
-                # Decouple Partial Scale-Outs from Full Liquidations
+                # Fractional Position Scale-Out (Isolated from Full Exit Branching)
                 elif decision.action == "SCALE_OUT":
                     logger.info(f"[X-RAY] PARTIAL SCALE-OUT // {symbol}: {decision.reason}")
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
-                    # Loop continues to manage the retained runner volume
 
-                # Order Execution Governor Management
-                await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
+                else:
+                    await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
                 if state.q_retained <= 0.01 and state.execution_state == "OBSERVE":
                     ctx["exit_trigger_price"] = current_price
@@ -1559,7 +1547,8 @@ class DistributedQuantEngine:
                     "POST", "/v5/order/create", is_execution=True,
                     category="linear", symbol=symbol, side=side,
                     orderType="Market", qty=qty_str, timeInForce="IOC", reduceOnly=True,
-                    positionIdx=self.sor.position_idx
+                    positionIdx=self.sor.position_idx,
+                    smpType="CancelMaker"
                 )
                 await asyncio.sleep(0.35)
                 
