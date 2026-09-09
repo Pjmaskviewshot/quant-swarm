@@ -3,21 +3,21 @@ APEX TITAN: TITANIUM API EXECUTOR (BYBIT V5)
 --------------------------------------------------------
 Cloud-resilient, zero-latency unified Bybit V5 exchange execution connector.
 
-Production Hardening & Bug Fixes:
-- Idempotent Order Retry Shield (Audit P0 Resolution): If a network timeout occurs 
-  during `POST /v5/order/create`, the executor inspects `/v5/order/realtime` using 
-  `orderLinkId` before retrying, preventing duplicate fill executions on the exchange.
-- Duplicate Order Link ID Reconciliation (Audit P0 Resolution): When Bybit returns 
-  error 110008 (DUPLICATE_ORDER_LINK_ID), queries the active order record by `orderLinkId` 
-  and returns the true `orderId`, preventing downstream SOR/Exit engines from receiving 
-  an invalid "UNKNOWN" order ID.
-- Dedicated WebSocket Heartbeat Ping Task: Replaces passive timeout-dependent pings 
-  with an active 20-second background ping loop. Prevents Bybit from severing private 
-  WebSocket connections during high-volume message streams.
-- IPv4 DNS Resolution Enforcement: Forces `socket.AF_INET` in `aiohttp.TCPConnector` 
-  to eliminate Windows 10/11 `getaddrinfo` socket stalls and connection timeouts.
-- None-Value Kwargs Sanitization: Strips `None` values from payloads prior to query-string 
-  serialization to prevent Bybit RetCode 10002 parameter errors.
+Production Hardening & Compliance Upgrades (Exchange Desk Certification):
+- Self-Trade Prevention (STP) Enforcement: Automatically injects `smpType="CancelMaker"`
+  into order creation payloads to eliminate self-matching against resting inventory
+  or delta-neutral cash-and-carry hedges.
+- Non-Throwing Compliance Quarantine (Audit 110126 Resolution): Catches Bybit error 
+  110126 (Agreement Not Signed / Innovation Zone) and applies a 1-hour quarantine ban
+  without throwing unhandled exceptions that destabilize asyncio task runners.
+- Monotonic Contention-Free Token Bucket: Computes rate pacing delays inside a minimal
+  critical lock and sleeps outside the lock, eradicating lock-contention latency.
+- WebSocket Watchdog Heartbeat: Pairs active 20-second pings with a 45-second message 
+  inactivity watchdog, forcibly resetting stale WebSocket feeds before silent disconnection.
+- Synchronized Asset Exclusion Matrix: Blocks pre-market, TradFi synthetics, and 
+  innovation-zone tokens before network calls to prevent compliance infractions.
+- Idempotent Order Retry & Reconciliation: Verifies order state via `orderLinkId` 
+  before network retries and recovers true `orderId` on RetCode 110008.
 """
 
 import time
@@ -54,6 +54,11 @@ class BybitRetCode:
 
 
 class TokenBucketRateLimiter:
+    """
+    Contention-Free Monotonic Token Bucket:
+    Calculates rate-limit backoff inside a locked critical section and executes 
+    the delay outside the lock to prevent event-loop stalls across concurrent workers.
+    """
     def __init__(self, capacity: int = 12, fill_rate: float = 6.0):
         self.capacity = float(capacity)
         self.tokens = float(capacity)
@@ -62,21 +67,22 @@ class TokenBucketRateLimiter:
         self.lock = asyncio.Lock()
 
     async def acquire(self):
-        while True:
-            async with self.lock:
-                now = time.time()
-                elapsed = now - self.last_fill_time
-                self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
-                self.last_fill_time = now
+        sleep_time = 0.0
+        async with self.lock:
+            now = time.time()
+            elapsed = max(0.0, now - self.last_fill_time)
+            self.last_fill_time = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.fill_rate)
 
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                
-                deficit = 1.0 - self.tokens
-                sleep_time = deficit / self.fill_rate
-                
-            await asyncio.sleep(max(0.005, sleep_time)) 
+            if self.tokens < 1.0:
+                sleep_time = (1.0 - self.tokens) / self.fill_rate
+                self.tokens = 0.0
+                self.last_fill_time += sleep_time
+            else:
+                self.tokens -= 1.0
+
+        if sleep_time > 0.0:
+            await asyncio.sleep(sleep_time)
 
 
 class BybitUnifiedExecutor:
@@ -114,6 +120,7 @@ class BybitUnifiedExecutor:
         self._clock_sync_task: Optional[asyncio.Task] = None  
         self._order_waiters: Dict[str, List[asyncio.Future]] = {}
         self._execution_cache: Dict[str, Dict[str, Any]] = {}
+        self._last_ws_msg_time: float = time.time()
         
         self._waiter_lock = asyncio.Lock()
         self._is_terminating = False
@@ -214,6 +221,9 @@ class BybitUnifiedExecutor:
         if is_order_create:
             if "orderLinkId" not in kwargs or not kwargs["orderLinkId"]:
                 kwargs["orderLinkId"] = f"APEX_{uuid.uuid4().hex[:16]}"
+            # STP ENFORCEMENT: Guard against self-matching
+            if "smpType" not in kwargs:
+                kwargs["smpType"] = "CancelMaker"
 
         clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         order_link_id = clean_kwargs.get("orderLinkId")
@@ -283,7 +293,7 @@ class BybitUnifiedExecutor:
 
                 ret_code = response.get("retCode", -1)
                 
-                # Duplicate Order Link ID Resolution: Fetches real orderId from exchange
+                # Duplicate Order Link ID Resolution
                 if ret_code == BybitRetCode.DUPLICATE_ORDER_LINK_ID and is_order_create and order_link_id:
                     existing_order = await self._query_order_by_link_id(category, symbol, order_link_id)
                     real_id = existing_order.get("orderId", order_link_id) if existing_order else order_link_id
@@ -298,11 +308,13 @@ class BybitUnifiedExecutor:
                         }
                     }
 
+                # Non-throwing Compliance Quarantine for 110126
                 if ret_code == BybitRetCode.AGREEMENT_NOT_SIGNED:
                     symbol_banned = clean_kwargs.get("symbol", "UNKNOWN")
                     if symbol_banned != "UNKNOWN":
-                        self.temporary_symbol_bans[symbol_banned] = time.time() + 900.0 
-                    raise ValueError(f"110126 INNOVATION ZONE BAN: {symbol_banned}")
+                        self.temporary_symbol_bans[symbol_banned] = time.time() + 3600.0
+                        logger.error(f"[COMPLIANCE] Agreement Not Signed (110126) for {symbol_banned}. Symbol quarantined for 1 hour.")
+                    return response
 
                 if ret_code == BybitRetCode.PARAMETER_ERROR and "timestamp" in response.get("retMsg", "").lower():
                     logger.warning("[X-RAY] Timestamp Drift (Error 10002). Forcing NTP calibration...")
@@ -380,6 +392,12 @@ class BybitUnifiedExecutor:
                 await asyncio.sleep(20.0)
                 if not ws.closed:
                     await ws.send_json({"req_id": str(int(time.time())), "op": "ping"})
+                    
+                # Watchdog: Disconnect if no message/pong received for over 45 seconds
+                if time.time() - self._last_ws_msg_time > 45.0:
+                    logger.warning("[X-RAY] WS Watchdog Timeout (>45s inactivity). Forcing reconnect.")
+                    await ws.close()
+                    break
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -396,6 +414,7 @@ class BybitUnifiedExecutor:
                     max_msg_size=16 * 1024 * 1024
                 ) as ws:
                     self._ws_connection = ws
+                    self._last_ws_msg_time = time.time()
                     backoff = 1.0
 
                     # Authenticate private feed
@@ -426,13 +445,14 @@ class BybitUnifiedExecutor:
 
                     await ws.send_json({"op": "subscribe", "args": ["execution", "order"]})
 
-                    # Spawn dedicated ping loop to prevent disconnects during data bursts
+                    # Spawn dedicated ping loop with watchdog
                     if self._ws_ping_task and not self._ws_ping_task.done():
                         self._ws_ping_task.cancel()
                     self._ws_ping_task = asyncio.create_task(self._ws_ping_loop(ws))
 
                     while not self._is_terminating:
                         msg = await ws.receive()
+                        self._last_ws_msg_time = time.time()
                             
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -635,10 +655,13 @@ class BybitUnifiedExecutor:
             return False
 
     async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
+        """Scans liquid perps while filtering out synthetic TradFi, commodities, and quarantined tokens."""
         banned_keywords = [
-            "SOXL", "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", 
-            "ESPUSDT", "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", 
-            "WTIUSDT", "BRENTUSDT"
+            "AAPL", "TSLA", "NVDA", "AMZN", "MSFT", "GOOG", "META", "SOXL",
+            "SPCX", "SKHY", "SNDK", "BANK", "MUUSDT", "BEAT", "MSTR", "ESPUSDT",
+            "DEXE", "PUMP", "EUL", "XAU", "XAG", "USDC", "CLUSDT", "SSPCUSDT",
+            "KO", "HANMI", "LRCX", "PURR", "MUU", "XIAOMI", "INTW", "CLANKER",
+            "AAOI", "COIN", "PLTR", "ARM", "BABA", "NIO", "AMD", "WTIUSDT", "BRENTUSDT"
         ]
         try:
             response = await self._safe_api_call("GET", "/v5/market/tickers", category="linear")
@@ -647,6 +670,8 @@ class BybitUnifiedExecutor:
             for t in tickers:
                 symbol = t.get("symbol", "")
                 if not symbol.endswith("USDT") or any(b in symbol for b in banned_keywords):
+                    continue
+                if symbol.startswith(("PRE-", "INNO-", "TEST-")):
                     continue
                 if symbol in self.temporary_symbol_bans:
                     if time.time() < self.temporary_symbol_bans[symbol]:

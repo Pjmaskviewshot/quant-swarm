@@ -1,15 +1,24 @@
 """
-💎 V25.0 APEX QUANTUM PRIME: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
+V25.1 APEX QUANTUM PRIME: ASYNCHRONOUS MACRO STATE MANAGER (FSM)
 --------------------------------------------------------------
 Serves as the O(1) in-memory cache for macro regime analysis, Sector Eigenvector 
 momentum states, and the single source of truth for Swarm-level circuit breakers.
-Upgraded with Per-Asset Micro-Locks for localized Exhaustion/Absorption isolation.
+
+Production Hardening & Systemic SRE Resolutions:
+- Module Anomaly Circuit Breaker (SRE Resolution): Actively tracks exception and 
+  failure frequencies across subsystems (e.g., SQLite faults, WebSocket drops).
+  Automatically triggers the global emergency lock if a single module encounters 
+  a critical failure flood (>15 anomalies per minute), preventing the engine 
+  from blind-firing through silent exceptions.
+- Per-Asset Micro-Locks: Isolates specific assets encountering high slippage or 
+  execution degradation (Exhaustion/Absorption) without halting the entire Swarm.
 """
 
 import logging
 import time
 from enum import Enum
 from typing import Dict, Any
+from collections import deque
 
 logger = logging.getLogger("QUANT_CORE.FSM")
 
@@ -23,7 +32,7 @@ class TradingState(Enum):
 
 class SystemStateMachine:
     """
-    🚀 V25.0 APEX UPGRADE: DYNAMIC MACRO & SECTOR STATE MANAGER
+    🚀 V25.1 APEX UPGRADE: DYNAMIC MACRO, SECTOR & SRE STATE MANAGER
     Serves as the O(1) in-memory cache for Off-Path AI Debate, Sector SVD Eigenvectors,
     and granular localized/global Circuit Breakers.
     """
@@ -39,8 +48,11 @@ class SystemStateMachine:
         
         # 🚀 V25.0 NEW: Per-Asset Micro-Locks (Timestamp expiration)
         self.asset_locks: Dict[str, float] = {}
+
+        # 🚀 V25.1 NEW: SRE Module Anomaly Tracking
+        self.error_counts: Dict[str, deque] = {}
         
-        logger.info("⚡ FSM Core Upgraded to V25.0: Now serving Granular Asset Locks & Sector Eigenvector Cache.")
+        logger.info("⚡ FSM Core Upgraded to V25.1: Now serving SRE Anomaly Circuit Breakers & Asset Locks.")
 
     # =====================================================================
     # MACRO & SECTOR STATE CACHING
@@ -79,6 +91,27 @@ class SystemStateMachine:
         if not state or (time.time() - state["last_updated"] > staleness_limit_seconds):
             return {"impulse_score": 0.0, "correlation": 0.0}
         return state
+
+    # =====================================================================
+    # SRE & EXCEPTION CIRCUIT BREAKERS
+    # =====================================================================
+
+    def record_module_error(self, module_name: str):
+        """
+        SRE Guardrail: Tracks the frequency of exceptions thrown by individual subsystems.
+        Triggers the global emergency lock if a module fails > 15 times within 60 seconds.
+        """
+        now = time.time()
+        if module_name not in self.error_counts:
+            self.error_counts[module_name] = deque(maxlen=100)
+        self.error_counts[module_name].append(now)
+        
+        # Count errors occurring within the last 60 seconds
+        recent_errors = [t for t in self.error_counts[module_name] if now - t <= 60.0]
+        
+        if len(recent_errors) >= 15 and not self.global_emergency_lock:
+            logger.critical(f"🛑 [SRE ALERT] Anomaly flood in {module_name} ({len(recent_errors)} errs/min). Locking execution.")
+            self.trigger_global_emergency_lock()
 
     # =====================================================================
     # GLOBAL & LOCAL CIRCUIT BREAKERS

@@ -1,24 +1,24 @@
 """
-V40.3 APEX TITAN: ATOMIC DUAL-LEG BASIS & YIELD HARVESTER
+V40.7 APEX TITAN: ATOMIC DUAL-LEG BASIS & YIELD HARVESTER
 ------------------------------------------------------------------------
 Ultra-low latency delta-neutral basis cash-and-carry execution engine.
 Sweeps idle margin into high-rate funding arbitrage with full multiplier 
 normalization, cross-instrument lot step harmonization, and atomic rollback.
 
-Architectural Supremacy (V40.3 Production Upgrades):
-- True Spot Balance Resolution (P1 Fix): Queries `walletBalance` instead of
-  `availableToWithdraw` during emergency spot unwinds, avoiding the UTA margin
-  trap where collateral haircuts falsely report zero available spot balance.
-- Shielded Atomic Execution & Rollback: Wraps Perpetual Short placement and
-  emergency Spot liquidation in `asyncio.shield()` to permanently eliminate
-  half-hedged exposure caused by unshielded `asyncio.CancelledError` interrupts.
-- Shielded Dual-Leg Unwind Routine: Protects simultaneous Spot/Perp unwind
-  sweeps and active reconciliation retries from cancellation aborts during
-  emergency shutdown sequences.
-- 30s High-Velocity Rate Scanner: Accelerates scan cadence from 180s to 30s to
-  capture transient funding rate dislocations before cross-exchange arbitrageurs.
-- Post-Quantization Lot Parity: Quantizes lot sizes to fixed-point strings prior
-  to evaluating exchange `min_order_qty` and `min_order_amt` limits.
+Production Hardening & Quantitative Resolutions:
+- UTA Collateral Haircut Sizing Guard (P0 Resolution): Sizing dynamically constrains 
+  `yield_capital` based on base-asset collateral discounting `(1.0 - collateral_ratio)`.
+  Guarantees available margin cannot be exhausted upon spot purchase, eradicating 
+  Bybit 110007 (Insufficient Margin) errors on the perpetual short leg.
+- Leverage-Aware Instrument Specs: Ingests `leverageFilter` directly from Bybit Linear
+  specifications to compute exact Initial Margin Requirements (IMR).
+- True Spot Balance Resolution: Queries `walletBalance` rather than `availableToWithdraw`
+  to bypass synthetic collateral freeze traps during emergency spot liquidations.
+- Shielded Critical Unwind & Rollback: Isolates spot liquidations and dual-leg unwinds
+  inside `asyncio.shield()` to guarantee tasks cannot be canceled while holding 
+  unhedged spot inventory.
+- Post-Quantization Decimal Lot Parity: Guarantees 1:1 base-to-perp contract matching 
+  across fractional multipliers (e.g. 1000PEPE, 1000000MOG) before dispatch.
 """
 
 import re
@@ -37,7 +37,7 @@ logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
 class DeltaNeutralYieldEngine:
     """
-    V40.3 APEX TITAN BASIS ENGINE
+    V40.7 APEX TITAN BASIS ENGINE
     Captures perpetual funding rate premiums via synchronized Spot Long / Perp Short
     atomic pairing with zero residual directional exposure and proactive solvency sentries.
     """
@@ -92,7 +92,7 @@ class DeltaNeutralYieldEngine:
         return f"{base_asset}USDT", base_asset, multiplier
 
     async def _fetch_instrument_specs(self, symbol: str, category: str) -> Optional[Dict[str, Any]]:
-        """Caches and validates lot size filters and tick specifications."""
+        """Caches and validates lot size filters, tick specifications, and leverage boundaries."""
         cache_key = f"{category}_{symbol}"
         if cache_key in self.instrument_cache and self.instrument_cache[cache_key] is not None:
             return self.instrument_cache[cache_key]
@@ -108,20 +108,23 @@ class DeltaNeutralYieldEngine:
             info = data_list[0]
             lot_filter = info.get("lotSizeFilter", {})
             price_filter = info.get("priceFilter", {})
+            lev_filter = info.get("leverageFilter", {})
 
             if category == "spot":
                 specs = {
                     "base_precision": str(lot_filter.get("basePrecision", "0.0001")),
                     "min_order_qty": float(lot_filter.get("minOrderQty", 0.0001)),
                     "min_order_amt": float(lot_filter.get("minOrderAmt", 5.0)),
-                    "tick_size": str(price_filter.get("tickSize", "0.01"))
+                    "tick_size": str(price_filter.get("tickSize", "0.01")),
+                    "max_leverage": 1.0
                 }
             else:
                 specs = {
                     "qty_step": str(lot_filter.get("qtyStep", "0.001")),
                     "min_order_qty": float(lot_filter.get("minOrderQty", 0.001)),
                     "min_notional": float(lot_filter.get("minNotionalValue", 5.0)),
-                    "tick_size": str(price_filter.get("tickSize", "0.01"))
+                    "tick_size": str(price_filter.get("tickSize", "0.01")),
+                    "max_leverage": float(lev_filter.get("maxLeverage", 2.0))
                 }
 
             self.instrument_cache[cache_key] = specs
@@ -340,8 +343,6 @@ class DeltaNeutralYieldEngine:
                 coins = data_list[0].get("coin", [])
                 for c in coins:
                     if c.get("coin") == base_asset:
-                        # P1 FIX: Query true walletBalance instead of availableToWithdraw
-                        # Prevents the UTA Margin Trap from hiding owned tokens during haircuts
                         return float(c.get("walletBalance", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"[YIELD] Failed querying spot balance for {base_asset}: {e}")
@@ -435,7 +436,6 @@ class DeltaNeutralYieldEngine:
                 continue
 
             current_funding = float(ticker_data.get("fundingRate", 0.0) or 0.0)
-            holding_hours = (time.time() - hedge_meta["timestamp"]) / 3600.0
 
             # 1. Negative Funding Rate Check (Short Perp pays Long)
             if current_funding < 0.0:
@@ -505,7 +505,7 @@ class DeltaNeutralYieldEngine:
             except Exception:
                 pass
 
-        idle_capital = total_bal - active_margin
+        idle_capital = max(0.0, total_bal - active_margin)
 
         # Adaptive Sizing
         min_idle_capital = 8.0 if total_bal < 100.0 else 30.0
@@ -513,14 +513,24 @@ class DeltaNeutralYieldEngine:
             logger.debug(f"[YIELD] Insufficient idle capital (${idle_capital:.2f} < ${min_idle_capital:.2f}) for {symbol}.")
             return False
 
+        # P0 RESOLUTION: Constrain yield capital to account for UTA collateral haircuts and perp IMR
+        perp_max_lev = float(perp_specs.get("max_leverage", 2.0))
+        effective_perp_leverage = min(2.0, perp_max_lev)
+        margin_drain_rate = (1.0 / effective_perp_leverage) + (1.0 - collateral_ratio) + 0.15  # 15% Headroom buffer
+        max_safe_capital_headroom = idle_capital / margin_drain_rate
+
         if total_bal < 100.0:
-            yield_capital = min(idle_capital * 0.85, max(7.0, total_bal * 0.45))
+            yield_capital = min(max_safe_capital_headroom, idle_capital * 0.85, max(7.0, total_bal * 0.45))
             min_yield_threshold = 6.50
         else:
-            yield_capital = min(idle_capital * 0.90, total_bal * 0.20)
+            yield_capital = min(max_safe_capital_headroom, idle_capital * 0.90, total_bal * 0.20)
             min_yield_threshold = 15.0
 
         if yield_capital < min_yield_threshold:
+            logger.warning(
+                f"[YIELD] Headroom check failed for {symbol}: Sized capital (${yield_capital:.2f}) < "
+                f"Threshold (${min_yield_threshold:.2f}). Margin Drain Rate: {margin_drain_rate:.2f}x"
+            )
             return False
 
         calc_result = await self._calculate_harmonized_quantities(

@@ -1,22 +1,22 @@
 """
-V40.5 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+V40.6 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
 Hyper-optimized Supabase connector and Transaction Cost Analysis (TCA) ledger.
 
-Architectural Supremacy (V40.5 Production Upgrades):
-- Metric Distortion Resolution: Corrected slippage aggregator in 
-  `get_forensic_execution_summary()`. Eradicated duplicate `* 10000.0` scalar on 
-  `slippage_drag` (which is already stored in basis points), fixing the -2622.6 bps anomaly.
-- True Bracket Shadow Forensics: Added `virtual_sl` and `virtual_tp` to the SQLite 
-  in-memory schema and sync pipeline. Shadow prediction evaluations now resolve 
-  against actual model volatility brackets rather than hardcoded 1% / 1.5% levels.
-- Thread/Async SQLite Concurrency Shield: Protected SQLite cursor executions and 
-  commits with an `asyncio.Lock()` to prevent cursor collision and state corruption 
-  across concurrent coroutines.
-- Fast-Path SQLite Decoupling: In-memory SQLite engine (`:memory:`) provides sub-millisecond 
-  KNN queries, fully isolating execution gates from cloud network jitter.
-- Lossless Shutdown Flush: Coalesces and flushes all queued mutations in micro-batches 
-  before terminating background tasks.
+Architectural Supremacy & Production Resolutions:
+- On-Disk WAL Persistence (SRE Resolution): Migrates local SQLite from volatile
+  ':memory:' to persistent on-disk storage with PRAGMA journal_mode=WAL and
+  synchronous=NORMAL. Protects forensic records, shadow paths, and TCA histories
+  from OOM/SIGKILL termination while preserving sub-millisecond query speed.
+- Shadow/Live Forensic Decoupling (P0 Resolution): Constrains shadow resolution
+  queries strictly to `WHERE resolved = 0 AND is_shadow = 1`. Eradicates the
+  catastrophic collision where ghost background workers prematurely resolved,
+  closed, and overwrote active live positions with synthetic candle metrics.
+- Sub-Millisecond Covering Indexes: Establishes compound indexes covering 
+  unresolved shadow batches and historical symbol evaluations, eliminating full
+  table scans during high-frequency k-NN Bayesian DNA queries.
+- Clean Resource Teardown: Extends flush_and_close to drain in-flight write 
+  queues, flush WAL checkpoints, and terminate SQLite connection handles safely.
 """
 
 import os
@@ -35,11 +35,11 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    V40.5 PURE-ASYNC FORENSIC LEDGER
+    V40.6 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
-    DNA clustering with batched cloud persistence and ultra-fast SQLite local reads.
+    DNA clustering with batched cloud persistence and fast-path SQLite WAL reads.
     """
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: Optional[str] = None):
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
 
@@ -54,14 +54,19 @@ class MemoryBank:
             logger.critical(f"❌ CONNECTION BOUND FAULT: Could not initialize Supabase client: {e}", exc_info=True)
             raise
 
+        # Storage directory resolution for persistent on-disk WAL
+        self.storage_dir = os.environ.get("PERSISTENT_STORAGE_PATH", ".")
+        os.makedirs(self.storage_dir, exist_ok=True)
+        self.db_path = db_path or os.path.join(self.storage_dir, "titan_memory_ledger.db")
+
         # Tier-1 Caches
         self.dna_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self.cache_ttl_seconds: float = 120.0
 
-        # Concurrency Lock for In-Memory SQLite
+        # Concurrency Lock for SQLite Operations
         self._db_lock = asyncio.Lock()
 
-        # Tier-2 Fast-Path Cache (SQLite In-Memory)
+        # Tier-2 Fast-Path Cache (Persistent On-Disk SQLite WAL)
         self._init_sqlite()
 
         # Holographic Local Fallback Matrix
@@ -77,11 +82,17 @@ class MemoryBank:
         self._is_shutting_down = False
 
     def _init_sqlite(self):
-        """Initializes the local SQLite in-memory replica with full bracket schema."""
-        self.local_db = sqlite3.connect(':memory:', check_same_thread=False)
+        """Initializes the persistent on-disk SQLite ledger configured for WAL concurrency."""
+        self.local_db = sqlite3.connect(self.db_path, check_same_thread=False)
         self.local_db.row_factory = sqlite3.Row
         self.local_cursor = self.local_db.cursor()
-        
+
+        # SRE Fix: Configure high-throughput WAL mode and synchronous=NORMAL
+        self.local_cursor.execute("PRAGMA journal_mode = WAL;")
+        self.local_cursor.execute("PRAGMA synchronous = NORMAL;")
+        self.local_cursor.execute("PRAGMA busy_timeout = 5000;")
+        self.local_cursor.execute("PRAGMA cache_size = -64000;")  # 64MB Page Cache
+
         self.local_cursor.execute('''
             CREATE TABLE IF NOT EXISTS quantitative_ledger (
                 signal_id TEXT PRIMARY KEY,
@@ -104,12 +115,23 @@ class MemoryBank:
                 virtual_tp REAL
             )
         ''')
+
+        # Covering indexes for real-time KNN edge scans and decoupled shadow forensics
         self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_sym_res_ts ON quantitative_ledger(symbol, resolved, timestamp DESC)')
-        self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_unresolved ON quantitative_ledger(resolved, timestamp ASC)')
+        self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_unresolved_shadow ON quantitative_ledger(resolved, is_shadow, timestamp ASC)')
+        self.local_cursor.execute('CREATE INDEX IF NOT EXISTS idx_forensic_covering ON quantitative_ledger(timestamp DESC, resolved, is_shadow)')
         self.local_db.commit()
 
     async def _warm_sqlite_from_cloud(self):
-        """Pre-warms the local SQLite database from Supabase on boot."""
+        """Pre-warms the persistent SQLite ledger from Supabase on boot if empty."""
+        async with self._db_lock:
+            self.local_cursor.execute("SELECT COUNT(*) FROM quantitative_ledger")
+            count = self.local_cursor.fetchone()[0]
+
+        if count >= 1000:
+            logger.info(f"✅ Local SQLite WAL warm with {count} verified records. Bypassing cloud sync.")
+            return
+
         logger.info("🔥 Warming local SQLite fast-path cache from Supabase...")
         try:
             query = (
@@ -120,7 +142,7 @@ class MemoryBank:
             )
             response = await self._safe_execute_async(query)
             rows = response.data if response else []
-            
+
             async with self._db_lock:
                 for r in rows:
                     self.local_cursor.execute('''
@@ -138,10 +160,10 @@ class MemoryBank:
                 self.local_db.commit()
             logger.info(f"✅ SQLite warm-up complete. Pre-loaded {len(rows)} historical records.")
         except Exception as e:
-            logger.warning(f"⚠️ SQLite warm-up failed, continuing with empty local cache: {e}")
+            logger.warning(f"⚠️ SQLite warm-up failed, continuing with active local cache: {e}")
 
     async def start(self):
-        """Initializes the async write queue, pre-warms SQLite, and starts the batching worker."""
+        """Initializes the async write queue, validates SQLite, and starts the batching worker."""
         await self._warm_sqlite_from_cloud()
         self.write_queue = asyncio.Queue(maxsize=50000)
         self._is_shutting_down = False
@@ -150,33 +172,31 @@ class MemoryBank:
 
     async def flush_and_close(self):
         """
-        Drains and flushes all pending database mutations before canceling worker tasks.
-        Guarantees zero dropped records during graceful shutdowns.
+        Drains and flushes all pending database mutations and cleanly checkpoints 
+        SQLite WAL files before shutting down.
         """
         logger.info("⏳ Halting async DB worker and flushing forensic ledger...")
         self._is_shutting_down = True
 
-        if not self.write_queue:
-            return
-
-        pending_tasks = []
-        while not self.write_queue.empty():
-            try:
-                task = self.write_queue.get_nowait()
-                if task is not None:
-                    pending_tasks.append(task)
-            except asyncio.QueueEmpty:
-                break
-
-        if pending_tasks:
-            logger.info(f"💾 Flushing {len(pending_tasks)} pending execution records in batches...")
-            chunk_size = 50
-            for i in range(0, len(pending_tasks), chunk_size):
-                chunk = pending_tasks[i:i + chunk_size]
+        if self.write_queue:
+            pending_tasks = []
+            while not self.write_queue.empty():
                 try:
-                    await self._dispatch_batch(chunk)
-                except Exception as e:
-                    logger.error(f"Flush execution batch error: {e}")
+                    task = self.write_queue.get_nowait()
+                    if task is not None:
+                        pending_tasks.append(task)
+                except asyncio.QueueEmpty:
+                    break
+
+            if pending_tasks:
+                logger.info(f"💾 Flushing {len(pending_tasks)} pending execution records in batches...")
+                chunk_size = 50
+                for i in range(0, len(pending_tasks), chunk_size):
+                    chunk = pending_tasks[i:i + chunk_size]
+                    try:
+                        await self._dispatch_batch(chunk)
+                    except Exception as e:
+                        logger.error(f"Flush execution batch error: {e}")
 
         if self._bg_task and not self._bg_task.done():
             self._bg_task.cancel()
@@ -184,6 +204,16 @@ class MemoryBank:
                 await self._bg_task
             except asyncio.CancelledError:
                 pass
+
+        # Checkpoint WAL and close connection handle cleanly
+        async with self._db_lock:
+            try:
+                self.local_cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                self.local_db.commit()
+                self.local_db.close()
+                logger.info("🔒 Local SQLite database closed and WAL checkpointed.")
+            except Exception as e:
+                logger.error(f"Error closing SQLite database: {e}")
 
         logger.info("✅ Cloud ledger flush complete.")
 
@@ -303,7 +333,7 @@ class MemoryBank:
         features: Optional[Dict[str, Any]] = None, 
         is_shadow: bool = False
     ):
-        """Persists the full 25D state vector to SQLite (Instant) and Supabase (Batched)."""
+        """Persists the full state vector to local SQLite (Instant) and Supabase (Batched)."""
         if not self.write_queue:
             return
         if features is None:
@@ -356,7 +386,6 @@ class MemoryBank:
             "predicted_direction": str(direction).upper(),
             "price_at_prediction": float(price),
             "ai_confidence": float(confidence),
-
             "market_regime": str(market_regime),
             "log_mlofi_z": float(log_mlofi_z),
             "hawkes_z": float(hawkes_z),
@@ -370,12 +399,10 @@ class MemoryBank:
             "cvd_z": float(cvd_z),
             "vol_mult": float(vol_mult),
             "spread": float(spread),
-
             "kelly_fraction": float(kelly_fraction),
             "conformal_gate": float(conformal_gate),
             "virtual_sl": sl_price,
             "virtual_tp": tp_price,
-
             "is_shadow": is_shadow,
             "execution_mode": "SHADOW" if is_shadow else str(features.get("execution_mode", "LIVE")),
             "resolved": False,
@@ -439,7 +466,6 @@ class MemoryBank:
                     "net_pnl": float(net_pnl),
                     "slippage_drag": float(slippage),
                     "is_correct": is_correct,
-
                     "tca_entry_slippage_bps": float(execution_details.get("tca_entry_slippage_bps", 0.0)),
                     "tca_exit_slippage_bps": float(execution_details.get("tca_exit_slippage_bps", 0.0)),
                     "tca_total_slippage_bps": float(execution_details.get("tca_total_slippage_bps", slippage)),
@@ -466,17 +492,21 @@ class MemoryBank:
         age_cutoff: float, 
         interval_mins: float = 15.0
     ) -> int:
-        """Resolves shadow signals against price history using the local SQLite queue with true volatility brackets."""
+        """
+        Resolves shadow signals against price history using the local SQLite queue with true volatility brackets.
+        P0 FIX: Constrained strictly to is_shadow = 1 to prevent overriding active live trades.
+        """
         if not self.write_queue:
             return 0
         resolved_count = 0
 
         try:
+            # SRE/P0 Fix: Query strictly unresolved SHADOW signals
             async with self._db_lock:
                 self.local_cursor.execute('''
                     SELECT signal_id, timestamp, symbol, price_at_prediction, predicted_direction, virtual_sl, virtual_tp
                     FROM quantitative_ledger
-                    WHERE resolved = 0
+                    WHERE resolved = 0 AND is_shadow = 1
                     ORDER BY timestamp ASC
                     LIMIT 500
                 ''')
@@ -560,7 +590,6 @@ class MemoryBank:
 
                 if is_terminated:
                     is_win = (prediction == "BUY" and exit_price > entry_price) or (prediction == "SELL" and exit_price < entry_price)
-
                     entry_price_safe = entry_price if entry_price > 0 else 1e-9
                     sl_distance_pct = max(0.005, abs(sl_price - entry_price_safe) / entry_price_safe)
                     simulated_leverage = max(1.0, min(5.0, float(math.floor(1.0 / (sl_distance_pct * 1.5)))))
@@ -815,11 +844,7 @@ class MemoryBank:
             }
 
     async def get_forensic_execution_summary(self, today_iso_start: str) -> Dict[str, Any]:
-        """
-        Queries today's executed trades via the fast-path SQLite covering index.
-        Fixes the metric distortion bug: slippage_drag is already stored in basis points,
-        so redundant multiplication by 10,000 is eliminated.
-        """
+        """Queries today's executed trades via the fast-path SQLite covering index."""
         try:
             async with self._db_lock:
                 self.local_cursor.execute('''
@@ -845,7 +870,6 @@ class MemoryBank:
                 "trade_count": len(rows),
                 "net_pnl": round(sum(pnls), 4),
                 "fees_paid": round(sum(fees), 4),
-                # FIX: slippage_drag is already captured in basis points (bps)
                 "avg_slippage_bps": round(float(np.mean(slips)), 2) if slips else 0.0,
                 "avg_holding_mins": round(float(np.mean(durations)), 1) if durations else 0.0,
                 "win_rate": round(wins / len(rows), 4)

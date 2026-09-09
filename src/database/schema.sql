@@ -1,5 +1,5 @@
 -- ====================================================================
--- 💎 V37.0 APEX TITAN: FORENSIC & TCA LEDGER ARCHITECTURAL SCHEMA
+-- 💎 V40.6 APEX TITAN: FORENSIC & TCA LEDGER ARCHITECTURAL SCHEMA
 -- HIGH-FREQUENCY PERSISTENCE & BAYESIAN DNA QUANTITATIVE PIPELINE
 -- SAFE MIGRATION PIPELINE: Non-destructive hot-migration enabled.
 -- ====================================================================
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS quantitative_ledger (
     sector_impulse NUMERIC DEFAULT 0.0,       -- Cross-Asset SVD Eigenvector Tailwinds
     swd_z NUMERIC DEFAULT 0.0,                -- Structural Work Deficit (Iceberg Absorption)
     accel_z NUMERIC DEFAULT 0.0,              -- Kinematic Order Flow Acceleration
-    micro_dislocation_z NUMERIC DEFAULT 0.0,  -- Stoikov Micro-Price Dislocation (V37.0)
+    micro_dislocation_z NUMERIC DEFAULT 0.0,  -- Stoikov Micro-Price Dislocation
     hurst_h NUMERIC DEFAULT 0.5,              -- Fractional Brownian Rough Volatility Exponent
     bocd_cp_prob NUMERIC DEFAULT 0.0,         -- Adams-MacKay Bayesian Changepoint Probability
     ou_divergence_z NUMERIC DEFAULT 0.0,      -- Ornstein-Uhlenbeck Micro-Reversion Z-score
@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS quantitative_ledger (
     is_correct BOOLEAN DEFAULT FALSE,
     net_pnl NUMERIC DEFAULT 0.0,
     slippage_drag NUMERIC DEFAULT 0.0,
+    mfe_r NUMERIC DEFAULT 0.0,                -- Maximum Favorable Excursion (R-multiple)
+    mae_r NUMERIC DEFAULT 0.0,                -- Maximum Adverse Excursion (R-multiple)
 
     -- TCA (Transaction Cost Analysis) Metrics
     tca_entry_slippage_bps NUMERIC DEFAULT 0.0,
@@ -88,12 +90,25 @@ CREATE TABLE IF NOT EXISTS delta_neutral_ledger (
 );
 
 -- ====================================================================
--- 3. HOT-MIGRATION UPGRADE PIPELINE (For Existing Databases)
+-- 3. SWARM CLOUD INSTANCE MUTEX LEASE (SRE Anti-Twin Guard)
+-- Guarantees single-leader execution across rolling container deploys.
+-- ====================================================================
+CREATE TABLE IF NOT EXISTS swarm_instance_lease (
+    environment TEXT PRIMARY KEY,             -- Single row per environment (e.g. 'PRODUCTION')
+    instance_id TEXT NOT NULL,
+    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    hostname TEXT,
+    ip_address TEXT,
+    meta JSONB DEFAULT '{}'::jsonb
+);
+
+-- ====================================================================
+-- 4. HOT-MIGRATION UPGRADE PIPELINE (For Existing Databases)
 -- Idempotent column attachment guarantees zero downtime or table locking.
 -- ====================================================================
 DO $$ 
 BEGIN
-    -- V37.0 Microstructure & Physics Features
+    -- V40.6 Microstructure & Physics Features
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS micro_dislocation_z NUMERIC DEFAULT 0.0;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS hurst_h NUMERIC DEFAULT 0.5;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS bocd_cp_prob NUMERIC DEFAULT 0.0;
@@ -104,7 +119,9 @@ BEGIN
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS kelly_fraction NUMERIC DEFAULT 0.0;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS conformal_gate NUMERIC DEFAULT 0.52;
 
-    -- Granular TCA Attribution
+    -- Path Excursion & TCA Forensics
+    ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS mfe_r NUMERIC DEFAULT 0.0;
+    ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS mae_r NUMERIC DEFAULT 0.0;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS tca_entry_slippage_bps NUMERIC DEFAULT 0.0;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS tca_exit_slippage_bps NUMERIC DEFAULT 0.0;
     ALTER TABLE quantitative_ledger ADD COLUMN IF NOT EXISTS tca_total_slippage_bps NUMERIC DEFAULT 0.0;
@@ -112,16 +129,23 @@ BEGIN
 END $$;
 
 -- ====================================================================
--- 4. ULTRA-LOW LATENCY PARTIAL & COVERING INDEXES
--- Designed specifically for high-throughput Supabase queries:
+-- 5. ULTRA-LOW LATENCY PARTIAL & COVERING INDEXES
+-- Designed specifically for high-throughput Supabase / PostgreSQL:
 -- - Eliminates sequential scans during async batch resolution.
+-- - Strictly decouples shadow resolution from active live trades.
 -- - Optimizes Bayesian k-NN DNA clustering searches (<2ms).
 -- ====================================================================
 
--- Accelerated Ghost Forensics Unresolved Batch Polling
-CREATE INDEX IF NOT EXISTS idx_ledger_unresolved_batch 
+-- P0 FIX: Accelerated Ghost Forensics Unresolved Batch Polling
+-- Strictly constrained to is_shadow = TRUE to prevent resolving active live orders.
+CREATE INDEX IF NOT EXISTS idx_ledger_unresolved_shadow 
 ON quantitative_ledger (timestamp ASC) 
-WHERE resolved = FALSE;
+WHERE resolved = FALSE AND is_shadow = TRUE;
+
+-- Accelerated Live Trade Tracking (Unresolved Active Real Inventory)
+CREATE INDEX IF NOT EXISTS idx_ledger_unresolved_live 
+ON quantitative_ledger (timestamp ASC) 
+WHERE resolved = FALSE AND is_shadow = FALSE;
 
 -- Accelerated Bayesian DNA Edge & Shadow Promotion Lookups
 CREATE INDEX IF NOT EXISTS idx_ledger_bayesian_dna_knn 
@@ -146,3 +170,7 @@ ON quantitative_ledger (market_regime, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_delta_neutral_active 
 ON delta_neutral_ledger (symbol, status) 
 WHERE status = 'ACTIVE';
+
+-- Swarm Mutex Heartbeat Lookup
+CREATE INDEX IF NOT EXISTS idx_instance_lease_hb 
+ON swarm_instance_lease (environment, last_heartbeat DESC);

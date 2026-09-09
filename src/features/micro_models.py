@@ -1,26 +1,28 @@
 """
-APEX TITAN: ZERO-ALLOCATION STATISTICAL MICROSTRUCTURE ENGINE
+V41.0 APEX TITAN: 25D VOLTERRA-RIEMANNIAN MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Continuous-time microstructure forecasting engine integrating zero-allocation 
 feature buffers, closed-form Ornstein-Uhlenbeck calibration, vectorized BOCD, 
 Joseph-form Adaptive Sparse RLS, and fractional Eighth-Kelly optimal control.
 
-Production Hardening & Quantitative Upgrades:
-- Flow-Conditioned Markov Likelihood: Injects real-time MLOFI Z-scores and Hawkes 
-  intensity directly into Bayesian likelihood updates, preventing catastrophic 
-  misclassification of aggressive orderbook sweeps as benign 'RANGING' regimes.
-- Range Prior Rectification: Neutralized `w_range[0] = 0.0` to eliminate linear 
-  fading of toxic flow sweeps. Price reversion is governed strictly by Ornstein-Uhlenbeck 
-  divergence and micro-dislocation rather than absorbing directional dumps.
-- Adverse Flow Selection Veto: Blocks counter-trend entries when order flow imbalance 
-  (|MLOFI_Z| > 1.75) signals toxic book depletion, unless backed by confirmed 
-  Structural Work Deficit (SWD) iceberg absorption.
-- Micro-Horizon Bracket Grounding: Anchors online RLS replay labels directly to 
-  dynamic ATR volatility boundaries (`virt_sl`, `virt_tp`) rather than static percentages.
-- Alpha Tensor Telemetry Wire: Exports `alpha_tensor_bps`, `expected_drift`, and 
-  `topology` metrics directly to the state dictionary, eliminating 0.0 bps telemetry.
-- Vectorized BOCD & ZCA Whitening: Pure NumPy/SciPy linear algebra preserves 
-  sub-millisecond execution latency and strict rotational coordinate invariance.
+Production Hardening & Mathematical Resolutions (Full 25D Preservation):
+- Affine Bias S^23 Invariant (P0 Resolution): Projects the 24 active features 
+  onto the unit hypersphere S^23 while anchoring the affine intercept uncompressed 
+  (v_att[24] = 1.0), preventing intercept collapse during volatility bursts.
+- Decoupled RLS Expert Errors (P0 Resolution): Updates each regime model 
+  (trend, range, spoof, cascade) against its own independent prediction error
+  e_m = y - sigma(3.5 * w_m^T x) rather than the blended ensemble probability,
+  eradicating cross-regime weight contamination.
+- 19D Fast-Path ZCA Eigenbasis Caching (P0 Resolution): Decouples np.linalg.eigh 
+  from the per-tick hot path by caching the whitening matrix and recomputing 
+  conditionally (every 20 ticks or when variance shifts > 10%), completely 
+  eliminating asyncio event-loop GIL stalls.
+- Softmax Temperature Smoothing (P1 Resolution): Raises the Markov mixture 
+  temperature to tau = 0.80, eliminating probability step-discontinuities.
+- Path-Aware Bracket Resolution: Enforces dynamic ATR boundary evaluation 
+  (both SL breaches and TP targets) in the online micro-learning replay buffer.
+- Full 25D Feature Space Intact: Preserves all 19 raw microstructure signals,
+  all 5 bilinear interaction terms, and the constant affine bias.
 """
 
 import os
@@ -36,7 +38,7 @@ logger = logging.getLogger("QUANT_CORE.MICRO_MODELS")
 
 
 class ClusterWarmStartRLS:
-    """Provides mathematically anchored prior weights across the 4 Markov regimes."""
+    """Provides mathematically anchored prior weights across the 4 Markov regimes for the full 25D manifold."""
     @staticmethod
     def get_cluster_priors(symbol: str, dim: int = 25) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         w_trend = np.zeros(dim, dtype=np.float64)
@@ -51,7 +53,7 @@ class ClusterWarmStartRLS:
         else:
             p_scale = 3.0
 
-        # Feature Index Legend:
+        # Feature Index Legend (25D Full Volterra Manifold):
         # 0: MLOFI_Z, 1: Hawkes_Z, 2: Meso_Momentum_Z, 3: Sector_Impulse,
         # 4: Micro_Elasticity, 5: OU_Divergence, 6: CFI_Z, 7: Jump_Z, 8: Shannon_Entropy,
         # 9: SWD_Z, 10: Accel_Z, 11: Hurst_Dev, 12: P_Bid_Deplete, 13: CVD_Z, 14: Div_Z,
@@ -71,15 +73,15 @@ class ClusterWarmStartRLS:
         w_trend[22] = 0.30  # CVD x Momentum
         w_trend[24] = 0.05  # Intercept bias
 
-        # 2. RANGE REGIME: Fades price stretch and dislocation, NOT toxic volume flow
-        w_range[0] = 0.00   # Rectified: Neutralized to eradicate fading toxic dumps
+        # 2. RANGE REGIME: Fades price stretch and dislocation; toxic flow neutralized
+        w_range[0] = 0.00   # Flow neutralized
         w_range[5] = -0.70  # Strong OU reversion
         w_range[12] = 0.40  # Bid depletion
         w_range[18] = -0.50 # Fade micro-dislocation
         w_range[23] = -0.35 # OU x Hawkes
         w_range[24] = 0.00
 
-        # 3. SPOOF REGIME: Defensive against fleeting depth sweeps and adverse selection
+        # 3. SPOOF REGIME: Defensive against fleeting sweeps; prioritizes iceberg absorption
         w_spoof[0] = -0.60  # Toxic flow rejection
         w_spoof[6] = -0.75  # Fleeting order imbalance (CFI)
         w_spoof[9] = 0.50   # Iceberg absorption (SWD)
@@ -87,7 +89,7 @@ class ClusterWarmStartRLS:
         w_spoof[24] = 0.00
 
         # 4. CASCADE REGIME: Directional execution on liquidation cascades
-        w_cascade[0] = 0.70
+        w_cascade[0] = 0.70 # Order flow chase
         w_cascade[1] = 0.85 # Extreme Hawkes surge
         w_cascade[7] = 0.50 # Volatility Jump Z
         w_cascade[10] = 0.60
@@ -100,7 +102,7 @@ class ClusterWarmStartRLS:
 
 class AsynchronousStateAligner:
     """Aligns irregularly arriving telemetry using continuous Laplace decay kernels."""
-    def __init__(self, dim: int, max_age: float = 5.0):
+    def __init__(self, dim: int = 19, max_age: float = 5.0):
         self.dim = dim
         self.state = np.zeros(dim, dtype=np.float64)
         self.last_times = np.zeros(dim, dtype=np.float64)
@@ -652,16 +654,15 @@ class MarkovRegimeDetector:
 
     def update_beliefs(self, er: float, entropy: float, fleeting: float, jump_z: float, mlofi_z: float = 0.0, hawkes_z: float = 0.0) -> np.ndarray:
         prior = self.tpm.T @ self.beliefs
-
         abs_flow = abs(mlofi_z)
         abs_hawkes = abs(hawkes_z)
 
-        # Flow-conditioned likelihoods: Severe orderbook flow suppresses RANGING probability
+        # Severe orderbook flow suppresses RANGING probability
         l_trend = math.exp(-2.0 * ((1.0 - er) ** 2) - 1.5 * (entropy ** 2) - 3.0 * (fleeting ** 2)) * (1.0 + min(2.0, abs_flow * 0.5))
         l_range = math.exp(-2.5 * (er ** 2) - 1.5 * ((1.0 - entropy) ** 2) - 2.0 * (fleeting ** 2) - 1.2 * (min(3.0, abs_flow) ** 2))
         l_spoof = math.exp(-3.0 * ((1.0 - fleeting) ** 2) - 1.0 * (er ** 2))
         
-        # Cascades are driven by simultaneous volatility jumps and extreme flow surges
+        # Cascades driven by jump volatility and flow intensity
         max_stress = max(abs(jump_z), abs_hawkes, abs_flow)
         l_cascade = math.exp(-0.75 * ((3.0 - min(3.0, max_stress)) ** 2))
 
@@ -676,7 +677,7 @@ QuantumMarkovRegimeDetector = MarkovRegimeDetector
 
 class AdaptiveSparseRLS:
     """L1-Regularized Recursive Least Squares with Bucy-Joseph Covariance Stabilization."""
-    def __init__(self, dim: int, p_init: float = 1.0, l1_penalty: float = 1e-4):
+    def __init__(self, dim: int = 25, p_init: float = 1.0, l1_penalty: float = 1e-4):
         self.dim = dim
         self.w = np.zeros(dim, dtype=np.float64)
         self.f_inv = np.eye(dim, dtype=np.float64) * p_init
@@ -740,7 +741,10 @@ InformationGeometricRLS = AdaptiveSparseRLS
 
 
 class BoundedAdaptiveWhitener:
-    """Streaming 19D Regularized Whitening Engine."""
+    """
+    Streaming 19D Regularized Whitening Engine with Fast-Path Eigenbasis Caching.
+    P0 RESOLUTION: Caches the ZCA transformation matrix to eliminate per-tick GIL stalls.
+    """
     def __init__(self, dim: int = 19, base_alpha: float = 0.001):
         self.dim = dim
         self.base_alpha = base_alpha
@@ -749,6 +753,11 @@ class BoundedAdaptiveWhitener:
         self.eye = np.eye(dim, dtype=np.float64)
         self.baseline_var = 1e-6
         self._whitened_buf = np.zeros(dim, dtype=np.float64)
+
+        # Eigenbasis Cache for 19x19 sub-millisecond execution
+        self.cached_zca_matrix = np.eye(dim, dtype=np.float64)
+        self.ticks_since_eigen = 0
+        self.last_eigen_var = 1e-6
 
     def get_adaptive_alpha(self, inst_variance: float) -> float:
         self.baseline_var = 0.99 * self.baseline_var + 0.01 * max(1e-9, inst_variance)
@@ -762,22 +771,29 @@ class BoundedAdaptiveWhitener:
         self.cov_matrix = (1.0 - alpha) * self.cov_matrix + alpha * np.outer(delta, delta)
         self.cov_matrix = 0.5 * (self.cov_matrix + self.cov_matrix.T)
 
-        tr = np.trace(self.cov_matrix)
-        reg = max(1e-5, (tr / self.dim) * 1e-4)
-        stable_cov = self.cov_matrix + (self.eye * reg)
+        self.ticks_since_eigen += 1
+        var_shift = abs(inst_variance - self.last_eigen_var) / (self.last_eigen_var + 1e-9)
 
-        # Strict Symmetric ZCA Whitening
-        try:
-            evals, evecs = np.linalg.eigh(stable_cov)
-            evals_clamped = np.maximum(evals, 1e-6)
-            inv_sqrt = 1.0 / np.sqrt(evals_clamped)
-            whitened = (evecs @ np.diag(inv_sqrt) @ evecs.T) @ delta
-            self._whitened_buf[:] = np.clip(whitened / 3.0, -3.0, 3.0)
-            return self._whitened_buf
-        except Exception:
-            diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
-            self._whitened_buf[:] = np.clip(delta / (diag_stds * 3.0), -3.0, 3.0)
-            return self._whitened_buf
+        # Recompute 19x19 ZCA eigendecomposition conditionally
+        if self.ticks_since_eigen >= 20 or var_shift > 0.10:
+            tr = np.trace(self.cov_matrix)
+            reg = max(1e-5, (tr / self.dim) * 1e-4)
+            stable_cov = self.cov_matrix + (self.eye * reg)
+
+            try:
+                evals, evecs = np.linalg.eigh(stable_cov)
+                evals_clamped = np.maximum(evals, 1e-6)
+                inv_sqrt = 1.0 / np.sqrt(evals_clamped)
+                self.cached_zca_matrix = evecs @ np.diag(inv_sqrt) @ evecs.T
+                self.ticks_since_eigen = 0
+                self.last_eigen_var = inst_variance
+            except Exception:
+                diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
+                self.cached_zca_matrix = np.diag(1.0 / (diag_stds + 1e-9))
+
+        whitened = self.cached_zca_matrix @ delta
+        self._whitened_buf[:] = np.clip(whitened / 3.0, -3.0, 3.0)
+        return self._whitened_buf
 
 
 def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) -> float:
@@ -808,7 +824,7 @@ def compute_permutation_entropy(series: list, order: int = 3, delay: int = 1) ->
 
 
 class ContinuousMicrostructureEngine:
-    """Zero-allocation statistical engine with continuous online learning."""
+    """Zero-allocation statistical engine operating the complete 25D Volterra-Riemannian Manifold."""
     def __init__(self, symbol: str = "GENERIC", memory_depth: int = 1000):
         self.symbol = symbol
 
@@ -839,7 +855,7 @@ class ContinuousMicrostructureEngine:
         self.ecosystem_propagator = EcosystemPropagator()
         self.whitening_engine = BoundedAdaptiveWhitener(dim=self.raw_dim)
 
-        # Warm-Start Adaptive Sparse RLS weight matrices
+        # Warm-Start Adaptive Sparse RLS 25D Matrices
         w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=self.feature_dim)
         self.rls_trend = AdaptiveSparseRLS(dim=self.feature_dim, p_init=p_scale)
         self.rls_range = AdaptiveSparseRLS(dim=self.feature_dim, p_init=p_scale)
@@ -882,13 +898,14 @@ class ContinuousMicrostructureEngine:
         self.historical_probs = deque(maxlen=2000)
         self.calibration_errors = deque(maxlen=300)
         self.rls_updates = 0
+        self.is_model_degraded = False
         
         # Micro-Horizon Asynchronous Online Learning Buffer
         self.micro_learning_enabled = os.getenv("ENABLE_MICRO_HORIZON_LEARNING", "true").lower() == "true"
         self.micro_learning_horizon_sec = float(os.getenv("MICRO_HORIZON_SEC", "60.0"))
         self.prediction_buffer = deque(maxlen=1000)
 
-        # RLS Freeze Override: Defaults to false to allow active online learning
+        # RLS Freeze Override
         self.freeze_rls = os.getenv("FREEZE_RLS_WEIGHTS", "false").lower() == "true"
 
     def update_funding_metrics(self, funding_rate: float):
@@ -979,7 +996,7 @@ class ContinuousMicrostructureEngine:
     ) -> Dict[str, Any]:
         now = time.time()
 
-        # Flow-Conditioned Markov Belief Update: Extreme order flow suppresses 'RANGING' regime
+        # Flow-Conditioned Markov Belief Update
         regime_weights = self.regime_detector.update_beliefs(
             self.kaufman_er,
             self.shannon_entropy,
@@ -1020,32 +1037,33 @@ class ContinuousMicrostructureEngine:
         aligned_raw_vec = self.async_aligner.get_aligned_vector(now)
         f = self.whitening_engine.orthogonalize(aligned_raw_vec, self.inst_variance)
 
-        # In-Place 25D Bilinear Feature Crosses
+        # 25D Full Volterra Bilinear Interaction Manifold
         self._bilinear_vec[:19] = f
         self._bilinear_vec[19] = f[11] * f[1]  # 19: Hurst x Hawkes interaction
         self._bilinear_vec[20] = f[17] * f[0]  # 20: Squeeze Risk x MLOFI
         self._bilinear_vec[21] = f[15] * f[0]  # 21: Macro Spillover x MLOFI
         self._bilinear_vec[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
         self._bilinear_vec[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
-        self._bilinear_vec[24] = 1.0           # 24: Affine Bias Intercept
 
-        # Uniform 25D Hypersphere Projection
-        full_norm = math.sqrt(float(np.dot(self._bilinear_vec, self._bilinear_vec))) + 1e-9
-        self._v_att[:] = self._bilinear_vec / full_norm
+        # P0 RESOLUTION: Project ONLY active 24 features onto S^23; anchor affine bias at 1.0 uncompressed
+        norm_active = math.sqrt(float(np.dot(self._bilinear_vec[:24], self._bilinear_vec[:24]))) + 1e-9
+        self._v_att[:24] = self._bilinear_vec[:24] / norm_active
+        self._v_att[24] = 1.0  # Invariant Affine Intercept Bias
 
         l_t = float(np.dot(self.rls_trend.w, self._v_att))
         l_r = float(np.dot(self.rls_range.w, self._v_att))
         l_s = float(np.dot(self.rls_spoof.w, self._v_att))
         l_c = float(np.dot(self.rls_cascade.w, self._v_att))
 
-        tau = 0.25
+        # P1 RESOLUTION: Smooth Softmax Gating (tau = 0.80) to eliminate step-discontinuities
+        tau = 0.80
         exp_weights = np.exp((regime_weights - np.max(regime_weights)) / tau)
         gate_weights = exp_weights / (np.sum(exp_weights) + 1e-9)
 
         regime_logits = np.array([l_t, l_r, l_s, l_c], dtype=np.float64)
         raw_score = float(np.dot(gate_weights, regime_logits))
 
-        # Calibrated Logit Gain (3.5x Parity with backtest.py)
+        # Calibrated Logit Gain
         LOGIT_GAIN = 3.5
         logit = float(np.clip(raw_score * LOGIT_GAIN, -5.0, 5.0))
         p_up = 1.0 / (1.0 + math.exp(-logit))
@@ -1056,7 +1074,6 @@ class ContinuousMicrostructureEngine:
 
         # ---------------------------------------------------------------------
         # ADVERSE ORDER FLOW SELECTION VETO
-        # Never buy into toxic sell sweeps; never short into aggressive buyer sweeps
         # ---------------------------------------------------------------------
         has_iceberg_absorption = self.swd_z > 2.0
         if action_dir == "BUY" and log_mlofi_z < -1.75 and not has_iceberg_absorption:
@@ -1071,8 +1088,11 @@ class ContinuousMicrostructureEngine:
         # Split-Conformal Prediction Coverage Gate (85% Coverage)
         if len(self.calibration_errors) >= 30:
             q_threshold = float(np.percentile(self.calibration_errors, 85))
+            rolling_cal_err = float(np.mean(list(self.calibration_errors)[-50:]))
+            self.is_model_degraded = rolling_cal_err > 0.35
         else:
             q_threshold = 0.06
+            self.is_model_degraded = False
 
         conformal_floor = float(np.clip(0.51 + (q_threshold * 0.25), 0.52, 0.65))
         kelly_target = self.jump_kelly_sizer.compute(self.inst_variance, self.marked_hawkes_z)
@@ -1096,7 +1116,7 @@ class ContinuousMicrostructureEngine:
         else:
             topology = "LAMINAR FLOW"
 
-        # Online Continuous Micro-Horizon Learning Updates with True Bracket Bounds
+        # Online Continuous Micro-Horizon Learning Updates with True Dynamic Bracket Bounds
         if self.micro_learning_enabled and not self.freeze_rls:
             self.prediction_buffer.append((now, current_price, self._v_att.copy(), p_up, p_t, p_r, p_s, p_c, virt_sl, virt_tp))
             while self.prediction_buffer and (now - self.prediction_buffer[0][0]) >= self.micro_learning_horizon_sec:
@@ -1108,16 +1128,28 @@ class ContinuousMicrostructureEngine:
                     sl_breached = (old_action_dir == "BUY" and current_price <= old_virt_sl) or \
                                   (old_action_dir == "SELL" and current_price >= old_virt_sl)
                     
+                    tp_reached = (old_action_dir == "BUY" and current_price >= old_virt_tp) or \
+                                 (old_action_dir == "SELL" and current_price <= old_virt_tp)
+
                     if sl_breached:
                         y_target = 0.0 if old_p_up > 0.5 else 1.0
+                    elif tp_reached:
+                        y_target = 1.0 if old_p_up > 0.5 else 0.0
                     else:
                         y_target = 1.0 if current_price > old_price else 0.0
                          
                     self.calibration_errors.append(abs(y_target - old_p_up))
-                    self.rls_trend.update(old_v, y_target, old_p_up, weight=b_t)
-                    self.rls_range.update(old_v, y_target, old_p_up, weight=b_r)
-                    self.rls_spoof.update(old_v, y_target, old_p_up, weight=b_s)
-                    self.rls_cascade.update(old_v, y_target, old_p_up, weight=b_c)
+
+                    # P0 RESOLUTION: Decouple expert predictions so each learns its own specialized error
+                    p_trend = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_trend.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
+                    p_range = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_range.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
+                    p_spoof = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_spoof.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
+                    p_casc  = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_cascade.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
+
+                    self.rls_trend.update(old_v, y_target, p_trend, weight=b_t)
+                    self.rls_range.update(old_v, y_target, p_range, weight=b_r)
+                    self.rls_spoof.update(old_v, y_target, p_spoof, weight=b_s)
+                    self.rls_cascade.update(old_v, y_target, p_casc, weight=b_c)
                     self.rls_updates += 1
 
         return {
@@ -1138,7 +1170,8 @@ class ContinuousMicrostructureEngine:
             "raw_features": self._v_att.copy(),
             "alpha_tensor_bps": float(raw_score * 10000.0),
             "expected_drift": float(raw_score),
-            "topology": topology
+            "topology": topology,
+            "is_model_degraded": self.is_model_degraded
         }
 
     def resolve_trade_outcome(self, signal_id: str, net_pnl: float, allocated_notional: float = 21.0):
@@ -1162,17 +1195,23 @@ class ContinuousMicrostructureEngine:
         true_return_pct = net_pnl / safe_notional
         self.jump_kelly_sizer.update(net_pnl, true_return_pct)
 
-        # Trade-Level RLS Update Pass
+        # P0 RESOLUTION: Trade-Level 25D RLS Update with Decoupled Expert Errors
         if not self.freeze_rls:
-            self.rls_trend.update(feats, y_up, old_p, weight=beliefs[0])
-            self.rls_range.update(feats, y_up, old_p, weight=beliefs[1])
-            self.rls_spoof.update(feats, y_up, old_p, weight=beliefs[2])
-            self.rls_cascade.update(feats, y_up, old_p, weight=beliefs[3])
+            LOGIT_GAIN = 3.5
+            p_trend = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_trend.w, feats) * LOGIT_GAIN, -5.0, 5.0))))
+            p_range = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_range.w, feats) * LOGIT_GAIN, -5.0, 5.0))))
+            p_spoof = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_spoof.w, feats) * LOGIT_GAIN, -5.0, 5.0))))
+            p_casc  = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_cascade.w, feats) * LOGIT_GAIN, -5.0, 5.0))))
+
+            self.rls_trend.update(feats, y_up, p_trend, weight=beliefs[0])
+            self.rls_range.update(feats, y_up, p_range, weight=beliefs[1])
+            self.rls_spoof.update(feats, y_up, p_spoof, weight=beliefs[2])
+            self.rls_cascade.update(feats, y_up, p_casc, weight=beliefs[3])
 
             self.rls_updates += 1
             if self.rls_updates % 25 == 0:
                 logger.info(
-                    f"[X-RAY] Sparse RLS Health Check (Trend Norm): {np.linalg.norm(self.rls_trend.w):.4f} | "
+                    f"[X-RAY] 25D Sparse RLS Health Check (Trend Norm): {np.linalg.norm(self.rls_trend.w):.4f} | "
                     f"Kelly Win Rate: {self.jump_kelly_sizer.win_rate:.1%} | "
                     f"Payoff (B): {self.jump_kelly_sizer.avg_win / max(1e-6, self.jump_kelly_sizer.avg_loss):.2f}"
                 )
