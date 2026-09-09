@@ -1,28 +1,29 @@
 """
-V41.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V41.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
 Production Hardening & Systemic SRE Resolutions:
+- Obizhaeva-Wang Polling Throttle (P0 Hotfix): Replaces raw sub-second polling of
+  `evaluate_active_trade_stress` with a 5.0-second interval gate, preventing 
+  the 50ms active monitoring loop from stacking artificial transient shocks.
 - Real-Time Cross-Margin Liquidation Sentry: Actively probes exchange liquidation 
   prices against live mark prices on every tick. Forcibly executes emergency flatten
-  routines if distance to liquidation contracts to within 2.5x ATR, preventing 
-  exchange-side wipeouts before account-level drawdown breakers trip.
+  routines if distance to liquidation contracts to within 2.5x ATR.
 - Verified Emergency Flatten (Eradicating Fire-and-Forget): Dispatches Market IOC 
   flatten orders with active polling verification (up to 5 retries) confirming 
   exchange position size reaches exactly 0.0. Automatically engages the global lock
   if position closure fails.
 - 25D Manifold Alpha Telemetry & Shadow Recovery: Seamlessly pipes the full 25D state 
-  vector (OFI, Hawkes, OU, SWD, bilinear crosses, affine bias) to the ledger, and 
-  routes disarmed symbols (< 0.55 Bayesian edge) to ghost shadow tracking to enable 
-  continuous forensic recovery.
+  vector to the ledger, and routes disarmed symbols (< 0.55 Bayesian edge) to ghost 
+  shadow tracking to enable continuous forensic recovery.
 - Sizing Pipeline Unification: Positions are sized strictly via dollar-risk budgets 
   anchored to Eighth-Kelly fractions, attenuated by correlation haircuts and protected 
-  by a mandatory tail-gap buffer (20 bps), letting the Risk Vault serve as the SSOT.
+  by a mandatory tail-gap buffer (20 bps).
 - Distributed Cloud Instance Mutex: Acquires and continuously heartbeats a Supabase 
   lease on boot to permanently eliminate twin-instance collisions across rolling deploys.
 - Full Lifecycle Test Mode Simulation: Paper-trading flows through the complete 
-  optimal stopping exit engine without early termination, mirroring live trading.
+  optimal stopping exit engine without early termination.
 """
 
 import os
@@ -68,7 +69,7 @@ class EmergencyShutdown(Exception):
 from core.fsm import SystemStateMachine
 from core.memory import MemoryBank
 from core.quantum_entry import QuantumEntryMatrix  
-from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState
+from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ExitDecision
 from features.adaptive_engine import AdaptiveFeatureEngine
 from features.omni_scanner import GlobalOmniScanner    
 from features.micro_models import ContinuousMicrostructureEngine
@@ -509,7 +510,6 @@ class DistributedQuantEngine:
                     if len(mem.get("prices", [])) >= 60:
                         price_histories[sym] = list(mem["prices"])[-60:]
                 if price_histories:
-                    # Check if market stress is elevated to engage fast covariance adaptation
                     is_stressed = any(
                         getattr(eng, 'jump_z', 0.0) > 2.0 or getattr(eng, 'changepoint_prob', 0.0) > 0.50
                         for eng in self.stat_engines.values()
@@ -1387,7 +1387,8 @@ class DistributedQuantEngine:
             "exec_details": {},
             "position_idx": self.sor.position_idx,
             "dynamic_rr_ratio": dynamic_rr_ratio,
-            "test_mode": self.test_mode
+            "test_mode": self.test_mode,
+            "last_stress_check_time": time.time()
         }
 
         async with self.execution_semaphore:
@@ -1403,7 +1404,7 @@ class DistributedQuantEngine:
                 {"direction": direction, "notional": ctx["actual_qty_filled"] * ctx["actual_entry"]}
             )
 
-        # P0 RESOLUTION: Initialize in OBSERVE to unlock optimal stopping exit matrix
+        # Initialize in OBSERVE to unlock optimal stopping exit matrix
         if symbol not in self.exit_states:
             self.exit_states[symbol] = PositionExitState(
                 position_id=signal_id, entry_time=time.time(), entry_price=ctx["actual_entry"],
@@ -1462,7 +1463,7 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # P0 RESOLUTION: Real-Time Cross-Margin Liquidation Proximity Sentry
+                # Real-Time Cross-Margin Liquidation Proximity Sentry
                 try:
                     pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
                     pos_list = pos_res.get("result", {}).get("list", [])
@@ -1483,15 +1484,18 @@ class DistributedQuantEngine:
                 except Exception as e:
                     logger.debug(f"[RISK] Liquidation distance probe warning: {e}")
 
-                # Adverse Orderbook Stress Ejection Sentry
-                if ctx["stat_engine"] and hasattr(ctx["stat_engine"], 'evaluate_active_trade_stress'):
+                # P0 RESOLUTION: Interval-Gated Stress Evaluation (5.0s cooldown)
+                # Prevents 50ms polling loop from self-accumulating impact shocks
+                now_sec = time.time()
+                if now_sec - ctx["last_stress_check_time"] >= 5.0 and ctx["stat_engine"] and hasattr(ctx["stat_engine"], 'evaluate_active_trade_stress'):
+                    ctx["last_stress_check_time"] = now_sec
                     should_eject, stress_reason = ctx["stat_engine"].evaluate_active_trade_stress(ctx["is_buy"])
                     if should_eject:
                         logger.critical(f"[X-RAY] ADVERSE STRESS SENTRY // {symbol}: {stress_reason}. Ejecting!")
                         ctx["exit_trigger_price"] = current_price
                         self.fsm.trigger_asset_lock(symbol, 300)
                         await ExecutionGovernorFSM.manage_execution(
-                            decision=IntelligentExitEngine.evaluate(ctx, state),
+                            decision=ExitDecision("EXIT", 0.0, "FLASH_IOC", current_price, 0.0, 0.0, stress_reason, ""),
                             state=state, ctx=ctx, executor=self.executor
                         )
                         break
@@ -1515,7 +1519,7 @@ class DistributedQuantEngine:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
                     break
 
-                # P0 RESOLUTION: Decouple Partial Scale-Outs from Full Liquidations
+                # Decouple Partial Scale-Outs from Full Liquidations
                 elif decision.action == "SCALE_OUT":
                     logger.info(f"[X-RAY] PARTIAL SCALE-OUT // {symbol}: {decision.reason}")
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
@@ -1542,7 +1546,7 @@ class DistributedQuantEngine:
 
     async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_sell: bool):
         """
-        P0 RESOLUTION: Verified Emergency Escape Routine.
+        Verified Emergency Escape Routine:
         Dispatches Market IOC orders and polls exchange position state until size reaches 0.0.
         """
         async def _escape():

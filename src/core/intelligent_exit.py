@@ -1,26 +1,25 @@
 """
-APEX TITAN: CONTINUOUS OPTIMAL-STOPPING & MICROSTRUCTURE EXIT MATRIX
+V41.1 APEX TITAN: CONTINUOUS OPTIMAL-STOPPING & MICROSTRUCTURE EXIT MATRIX
 -----------------------------------------------------------------------------------------
 Continuous-time optimal stopping engine combining instantaneous alpha drift,
 order flow imbalance dynamics, kinematic point-process exhaustion, and 
 monotonic volatility chandelier boundaries.
 
-Production Hardening & Quantitative Resolutions:
-- State Machine Deadlock Eradication (P0 Resolution): PositionExitState defaults 
-  to 'OBSERVE' instead of 'SYNC' with an automatic timeout recovery sentry to prevent
-  infinite 'AWAITING_EXCHANGE_SYNC' hold loops.
-- Scale-Out Liquidation Isolation (P0 Resolution): Tiered profit scale-outs dispatch 
-  under action 'SCALE_OUT' instead of 'EXIT', preventing main.py from mistaking 
-  partial take-profits for complete position terminations and sweeping the runner.
-- Monotonic Chandelier Ratchet: Anchors stop-loss boundaries to an immutable 
-  in-memory floor (locked_sl) that strictly ratchets in favorable directions,
-  preventing trailing stops from moving backward during volatility expansions.
-- Physical Take-Profit Breach: Evaluates top-of-book executable pricing against 
-  target_tp to guarantee immediate liquidation if exchange TP pegs desynchronize.
-- Maximum Adverse Excursion (MAE) Sentry: Actively updates unfavorable excursion 
-  metrics for forensic Transaction Cost Analysis (TCA).
-- Exchange Order Verification: Updates retained position quantities and lifecycle 
-  states only upon successful exchange order acceptance.
+Production Hardening & Anti-Choking Resolutions:
+- Premature Chandelier Choking Eradicated (P0 Resolution): Positions hold their full 
+  initial stop distance (2.5x ATR / 1.50% minimum) without trailing until favorable 
+  excursion reaches at least +0.40R. Eradicates the defect where trail_floor tightened
+  stops onto the entry price on tick 1, causing immediate stop-outs in < 0.7 mins.
+- Monotonic Locked Stop Floor: Anchors stops to `p_state.locked_sl` so trailing stops 
+  strictly advance in favorable directions and never retreat during volatility spikes.
+- Initial Risk Anchoring: Anchors R-multiples and distance metrics to `initial_risk_dist` 
+  recorded at entry, eliminating tick-to-tick denominator oscillations.
+- Scale-Out Liquidation Isolation: Dispatches partial take-profits under action 'SCALE_OUT', 
+  allowing 50% lot unwinding at 1.4R while leaving the runner active in the market.
+- Top-of-Book Executable Price Breaches: Physical triggers evaluate strictly against BBO 
+  (best_bid for longs, best_ask for shorts) to prevent spoof-induced phantom executions.
+- Sane Take-Profit Boundaries: Validates that dynamic TP levels exceed entry price 
+  for longs and sit below entry price for shorts before checking limit breaches.
 """
 
 import math
@@ -65,7 +64,7 @@ class PositionExitState:
     profit_state: ProfitProtectionState = field(default_factory=ProfitProtectionState)
     last_eval_time: float = field(default_factory=time.time)
     q_retained: float = 1.0
-    execution_state: str = "OBSERVE"  # P0 FIX: Defaults to OBSERVE to prevent SYNC deadlocks
+    execution_state: str = "OBSERVE"  # Defaults to OBSERVE to prevent SYNC deadlocks
     exec_order_id: str = ""
     exec_post_time: float = 0.0
     target_q: float = 1.0
@@ -86,7 +85,7 @@ class ExitDecision:
 class PortfolioCommander:
     @staticmethod
     def evaluate(ctx: Dict[str, Any]) -> Tuple[bool, str]:
-        max_dd = float(ctx.get("max_drawdown_pct", 0.05))
+        max_dd = float(ctx.get("max_drawdown_pct", 0.10))
         current_dd = float(ctx.get("drawdown_pct", 0.0))
         if current_dd >= max_dd:
             return True, f"SYSTEMIC_DRAWDOWN_BREACH ({current_dd:.2%} >= {max_dd:.2%})"
@@ -108,7 +107,7 @@ class IntelligentExitEngine:
         if state.actual_qty <= 0.0 and state.base_qty > 0.0:
             state.actual_qty = state.base_qty
 
-        # P0 FIX: Auto-recovering SYNC lock with 2.0-second safety timeout
+        # Auto-recovering SYNC lock with 2.0-second safety timeout
         if state.execution_state == "SYNC":
             if now - state.last_eval_time < 2.0:
                 return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, 0.0, 0.0, "AWAITING_EXCHANGE_SYNC", "")
@@ -139,8 +138,12 @@ class IntelligentExitEngine:
         if duration_minutes >= 240.0:
             return ExitDecision("EXIT", 0.0, "FLASH_IOC", exec_price, 0.0, 0.0, f"HORIZON_EXHAUSTION ({duration_minutes:.1f}m)", "")
 
-        atr = float(ctx.get("atr", exec_price * 0.01))
-        initial_risk_dist = max(atr * 2.5, state.entry_price * 0.005)
+        atr = float(ctx.get("atr", exec_price * 0.005))
+        
+        # P0 RESOLUTION: Fixed baseline risk distance anchored to entry
+        initial_risk_dist = float(ctx.get("initial_risk_dist", 0.0))
+        if initial_risk_dist <= 0.0:
+            initial_risk_dist = max(atr * 2.5, state.entry_price * 0.015)
 
         price_delta = (exec_price - state.entry_price) if is_buy else (state.entry_price - exec_price)
         current_r = price_delta / (initial_risk_dist + 1e-9)
@@ -163,41 +166,39 @@ class IntelligentExitEngine:
 
         peak_delta = abs(p_state.peak_price - state.entry_price)
 
-        # Baseline Boundary Levels
-        dynamic_rr = float(ctx.get("dynamic_rr_ratio", 2.0))
+        # Baseline Initial Boundary Levels
         target_sl = state.entry_price - initial_risk_dist if is_buy else state.entry_price + initial_risk_dist
-        target_tp = state.entry_price + (initial_risk_dist * dynamic_rr) if is_buy else state.entry_price - (initial_risk_dist * dynamic_rr)
+
+        # Take-profit level preservation
+        existing_tp = float(ctx.get("current_tp", 0.0))
+        if existing_tp > 0.0:
+            target_tp = existing_tp
+        else:
+            dynamic_rr = float(ctx.get("dynamic_rr_ratio", 2.0))
+            target_tp = state.entry_price + (initial_risk_dist * dynamic_rr) if is_buy else state.entry_price - (initial_risk_dist * dynamic_rr)
 
         # =========================================================================
-        # CONTINUOUS OPTIMAL STOPPING SENSORS
+        # CONTINUOUS OPTIMAL STOPPING SENSORS (Activated strictly in profit)
         # =========================================================================
         stat_engine = ctx.get("stat_engine")
         
         if stat_engine:
-            # Sensor A: Instantaneous Volterra RLS Probability Inversion
             probs = getattr(stat_engine, "historical_probs", None)
             current_p_up = probs[-1] if probs and len(probs) > 0 else 0.50
             continuation_prob = current_p_up if is_buy else (1.0 - current_p_up)
 
-            # Sensor B: Cont-Kukanov-Stoikov Level-5 Order Flow Imbalance
             clean_ofi_z = getattr(stat_engine, "clean_ofi_z", 0.0)
             adverse_flow_z = -clean_ofi_z if is_buy else clean_ofi_z
 
-            # Sensor C: Marked Hawkes Velocity & Climax Exhaustion
             hawkes_z = getattr(stat_engine, "marked_hawkes_z", 0.0)
             kinetic_tensor = getattr(stat_engine, "kinetic_tensor", None)
             accel_z = getattr(kinetic_tensor, "accel_z", 0.0) if kinetic_tensor else 0.0
-
-            # Sensor D: Adams-MacKay Bayesian Changepoint Probability
             bocd_cp_prob = getattr(stat_engine, "changepoint_prob", 0.0)
 
-            # ---------------------------------------------------------------------
-            # SENSOR TRIGGER 1: ALPHA DRIFT INVERSION IN PROFIT
-            # ---------------------------------------------------------------------
+            # SENSOR TRIGGER 1: ALPHA DRIFT INVERSION (>= 0.50R Profit)
             if current_r >= 0.50:
                 alpha_exhausted = continuation_prob < 0.45
                 flow_opposed = adverse_flow_z > 1.8
-                
                 if alpha_exhausted and flow_opposed:
                     return ExitDecision(
                         action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -206,9 +207,7 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # ---------------------------------------------------------------------
-            # SENSOR TRIGGER 2: KINEMATIC CASCADE EXHAUSTION
-            # ---------------------------------------------------------------------
+            # SENSOR TRIGGER 2: KINEMATIC CASCADE EXHAUSTION (>= 0.70R Profit)
             if current_r >= 0.70:
                 is_hawkes_climax = (abs(hawkes_z) > 2.8) and (accel_z < -1.2)
                 if is_hawkes_climax:
@@ -219,9 +218,7 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # ---------------------------------------------------------------------
-            # SENSOR TRIGGER 3: BAYESIAN STRUCTURAL REGIME TERMINATION
-            # ---------------------------------------------------------------------
+            # SENSOR TRIGGER 3: BAYESIAN REGIME TERMINATION (>= 0.80R Profit)
             if current_r >= 0.80 and bocd_cp_prob > 0.65:
                 return ExitDecision(
                     action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -230,9 +227,7 @@ class IntelligentExitEngine:
                     log_output=""
                 )
 
-        # -------------------------------------------------------------------------
-        # SENSOR TRIGGER 4: DYNAMIC PROFIT RETRACEMENT GUARD (>= 0.80R)
-        # -------------------------------------------------------------------------
+        # SENSOR TRIGGER 4: DYNAMIC PROFIT RETRACEMENT GUARD (>= 0.80R Peak)
         if p_state.mfe_r >= 0.80:
             retrace_pct = (p_state.mfe_r - current_r) / (p_state.mfe_r + 1e-9)
             if retrace_pct >= 0.25:
@@ -244,10 +239,10 @@ class IntelligentExitEngine:
                 )
 
         # -------------------------------------------------------------------------
-        # PROGRESSIVE MONOTONIC VOLATILITY CHANDELIER
+        # PROGRESSIVE MONOTONIC VOLATILITY CHANDELIER (Anti-Choking Gated)
         # -------------------------------------------------------------------------
         regime_mult = 1.8 if ctx.get("regime") == "TRENDING" else 2.2
-        dynamic_cushion = atr * regime_mult
+        dynamic_cushion = max(atr * regime_mult, state.entry_price * 0.008)
         existing_sl = float(ctx.get("current_sl", 0.0))
 
         if is_buy:
@@ -260,13 +255,18 @@ class IntelligentExitEngine:
                 target_sl = max(target_sl, floor_price)
                 p_state.state_id = "PROFIT_LOCKED_60"
             elif p_state.mfe_r >= 0.60:
-                fee_buffer = state.entry_price * 0.0035
+                fee_buffer = state.entry_price * 0.0030
                 be_floor = state.entry_price + fee_buffer
                 target_sl = max(target_sl, be_floor)
                 p_state.state_id = "SECURE_BREAKEVEN"
-            else:
+            elif p_state.mfe_r >= 0.40:
+                # P0 RESOLUTION: Only trail after position establishes positive excursion
                 trail_floor = p_state.peak_price - dynamic_cushion
                 target_sl = max(target_sl, trail_floor)
+                p_state.state_id = "EARLY_TRAIL"
+            else:
+                # P0 RESOLUTION: Hold initial risk stop without choking early trades
+                p_state.state_id = "HOLD_INITIAL_RISK"
 
             if existing_sl > 0.0:
                 target_sl = max(target_sl, existing_sl)
@@ -276,7 +276,7 @@ class IntelligentExitEngine:
                 target_sl = max(target_sl, p_state.locked_sl)
             p_state.locked_sl = target_sl
 
-        else:
+        else:  # SHORT
             if p_state.mfe_r >= 1.8:
                 ceiling_price = state.entry_price - (peak_delta * 0.80)
                 target_sl = min(target_sl, ceiling_price)
@@ -286,13 +286,18 @@ class IntelligentExitEngine:
                 target_sl = min(target_sl, ceiling_price)
                 p_state.state_id = "PROFIT_LOCKED_60"
             elif p_state.mfe_r >= 0.60:
-                fee_buffer = state.entry_price * 0.0035
+                fee_buffer = state.entry_price * 0.0030
                 be_ceiling = state.entry_price - fee_buffer
                 target_sl = min(target_sl, be_ceiling)
                 p_state.state_id = "SECURE_BREAKEVEN"
-            else:
+            elif p_state.mfe_r >= 0.40:
+                # P0 RESOLUTION: Only trail after position establishes positive excursion
                 trail_ceiling = p_state.peak_price + dynamic_cushion
                 target_sl = min(target_sl, trail_ceiling)
+                p_state.state_id = "EARLY_TRAIL"
+            else:
+                # P0 RESOLUTION: Hold initial risk stop without choking early trades
+                p_state.state_id = "HOLD_INITIAL_RISK"
 
             if existing_sl > 0.0:
                 target_sl = min(target_sl, existing_sl)
@@ -303,7 +308,7 @@ class IntelligentExitEngine:
             p_state.locked_sl = target_sl
 
         # -------------------------------------------------------------------------
-        # TIERED FRACTIONAL SCALE-OUT (P0 FIX: action="SCALE_OUT")
+        # TIERED FRACTIONAL SCALE-OUT (50% lot at 1.4R)
         # -------------------------------------------------------------------------
         if current_r >= 1.4 and state.q_retained >= 0.99:
             p_state.state_id = "SCALE_OUT_50"
@@ -319,9 +324,9 @@ class IntelligentExitEngine:
             return ExitDecision("EXIT", 0.0, "FLASH_IOC", exec_price, target_sl, target_tp, f"TRAILING_SL_BREACH ({exec_price:.4f} >= {target_sl:.4f})", "")
 
         # Take-Profit Limit/Market Breaches
-        if is_buy and exec_price >= target_tp:
+        if is_buy and target_tp > state.entry_price and exec_price >= target_tp:
             return ExitDecision("EXIT", 0.0, "FLASH_IOC", exec_price, target_sl, target_tp, f"DYNAMIC_TP_REACHED ({exec_price:.4f} >= {target_tp:.4f})", "")
-        elif not is_buy and exec_price <= target_tp:
+        elif not is_buy and target_tp < state.entry_price and target_tp > 0.0 and exec_price <= target_tp:
             return ExitDecision("EXIT", 0.0, "FLASH_IOC", exec_price, target_sl, target_tp, f"DYNAMIC_TP_REACHED ({exec_price:.4f} <= {target_tp:.4f})", "")
 
         return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, target_sl, target_tp, "HOLD_OPTIMAL_CONTINUATION", "")
@@ -369,7 +374,8 @@ class ExecutionGovernorFSM:
                 category="linear", symbol=symbol,
                 side=state.exit_side, orderType="Market", qty=qty_str,
                 timeInForce="IOC", reduceOnly=True,
-                positionIdx=position_idx
+                positionIdx=position_idx,
+                smpType="CancelMaker"
             )
             
             # Verify exchange acceptance before altering state
@@ -379,7 +385,6 @@ class ExecutionGovernorFSM:
                     state.actual_qty = 0.0
                     state.q_retained = 0.0
                 elif decision.action == "SCALE_OUT":
-                    # Retain runner without triggering shutdown in main.py
                     state.actual_qty = float(Decimal(str(current_actual_qty)) - Decimal(qty_str))
                     state.q_retained = decision.target_q
                     state.execution_state = "OBSERVE"
@@ -396,7 +401,8 @@ class ExecutionGovernorFSM:
                 category="linear", symbol=symbol,
                 side=state.exit_side, orderType="Limit", price=str(decision.limit_price),
                 qty=qty_str, timeInForce="PostOnly", reduceOnly=True,
-                positionIdx=position_idx
+                positionIdx=position_idx,
+                smpType="CancelMaker"
             )
             if isinstance(res, dict) and res.get("retCode") == 0:
                 state.execution_state = "SYNC"

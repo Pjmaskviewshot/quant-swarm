@@ -1,28 +1,26 @@
 """
-V41.0 APEX TITAN: 25D VOLTERRA-RIEMANNIAN MICROSTRUCTURE ENGINE
+V41.1 APEX TITAN: 25D VOLTERRA-RIEMANNIAN MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Continuous-time microstructure forecasting engine integrating zero-allocation 
 feature buffers, closed-form Ornstein-Uhlenbeck calibration, vectorized BOCD, 
 Joseph-form Adaptive Sparse RLS, and fractional Eighth-Kelly optimal control.
 
-Production Hardening & Mathematical Resolutions (Full 25D Preservation):
-- Affine Bias S^23 Invariant (P0 Resolution): Projects the 24 active features 
-  onto the unit hypersphere S^23 while anchoring the affine intercept uncompressed 
-  (v_att[24] = 1.0), preventing intercept collapse during volatility bursts.
-- Decoupled RLS Expert Errors (P0 Resolution): Updates each regime model 
-  (trend, range, spoof, cascade) against its own independent prediction error
-  e_m = y - sigma(3.5 * w_m^T x) rather than the blended ensemble probability,
-  eradicating cross-regime weight contamination.
-- 19D Fast-Path ZCA Eigenbasis Caching (P0 Resolution): Decouples np.linalg.eigh 
-  from the per-tick hot path by caching the whitening matrix and recomputing 
-  conditionally (every 20 ticks or when variance shifts > 10%), completely 
-  eliminating asyncio event-loop GIL stalls.
-- Softmax Temperature Smoothing (P1 Resolution): Raises the Markov mixture 
-  temperature to tau = 0.80, eliminating probability step-discontinuities.
-- Path-Aware Bracket Resolution: Enforces dynamic ATR boundary evaluation 
-  (both SL breaches and TP targets) in the online micro-learning replay buffer.
-- Full 25D Feature Space Intact: Preserves all 19 raw microstructure signals,
-  all 5 bilinear interaction terms, and the constant affine bias.
+Production Hardening & Quantitative Resolutions (P0 Bug Fixes):
+- Obizhaeva-Wang Self-Destruct Eradicated (P0 Resolution): Decouples trade shock 
+  injection from passive state queries. Passive polling in `evaluate_active_trade_stress`
+  strictly evaluates exponential resilience decay (trade_qty=0.0), permanently 
+  eliminating artificial impact accumulation that prematurely ejected trades in <30s.
+- 10x Feature Compression & Alpha Tensor Rectification (P0 Resolution): Removed the 
+  distortive `/ 3.0` divider in ZCA whitening and replaced Euclidean vector normalization 
+  with Root-Mean-Square (RMS) scaling. Regressors retain true unit variance (sigma=1.0) 
+  and the affine intercept bias remains uncompressed at 1.0. Expected drift in basis 
+  points reflects genuine model edge rather than rounding to 0.0 bps.
+- Discrete Trade Shock Registration: Volume shocks are now registered exclusively 
+  inside `update_trades()` when physical market orders clear on the exchange tape.
+- 1-Second Buffer Sampling Throttle: Caps `prediction_buffer` insertions to 1.0-second 
+  intervals, preventing queue overflow and ensuring 60-second micro-horizons resolve accurately.
+- Decoupled RLS Expert Errors: Updates each regime model (trend, range, spoof, cascade) 
+  against its own independent prediction error e_m = y - sigma(3.5 * w_m^T x).
 """
 
 import os
@@ -211,27 +209,45 @@ class AdamsMacKayBOCD:
 
 
 class ObizhaevaWangExecutionSentry:
-    """Transient Market Impact and Orderbook Resilience Monitor."""
-    def __init__(self, resilience_rho: float = 0.20, lambda_impact: float = 0.04):
+    """
+    Transient Market Impact and Orderbook Resilience Monitor.
+    Decoupled shock ingestion prevents polling calls from artificially inflating impact.
+    """
+    def __init__(self, resilience_rho: float = 0.35, lambda_impact: float = 0.02):
         self.rho = resilience_rho
         self.lambda_impact = lambda_impact
         self.transient_impact = 0.0
         self.last_time = time.time()
 
-    def evaluate_trajectory(self, is_buy: bool, spread_bps: float, volatility: float, hawkes_z: float, trade_qty: float = 1.0) -> Tuple[bool, str]:
+    def register_market_trade_shock(self, volume: float, volatility: float, hawkes_z: float):
+        """Called exclusively when a physical trade occurs on the exchange tape."""
         now = time.time()
         dt = max(1e-4, now - self.last_time)
         self.transient_impact *= math.exp(-self.rho * dt)
+        self.last_time = now
 
-        impact_shock = self.lambda_impact * trade_qty * (1.0 + abs(hawkes_z) * max(volatility, 1e-6) * 100.0)
-        self.transient_impact += impact_shock
+        # Scaled non-linear volume shock activated only during Hawkes point-process surges
+        if abs(hawkes_z) > 1.8 and volume > 0.0:
+            norm_vol = math.log1p(volume)
+            shock = self.lambda_impact * norm_vol * (1.0 + abs(hawkes_z) * max(volatility, 1e-6) * 10.0)
+            self.transient_impact += shock
+
+        if not math.isfinite(self.transient_impact):
+            self.transient_impact = 0.0
+
+    def evaluate_trajectory(self, is_buy: bool, spread_bps: float) -> Tuple[bool, str]:
+        """Passive status inquiry. Evaluates natural resilience decay without adding shocks."""
+        now = time.time()
+        dt = max(1e-4, now - self.last_time)
+        self.transient_impact *= math.exp(-self.rho * dt)
         self.last_time = now
 
         if not math.isfinite(self.transient_impact):
             self.transient_impact = 0.0
 
-        if self.transient_impact > max(1.5, spread_bps * 3.2):
-            return True, f"OBIZHAEVA_WANG_COLLAPSE (Impact: {self.transient_impact:.1f}bps > SpreadMult: {spread_bps * 3.2:.1f}bps)"
+        # Ejection trips only under acute liquidity collapse (>= 12.0 bps shock)
+        if self.transient_impact > max(12.0, spread_bps * 4.5):
+            return True, f"OBIZHAEVA_WANG_COLLAPSE (Impact: {self.transient_impact:.1f}bps > Limit: {max(12.0, spread_bps * 4.5):.1f}bps)"
 
         return False, "HEALTHY"
 
@@ -377,7 +393,6 @@ class MarkedHawkesProcess:
         self.baseline = 0.05
         self.impact_ewma = 1e-6
 
-        # Online Welford Moments for Real Statistical Z-Score
         self.mean_imb = 0.0
         self.var_imb = 1.0
         self.alpha_imb = 0.05
@@ -404,7 +419,6 @@ class MarkedHawkesProcess:
 
         imbalance = (lambda_b - lambda_s) / (lambda_b + lambda_s + 1e-9)
 
-        # Standardized Welford EWMA Z-Score
         delta = imbalance - self.mean_imb
         self.mean_imb += self.alpha_imb * delta
         self.var_imb = max(1e-9, (1.0 - self.alpha_imb) * (self.var_imb + self.alpha_imb * (delta ** 2)))
@@ -657,12 +671,10 @@ class MarkovRegimeDetector:
         abs_flow = abs(mlofi_z)
         abs_hawkes = abs(hawkes_z)
 
-        # Severe orderbook flow suppresses RANGING probability
         l_trend = math.exp(-2.0 * ((1.0 - er) ** 2) - 1.5 * (entropy ** 2) - 3.0 * (fleeting ** 2)) * (1.0 + min(2.0, abs_flow * 0.5))
         l_range = math.exp(-2.5 * (er ** 2) - 1.5 * ((1.0 - entropy) ** 2) - 2.0 * (fleeting ** 2) - 1.2 * (min(3.0, abs_flow) ** 2))
         l_spoof = math.exp(-3.0 * ((1.0 - fleeting) ** 2) - 1.0 * (er ** 2))
         
-        # Cascades driven by jump volatility and flow intensity
         max_stress = max(abs(jump_z), abs_hawkes, abs_flow)
         l_cascade = math.exp(-0.75 * ((3.0 - min(3.0, max_stress)) ** 2))
 
@@ -741,10 +753,7 @@ InformationGeometricRLS = AdaptiveSparseRLS
 
 
 class BoundedAdaptiveWhitener:
-    """
-    Streaming 19D Regularized Whitening Engine with Fast-Path Eigenbasis Caching.
-    P0 RESOLUTION: Caches the ZCA transformation matrix to eliminate per-tick GIL stalls.
-    """
+    """Streaming 19D Regularized Whitening Engine with Unit-Variance Preserved."""
     def __init__(self, dim: int = 19, base_alpha: float = 0.001):
         self.dim = dim
         self.base_alpha = base_alpha
@@ -791,8 +800,9 @@ class BoundedAdaptiveWhitener:
                 diag_stds = np.sqrt(np.maximum(1e-8, np.diag(stable_cov)))
                 self.cached_zca_matrix = np.diag(1.0 / (diag_stds + 1e-9))
 
+        # P0 RESOLUTION: Retains true unit variance (sigma=1.0) without the destructive /3.0 divider
         whitened = self.cached_zca_matrix @ delta
-        self._whitened_buf[:] = np.clip(whitened / 3.0, -3.0, 3.0)
+        self._whitened_buf[:] = np.clip(whitened, -3.0, 3.0)
         return self._whitened_buf
 
 
@@ -904,6 +914,7 @@ class ContinuousMicrostructureEngine:
         self.micro_learning_enabled = os.getenv("ENABLE_MICRO_HORIZON_LEARNING", "true").lower() == "true"
         self.micro_learning_horizon_sec = float(os.getenv("MICRO_HORIZON_SEC", "60.0"))
         self.prediction_buffer = deque(maxlen=1000)
+        self._last_pred_buffer_time = 0.0
 
         # RLS Freeze Override
         self.freeze_rls = os.getenv("FREEZE_RLS_WEIGHTS", "false").lower() == "true"
@@ -963,6 +974,10 @@ class ContinuousMicrostructureEngine:
 
         self.jump_z = abs(dp) / (math.sqrt(self.inst_variance) * price + 1e-9)
 
+        # P0 RESOLUTION: Shock is registered ONLY when an actual trade occurs on the tape
+        if volume > 0.0:
+            self.obizhaeva_wang_sentry.register_market_trade_shock(volume, self.rough_vol, self.marked_hawkes_z)
+
         if len(self.tick_prices) > 1:
             ret = math.log(max(1e-9, price) / max(1e-9, self.tick_prices[-2]))
             if math.isfinite(ret):
@@ -986,8 +1001,9 @@ class ContinuousMicrostructureEngine:
                 self.shannon_entropy = compute_permutation_entropy(rets.tolist())
 
     def evaluate_active_trade_stress(self, is_buy: bool) -> Tuple[bool, str]:
+        """P0 RESOLUTION: Passive inquiry. Does NOT inject shocks into the decay loop."""
         spread_bps = ((self.prev_ask - self.prev_bid) / (self.prev_bid + 1e-9)) * 10000.0
-        return self.obizhaeva_wang_sentry.evaluate_trajectory(is_buy, spread_bps, self.rough_vol, self.marked_hawkes_z, 1.0)
+        return self.obizhaeva_wang_sentry.evaluate_trajectory(is_buy, spread_bps)
 
     def extract_statistical_state(
         self, current_price: float, log_mlofi_z: float, hawkes_z: float,
@@ -1045,9 +1061,10 @@ class ContinuousMicrostructureEngine:
         self._bilinear_vec[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
         self._bilinear_vec[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
 
-        # P0 RESOLUTION: Project ONLY active 24 features onto S^23; anchor affine bias at 1.0 uncompressed
-        norm_active = math.sqrt(float(np.dot(self._bilinear_vec[:24], self._bilinear_vec[:24]))) + 1e-9
-        self._v_att[:24] = self._bilinear_vec[:24] / norm_active
+        # P0 RESOLUTION: Root-Mean-Square (RMS) amplitude preservation
+        # Prevents regressor squashing and preserves 1-sigma natural scale
+        rms_scale = math.sqrt(float(np.mean(self._bilinear_vec[:24] ** 2)) + 1e-9)
+        self._v_att[:24] = np.clip(self._bilinear_vec[:24] / max(1.0, rms_scale), -3.0, 3.0)
         self._v_att[24] = 1.0  # Invariant Affine Intercept Bias
 
         l_t = float(np.dot(self.rls_trend.w, self._v_att))
@@ -1116,9 +1133,18 @@ class ContinuousMicrostructureEngine:
         else:
             topology = "LAMINAR FLOW"
 
+        # P0 RESOLUTION: Correct Alpha Tensor Calculation
+        # Computes actual expected drift in basis points based on directional edge & dynamic bracket target
+        directional_edge = (p_up - 0.5) * 2.0
+        alpha_tensor_bps = float(directional_edge * tp_dist_pct * 10000.0)
+
         # Online Continuous Micro-Horizon Learning Updates with True Dynamic Bracket Bounds
         if self.micro_learning_enabled and not self.freeze_rls:
-            self.prediction_buffer.append((now, current_price, self._v_att.copy(), p_up, p_t, p_r, p_s, p_c, virt_sl, virt_tp))
+            # P0 RESOLUTION: 1-Second Sampling Throttle prevents deque queue overflow
+            if now - self._last_pred_buffer_time >= 1.0:
+                self._last_pred_buffer_time = now
+                self.prediction_buffer.append((now, current_price, self._v_att.copy(), p_up, p_t, p_r, p_s, p_c, virt_sl, virt_tp))
+
             while self.prediction_buffer and (now - self.prediction_buffer[0][0]) >= self.micro_learning_horizon_sec:
                 old_ts, old_price, old_v, old_p_up, b_t, b_r, b_s, b_c, old_virt_sl, old_virt_tp = self.prediction_buffer.popleft()
                 if current_price != old_price and old_price > 0.0:
@@ -1140,7 +1166,7 @@ class ContinuousMicrostructureEngine:
                          
                     self.calibration_errors.append(abs(y_target - old_p_up))
 
-                    # P0 RESOLUTION: Decouple expert predictions so each learns its own specialized error
+                    # Decoupled expert updates
                     p_trend = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_trend.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
                     p_range = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_range.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
                     p_spoof = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_spoof.w, old_v) * LOGIT_GAIN, -5.0, 5.0))))
@@ -1168,7 +1194,7 @@ class ContinuousMicrostructureEngine:
             "hurst_h": self.hurst_h,
             "bocd_cp_prob": self.changepoint_prob,
             "raw_features": self._v_att.copy(),
-            "alpha_tensor_bps": float(raw_score * 10000.0),
+            "alpha_tensor_bps": alpha_tensor_bps,
             "expected_drift": float(raw_score),
             "topology": topology,
             "is_model_degraded": self.is_model_degraded
@@ -1195,7 +1221,7 @@ class ContinuousMicrostructureEngine:
         true_return_pct = net_pnl / safe_notional
         self.jump_kelly_sizer.update(net_pnl, true_return_pct)
 
-        # P0 RESOLUTION: Trade-Level 25D RLS Update with Decoupled Expert Errors
+        # Trade-Level 25D RLS Update with Decoupled Expert Errors
         if not self.freeze_rls:
             LOGIT_GAIN = 3.5
             p_trend = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_trend.w, feats) * LOGIT_GAIN, -5.0, 5.0))))
