@@ -1002,7 +1002,7 @@ class DistributedQuantEngine:
             if stat_engine and hasattr(stat_engine, 'pending_trade_outcomes'):
                 stat_engine.pending_trade_outcomes[sig_id] = {
                     "action": action, "features": state.get("raw_features", np.zeros(25)), "p_up": state.get("p_up", 0.5),
-                    "notional": target_notional,  # Bug B9 Remediation: Exact signal notional tracking
+                    "notional": target_notional,
                     "beliefs": [
                         state.get("markov_beliefs", {}).get("trend", 0.25),
                         state.get("markov_beliefs", {}).get("range", 0.25),
@@ -1067,7 +1067,7 @@ class DistributedQuantEngine:
                 async def _safe_fetch(sym, dna):
                     try:
                         if not self.memory:
-                            return {"is_armed": False, "win_rate": 0.50}  # Bug B3: Default disarmed on cold start without history
+                            return {"is_armed": False, "win_rate": 0.50}
                         async with self.db_semaphore:
                             return await asyncio.wait_for(self.memory.compute_latent_dna_edge(dna, 30), timeout=2.0)
                     except Exception:

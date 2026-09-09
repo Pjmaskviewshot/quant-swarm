@@ -46,22 +46,22 @@ class SmartOrderRouter:
         self.core_engine = core_engine
         self.base_max_slippage_pct = max_slippage_pct
         self.instrument_cache: Dict[str, Dict[str, Any]] = {}
-        self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))[cite: 1]
+        self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
         self._last_amend_time: Dict[str, float] = {}
         self._amend_throttle_sec: float = 1.20  # Rate-limit hysteresis cooldown
 
         # Avellaneda-Stoikov Base Parameters
-        self.gamma_base = 0.08  # Baseline inventory risk-aversion[cite: 1]
-        self.k_decay = 1.5      # Book liquidity density parameter[cite: 1]
+        self.gamma_base = 0.08  # Baseline inventory risk-aversion
+        self.k_decay = 1.5      # Book liquidity density parameter
 
         # Exchange Fee Schedules (Bybit VIP0 Linear Perps)
-        self.taker_fee_rate: float = 0.00055[cite: 1]
-        self.maker_fee_rate: float = 0.00020[cite: 1]
+        self.taker_fee_rate: float = 0.00055
+        self.maker_fee_rate: float = 0.00020
 
         # Contention-Free Token Bucket (Burst: 12 calls/sec, Steady-State: 8 calls/sec)
-        self._rate_tokens = 12.0[cite: 1]
-        self._rate_last_check = time.time()[cite: 1]
-        self._rate_lock = asyncio.Lock()[cite: 1]
+        self._rate_tokens = 12.0
+        self._rate_last_check = time.time()
+        self._rate_lock = asyncio.Lock()
 
     # =========================================================================
     # RATE LIMITING & NON-BLOCKING PACING
@@ -78,7 +78,7 @@ class SmartOrderRouter:
             now = time.time()
             elapsed = max(0.0, now - self._rate_last_check)
             self._rate_last_check = now
-            self._rate_tokens = min(12.0, self._rate_tokens + (elapsed * 8.0))[cite: 1]
+            self._rate_tokens = min(12.0, self._rate_tokens + (elapsed * 8.0))
 
             if self._rate_tokens < 1.0:
                 sleep_time = (1.0 - self._rate_tokens) / 8.0
@@ -167,7 +167,6 @@ class SmartOrderRouter:
             val_dec = Decimal(str(raw_qty)) if not isinstance(raw_qty, Decimal) else raw_qty
             quantized = (val_dec // qty_step) * qty_step
             precision = max(0, -qty_step.as_tuple().exponent)
-            # Format explicitly via fixed-point representation
             return f"{quantized:.{precision}f}"
         except (InvalidOperation, TypeError, ValueError):
             return f"{float(raw_qty):.4f}"
@@ -245,7 +244,6 @@ class SmartOrderRouter:
 
             if sl and sl > 0.0:
                 anchored_sl = sl
-                # 35 bps minimum distance to eliminate MarkPrice clash rejections
                 if is_buy and anchored_sl >= mark_price:
                     anchored_sl = mark_price * 0.9965
                 elif not is_buy and anchored_sl <= mark_price:
@@ -295,7 +293,6 @@ class SmartOrderRouter:
         safe_sl_pct = max(0.005, sl_pct)
         target_notional = trade_risk_dollars / safe_sl_pct
 
-        # Dynamic alignment with Risk Vault leverage limit (Single Source of Truth)
         max_leverage_cap = 2.0
         if self.core_engine and hasattr(self.core_engine, 'live_params'):
             max_leverage_cap = float(self.core_engine.live_params.get("LEVERAGE_CAP", max_leverage_cap))
@@ -429,7 +426,6 @@ class SmartOrderRouter:
             if stat_eng:
                 inst_var = getattr(stat_eng, 'inst_variance', 1e-5)
 
-        # 1. Continuous Normalized Inventory Skew (q in [-1.0, 1.0])
         q = 0.0
         if self.core_engine:
             active_notional = 0.0
@@ -455,11 +451,9 @@ class SmartOrderRouter:
         norm_tick_vol = (tick_size / max(mid_price, 1e-9)) / (vol_sigma + 1e-9)
         dynamic_gamma = float(np.clip(self.gamma_base * (1.0 + min(3.0, norm_tick_vol)), 0.02, 0.35))
 
-        # 2. Scale-Invariant Reservation Price
         reservation_skew_bps = q * dynamic_gamma * (vol_sigma * 10000.0) * math.sqrt(tau)
         reservation_price = mid_price * (1.0 - (reservation_skew_bps / 10000.0))
 
-        # 3. Scale-Invariant Half-Spread Formulation
         vol_cushion_bps = dynamic_gamma * (vol_sigma * 10000.0) * tau
         liquidity_cushion_bps = (2.0 / dynamic_gamma) * math.log1p(dynamic_gamma / self.k_decay) * 1.5
         total_half_spread_bps = max(1.0, (vol_cushion_bps + liquidity_cushion_bps) / 2.0)
@@ -511,7 +505,6 @@ class SmartOrderRouter:
 
         await asyncio.sleep(0.06)
 
-        # 1. Probe active/recently filled orders via realtime endpoint
         try:
             open_res = await self.executor.safe_call(
                 "GET", "/v5/order/realtime", category="linear", symbol=symbol, orderId=order_id
@@ -522,7 +515,6 @@ class SmartOrderRouter:
         except Exception:
             pass
 
-        # 2. Probe historical terminal orders
         try:
             hist_res = await self.executor.safe_call(
                 "GET", "/v5/order/history", category="linear", symbol=symbol, orderId=order_id, limit=1
@@ -546,7 +538,6 @@ class SmartOrderRouter:
         Dynamically constructs selective bracket payloads and absorbs idempotent terminal codes.
         """
         now = time.time()
-        # Rate-limiting cooldown unless emergency
         if not is_emergency and (now - self._last_amend_time.get(symbol, 0.0) < self._amend_throttle_sec):
             return False
 
@@ -557,7 +548,6 @@ class SmartOrderRouter:
             "tpslMode": "Full"
         }
 
-        # P0 FIX: Selective bracket attachment prevents passing '0.00' takeProfit values
         if new_sl and new_sl > 0.0:
             payload["stopLoss"] = self._format_price_str(new_sl, symbol)
             payload["slTriggerBy"] = "MarkPrice"
@@ -577,12 +567,10 @@ class SmartOrderRouter:
             ret_code = res.get("retCode")
             ret_msg = res.get("retMsg", "").lower()
 
-            # Benign idempotency absorption
             if ret_code in [0, 34040, 34036, 110043] or any(k in ret_msg for k in ["not modified", "same", "identical"]):
                 self._last_amend_time[symbol] = now
                 return True
 
-            # MarkPrice clash recovery
             if "clash" in ret_msg or "cannot be higher" in ret_msg or "cannot be lower" in ret_msg:
                 pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
                 positions = pos_res.get("result", {}).get("list", [])
@@ -641,7 +629,7 @@ class SmartOrderRouter:
             "timeInForce": "IOC",
             "positionIdx": self.position_idx,
             "orderLinkId": client_link_id,
-            "smpType": "CancelMaker"  # Enforce Self-Trade Prevention[cite: 1]
+            "smpType": "CancelMaker"
         }
 
         if sl and sl > 0.0:
@@ -706,7 +694,6 @@ class SmartOrderRouter:
 
         qty_str = self._format_qty_str(cleaned_qty, symbol)
 
-        # Depth-bounded boundary check
         bids = depth_snapshot.get("bids", []) if depth_snapshot else []
         asks = depth_snapshot.get("asks", []) if depth_snapshot else []
         best_bid = float(bids[0][0]) if bids else current_mid_price
@@ -736,7 +723,7 @@ class SmartOrderRouter:
             "timeInForce": "IOC",
             "positionIdx": self.position_idx,
             "orderLinkId": client_link_id,
-            "smpType": "CancelMaker"  # Enforce Self-Trade Prevention[cite: 1]
+            "smpType": "CancelMaker"
         }
 
         if sl and sl > 0.0:
@@ -775,11 +762,9 @@ class SmartOrderRouter:
         remainder = cleaned_qty - total_executed_qty
         min_tradeable = float(self.instrument_cache.get(symbol, {}).get("min_qty", Decimal("0.001")))
 
-        # Immediate Partial Fill Bracket Anchor
         if total_executed_qty > 0.0 and (sl or tp):
             await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
 
-        # Hand off remainder to Maker Peg without leaving prior inventory unhedged
         if order_confirmed and total_executed_qty > 0.0 and remainder > min_tradeable and (remainder * current_mid_price) >= 6.50:
             logger.info(f"[X-RAY] Partial fill ({total_executed_qty:.4f}/{cleaned_qty:.4f}). Routing remainder to Maker Peg.")
             peg_success, peg_price, peg_qty = await self._execute_dynamic_maker_peg(
@@ -860,13 +845,11 @@ class SmartOrderRouter:
                 target_price_str = self._format_price_str(optimal_price, symbol)
                 target_price_float = float(target_price_str)
 
-                # Dynamic anchor trailing to prevent freezes
                 if anchor_price is None:
                     anchor_price = curr_mid
                 else:
                     anchor_price = (anchor_price * 0.85) + (curr_mid * 0.15)
 
-                # Anti-Chase Firewall against adverse micro-spikes
                 if side == "Buy" and target_price_float > anchor_price * (1.0 + max_chase_deviation):
                     logger.warning(f"[X-RAY] CHASE BREACH // {symbol} drifted +{max_chase_deviation:.2%} past anchor.")
                     break
@@ -874,7 +857,6 @@ class SmartOrderRouter:
                     logger.warning(f"[X-RAY] CHASE BREACH // {symbol} drifted -{max_chase_deviation:.2%} past anchor.")
                     break
 
-                # 1. Place initial PostOnly limit
                 if not current_order_id:
                     client_link_id = f"APEX_PEG_{uuid.uuid4().hex[:14]}"
                     post_payload: Dict[str, Any] = {
@@ -887,7 +869,7 @@ class SmartOrderRouter:
                         "timeInForce": "PostOnly",
                         "positionIdx": self.position_idx,
                         "orderLinkId": client_link_id,
-                        "smpType": "CancelMaker"  # Enforce Self-Trade Prevention[cite: 1]
+                        "smpType": "CancelMaker"
                     }
                     if sl and sl > 0.0:
                         post_payload["stopLoss"] = self._format_price_str(sl, symbol)
@@ -914,7 +896,6 @@ class SmartOrderRouter:
                             await asyncio.sleep(0.15)
                         continue
 
-                # 2. Sub-millisecond Fill Verification
                 fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.75)
                 if fill_report:
                     raw_exec = fill_report.get("cumExecQty")
@@ -936,10 +917,9 @@ class SmartOrderRouter:
                             return True, avg_price, cum_exec
                         continue
 
-                # 3. Order Amendment with 150ms OTR Throttling[cite: 1]
                 tick_displacement = abs(target_price_float - current_peg_price) / max(1e-9, tick_size)
                 now_tick = time.time()
-                if current_order_id and tick_displacement >= 3.0 and (now_tick - last_amend_time >= 0.15):[cite: 1]
+                if current_order_id and tick_displacement >= 3.0 and (now_tick - last_amend_time >= 0.15):
                     await self._rate_limit_acquire()
                     amend_res = await self.executor.safe_call(
                         "POST", "/v5/order/amend", is_execution=True,
@@ -958,7 +938,6 @@ class SmartOrderRouter:
                     break
                 await asyncio.sleep(0.15)
 
-        # 4. Timeout Cancellation and Residual Fill Sweep
         if current_order_id:
             await self.cancel_order_safe(symbol, current_order_id)
             fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.20)
@@ -1000,7 +979,6 @@ class SmartOrderRouter:
             if stat_eng:
                 inst_var = getattr(stat_eng, 'inst_variance', 1e-5)
 
-        # Compute true L2 Notional Depth
         bids = depth_snapshot.get("bids", []) if depth_snapshot else []
         asks = depth_snapshot.get("asks", []) if depth_snapshot else []
         top_bid_notional = sum(float(l[0]) * float(l[1]) for l in bids[:5]) if bids else 25000.0
@@ -1085,7 +1063,6 @@ class SmartOrderRouter:
             logger.warning(f"[X-RAY] Insufficient notional for {symbol}: ${total_qty * current_mid_price:.2f} < $6.00.")
             return False, current_mid_price, 0.0
 
-        # High-Velocity Cascade Routing: True Market IOC Execution
         if regime == "CASCADE":
             logger.critical(f"[X-RAY] 🌊 CASCADE REGIME DETECTED on {symbol}. Routing via Emergency Market Strike.")
             return await self._execute_emergency_market_strike(
@@ -1093,7 +1070,6 @@ class SmartOrderRouter:
                 current_mid_price=current_mid_price, sl=sl_price, tp=tp_price
             )
 
-        # Slippage Firewall Check
         ob = depth_snapshot or {}
         bids = ob.get("bids", [])
         asks = ob.get("asks", [])
@@ -1111,7 +1087,6 @@ class SmartOrderRouter:
             )
             return False, current_mid_price, 0.0
 
-        # Whale Routing (TWAP Iceberg)
         top_bid_vol = sum(float(l[1]) for l in bids[:3]) if bids else 0.0
         top_ask_vol = sum(float(l[1]) for l in asks[:3]) if asks else 0.0
         avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
@@ -1122,7 +1097,6 @@ class SmartOrderRouter:
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
             )
 
-        # Urgent Routing (Flash Strike IOC)
         book_skew = top_bid_vol / (top_ask_vol + 1e-9)
         urgent_taker = False
 
@@ -1136,7 +1110,6 @@ class SmartOrderRouter:
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
             )
 
-        # Passive Routing (Avellaneda-Stoikov Maker Peg)
         is_major = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         dynamic_timeout = 3 if is_major else 5
         return await self._execute_dynamic_maker_peg(
