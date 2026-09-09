@@ -1,14 +1,14 @@
 """
-V44.0 APEX TITAN: TITANIUM API EXECUTOR (BYBIT V5)
+V44.1 APEX TITAN: TITANIUM API EXECUTOR (BYBIT V5)
 --------------------------------------------------------
 Cloud-resilient, zero-latency unified Bybit V5 exchange execution connector.
 
-Production Hardening & Quantitative Upgrades (V44.0 Core Architecture):
-- Mathematical Market Quality Sieve: Replaces ad-hoc ticker blacklisting with a dynamic
-  friction kernel. Enforces strict Top-of-Book depth floors ($3,000 USD minimum) and
-  clamps maximum bid-ask spread to <= 5.0 bps, algorithmically filtering illiquid micro-caps.
-- Microstructure Spread-to-Vol Screening: Disqualifies any instrument where spread friction
-  consumes > 1.5% of prevailing daily volatility, ensuring positive expected value.
+Production Hardening & Quantitative Upgrades (V44.1 Core Architecture):
+- Calibrated Market Quality Sieve: Tunes Top-of-Book depth floor to $1,000.00 USD
+  and relaxes the spread ceiling to <= 8.0 bps. Eliminates universe starvation
+  while preventing execution into paper-thin orderbooks.
+- Spread-to-Volatility Sieve: Disqualifies instruments where spread consumes > 2.0%
+  of daily volatility range, ensuring positive expected value on taker executions.
 - Expanded Recv-Window Tolerance (Error 10002 Remediation): Enforces 15,000ms
   `X-BAPI-RECV-WINDOW` headers and HMAC signatures across all REST calls and retries.
 - Self-Trade Prevention (STP) Enforcement: Injects `smpType="CancelMaker"` into order
@@ -648,12 +648,12 @@ class BybitUnifiedExecutor:
 
     async def get_top_volatile_assets(self, limit: int = 16, min_turnover: float = 15_000_000.0) -> List[str]:
         """
-        Institutional Market Quality Sieve:
-        Algorithmic filtration based on orderbook physics rather than manual ticker lists:
+        Calibrated Market Quality Sieve:
+        Algorithmic filtration based on orderbook physics and realistic liquidity constraints:
         1. Universal structural exclusions (TradFi synthetics, commodities, settlement stables).
-        2. Strict Top-of-Book depth floor (>= $3,000 USD resting at BBO).
-        3. Hard spread friction ceiling (<= 5.0 bps).
-        4. Spread-to-Volatility ratio filter (Spread must consume < 1.5% of intraday range).
+        2. Calibrated Top-of-Book depth floor (>= $1,000 USD resting at BBO).
+        3. Scalp spread friction ceiling (<= 8.0 bps).
+        4. Spread-to-Volatility ratio filter (Spread must consume < 2.0% of intraday range).
         """
         structural_exclusions = [
             "AAPL", "TSLA", "NVDA", "AMZN", "MSFT", "GOOG", "META", "SOXL",
@@ -699,23 +699,22 @@ class BybitUnifiedExecutor:
                 # Physical Top-of-Book Spread
                 live_spread_bps = ((ask - bid) / (bid + 1e-9)) * 10000.0
 
-                # 1. Hard Spread Friction Ceiling:
-                # Any asset with a spread exceeding 5.0 bps is rejected immediately
-                if live_spread_bps > 5.0:
+                # 1. Calibrated Spread Friction Ceiling (<= 8.0 bps)
+                if live_spread_bps > 8.0:
                     continue
 
                 # 2. Spread-to-Volatility Ratio:
-                # Disqualify assets where spread consumes > 1.5% of daily range
-                max_tolerated_spread = max(1.5, volatility_bps * 0.015)
+                # Disqualify assets where spread consumes > 2.0% of daily range
+                max_tolerated_spread = max(2.5, volatility_bps * 0.020)
                 if live_spread_bps > max_tolerated_spread:
                     continue 
                 
                 # 3. Microstructure Depth Sieve:
-                # Require >= $3,000 resting at top of book to prevent market sweeps from slipping
+                # Require >= $1,000 USD resting at top of book to prevent sweep slippage
                 bid_size = float(t.get("bid1Size", 0.0) or 0.0)
                 ask_size = float(t.get("ask1Size", 0.0) or 0.0)
                 top_depth_usd = min(bid * bid_size, ask * ask_size)
-                if top_depth_usd < 3000.0:
+                if top_depth_usd < 1000.0:
                     continue
 
                 # Rank by Volatility-to-Spread efficiency weighted by volume density

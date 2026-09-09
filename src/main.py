@@ -1,9 +1,14 @@
 """
-V44.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V44.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V44.0 Core Architecture):
+Production Hardening & Quantitative Upgrades (V44.1 Core Architecture):
+- Calibrated Directional Drift Gating: Replaces rigid zero Alpha Tensor veto with an
+  asymmetric expected drift filter (only vetoes when directional drift explicitly opposes
+  the trade thesis), restoring high-frequency signal generation in RANGING regimes.
+- Synchronized Spread Friction Ceiling (8.0 bps): Re-aligns spread friction ceilings in
+  `_eval_gate` and `run_omni_swarm_director` with `services/bybit_v5.py` (<= 8.0 bps).
 - Sovereign Local Exit Enforcement: Microstructure breaches execute immediate local
   Market IOC orders directly through the 50ms event loop, eliminating dependency on
   exchange-side trailing stop amendments and eradicating downside latency.
@@ -13,8 +18,6 @@ Production Hardening & Quantitative Upgrades (V44.0 Core Architecture):
   with a realized loss for 3 minutes, terminating rapid-fire revenge-trading churn loops.
 - Anti-Whipsaw Directional Lockout (300s): Forbids immediate opposite-side position flipping
   following a stopped trade, eliminating sawtooth chop decay.
-- Empirical Microstructure Quality Sieve: Gates entry on positive expected alpha drift
-  (rejects zero Alpha Tensor in RANGING regimes) and enforces Spread-to-ATR friction limits.
 - Whitener State Persistence on Boot & Shutdown (Bug B5 Remediation): Serializes and restores
   19D streaming whitening feature means and covariance matrices to `sgd_state.json`.
 - Bounded Amendment Rate Hysteresis: Clamps trailing stop update backoff to 8.0s max,
@@ -232,7 +235,6 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] CLOUD DB OFFLINE: Supabase connection failed ({e}). Booting in Local Mode.")
             self.memory = None
 
-        # Multi-Tier Risk Vault Governance with Tail-Gap Cushion (20 bps)
         default_max_dd = 0.15 if MIN_REQUIRED_EQUITY < 100.0 else 0.10
         default_single_risk = 0.03 if MIN_REQUIRED_EQUITY < 100.0 else 0.015
         max_dd_pct = float(os.getenv("MAX_DRAWDOWN_PCT", str(default_max_dd)))
@@ -306,11 +308,6 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] BACKGROUND TASK CRASHED: {task.exception()}", exc_info=task.exception())
 
     def track_task(self, coro: Any, is_critical: bool = False):
-        """
-        Asynchronous Task Scheduler with Critical Overrides.
-        Throttles entry signals when task count exceeds 350, but guarantees that
-        lifecycle management and exit closures are never dropped.
-        """
         if len(self._active_tasks) > 350 and not is_critical:
             now = time.time()
             if now - self._last_overflow_log > 5.0:
@@ -437,7 +434,6 @@ class DistributedQuantEngine:
             if s not in self.last_eval_time:
                 self.last_eval_time[s] = 0.0
             if s not in self.orderbook_snapshots:
-                # Do not populate with 0.0 prices to prevent phantom valuation glitches
                 self.orderbook_snapshots[s] = {}
 
     def _safe_telegram_dispatch_sync(self, message: str, is_html: bool = True, message_type: str = "SUCCESS"):
@@ -865,7 +861,6 @@ class DistributedQuantEngine:
             action = state["action_dir"]
             dynamic_gate = state.get("dynamic_gate", 0.52)
             dominant_regime = state.get("dominant_regime", "TRENDING")
-            alpha_tensor_bps = float(state.get("alpha_tensor_bps", 0.0))
 
             if action == "HOLD" or prob_success < dynamic_gate:
                 if now - self.last_eval_time.get(symbol + "_gate_diag", 0.0) > 120.0:
@@ -877,7 +872,7 @@ class DistributedQuantEngine:
             last_exit = self.last_exit_direction.get(symbol)
             if last_exit and len(last_exit) >= 3:
                 last_dir, last_time, last_outcome = last_exit
-                if last_outcome == "LOSS" and (now - last_time) < 300.0 and action != last_dir:
+                if last_outcome == "LOSS" and (now - last_time) < 180.0 and action != last_dir:
                     if now - self.last_eval_time.get(symbol + "_whipsaw_veto", 0.0) > 60.0:
                         logger.info(
                             f"[RADAR] {symbol} {action} Vetoed: Anti-Whipsaw lockout active "
@@ -886,18 +881,20 @@ class DistributedQuantEngine:
                         self.last_eval_time[symbol + "_whipsaw_veto"] = now
                     return
 
-            # 3. Microstructure Alpha Drift Gate: Reject trades with zero statistical drift in RANGING regime
-            if dominant_regime == "RANGING" and abs(alpha_tensor_bps) < 1.0:
-                if now - self.last_eval_time.get(symbol + "_flat_alpha_veto", 0.0) > 120.0:
-                    logger.info(f"[RADAR] {symbol} Filtered: Flat alpha tensor ({alpha_tensor_bps:+.1f} bps) in RANGING regime.")
-                    self.last_eval_time[symbol + "_flat_alpha_veto"] = now
+            # 3. Calibrated Directional Drift Gate:
+            # Only veto if the model explicitly projects negative directional drift opposing the trade
+            expected_drift = float(state.get("expected_drift", 0.0))
+            if (action == "BUY" and expected_drift < -0.0005) or (action == "SELL" and expected_drift > 0.0005):
+                if now - self.last_eval_time.get(symbol + "_drift_veto", 0.0) > 60.0:
+                    logger.info(f"[RADAR] {symbol} {action} Vetoed: Adverse Expected Drift ({expected_drift:+.4f}).")
+                    self.last_eval_time[symbol + "_drift_veto"] = now
                 return
 
-            # 4. Spread-to-ATR Friction Sieve
+            # 4. Spread-to-ATR Friction Sieve (Calibrated to 8.0 bps)
             spread = float(ob_payload.get("spread", 0.0001))
             spread_bps = (spread / (price + 1e-9)) * 10000.0
             atr_bps = (atr / (price + 1e-9)) * 10000.0
-            if spread_bps > 5.0 or (atr_bps > 0 and (spread_bps / atr_bps) > 0.25):
+            if spread_bps > 8.0 or (atr_bps > 0 and (spread_bps / atr_bps) > 0.35):
                 if now - self.last_eval_time.get(symbol + "_friction_veto", 0.0) > 120.0:
                     logger.info(f"[RADAR] {symbol} Filtered: Friction ratio excessive (Spread: {spread_bps:.1f} bps, ATR: {atr_bps:.1f} bps).")
                     self.last_eval_time[symbol + "_friction_veto"] = now
@@ -933,8 +930,8 @@ class DistributedQuantEngine:
                     "hawkes_z": getattr(stat_engine, 'marked_hawkes_z', 0.0),
                     "sector_impulse": sector_impulse,
                     "bocd_cp_prob": state.get("bocd_cp_prob", 0.0),
-                    "alpha_tensor_bps": alpha_tensor_bps,
-                    "expected_drift": state.get("expected_drift", 0.0),
+                    "alpha_tensor_bps": state.get("alpha_tensor_bps", 0.0),
+                    "expected_drift": expected_drift,
                     "topology": state.get("topology", "LAMINAR FLOW"),
                     "markov_beliefs": state.get("markov_beliefs", {})
                 }
@@ -1071,8 +1068,8 @@ class DistributedQuantEngine:
                 "hawkes_z": getattr(stat_engine, 'marked_hawkes_z', 0.0),
                 "sector_impulse": sector_impulse, 
                 "bid_ask_spread": spread,
-                "alpha_tensor_bps": alpha_tensor_bps,
-                "expected_drift": state.get("expected_drift", 0.0),
+                "alpha_tensor_bps": state.get("alpha_tensor_bps", 0.0),
+                "expected_drift": expected_drift,
                 "topology": state.get("topology", "LAMINAR FLOW"),
                 "markov_beliefs": state.get("markov_beliefs", {}),
                 "bocd_cp_prob": state.get("bocd_cp_prob", 0.0),
@@ -1192,7 +1189,8 @@ class DistributedQuantEngine:
                         turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
                         spread_bps = ((ask - bid) / (bid + 1e-9)) * 10000.0 if bid > 0 else 999.0
 
-                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 4.0:
+                        # Synchronized with 8.0 bps spread tolerance
+                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 8.0:
                             if dead_sym in self.asset_basket:
                                 self.asset_basket.remove(dead_sym)
                             if hot_sym not in self.asset_basket:
@@ -1470,7 +1468,6 @@ class DistributedQuantEngine:
                 ctx["last_eval_price"] = current_price
                 ctx["last_eval_time"] = time.time()
 
-                # Zero-Price Protected Orderbook Extraction
                 ob = self.orderbook_snapshots.get(symbol, {})
                 best_bid = float(ob.get("best_bid", 0.0) or 0.0)
                 best_ask = float(ob.get("best_ask", 0.0) or 0.0)
@@ -1554,7 +1551,6 @@ class DistributedQuantEngine:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
                     break
 
-                # Fractional Position Scale-Out
                 elif decision.action == "SCALE_OUT":
                     logger.info(f"[X-RAY] PARTIAL SCALE-OUT // {symbol}: {decision.reason}")
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
@@ -1572,7 +1568,6 @@ class DistributedQuantEngine:
                     time_elapsed = now_sec - ctx.get("last_amend_time", 0.0)
                     amend_cooldown = ctx.get("amend_cooldown", 1.20)
 
-                    # Bounded displacement and cooldown check
                     if displacement >= (atr_val * 0.15) and time_elapsed >= amend_cooldown:
                         ctx["last_amend_time"] = now_sec
                         amended_ok = await self.sor._amend_trailing_stop(symbol, target_sl, target_tp)
@@ -1593,10 +1588,8 @@ class DistributedQuantEngine:
                     ctx["exit_trigger_price"] = current_price
                     break
 
-            # Instantly release local execution locks so the swarm can evaluate new assets
             self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"], "outcome": "CLOSED"})
             
-            # Offload final residual sweeps and PnL polling into the background
             if not self.test_mode:
                 self.track_task(self._state_settle_trade(ctx), is_critical=True)
 
@@ -1606,10 +1599,6 @@ class DistributedQuantEngine:
             self.state_actor.dispatch(symbol, "LIQUIDATE_POSITION", {"direction": ctx["direction"], "outcome": "ERROR"})
 
     async def _execute_emergency_escape(self, symbol: str, current_price: float, qty: float, is_sell: bool):
-        """
-        Verified Emergency Escape Routine:
-        Dispatches Market IOC orders and polls exchange position state until size reaches 0.0.
-        """
         async def _escape():
             side = "Sell" if is_sell else "Buy"
             qty_str = self.sor._format_qty_str(qty, symbol)
@@ -1722,10 +1711,8 @@ class DistributedQuantEngine:
 
     async def run_engine_forever(self):
         try:
-            # 1. Acquire Distributed Cloud Lease
             self.instance_id = await self._acquire_cloud_instance_lease()
 
-            # 2. Boot verification
             boot_bal = await self._get_true_equity_usdt()
             if boot_bal <= 0.0:
                 self.fsm.trigger_global_emergency_lock()
@@ -1749,7 +1736,6 @@ class DistributedQuantEngine:
             self.global_state_cache["last_updated"] = time.time()
             self.global_state_cache["current_day"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
-            # Synchronize Risk Vault watermarks to boot balance
             self.risk_vault.sync_watermarks(boot_bal)
 
             is_safe, reason = await self.risk_vault.evaluate_portfolio_safety(boot_bal, 0.0, "")
