@@ -1,29 +1,19 @@
 """
-V44.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V44.2 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V44.1 Core Architecture):
-- Calibrated Directional Drift Gating: Replaces rigid zero Alpha Tensor veto with an
-  asymmetric expected drift filter (only vetoes when directional drift explicitly opposes
-  the trade thesis), restoring high-frequency signal generation in RANGING regimes.
-- Synchronized Spread Friction Ceiling (8.0 bps): Re-aligns spread friction ceilings in
-  `_eval_gate` and `run_omni_swarm_director` with `services/bybit_v5.py` (<= 8.0 bps).
-- Sovereign Local Exit Enforcement: Microstructure breaches execute immediate local
-  Market IOC orders directly through the 50ms event loop, eliminating dependency on
-  exchange-side trailing stop amendments and eradicating downside latency.
-- Zero-Price Sanity Barrier: Validates top-of-book and tick pricing against None/zero
-  payloads prior to context transmission, eradicating phantom 26.67R mathematical glitches.
-- Post-Loss Asset Quarantine (180s Cooldown): Automatically locks any symbol that closes
-  with a realized loss for 3 minutes, terminating rapid-fire revenge-trading churn loops.
-- Anti-Whipsaw Directional Lockout (300s): Forbids immediate opposite-side position flipping
-  following a stopped trade, eliminating sawtooth chop decay.
-- Whitener State Persistence on Boot & Shutdown (Bug B5 Remediation): Serializes and restores
-  19D streaming whitening feature means and covariance matrices to `sgd_state.json`.
-- Bounded Amendment Rate Hysteresis: Clamps trailing stop update backoff to 8.0s max,
-  ensuring passive exchange stops stay tightly aligned with market momentum.
-- Native Exchange Bracket Reconciliation: Intercepts zero position size reports cleanly
-  synchronizing state when native stops fill.
+Production Hardening & Quantitative Upgrades (V44.2 Execution & Headroom Hotfix):
+- Unlocked Dynamic Leverage Headroom: Strips the hardcoded 2.0x clamp on `safe_leverage_headroom`,
+  allowing `LEVERAGE_CAP` from `params.json` to safely scale portfolio heat headroom.
+- Proportional Merton-Kelly Sizing: Re-scales fractional Kelly allocation against
+  `MAX_SINGLE_POSITION_RISK_PCT` from `.env`, ensuring sizing is not capped at 0.75%.
+- Cold-Start DNA Bypass: Prevents unvetted tokens from being trapped in Ghost Shadow
+  mode when historical sample size is under 15 verified trades.
+- Lowered Capital Governance Floor (50.0 USDT): Protects sub-$200 accounts from tripping
+  the hard equity veto on normal exchange fee or funding deductions.
+- Dynamic Target Leverage Daemon Propagation: Binds `int(vault_leverage_limit)` across
+  all position daemon instances instead of static 2x hardcodes.
 """
 
 import os
@@ -72,7 +62,7 @@ from core.memory import MemoryBank
 from core.quantum_entry import QuantumEntryMatrix  
 from core.intelligent_exit import IntelligentExitEngine, ExecutionGovernorFSM, PositionExitState, ExitDecision
 from features.adaptive_engine import AdaptiveFeatureEngine
-from features.omni_scanner import GlobalOmniScanner    
+from features.omni_scanner import GlobalOmniScanner     
 from features.micro_models import ContinuousMicrostructureEngine
 
 # Execution & Risk
@@ -94,8 +84,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QUANT_CORE.TITAN_CORE")
 
-# Capital Governance Floor: Defaults to $100.00 for mathematically sound fractional sizing
-MIN_REQUIRED_EQUITY = float(os.getenv("MIN_REQUIRED_EQUITY", "100.0"))
+# Capital Governance Floor: Defaults to $50.00 for micro-account survivability
+MIN_REQUIRED_EQUITY = float(os.getenv("MIN_REQUIRED_EQUITY", "50.0"))
 
 # Unified TradFi, Synthetic Commodity, and Settlement Asset Exclusion Matrix
 BANNED_ASSET_KEYWORDS = [
@@ -235,10 +225,8 @@ class DistributedQuantEngine:
             logger.error(f"[X-RAY] CLOUD DB OFFLINE: Supabase connection failed ({e}). Booting in Local Mode.")
             self.memory = None
 
-        default_max_dd = 0.15 if MIN_REQUIRED_EQUITY < 100.0 else 0.10
-        default_single_risk = 0.03 if MIN_REQUIRED_EQUITY < 100.0 else 0.015
-        max_dd_pct = float(os.getenv("MAX_DRAWDOWN_PCT", str(default_max_dd)))
-        single_risk_pct = float(os.getenv("MAX_SINGLE_POSITION_RISK_PCT", str(default_single_risk)))
+        max_dd_pct = float(os.getenv("MAX_DRAWDOWN_PCT", "0.15"))
+        single_risk_pct = float(os.getenv("MAX_SINGLE_POSITION_RISK_PCT", "0.025"))
 
         self.risk_vault = InstitutionalRiskVault(
             max_drawdown_pct=max_dd_pct, 
@@ -330,7 +318,7 @@ class DistributedQuantEngine:
         return task
 
     def _load_live_params(self) -> dict:
-        default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.0, "LEVERAGE_CAP": 2.0}
+        default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.2, "LEVERAGE_CAP": 2.0}
         try:
             if os.path.exists("params.json"):
                 with open("params.json", "r") as f:
@@ -507,6 +495,7 @@ class DistributedQuantEngine:
             if not active_orphans:
                 return
 
+            target_lev = int(self.live_params.get("LEVERAGE_CAP", 2.0))
             logger.critical(f"  RECOVERY ENGAGED: Found {len(active_orphans)} open positions. Adopting into matrix.")
             for pos in active_orphans:
                 symbol = pos["symbol"]
@@ -522,7 +511,7 @@ class DistributedQuantEngine:
                 risk_matrix = {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}
 
                 self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
-                    symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, 2, "RANGING", is_recovery=True
+                    symbol, str(uuid.uuid4()), direction, entry_price, atr, risk_matrix, target_lev, "RANGING", is_recovery=True
                 ), is_critical=True)
         except Exception as e:
             logger.error(f"[X-RAY] Failed synchronizing exchange state: {e}", exc_info=True)
@@ -552,6 +541,7 @@ class DistributedQuantEngine:
                             self.state_actor.dispatch(tracked_sym, "LIQUIDATE_POSITION", {"direction": "NONE", "outcome": "RECONCILED"})
 
                 # 2. Adopt orphaned exchange positions
+                target_lev = int(self.live_params.get("LEVERAGE_CAP", 2.0))
                 for ex_sym, pos_data in active_on_exchange.items():
                     if ex_sym not in self.active_positions_map and ex_sym not in self.in_flight_symbols:
                         logger.critical(f"[X-RAY] ORPHAN ADOPTED: Found untracked position for {ex_sym}.")
@@ -569,7 +559,7 @@ class DistributedQuantEngine:
                         self.state_actor.dispatch(ex_sym, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                         self.daemon_tasks[ex_sym] = self.track_task(self._position_lifecycle_daemon(
                             ex_sym, str(uuid.uuid4()), direction, entry_price, atr,
-                            {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}, 2, "RANGING", is_recovery=True
+                            {"allocated_value_usdt": qty * entry_price, "size": qty, "arrival_price": entry_price}, target_lev, "RANGING", is_recovery=True
                         ), is_critical=True)
             except Exception as e:
                 logger.debug(f"[X-RAY] Invariant sync cycle bypassed: {e}")
@@ -821,7 +811,7 @@ class DistributedQuantEngine:
             atr = feature_engine.get_computed_atr() if feature_engine else (price * 0.005)
 
             sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.015)
-            dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.0)
+            dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.2)
             tp_dist_pct = sl_dist_pct * dynamic_rr
 
             sol_cluster = ["SOLUSDT", "JUPUSDT", "WIFUSDT", "PYTHUSDT", "RAYUSDT", "JTOUSDT", "BONKUSDT"]
@@ -881,8 +871,7 @@ class DistributedQuantEngine:
                         self.last_eval_time[symbol + "_whipsaw_veto"] = now
                     return
 
-            # 3. Calibrated Directional Drift Gate:
-            # Only veto if the model explicitly projects negative directional drift opposing the trade
+            # 3. Calibrated Directional Drift Gate
             expected_drift = float(state.get("expected_drift", 0.0))
             if (action == "BUY" and expected_drift < -0.0005) or (action == "SELL" and expected_drift > 0.0005):
                 if now - self.last_eval_time.get(symbol + "_drift_veto", 0.0) > 60.0:
@@ -910,11 +899,12 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_macro_short_veto"] = now
                 return
 
-            # Route disarmed symbols to Ghost Shadow instead of dropping them
-            is_armed = self.ram_dna_cache.get(symbol, {"is_armed": True}).get("is_armed", True)
-            if not is_armed:
+            # Cold-Start Resilient DNA Filter: Only drop to shadow if sample-proven unprofitable
+            dna_stats = self.ram_dna_cache.get(symbol, {"is_armed": True, "matched_samples": 0})
+            is_armed = dna_stats.get("is_armed", True)
+            if not is_armed and dna_stats.get("matched_samples", 0) >= 15:
                 if now - self.last_eval_time.get(symbol + "_dna_diag", 0.0) > 120.0:
-                    logger.info(f"[RADAR] {symbol} Filtered: DNA Disarmed in RAM Cache. Routing to Ghost Shadow.")
+                    logger.info(f"[RADAR] {symbol} Filtered: DNA Demoted in Cache. Routing to Ghost Shadow.")
                     self.last_eval_time[symbol + "_dna_diag"] = now
                 
                 shadow_sig_id = str(uuid.uuid4())
@@ -967,9 +957,11 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_equity_veto"] = now
                 return
 
-            # Sizing Pipeline Unification
-            kelly_f = state.get("kelly_fraction", 0.0)
-            target_risk_pct = max(0.001, min(0.0075, kelly_f)) * exec_weight
+            # Proportional Merton-Kelly Sizing bound to institutional vault settings
+            max_single_risk = float(getattr(self.risk_vault, "max_single_position_risk_pct", 0.025))
+            kelly_f = state.get("kelly_fraction", 0.005)
+            base_risk = (kelly_f / 0.0075) * max_single_risk if kelly_f > 0 else (max_single_risk * 0.6)
+            target_risk_pct = float(np.clip(base_risk * exec_weight, 0.002, max_single_risk))
 
             slippage_gap_buffer = max(0.0020, getattr(stat_engine, 'rough_vol', 0.001) * 1.5)
             total_risk_dist_pct = sl_dist_pct + slippage_gap_buffer
@@ -980,8 +972,9 @@ class DistributedQuantEngine:
             corr_haircut = self.risk_vault.calculate_correlation_haircut(symbol)
             target_notional = raw_notional * corr_haircut
 
+            # Dynamic Portfolio Headroom
             vault_leverage_limit = float(self.live_params.get("LEVERAGE_CAP", getattr(self.risk_vault, "max_leverage", 2.0)))
-            safe_leverage_headroom = min(2.0, vault_leverage_limit) * 0.95
+            safe_leverage_headroom = max(1.0, vault_leverage_limit) * 0.95
             max_portfolio_heat = current_bal * safe_leverage_headroom
 
             active_notional_sum = sum(self.risk_vault.position_ledger.values()) if hasattr(self.risk_vault, "position_ledger") else 0.0
@@ -992,7 +985,7 @@ class DistributedQuantEngine:
                 if now - self.last_eval_time.get(symbol + "_heat_deadlock", 0.0) > 60.0:
                     logger.info(
                         f"[RADAR] {symbol} Filtered: Portfolio Headroom Exhausted "
-                        f"(Active: ${active_notional_sum:.2f} + Flight: ${in_flight_notionals:.2f} >= Cap: ${max_portfolio_heat:.2f})"
+                        f"(Active: ${active_notional_sum:.2f} + Flight: ${in_flight_notional_sum:.2f} >= Cap: ${max_portfolio_heat:.2f})"
                     )
                     self.last_eval_time[symbol + "_heat_deadlock"] = now
                 return
@@ -1090,7 +1083,7 @@ class DistributedQuantEngine:
             self.daemon_tasks[symbol] = self.track_task(self._position_lifecycle_daemon(
                 symbol, sig_id, action, avg_fill_price, atr,
                 {"allocated_value_usdt": target_notional, "size": actual_qty_filled, "arrival_price": arrival_price, "qty_step": qty_step_str},
-                2, dominant_regime, realigned_tp=tp_price, dynamic_rr_ratio=dynamic_rr, realigned_sl=sl_price
+                int(vault_leverage_limit), dominant_regime, realigned_tp=tp_price, dynamic_rr_ratio=dynamic_rr, realigned_sl=sl_price
             ), is_critical=True)
 
         except Exception as e:
@@ -1114,11 +1107,11 @@ class DistributedQuantEngine:
                 async def _safe_fetch(sym, dna):
                     try:
                         if not self.memory:
-                            return {"is_armed": False, "win_rate": 0.50}
+                            return {"is_armed": True, "win_rate": 0.50}
                         async with self.db_semaphore:
                             return await asyncio.wait_for(self.memory.compute_latent_dna_edge(dna, 30), timeout=2.0)
                     except Exception:
-                        return {"is_armed": False, "win_rate": 0.50}
+                        return {"is_armed": True, "win_rate": 0.50}
 
                 fetch_tasks = {}
                 for sym in list(self.asset_basket):
@@ -1135,7 +1128,7 @@ class DistributedQuantEngine:
                 results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
                 for sym, result in zip(list(fetch_tasks.keys()), results):
                     if isinstance(result, Exception):
-                        self.ram_dna_cache[sym] = {"is_armed": False, "win_rate": 0.50}
+                        self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
                     else:
                         self.ram_dna_cache[sym] = result
             except Exception as e:
@@ -1157,7 +1150,6 @@ class DistributedQuantEngine:
                     for sym in self.asset_basket + self.shadow_basket
                     if self.screener_memory.get(sym) and self.screener_memory[sym].get("prices") and sym not in active_syms
                 }
-
                 if current_prices and self.memory:
                     async with self.db_semaphore:
                         try:
@@ -1189,7 +1181,6 @@ class DistributedQuantEngine:
                         turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
                         spread_bps = ((ask - bid) / (bid + 1e-9)) * 10000.0 if bid > 0 else 999.0
 
-                        # Synchronized with 8.0 bps spread tolerance
                         if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 8.0:
                             if dead_sym in self.asset_basket:
                                 self.asset_basket.remove(dead_sym)
@@ -1349,7 +1340,7 @@ class DistributedQuantEngine:
 
             duration_mins = (time.time() - ctx["daemon_start_time"]) / 60.0
 
-            # 3. Post-Loss Asset Quarantine (Terminates revenge-trading loops)
+            # 3. Post-Loss Asset Quarantine
             if net_pnl < 0:
                 async with self.circuit_breaker_lock:
                     self.circuit_breakers[symbol] = time.time() + 180.0
@@ -1384,7 +1375,7 @@ class DistributedQuantEngine:
     async def _position_lifecycle_daemon(
         self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float,
         risk_matrix: dict, target_leverage: int = 2, market_regime: str = "TRENDING",
-        is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0,
+        is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.2,
         realigned_sl: float = None, historical_favorable_price: float = None
     ):
         specs = self.sor.instrument_cache.get(symbol, {})
@@ -1499,7 +1490,7 @@ class DistributedQuantEngine:
                 ctx["current_sl"] = current_active_sl
                 ctx["current_tp"] = current_active_tp
 
-                # Liquidation Proximity Sentry (7.0s Cadence with Jitter)
+                # Liquidation Proximity Sentry
                 if now_sec - ctx["last_liq_check_time"] >= (7.0 + random.uniform(0.0, 1.5)):
                     ctx["last_liq_check_time"] = now_sec
                     try:
@@ -1527,7 +1518,7 @@ class DistributedQuantEngine:
                     except Exception as e:
                         logger.debug(f"[RISK] Liquidation distance probe warning: {e}")
 
-                # Interval-Gated Stress Evaluation (5.0s cooldown)
+                # Interval-Gated Stress Evaluation
                 if now_sec - ctx["last_stress_check_time"] >= 5.0 and ctx["stat_engine"] and hasattr(ctx["stat_engine"], 'evaluate_active_trade_stress'):
                     ctx["last_stress_check_time"] = now_sec
                     should_eject, stress_reason = ctx["stat_engine"].evaluate_active_trade_stress(ctx["is_buy"])
@@ -1544,7 +1535,6 @@ class DistributedQuantEngine:
                 # Continuous Adaptive Microstructure Barrier (CAMB) Evaluation
                 decision = IntelligentExitEngine.evaluate(ctx, state)
 
-                # SOVEREIGN LOCAL EXIT SENTRY: Immediate IOC Execution
                 if decision.action in ["EXIT", "CLOSE", "EMERGENCY"]:
                     logger.critical(f"[X-RAY] SOVEREIGN EXIT FIRED // {symbol}: {decision.reason}")
                     ctx["exit_trigger_price"] = current_price
@@ -1558,7 +1548,7 @@ class DistributedQuantEngine:
                 else:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
-                # Passive Exchange Stop-Loss Advancement (Clamped & Rate-Limited)
+                # Passive Exchange Stop-Loss Advancement
                 target_sl = decision.exchange_ts_price
                 target_tp = decision.dynamic_tp_price
 

@@ -1,24 +1,23 @@
 """
-V42.0 APEX TITAN: ATOMIC DUAL-LEG BASIS & YIELD HARVESTER
+V42.1 APEX TITAN: ATOMIC DUAL-LEG BASIS & YIELD HARVESTER
 ------------------------------------------------------------------------
 Ultra-low latency delta-neutral basis cash-and-carry execution engine.
 Sweeps idle margin into high-rate funding arbitrage with full multiplier 
 normalization, cross-instrument lot step harmonization, and atomic rollback.
 
-Production Hardening & Quantitative Upgrades (V42.0):
-- Single-Call Margin Aggregate Resolution (P0 Resolution): Replaces iterative N-symbol 
-  position queries with a single atomic `settleCoin="USDT"` probe, cutting entry 
-  pre-flight verification latency from ~850ms to <45ms.
-- True Multiplier Lot-Parity Invariant (P0 Resolution): Enforces bidirectional modulus 
-  checks between Spot Base Precision and Linear Qty Steps across contract multipliers 
-  (e.g., 1000PEPE, 1000000MOG), permanently eradicating fractional delta imbalances.
+Production Hardening & Quantitative Upgrades (V42.1 Network Optimization):
+- Relaxed Scanner Cadence (120s): Prevents event-loop socket starvation and Bybit 
+  REST timeout errors by throttling heavy global market ticker pulls.
+- Inter-Candidate Request Pacing: Injects a 250ms delay between candidate probes 
+  to eliminate Bybit rate-limiter pacing spikes and TCP connection dropouts.
+- Single-Call Margin Aggregate Resolution: Replaces iterative N-symbol position 
+  queries with a single atomic `settleCoin="USDT"` probe (<45ms).
+- True Multiplier Lot-Parity Invariant: Enforces bidirectional modulus checks 
+  between Spot Base Precision and Linear Qty Steps across contract multipliers.
 - Dynamic Dust-Tolerance Thresholding: Reconciles sub-notional residue (<$1.50) 
-  during unwinds without deadlocking reconciler loops or triggering false asymmetric flags.
-- Real-Time Fallback to Terminal Order History: Probes `/v5/order/history` when 
-  post-cancel realtime order inquiries return empty, capturing fast partial fills.
+  without deadlocking reconciler loops or triggering false asymmetric flags.
 - UTA Collateral Haircut Sizing Guard: Constrains capital deployment strictly 
-  against `(1.0 / leverage) + (1.0 - collateral_ratio) + buffer`, eliminating 
-  Bybit 110007 (Insufficient Margin) rejections on the short perpetual leg.
+  against `(1.0 / leverage) + (1.0 - collateral_ratio) + buffer`.
 - Self-Trade Prevention (STP): Enforces `smpType="CancelMaker"` across all orders.
 """
 
@@ -38,7 +37,7 @@ logger = logging.getLogger("QUANT_CORE.DELTA_NEUTRAL")
 
 class DeltaNeutralYieldEngine:
     """
-    V42.0 APEX TITAN BASIS ENGINE
+    V42.1 APEX TITAN BASIS ENGINE
     Captures perpetual funding rate premiums via synchronized Spot Long / Perp Short
     atomic pairing with zero residual directional exposure and proactive solvency sentries.
     """
@@ -358,11 +357,12 @@ class DeltaNeutralYieldEngine:
     # =========================================================================
 
     async def run_yield_scanner_daemon(self):
-        """High-frequency funding rate arbitrage scanner with 30s cadence and delta rate pre-filter."""
-        logger.info("DELTA-NEUTRAL BASIS ENGINE ONLINE: Scanning for Altcoin Funding Yield (30s Cadence).")
+        """Funding rate arbitrage scanner with 120s cadence and paced API queries."""
+        logger.info("DELTA-NEUTRAL BASIS ENGINE ONLINE: Scanning for Altcoin Funding Yield (120s Cadence).")
 
         while True:
-            await asyncio.sleep(30)
+            # 120s cycle eliminates REST connection pool congestion and timeouts
+            await asyncio.sleep(120)
 
             if not self.core.fsm.can_execute_trades:
                 continue
@@ -401,6 +401,9 @@ class DeltaNeutralYieldEngine:
 
                 # 3. Multi-Candidate Waterfall: Probe top candidates in order of yield
                 for target_asset, best_funding in candidates[:10]:
+                    # Pacing between probes avoids slamming Bybit rate limits
+                    await asyncio.sleep(0.25)
+
                     spot_symbol, base_asset, _ = self._resolve_contract_scale(target_asset)
 
                     # Pre-validation: Verify Spot market specs exist
