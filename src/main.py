@@ -1,25 +1,29 @@
 """
-V44.2 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V44.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V44.2 Core Architecture):
-- Omni-Swarm Tiered Injection Gate: Replaces rigid 8.0 bps / $15M thresholds with 
-  adaptive criteria (18.0 bps / $3M for altcoins; 8.0 bps / $10M for majors), 
-  unlocking high-velocity momentum discovery without choking liquidity.
-- 3-Slot Concurrency Engine: Partitions portfolio heat evenly across independent slots 
-  (~$25-$34 notional cap per slot on micro accounts), preventing single-asset trade stagnation.
-- Calibrated Spread-to-ATR Gate: Expands spread tolerance up to 18.0 bps for volatile 
-  altcoin setups, letting the L2/L3 slippage model govern order viability.
-- Anti-Thrashing Stop Amendment Hysteresis: Requires >= 0.40x ATR price displacement and 
-  >= 4.0s cooldown for passive REST amendments, eradicating Bybit 10016 overload locks 
-  while relying on the 50ms sovereign local IOC loop for immediate stop execution.
+Production Hardening & Quantitative Upgrades (V44.1 Core Architecture):
+- Calibrated Directional Drift Gating: Replaces rigid zero Alpha Tensor veto with an
+  asymmetric expected drift filter (only vetoes when directional drift explicitly opposes
+  the trade thesis), restoring high-frequency signal generation in RANGING regimes.
+- Synchronized Spread Friction Ceiling (8.0 bps): Re-aligns spread friction ceilings in
+  `_eval_gate` and `run_omni_swarm_director` with `services/bybit_v5.py` (<= 8.0 bps).
 - Sovereign Local Exit Enforcement: Microstructure breaches execute immediate local
-  Market IOC orders directly through the 50ms event loop, eliminating downside latency.
+  Market IOC orders directly through the 50ms event loop, eliminating dependency on
+  exchange-side trailing stop amendments and eradicating downside latency.
+- Zero-Price Sanity Barrier: Validates top-of-book and tick pricing against None/zero
+  payloads prior to context transmission, eradicating phantom 26.67R mathematical glitches.
 - Post-Loss Asset Quarantine (180s Cooldown): Automatically locks any symbol that closes
   with a realized loss for 3 minutes, terminating rapid-fire revenge-trading churn loops.
-- Whitener State Persistence on Boot & Shutdown: Serializes and restores 19D streaming 
-  whitening feature means and covariance matrices to `sgd_state.json`.
+- Anti-Whipsaw Directional Lockout (300s): Forbids immediate opposite-side position flipping
+  following a stopped trade, eliminating sawtooth chop decay.
+- Whitener State Persistence on Boot & Shutdown (Bug B5 Remediation): Serializes and restores
+  19D streaming whitening feature means and covariance matrices to `sgd_state.json`.
+- Bounded Amendment Rate Hysteresis: Clamps trailing stop update backoff to 8.0s max,
+  ensuring passive exchange stops stay tightly aligned with market momentum.
+- Native Exchange Bracket Reconciliation: Intercepts zero position size reports cleanly
+  synchronizing state when native stops fill.
 """
 
 import os
@@ -210,9 +214,6 @@ class DistributedQuantEngine:
         self.timeframe = os.getenv("TRADING_TIMEFRAME", "15")
         self.shadow_basket: List[str] = []
 
-        # Concurrency Engine Configuration
-        self.max_concurrent_positions = int(os.getenv("MAX_CONCURRENT_POSITIONS", "3"))
-
         safe_workers = min(4, multiprocessing.cpu_count() - 1) if multiprocessing.cpu_count() > 1 else 1
         self.math_pool = concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers, thread_name_prefix="Titan_Math")
         self.io_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="Titan_IO")
@@ -249,8 +250,7 @@ class DistributedQuantEngine:
             f"  RISK VAULT INITIALIZED // Hard Stop: {max_dd_pct:.1%} | "
             f"Soft Freeze: {self.risk_vault.soft_freeze_drawdown_pct:.1%} | "
             f"Daily Limit: {self.risk_vault.daily_loss_limit_pct:.1%} | "
-            f"Single Pos Risk Cap: {single_risk_pct:.1%} | "
-            f"Max Slots: {self.max_concurrent_positions}"
+            f"Single Pos Risk Cap: {single_risk_pct:.1%}"
         )
 
         self.yield_engine = DeltaNeutralYieldEngine(self)
@@ -586,7 +586,7 @@ class DistributedQuantEngine:
             calibrated_count = sum(1 for cnt in active_ticks.values() if cnt >= 50)
             logger.info(
                 f"[RADAR] SWARM ACTIVE // Calibrated: {calibrated_count}/{len(self.asset_basket)} nodes | "
-                f"Active Tasks: {len(self._active_tasks)} | Active Positions: {len(self.active_positions_map)}/{self.max_concurrent_positions} | Uptime: {uptime_hours:.2f}h"
+                f"Active Tasks: {len(self._active_tasks)} | Uptime: {uptime_hours:.2f}h"
             )
 
             if loop_counter % 5 == 0:
@@ -806,11 +806,6 @@ class DistributedQuantEngine:
                 return
             self.last_eval_time[symbol + "_learning_throttle"] = now
 
-        # Concurrency Slot Limit Check: Restrict active + in-flight slots
-        current_occupied_slots = len(self.active_positions_map) + len(self.in_flight_symbols)
-        if not is_active_fast and current_occupied_slots >= self.max_concurrent_positions:
-            return
-
         in_flight_reserved = False
         try:
             price = ob_payload.get("micro_price", 0.0)
@@ -895,13 +890,11 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_drift_veto"] = now
                 return
 
-            # 4. Calibrated Spread-to-ATR Friction Sieve (Tiered: Majors vs Altcoins)
-            is_major = any(m in symbol for m in ["BTC", "ETH", "SOL"])
-            max_gate_spread = 8.0 if is_major else 18.0
+            # 4. Spread-to-ATR Friction Sieve (Calibrated to 8.0 bps)
             spread = float(ob_payload.get("spread", 0.0001))
             spread_bps = (spread / (price + 1e-9)) * 10000.0
             atr_bps = (atr / (price + 1e-9)) * 10000.0
-            if spread_bps > max_gate_spread or (atr_bps > 0 and (spread_bps / atr_bps) > 0.45):
+            if spread_bps > 8.0 or (atr_bps > 0 and (spread_bps / atr_bps) > 0.35):
                 if now - self.last_eval_time.get(symbol + "_friction_veto", 0.0) > 120.0:
                     logger.info(f"[RADAR] {symbol} Filtered: Friction ratio excessive (Spread: {spread_bps:.1f} bps, ATR: {atr_bps:.1f} bps).")
                     self.last_eval_time[symbol + "_friction_veto"] = now
@@ -959,9 +952,9 @@ class DistributedQuantEngine:
             fusion_verdict = fusion_engine.fuse_signal_probability(symbol, prob_success, action, bids, asks)
             exec_weight = fusion_verdict["execution_weight"]
 
-            if exec_weight < 0.40:
+            if exec_weight < 0.5:
                 if now - self.last_eval_time.get(symbol + "_weight_diag", 0.0) > 120.0:
-                    logger.info(f"[RADAR] {symbol} Filtered: Execution Weight {exec_weight:.2f} < 0.40")
+                    logger.info(f"[RADAR] {symbol} Filtered: Execution Weight {exec_weight:.2f} < 0.50")
                     self.last_eval_time[symbol + "_weight_diag"] = now
                 return
 
@@ -974,7 +967,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_equity_veto"] = now
                 return
 
-            # Sizing Pipeline Unification with Concurrency Slot Allocation
+            # Sizing Pipeline Unification
             kelly_f = state.get("kelly_fraction", 0.0)
             target_risk_pct = max(0.001, min(0.0075, kelly_f)) * exec_weight
 
@@ -991,9 +984,6 @@ class DistributedQuantEngine:
             safe_leverage_headroom = min(2.0, vault_leverage_limit) * 0.95
             max_portfolio_heat = current_bal * safe_leverage_headroom
 
-            # Partition portfolio heat evenly across concurrency slots
-            slot_notional_cap = max_portfolio_heat / float(self.max_concurrent_positions)
-
             active_notional_sum = sum(self.risk_vault.position_ledger.values()) if hasattr(self.risk_vault, "position_ledger") else 0.0
             in_flight_notional_sum = sum(self.in_flight_notionals.values())
             remaining_notional_capacity = max(0.0, max_portfolio_heat - (active_notional_sum + in_flight_notional_sum))
@@ -1007,8 +997,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_heat_deadlock"] = now
                 return
 
-            # Clamp sizing to slot cap while guaranteeing Bybit minimum notional
-            target_notional = float(np.clip(target_notional, 6.50, min(slot_notional_cap, remaining_notional_capacity)))
+            target_notional = float(np.clip(target_notional, 6.50, remaining_notional_capacity))
 
             is_safe, risk_reason = await self.risk_vault.evaluate_portfolio_safety(
                 current_bal, target_notional, symbol, sl_dist_pct=total_risk_dist_pct
@@ -1030,8 +1019,7 @@ class DistributedQuantEngine:
 
             logger.critical(
                 f"  ALPHA SIGNAL // {symbol} {action} | Regime: {dominant_regime} | "
-                f"Prob: {prob_success:.2%} | Weight: {exec_weight:.2f}x | Haircut: {corr_haircut:.2f}x | "
-                f"Slot Size: ${target_notional:.2f} | Active Slots: {len(self.active_positions_map) + 1}/{self.max_concurrent_positions}"
+                f"Prob: {prob_success:.2%} | Weight: {exec_weight:.2f}x | Haircut: {corr_haircut:.2f}x | Size: ${target_notional:.2f}"
             )
 
             try:
@@ -1126,11 +1114,11 @@ class DistributedQuantEngine:
                 async def _safe_fetch(sym, dna):
                     try:
                         if not self.memory:
-                            return {"is_armed": True, "win_rate": 0.50}
+                            return {"is_armed": False, "win_rate": 0.50}
                         async with self.db_semaphore:
                             return await asyncio.wait_for(self.memory.compute_latent_dna_edge(dna, 30), timeout=2.0)
                     except Exception:
-                        return {"is_armed": True, "win_rate": 0.50}
+                        return {"is_armed": False, "win_rate": 0.50}
 
                 fetch_tasks = {}
                 for sym in list(self.asset_basket):
@@ -1147,7 +1135,7 @@ class DistributedQuantEngine:
                 results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
                 for sym, result in zip(list(fetch_tasks.keys()), results):
                     if isinstance(result, Exception):
-                        self.ram_dna_cache[sym] = {"is_armed": True, "win_rate": 0.50}
+                        self.ram_dna_cache[sym] = {"is_armed": False, "win_rate": 0.50}
                     else:
                         self.ram_dna_cache[sym] = result
             except Exception as e:
@@ -1185,11 +1173,6 @@ class DistributedQuantEngine:
                 logger.error(f"[X-RAY] Shadow resolution error: {e}")
 
     async def run_omni_swarm_director(self):
-        """
-        High-velocity universe director with adaptive tiered gates:
-        Permits high-RVOL altcoin injections at up to 18.0 bps spread and $3M turnover,
-        while maintaining institutional 8.0 bps and $10M criteria for major pairs.
-        """
         logger.info("  60s OMNI-SWARM DIRECTOR ONLINE.")
         while True:
             await asyncio.sleep(60)
@@ -1206,12 +1189,8 @@ class DistributedQuantEngine:
                         turnover = float(t_data.get("turnover24h", 0.0) or 0.0)
                         spread_bps = ((ask - bid) / (bid + 1e-9)) * 10000.0 if bid > 0 else 999.0
 
-                        # Tiered Spread & Turnover Validation
-                        is_major = any(m in hot_sym for m in ["BTC", "ETH", "SOL"])
-                        max_allowed_spread = 8.0 if is_major else 18.0
-                        min_required_turnover = 10_000_000.0 if is_major else 3_000_000.0
-
-                        if bid > 0 and ask > bid and turnover >= min_required_turnover and spread_bps <= max_allowed_spread:
+                        # Synchronized with 8.0 bps spread tolerance
+                        if bid > 0 and ask > bid and turnover >= 15_000_000.0 and spread_bps <= 8.0:
                             if dead_sym in self.asset_basket:
                                 self.asset_basket.remove(dead_sym)
                             if hot_sym not in self.asset_basket:
@@ -1220,10 +1199,7 @@ class DistributedQuantEngine:
                             await self._prune_dead_symbols()
                             if self.stream_feed_instance and hasattr(self.stream_feed_instance, 'hot_swap_socket_stream'):
                                 await self.stream_feed_instance.hot_swap_socket_stream(dead_sym, hot_sym)
-                            logger.critical(
-                                f"[X-RAY] DYNAMIC SWAP // {hot_sym} injected into matrix "
-                                f"(Replaced {dead_sym} | Spread: {spread_bps:.1f} bps | Turnover: ${turnover/1e6:.1f}M)."
-                            )
+                            logger.critical(f"[X-RAY] DYNAMIC SWAP // {hot_sym} injected into matrix (Replaced {dead_sym}).")
             except Exception as e:
                 logger.error(f"[X-RAY] Omni-Swarm Director error: {e}")
 
@@ -1232,9 +1208,9 @@ class DistributedQuantEngine:
             logger.info("  MATRIX REFRESH: Scanning High-Velocity Universe...")
             await self.sor._fetch_exchange_limits("BTCUSDT")
 
-            dynamic_basket = await self.executor.get_top_volatile_assets(limit=40, min_turnover=10_000_000.0)
+            dynamic_basket = await self.executor.get_top_volatile_assets(limit=40, min_turnover=15_000_000.0)
             if not dynamic_basket or len(dynamic_basket) < 15:
-                dynamic_basket = await self.executor.get_top_volatile_assets(limit=40, min_turnover=3_000_000.0)
+                dynamic_basket = await self.executor.get_top_volatile_assets(limit=40, min_turnover=5_000_000.0)
 
             dynamic_basket = [
                 s for s in dynamic_basket 
@@ -1437,7 +1413,7 @@ class DistributedQuantEngine:
             "last_stress_check_time": time.time(),
             "last_liq_check_time": time.time(),
             "last_amend_time": time.time(),
-            "amend_cooldown": 4.0,  # Anti-Thrashing Hysteresis Window
+            "amend_cooldown": 1.20,
             "last_exchange_sl": realigned_sl if realigned_sl else current_price,
             "taker_fee_rate": getattr(self.sor, "taker_fee_rate", 0.00055),
             "slippage_buffer_pct": 0.0004
@@ -1582,7 +1558,7 @@ class DistributedQuantEngine:
                 else:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
-                # Passive Exchange Stop-Loss Advancement (Clamped & Rate-Limited with Anti-Thrashing)
+                # Passive Exchange Stop-Loss Advancement (Clamped & Rate-Limited)
                 target_sl = decision.exchange_ts_price
                 target_tp = decision.dynamic_tp_price
 
@@ -1590,20 +1566,19 @@ class DistributedQuantEngine:
                     atr_val = ctx["atr"]
                     displacement = abs(target_sl - ctx.get("last_exchange_sl", current_active_sl))
                     time_elapsed = now_sec - ctx.get("last_amend_time", 0.0)
-                    amend_cooldown = ctx.get("amend_cooldown", 4.0)
+                    amend_cooldown = ctx.get("amend_cooldown", 1.20)
 
-                    # Require at least 0.40x ATR price displacement and 4.0s cooldown
-                    if displacement >= (atr_val * 0.40) and time_elapsed >= max(4.0, amend_cooldown):
+                    if displacement >= (atr_val * 0.15) and time_elapsed >= amend_cooldown:
                         ctx["last_amend_time"] = now_sec
                         amended_ok = await self.sor._amend_trailing_stop(symbol, target_sl, target_tp)
                         if amended_ok:
                             ctx["last_exchange_sl"] = target_sl
                             current_active_sl = target_sl
                             current_active_tp = target_tp
-                            ctx["amend_cooldown"] = 4.0
+                            ctx["amend_cooldown"] = 1.20
                             logger.info(f"[CAMB] EXCHANGE STOP ADVANCED // {symbol} SL: {target_sl:.4f} | TP: {target_tp:.4f}")
                         else:
-                            ctx["amend_cooldown"] = min(12.0, amend_cooldown * 1.5)
+                            ctx["amend_cooldown"] = min(8.0, amend_cooldown * 1.5)
                             logger.warning(
                                 f"[CAMB] Stop amendment rejected by exchange for {symbol}. "
                                 f"Backing off for {ctx['amend_cooldown']:.1f}s. Retaining active SL: {current_active_sl:.4f}"
@@ -1644,13 +1619,13 @@ class DistributedQuantEngine:
                 remaining_size = float(pos_list[0].get("size", 0.0)) if pos_list else 0.0
                 
                 if remaining_size <= 0.0:
-                    logger.critical(f"  EMERGENCY ESCAPE VERIFIED // {symbol} inventory completely cleared.")
+                    logger.critical(f"✅ EMERGENCY ESCAPE VERIFIED // {symbol} inventory completely cleared.")
                     return
                 else:
                     qty_str = self.sor._format_qty_str(remaining_size, symbol)
-                    logger.warning(f"  Partial escape fill on {symbol}. Remaining: {remaining_size}. Retrying ({attempt + 1}/5)...")
+                    logger.warning(f"⚠️ Partial escape fill on {symbol}. Remaining: {remaining_size}. Retrying ({attempt + 1}/5)...")
                     
-            logger.critical(f"  FATAL: Emergency escape failed to zero {symbol} after 5 attempts. Engaging global emergency lock.")
+            logger.critical(f"💀 FATAL: Emergency escape failed to zero {symbol} after 5 attempts. Engaging global emergency lock.")
             self.fsm.trigger_global_emergency_lock()
 
         await asyncio.shield(_escape())

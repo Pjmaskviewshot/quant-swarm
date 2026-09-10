@@ -1,22 +1,21 @@
 """
-V44.2 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+V43.0 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
 Hyper-optimized persistent database connector and Transaction Cost Analysis (TCA) ledger.
 
-Production Hardening & Quantitative Upgrades (V44.2 Core Architecture):
-1. Omni-Swarm Discovery Arming Policy: Eradicates the cold-start deadlock by 
-   arming newly injected momentum assets immediately (is_armed=True), permitting 
-   instant live trading unless empirical shadow/live metrics trigger an active demotion.
-2. Early Toxicity Quarantine: Evaluates early underperformance on 10+ samples 
-   (win rate < 35%) to isolate degrading assets without waiting for a full 35-sample window.
-3. Graceful SQLite-Only Degradation: Bypasses fatal boot crashes when SUPABASE_URL 
-   or SUPABASE_KEY is missing or unreachable; executes locally in high-performance WAL mode.
-4. Signal Notional Tracking: Persists dollar risk and target notional directly 
-   in the quantitative ledger for accurate capital-weighted post-trade attribution.
-5. Decoupled Shadow Forensics: Restricts shadow settlement queries strictly to 
-   `WHERE resolved = 0 AND is_shadow = 1`, preventing interference with active live inventory.
-6. Non-Blocking Batched Persistence: Asynchronously drains mutation queues with 
-   timeout-guarded thread dispatch and clean shutdown checkpoints.
+Production Hardening & Quantitative Upgrades (V43.0 Audit Remediations):
+1. Cold-Start Disarm Safeguard (Bug B3 Remediation): Disarms live trading (is_armed=False) 
+   when historical trade samples are below the minimum vetting threshold (<15 verified trades)
+   or when engaging the uninitialized holographic fallback, preventing unvetted live execution.
+2. Graceful SQLite-Only Degradation (§6.4 Audit Fix): Bypasses fatal boot crashes when 
+   SUPABASE_URL or SUPABASE_KEY is missing or unreachable. Gracefully operates in 
+   persistent on-disk SQLite WAL mode without interrupting real-time execution.
+3. Signal Notional Tracking (Bug B9 Remediation): Ingests and persists dollar risk and 
+   target notional directly in the quantitative ledger, eliminating downstream hardcoded defaults.
+4. Shadow/Live Forensic Decoupling: Queries strictly constrain shadow resolutions to 
+   `WHERE resolved = 0 AND is_shadow = 1` to prevent overriding active real inventory.
+5. High-Throughput Micro-Batching: Asynchronously drains write queues into batched 
+   upserts/inserts with non-blocking SQLite checkpoints and clean task cancellation teardown.
 """
 
 import os
@@ -41,7 +40,7 @@ logger = logging.getLogger("QUANT_CORE.MEMORY")
 
 class MemoryBank:
     """
-    V44.2 PURE-ASYNC FORENSIC LEDGER
+    V43.0 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
     DNA clustering with resilient on-disk SQLite WAL reads and batched cloud persistence.
     """
@@ -49,12 +48,12 @@ class MemoryBank:
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
 
-        # Graceful degradation to local mode if Supabase credentials missing
+        # §6.4 Audit Fix: Graceful degradation to local mode if Supabase credentials missing
         self.supabase: Optional[Any] = None
         if HAS_SUPABASE and url and key:
             try:
                 self.supabase = create_client(url, key)
-                logger.info("  CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
+                logger.info("🛸 CLOUD LEDGER BOUND: Connected successfully to Supabase cluster.")
             except Exception as e:
                 logger.warning(f"[MEMORY] Cloud connection failed ({e}). Degraded to Local SQLite-Only Mode.")
         else:
@@ -139,10 +138,10 @@ class MemoryBank:
             count = self.local_cursor.fetchone()[0]
 
         if count >= 1000:
-            logger.info(f"  Local SQLite WAL warm with {count} verified records. Bypassing cloud sync.")
+            logger.info(f"✅ Local SQLite WAL warm with {count} verified records. Bypassing cloud sync.")
             return
 
-        logger.info("  Warming local SQLite fast-path cache from Supabase...")
+        logger.info("🔥 Warming local SQLite fast-path cache from Supabase...")
         try:
             query = (
                 self.supabase.table("quantitative_ledger")
@@ -168,9 +167,9 @@ class MemoryBank:
                         r.get("virtual_sl") or 0.0, r.get("virtual_tp") or 0.0, r.get("target_notional") or 10.0
                     ))
                 self.local_db.commit()
-            logger.info(f"  SQLite warm-up complete. Pre-loaded {len(rows)} historical records.")
+            logger.info(f"✅ SQLite warm-up complete. Pre-loaded {len(rows)} historical records.")
         except Exception as e:
-            logger.warning(f"  SQLite warm-up failed, continuing with active local cache: {e}")
+            logger.warning(f"⚠️ SQLite warm-up failed, continuing with active local cache: {e}")
 
     async def start(self):
         """Initializes the async write queue, pre-warms local state, and starts the batching worker."""
@@ -178,14 +177,14 @@ class MemoryBank:
         self.write_queue = asyncio.Queue(maxsize=50000)
         self._is_shutting_down = False
         self._bg_task = asyncio.create_task(self._async_sync_worker())
-        logger.info("  ASYNC MICRO-BATCH WORKER ONLINE: DB writes non-blocking & batched.")
+        logger.info("🛡️ ASYNC MICRO-BATCH WORKER ONLINE: DB writes non-blocking & batched.")
 
     async def flush_and_close(self):
         """
         Drains and flushes all pending database mutations and cleanly checkpoints 
         SQLite WAL files before shutting down.
         """
-        logger.info("  Halting async DB worker and flushing forensic ledger...")
+        logger.info("⏳ Halting async DB worker and flushing forensic ledger...")
         self._is_shutting_down = True
 
         if self.write_queue:
@@ -199,7 +198,7 @@ class MemoryBank:
                     break
 
             if pending_tasks and self.supabase:
-                logger.info(f"  Flushing {len(pending_tasks)} pending execution records in batches...")
+                logger.info(f"💾 Flushing {len(pending_tasks)} pending execution records in batches...")
                 chunk_size = 50
                 for i in range(0, len(pending_tasks), chunk_size):
                     chunk = pending_tasks[i:i + chunk_size]
@@ -220,11 +219,11 @@ class MemoryBank:
                 self.local_cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                 self.local_db.commit()
                 self.local_db.close()
-                logger.info("  Local SQLite database closed and WAL checkpointed.")
+                logger.info("🔒 Local SQLite database closed and WAL checkpointed.")
             except Exception as e:
                 logger.error(f"Error closing SQLite database: {e}")
 
-        logger.info("  Ledger teardown complete.")
+        logger.info("✅ Ledger teardown complete.")
 
     async def _async_sync_worker(self):
         """Processes database mutations using high-throughput micro-batching."""
@@ -438,9 +437,9 @@ class MemoryBank:
             try:
                 self.write_queue.put_nowait(("INSERT", "quantitative_ledger", payload, None, None))
             except asyncio.QueueFull:
-                logger.error(f"  Write queue overflow. Dropping signal {signal_id[:8]}")
+                logger.error(f"❌ Write queue overflow. Dropping signal {signal_id[:8]}")
 
-        label = "  SHADOW" if is_shadow else "  CORE"
+        label = "🦇 SHADOW" if is_shadow else "💾 CORE"
         logger.info(f"[X-RAY] {label} LEDGER ROUTED // ID: {signal_id[:8]}... | {symbol} | SL: {sl_price:.4f} | TP: {tp_price:.4f}")
 
     async def log_live_execution_result(
@@ -495,7 +494,7 @@ class MemoryBank:
                     "exec_details": execution_details
                 }
                 self.write_queue.put_nowait(("UPDATE", "quantitative_ledger", update_payload, "signal_id", str(signal_id)))
-                logger.info(f"[X-RAY]   ATTRIBUTION DISPATCHED // Signal {signal_id[:8]}... PnL: ${net_pnl:.4f} | Total Slippage: {slippage:+.1f} bps")
+                logger.info(f"[X-RAY] 🎯 ATTRIBUTION DISPATCHED // Signal {signal_id[:8]}... PnL: ${net_pnl:.4f} | Total Slippage: {slippage:+.1f} bps")
 
         except Exception as e:
             logger.error(f"Database update route failed: {e}")
@@ -636,7 +635,7 @@ class MemoryBank:
                     for i in range(0, len(update_batch), chunk_size):
                         chunk = update_batch[i:i + chunk_size]
                         self.write_queue.put_nowait(("UPSERT", "quantitative_ledger", chunk, None, None))
-                    logger.info(f"[X-RAY]   GHOST FORENSICS: Enqueued {len(update_batch)} paths for batched cloud sync.")
+                    logger.info(f"[X-RAY] 📊 GHOST FORENSICS: Enqueued {len(update_batch)} paths for batched cloud sync.")
 
             return resolved_count
 
@@ -645,10 +644,7 @@ class MemoryBank:
             return 0
 
     async def evaluate_shadow_promotion(self, target_symbol: str, window_trades: int = 35) -> Dict[str, Any]:
-        """
-        Assesses asset performance instantly via Local SQLite Fast-Path.
-        Incorporates early toxicity detection (>= 10 samples) to catch deteriorating edges early.
-        """
+        """Assesses shadow asset performance instantly via Local SQLite Fast-Path."""
         try:
             async with self._db_lock:
                 self.local_cursor.execute('''
@@ -660,37 +656,22 @@ class MemoryBank:
                 ''', (target_symbol, window_trades))
                 rows = self.local_cursor.fetchall()
 
-            total = len(rows)
-
-            # Cold discovery phase: No performance history to penalize
-            if total < 10:
+            if len(rows) < 35:
                 return {
                     "should_promote": False, "should_demote": False, "shadow_sharpe": 0.0,
-                    "shadow_win_rate": 0.50, "sample_count": total,
-                    "reason": f"Discovery baseline active ({total}/10 min for trend analysis)"
+                    "shadow_win_rate": 0.50, "sample_count": len(rows),
+                    "reason": f"Insufficient shadow samples ({len(rows)}/35 min)"
                 }
 
             pnls = np.array([float(r["net_pnl"]) for r in rows])
             wins = sum(1 for r in rows if r["is_correct"])
+            total = len(rows)
             win_rate = wins / total
 
             mean_pnl = np.mean(pnls)
             std_pnl = np.std(pnls) + 1e-9
             shadow_sharpe = float((mean_pnl / std_pnl) * math.sqrt(365.0)) if std_pnl > 1e-6 else 0.0
 
-            # Early Toxicity Quarantine: Quarantine deteriorating assets early
-            if total < 35:
-                should_early_demote = (win_rate < 0.35) or (shadow_sharpe < -1.0)
-                return {
-                    "should_promote": False,
-                    "should_demote": should_early_demote,
-                    "shadow_sharpe": round(shadow_sharpe, 2),
-                    "shadow_win_rate": round(win_rate, 4),
-                    "sample_count": total,
-                    "reason": f"EARLY_TOXICITY_QUARANTINE (Win Rate: {win_rate:.1%})" if should_early_demote else f"Interim Discovery ({total}/35)"
-                }
-
-            # Standard 35+ Trade Promotion/Demotion Boundaries
             should_promote = (win_rate >= 0.55) and (shadow_sharpe >= 1.5)
             should_demote = (win_rate < 0.45) or (shadow_sharpe < -0.5)
 
@@ -715,8 +696,7 @@ class MemoryBank:
     async def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
         Computes k-NN Bayesian win probability instantly via Local SQLite Fast-Path.
-        Features the Omni-Swarm Discovery Arming Policy: arms new candidates immediately,
-        quarantining them only when empirical evidence demonstrates statistically adverse edge.
+        Remediates Bug B3 by enforcing conservative disarm on cold starts with zero historical evidence.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0) or 1.0), 10.0)
         c_log_mlofi = float(current_dna.get("log_mlofi_z", 0.0) or 0.0)
@@ -757,22 +737,17 @@ class MemoryBank:
             self._ingest_hologram_data(historical_data)
             promo_eval = await self.evaluate_shadow_promotion(target_symbol)
 
-            # =========================================================================
-            # OMNI-SWARM DISCOVERY ARMING POLICY (Cold-Start Deadlock Resolution)
-            # =========================================================================
-            # Arms newly injected assets immediately upon discovery to allow live scalping.
-            # Only disarms if performance metrics indicate adverse edge (should_demote = True).
+            # Bug B3 Remediation: Require at least 15 verified trades before arming live execution
             if len(historical_data) < k_neighbors:
-                should_demote = promo_eval.get("should_demote", False)
-                is_armed_default = not should_demote
+                is_armed_default = len(historical_data) >= 15 and not promo_eval.get("should_demote", False)
                 result_payload = {
-                    "bayesian_edge": 0.55 if is_armed_default else 0.40,
+                    "bayesian_edge": 0.50 if len(historical_data) < 15 else 0.55,
                     "is_armed": is_armed_default,
                     "matched_samples": len(historical_data),
                     "cluster_win_rate": 0.50,
                     "win_rate": 0.50,
                     "shadow_sharpe": promo_eval.get("shadow_sharpe", 0.0),
-                    "promotion_event": "DISCOVERY_ARMED" if is_armed_default else "COLD_START_DEMOTED"
+                    "promotion_event": "COLD_START_ARMED" if is_armed_default else "COLD_START_DISARMED"
                 }
                 self.dna_cache[dna_hash] = (current_time, result_payload)
                 return result_payload
@@ -802,7 +777,7 @@ class MemoryBank:
             total = k_actual
 
             bayesian_edge = (wins + 2.0) / (total + 4.0)
-            is_armed = (bayesian_edge >= 0.52) or promo_eval["should_promote"]
+            is_armed = (bayesian_edge >= 0.55) or promo_eval["should_promote"]
             if promo_eval["should_demote"] and not promo_eval["should_promote"]:
                 is_armed = False
 
@@ -828,18 +803,15 @@ class MemoryBank:
             return result_payload
 
         except Exception as e:
-            logger.error(f"[X-RAY]   LOCAL DB FAULT: SQLite lookup failed ({e}). Engaging HOLOGRAPHIC FALLBACK.")
+            logger.error(f"[X-RAY] 🛑 LOCAL DB FAULT: SQLite lookup failed ({e}). Engaging HOLOGRAPHIC FALLBACK.")
 
+            # Bug B3 Remediation: Disarm if zero verified historical samples exist
             if not self.holo_warmed_up or self.holo_pointer == 0:
-                logger.info("[X-RAY]   Hologram initializing. Permitting cold discovery arming baseline.")
+                logger.warning("[X-RAY] 🔒 Hologram uninitialized. Disarming live execution for safety.")
                 return {
-                    "bayesian_edge": 0.55,
-                    "is_armed": True,
-                    "matched_samples": 0,
-                    "cluster_win_rate": 0.50,
-                    "win_rate": 0.50,
-                    "shadow_sharpe": 0.0,
-                    "promotion_event": "COLD_START_DISCOVERY_SAFE"
+                    "bayesian_edge": 0.50, "is_armed": False, "matched_samples": 0,
+                    "cluster_win_rate": 0.50, "win_rate": 0.50, "shadow_sharpe": 0.0,
+                    "promotion_event": "COLD_START_DISARMED_SAFE"
                 }
 
             active_size = min(self.holo_pointer, self.holo_capacity)
@@ -863,9 +835,9 @@ class MemoryBank:
             total = k_actual
 
             bayesian_edge = (wins + 2.0) / (total + 4.0)
-            is_armed = bool(bayesian_edge >= 0.50)
+            is_armed = bool(bayesian_edge >= 0.55 and total >= 15)
 
-            logger.info(f"[X-RAY]   HOLOGRAPHIC SURVIVAL // Local Edge: {bayesian_edge:.2%} | Armed: {is_armed}")
+            logger.info(f"[X-RAY] 🌌 HOLOGRAPHIC SURVIVAL // Local Edge: {bayesian_edge:.2%} | Armed: {is_armed}")
 
             return {
                 "bayesian_edge": round(float(bayesian_edge), 4),
