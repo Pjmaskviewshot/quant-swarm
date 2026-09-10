@@ -1,5 +1,5 @@
 """
-V43.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
+V45.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
 --------------------------------------------------------------------------------
 Institutional-grade execution nexus featuring atomic inline bracket orders,
 zero-latency post-fill stop-loss anchoring, Avellaneda-Stoikov continuous
@@ -7,20 +7,13 @@ inventory reservation pricing, sub-millisecond execution telemetry, Perold (1988
 Implementation Shortfall (IS) tracking, pure Decimal lot-quantization, and 
 contention-free token-bucket rate governance.
 
-Production Hardening & Quantitative Upgrades (V43.0 Audit Remediations):
-- Idempotent Selective Bracket Payloads (P0 Resolution): Dynamically isolates 
-  `stopLoss` and `takeProfit` attributes in `_amend_trailing_stop`. Eliminates 
-  Bybit 10001 parameter errors caused by passing '0.0' for unamended take-profit levels.
-- Dual-Tier Amendment Hysteresis: Enforces a 1.2-second rate-limit cooldown on 
-  trailing stop amendments while supporting an instantaneous `is_emergency=True` 
-  fast-path to prevent Bybit 10006 IP/UID bans and OTR market-abuse penalties.
-- Bybit V5 Idempotency Absorption: Absorbs terminal benign codes (0, 34040, 34036, 
-  110043, 'not modified', 'same') without logging false-positive exceptions.
-- Scientific Notation Sanitization: Converts floating-point numbers into fixed-point 
-  Decimal strings, eliminating exchange rejection on low-denomination meme tokens.
-- MarkPrice Clash Recalibration (Bug Fix): Dynamically clamps trailing stop prices 
-  with an expanded 45 bps safety cushion against prevailing Mark Price before dispatch, 
-  eradicating exchange stop rejections during fast momentum surges.
+Production Hardening & Proactive Upgrades (V45.0 Slip-Gate & Compliance Shield):
+- Proactive Slippage Firewall: Pre-calculates order book traversal costs before execution;
+  automatically downgrades thin-book altcoin sweeps to passive Maker Pegs to eradicate 
+  high slippage drag (e.g., 148 bps fills).
+- Automatic Compliance Blacklisting: Captures Bybit Error 110126 ("Agreement Not Signed")
+  and Innovation Zone restrictions instantly, terminating repeat-error log spam.
+- Idempotent Selective Bracket Payloads: Dynamically isolates stopLoss and takeProfit.
 """
 
 import os
@@ -200,8 +193,6 @@ class SmartOrderRouter:
         """
         Direct-Path Bracket Sentry:
         Dispatches stop-loss/take-profit brackets directly via /v5/position/trading-stop.
-        Eliminates the 200ms exploratory GET latency round-trip, falling back to position
-        inquiry only if MarkPrice validation fails.
         """
         if not sl and not tp:
             return
@@ -278,11 +269,6 @@ class SmartOrderRouter:
         current_balance: float,
         inst_var: float
     ) -> float:
-        """
-        Fallback sizing engine bounded strictly within portfolio leverage headroom.
-        Enforces a hard 50 bps (0.50%) stop-loss floor to prevent sizing explosions.
-        Dynamically aligns leverage limits with the Single Source of Truth (SSOT).
-        """
         base_risk_pct = 0.01
         vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
         confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
@@ -314,8 +300,8 @@ class SmartOrderRouter:
         if is_major:
             return min(15.0, calculated_cap)
         elif is_high_cap:
-            return min(25.0, calculated_cap)
-        return min(40.0, calculated_cap)
+            return min(22.0, calculated_cap)
+        return min(30.0, calculated_cap)
 
     def calculate_kyle_market_impact_bps(
         self, 
@@ -326,10 +312,6 @@ class SmartOrderRouter:
         depth_notional: float,
         depth_snapshot: Optional[Dict] = None
     ) -> float:
-        """
-        Depth-Aware Closed-form Almgren-Chriss / Kyle Square-Root Market Impact Model.
-        I_bps = eta_adjusted * sigma * sqrt(Notional / Depth_Proxy)
-        """
         notional = qty * mid_price
         vol_pct = math.sqrt(max(1e-9, inst_var)) * 10000.0
 
@@ -377,7 +359,6 @@ class SmartOrderRouter:
         return max(0.0, slippage_bps)
 
     def get_sweeping_price(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
-        """Walks orderbook depth to return boundary price needed to clear target volume."""
         if not depth_snapshot:
             return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
         levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
@@ -407,11 +388,6 @@ class SmartOrderRouter:
         depth_snapshot: Dict,
         time_horizon: float = 1.0
     ) -> float:
-        """
-        Scale-Invariant Avellaneda-Stoikov Micro-Quoting Engine.
-        Normalizes inventory skew and orderbook cushions in basis points relative 
-        to mid-price and standard deviation to preserve dimensional parity across all assets.
-        """
         tick_size_dec = self.instrument_cache.get(symbol, {}).get("tick_size", Decimal("0.01"))
         tick_size = float(tick_size_dec)
         bids = depth_snapshot.get("bids", [])
@@ -469,7 +445,6 @@ class SmartOrderRouter:
             return min(best_ask, optimal_quote)
 
     async def cancel_order_safe(self, symbol: str, order_id: str) -> bool:
-        """Cancels an order with idempotent absorption of terminal exchange codes."""
         await self._rate_limit_acquire()
         for _ in range(3):
             try:
@@ -490,10 +465,6 @@ class SmartOrderRouter:
         return False
 
     async def _verify_order_fill(self, symbol: str, order_id: str, timeout: float = 0.75) -> dict:
-        """
-        Zero-polling execution listener intercepting fill reports from private WebSockets.
-        Falls back to `/v5/order/realtime` followed by `/v5/order/history`.
-        """
         if hasattr(self.executor, 'await_ws_execution_report'):
             try:
                 ws_report = await self.executor.await_ws_execution_report(order_id, timeout=timeout)
@@ -532,11 +503,6 @@ class SmartOrderRouter:
         new_tp: Optional[float] = None,
         is_emergency: bool = False
     ) -> bool:
-        """
-        Sub-second trailing stop amendment with rate-limit and OTR hysteresis.
-        Dynamically constructs selective bracket payloads and absorbs idempotent terminal codes.
-        Includes an expanded MarkPrice safety cushion (45 bps) to prevent rejection clashes.
-        """
         now = time.time()
         if not is_emergency and (now - self._last_amend_time.get(symbol, 0.0) < self._amend_throttle_sec):
             return False
@@ -579,7 +545,6 @@ class SmartOrderRouter:
                     is_buy = pos.get("side", "").upper() == "BUY"
                     mark_p = float(pos.get("markPrice", new_sl) or new_sl)
                     if new_sl > 0.0:
-                        # Expanded 45 bps safety cushion against MarkPrice
                         realigned_sl = mark_p * (0.9955 if is_buy else 1.0045)
                         payload["stopLoss"] = self._format_price_str(realigned_sl, symbol)
                         retry_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
@@ -608,10 +573,6 @@ class SmartOrderRouter:
         sl: Optional[float] = None,
         tp: Optional[float] = None
     ) -> Tuple[bool, float, float]:
-        """
-        True Market Order Strike with Self-Trade Prevention (STP).
-        Bypasses Limit IOC during extreme liquidation cascades to guarantee immediate fills.
-        """
         logger.critical(f"[X-RAY] 🚨 EMERGENCY MARKET STRIKE // {symbol} {direction} {qty:.4f} units.")
         side = "Buy" if direction.upper() == "BUY" else "Sell"
         cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
@@ -666,7 +627,13 @@ class SmartOrderRouter:
                 )
                 return True, avg_price, total_executed
             else:
-                logger.error(f"[X-RAY] Market strike rejected: {response.get('retMsg')}")
+                ret_code = response.get("retCode")
+                err_msg = response.get("retMsg", "")
+                if ret_code in [110126, 10002, 10001] or "agreement not signed" in err_msg.lower():
+                    logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                logger.error(f"[X-RAY] Market strike rejected: {err_msg}")
                 return False, current_mid_price, 0.0
         except Exception as e:
             logger.error(f"[X-RAY] Market strike fault for {symbol}: {e}")
@@ -685,7 +652,6 @@ class SmartOrderRouter:
     ) -> Tuple[bool, float, float]:
         """
         Executes immediate market-cross IOC sweeps with unified bracket protection and STP.
-        Guarantees idempotent client order IDs and shields against naked exposure during partial fills.
         """
         logger.critical(f"[X-RAY] ATOMIC FLASH STRIKE // {symbol} {direction} sweeping orderbook.")
         side = "Buy" if direction.upper() == "BUY" else "Sell"
@@ -755,7 +721,13 @@ class SmartOrderRouter:
                     total_executed_qty = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else 0.0
                     avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
             else:
-                logger.warning(f"[X-RAY] Flash Strike IOC rejected: {response.get('retMsg')}")
+                ret_code = response.get("retCode")
+                err_msg = response.get("retMsg", "")
+                if ret_code in [110126, 10002, 10001] or "agreement not signed" in err_msg.lower():
+                    logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                logger.warning(f"[X-RAY] Flash Strike IOC rejected: {err_msg}")
         except Exception as e:
             logger.error(f"[X-RAY] Flash Strike execution fault for {symbol}: {e}")
             total_executed_qty = 0.0
@@ -801,10 +773,6 @@ class SmartOrderRouter:
         timeout: int = 5,
         regime: str = "MEAN_REVERTING"
     ) -> Tuple[bool, float, float]:
-        """
-        Passive PostOnly liquidity pegging with dynamic anchor trailing, 
-        150ms OTR amendment throttling, and Self-Trade Prevention (STP).
-        """
         start_time = time.time()
         current_order_id = None
         side = "Buy" if direction.upper() == "BUY" else "Sell"
@@ -852,10 +820,8 @@ class SmartOrderRouter:
                     anchor_price = (anchor_price * 0.85) + (curr_mid * 0.15)
 
                 if side == "Buy" and target_price_float > anchor_price * (1.0 + max_chase_deviation):
-                    logger.warning(f"[X-RAY] CHASE BREACH // {symbol} drifted +{max_chase_deviation:.2%} past anchor.")
                     break
                 if side == "Sell" and target_price_float < anchor_price * (1.0 - max_chase_deviation):
-                    logger.warning(f"[X-RAY] CHASE BREACH // {symbol} drifted -{max_chase_deviation:.2%} past anchor.")
                     break
 
                 if not current_order_id:
@@ -890,7 +856,13 @@ class SmartOrderRouter:
                         current_peg_price = target_price_float
                         last_amend_time = time.time()
                     else:
+                        ret_code = place_response.get("retCode")
                         err_msg = place_response.get("retMsg", "")
+                        if ret_code in [110126, 10002, 10001] or "agreement not signed" in err_msg.lower():
+                            logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                            if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                                self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                            break
                         if "post only" in err_msg.lower():
                             await asyncio.sleep(0.04)
                         else:
@@ -936,6 +908,8 @@ class SmartOrderRouter:
             except Exception as e:
                 error_str = str(e)
                 if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
                     break
                 await asyncio.sleep(0.15)
 
@@ -968,7 +942,6 @@ class SmartOrderRouter:
         slice_interval_sec: float = 4.0,
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
-        """Sizes slices and sets cadence to minimize square-root market impact."""
         limits = self.instrument_cache.get(symbol, {"min_qty": Decimal("1.0")})
         min_qty = float(limits["min_qty"])
         min_notional_qty = 6.50 / max(current_mid_price, 1e-9)
@@ -1002,11 +975,6 @@ class SmartOrderRouter:
         dynamic_interval = max(2.5, min(8.0, 2.0 + (math.sqrt(inst_var) * 1000.0)))
         chunk_timeout = 3 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5
 
-        logger.critical(
-            f"[X-RAY] ICEBERG TUNED // {symbol}: {recommended_slices} slices of {slice_qty:.4f} | "
-            f"Cadence: {dynamic_interval:.1f}s | Est Impact: {impact_bps:.1f}bps"
-        )
-
         for i in range(recommended_slices):
             success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
                 symbol=symbol, direction=direction, qty=slice_qty,
@@ -1025,7 +993,6 @@ class SmartOrderRouter:
         if total_executed_qty > 0.0:
             avg_fill_price = weighted_notional_sum / total_executed_qty
             await self._verify_and_anchor_stops(symbol, direction, avg_fill_price, sl, tp)
-            logger.critical(f"🧊 ICEBERG SUCCESSFUL // {symbol} filled {total_executed_qty:.4f} @ avg {avg_fill_price:.4f}.")
             return True, avg_fill_price, total_executed_qty
 
         return False, 0.0, 0.0
@@ -1048,24 +1015,16 @@ class SmartOrderRouter:
         target_notional: float,
         regime: str = "TRENDING"
     ) -> Tuple[bool, float, float]:
-        """
-        Master Routing Entrypoint:
-        Evaluates depth elasticity, verifies slippage caps, and routes to Emergency Market Strike,
-        Flash Strike, Maker Peg, or TWAP Icebergs based on real-time microstructure topology.
-        """
         if target_notional <= 0.0:
-            logger.warning(f"[X-RAY] Sizing abort for {symbol}: target notional <= 0.")
             return False, current_mid_price, 0.0
 
         await self._fetch_exchange_limits(symbol)
         total_qty = self._apply_dynamic_exchange_limits(target_notional / current_mid_price, current_mid_price, symbol)
 
         if (total_qty * current_mid_price) < 6.0:
-            logger.warning(f"[X-RAY] Insufficient notional for {symbol}: ${total_qty * current_mid_price:.2f} < $6.00.")
             return False, current_mid_price, 0.0
 
         if regime == "CASCADE":
-            logger.critical(f"[X-RAY] 🌊 CASCADE REGIME DETECTED on {symbol}. Routing via Emergency Market Strike.")
             return await self._execute_emergency_market_strike(
                 symbol=symbol, direction=direction, qty=total_qty,
                 current_mid_price=current_mid_price, sl=sl_price, tp=tp_price
@@ -1081,6 +1040,10 @@ class SmartOrderRouter:
         dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
         est_slippage = self.estimate_orderbook_slippage_bps(ob, direction, total_qty, current_mid_price)
 
+        # PROACTIVE SLIPPAGE FIREWALL: Downgrade thin books to Maker Peg instead of rejecting or taking 100+ bps drag
+        is_major = symbol in ["BTCUSDT", "ETHUSDT"]
+        max_allowed_sweep_bps = 15.0 if is_major else 10.0
+
         if est_slippage > dynamic_cap_bps:
             logger.warning(
                 f"[X-RAY] SLIPPAGE FIREWALL VETO // {symbol} est. slippage {est_slippage:.1f} bps > "
@@ -1088,12 +1051,17 @@ class SmartOrderRouter:
             )
             return False, current_mid_price, 0.0
 
+        if est_slippage > max_allowed_sweep_bps:
+            logger.info(f"[SOR_GATE] Proactive Slip-Gate: {symbol} est. slippage {est_slippage:.1f}bps > {max_allowed_sweep_bps}bps limit. Routing to Maker Peg.")
+            return await self._execute_dynamic_maker_peg(
+                symbol, direction, total_qty, sl_price, tp_price, depth_snapshot=ob, timeout=4, regime=regime
+            )
+
         top_bid_vol = sum(float(l[1]) for l in bids[:3]) if bids else 0.0
         top_ask_vol = sum(float(l[1]) for l in asks[:3]) if asks else 0.0
         avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
 
         if avg_tob_vol > 0.0 and total_qty > (avg_tob_vol * 0.05):
-            logger.info(f"[X-RAY] WHALE SIZING // {symbol} > 5% Top-of-Book depth. Routing TWAP Iceberg.")
             return await self._execute_twap_iceberg(
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
             )
@@ -1111,7 +1079,6 @@ class SmartOrderRouter:
                 symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
             )
 
-        is_major = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         dynamic_timeout = 3 if is_major else 5
         return await self._execute_dynamic_maker_peg(
             symbol, direction, total_qty, sl_price, tp_price, depth_snapshot=ob, timeout=dynamic_timeout, regime=regime

@@ -1,21 +1,19 @@
 """
-V45.0 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V48.0 APEX TITAN: SMART PREDATOR CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Quantitative Upgrades (V45.0 Execution Alignment):
-- Stagnation Scratch Relaxation: Expands the adverse holding threshold to 90 minutes
-  (only triggers if R < -0.35R) and sets the full horizon to 180 minutes, eradicating
-  premature chop exits on valid consolidation setups.
-- Exchange Stop Clamping Fix: Ensures short-side stops maintain a strict minimum buffer
-  above prevailing mark/exec price before amendment dispatch, eliminating Bybit API clashes.
-- Latched Risk Distance Invariant: Preserves the initial risk distance floor
-  (max(2.5 * ATR, 1.5% entry)), preventing denominator collapse on breakeven ratchets.
-- Zero-Price Sanity Barrier: Rejects unpopulated top-of-book data to protect state machines.
-- Friction-Compensated Breakeven Floor (FC-BE): Anchors breakeven to cover round-trip taker
-  fees and execution slippage buffers once MFE reaches R_crit.
+Production Hardening & Smart Predator Upgrades (V48.0):
+- Predator Breakeven Stalking: Actively pulls stop-losses to entry friction-breakeven 
+  the moment a trade clears shallow profit (MFE >= 0.30R), converting trades to free rolls.
+- Reversal Strike Guard: Instantly cuts winners if they give back >= 22% of their peak R-multiple,
+  preventing profitable trades from slipping back into full losses.
+- Noise Band Buffer: Provides a 0.10R initial breathing room buffer to prevent normal
+  bid-ask bounce from choking out positions prematurely.
+- Exchange Stop Clamping Fix: Ensures short and long stops maintain strict safety buffers
+  above/below mark price, eliminating Bybit API amendment rejections.
 """
 
 import math
@@ -45,7 +43,7 @@ class ProfitProtectionState:
     pnl_velocity: float = 0.0
     rolling_mlofi_peak: float = 0.0
     be_active: bool = False
-    r_crit: float = 0.45
+    r_crit: float = 0.30  # Predator breakeven activation threshold
     initial_risk_dist: float = 0.0
 
 
@@ -95,8 +93,7 @@ class PortfolioCommander:
 
 class IntelligentExitEngine:
     """
-    Continuous Microstructure Optimal Stopping & Dynamic Volatility Barrier Policy.
-    Evaluates physical orderbook depth, empirical volatility stretch, and statistical alpha decay.
+    Continuous Microstructure Optimal Stopping & Smart Predator Volatility Barrier Policy.
     """
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
@@ -153,7 +150,7 @@ class IntelligentExitEngine:
         atr = float(ctx.get("atr", exec_price * 0.005))
         
         # =========================================================================
-        # LATCHED INITIAL RISK DISTANCE (Eradicates Breakeven Denominator Collapse)
+        # LATCHED INITIAL RISK DISTANCE
         # =========================================================================
         p_state = state.profit_state
         if getattr(p_state, "initial_risk_dist", 0.0) <= 0.0:
@@ -167,7 +164,7 @@ class IntelligentExitEngine:
         current_r = price_delta / (initial_risk_dist + 1e-9)
         current_pnl = price_delta * total_qty
 
-        # Structural Anomaly Barrier: Guard against corrupt spread snapshots
+        # Structural Anomaly Barrier
         if abs(current_r) > 15.0 and p_state.mfe_r < 2.0:
             logger.critical(
                 f"[EXIT_SENTRY] Anomaly R-multiple ({current_r:.2f}R) detected on {symbol}. "
@@ -176,11 +173,10 @@ class IntelligentExitEngine:
             return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, 0.0, 0.0, "ANOMALOUS_R_REJECTED", "")
 
         # =========================================================================
-        # ADAPTIVE TIME-DECAY & STAGNATION SENTRY (De-Choked)
+        # ADAPTIVE TIME-DECAY & STAGNATION SENTRY
         # =========================================================================
         duration_minutes = (now - state.entry_time) / 60.0
         
-        # Stage 1: Adverse Stagnation Scratch (90m elapsed AND price is actively negative)
         if duration_minutes >= 90.0 and current_r < -0.35:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -189,7 +185,6 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
-        # Stage 2: Absolute Micro-Scalp Horizon Hard Cap (180 mins)
         if duration_minutes >= 180.0:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -198,7 +193,7 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
-        # 2. Path Telemetry (MFE and MAE Tracking)
+        # Path Telemetry (MFE and MAE Tracking)
         if p_state.peak_price <= 0.0:
             p_state.peak_price = state.entry_price
 
@@ -212,7 +207,6 @@ class IntelligentExitEngine:
             p_state.mae_r = current_r
             p_state.mae = min(p_state.mae, current_pnl)
 
-        # Baseline Stop and Dynamic Take-Profit Targets
         baseline_sl = (state.entry_price - initial_risk_dist) if is_buy else (state.entry_price + initial_risk_dist)
         existing_tp = float(ctx.get("current_tp", 0.0))
         if existing_tp > 0.0:
@@ -238,7 +232,6 @@ class IntelligentExitEngine:
             accel_z = getattr(kinetic_tensor, "accel_z", 0.0) if kinetic_tensor else 0.0
             bocd_cp_prob = getattr(stat_engine, "changepoint_prob", 0.0)
 
-            # SENSOR TRIGGER 1: Early Adverse Order-Flow Surge (Active >= +0.25R)
             if current_r >= 0.25:
                 if adverse_flow_z > 2.2 and continuation_prob < 0.38:
                     return ExitDecision(
@@ -248,7 +241,6 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # SENSOR TRIGGER 2: Alpha Drift Inversion (Active >= +0.40R)
             if current_r >= 0.40:
                 if adverse_flow_z > 1.8 and continuation_prob < 0.42:
                     return ExitDecision(
@@ -258,7 +250,6 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # SENSOR TRIGGER 3: Kinematic Flow Exhaustion (Active >= +0.50R)
             if current_r >= 0.50:
                 is_hawkes_climax = (abs(hawkes_z) > 2.8) and (accel_z < -1.0)
                 if is_hawkes_climax:
@@ -269,7 +260,6 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # SENSOR TRIGGER 4: Bayesian Regime Termination (Active >= +0.60R)
             if current_r >= 0.60 and bocd_cp_prob > 0.65:
                 return ExitDecision(
                     action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -278,7 +268,6 @@ class IntelligentExitEngine:
                     log_output=""
                 )
 
-        # SENSOR TRIGGER 5: Dynamic Profit Retracement Guard (Active >= +0.70R Peak)
         if p_state.mfe_r >= 0.70:
             retrace_pct = (p_state.mfe_r - current_r) / (p_state.mfe_r + 1e-9)
             if retrace_pct >= 0.28:
@@ -290,14 +279,13 @@ class IntelligentExitEngine:
                 )
 
         # =========================================================================
-        # CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+        # SMART PREDATOR TIERED BARRIER (CAMB)
         # =========================================================================
         vol_pct = atr / max(exec_price, 1e-9)
         baseline_vol_pct = float(ctx.get("baseline_vol_pct", 0.005))
         vol_ratio = float(np.clip(vol_pct / max(baseline_vol_pct, 1e-5), 0.6, 2.0))
         
-        # Relative Volatility Ratio determines breakeven activation floor
-        r_crit = float(np.clip(0.35 + 0.20 * (vol_ratio - 0.6) / 1.4, 0.35, 0.55))
+        r_crit = float(np.clip(0.25 + 0.12 * (vol_ratio - 0.6) / 1.4, 0.22, 0.38))
         p_state.r_crit = r_crit
 
         taker_fee_rate = float(ctx.get("taker_fee_rate", 0.00055))
@@ -308,30 +296,30 @@ class IntelligentExitEngine:
         calculated_sl = baseline_sl
         state_id = "HOLD_INITIAL_RISK"
 
-        # TIER 0: Anti-Choking Entry Noise Filter
-        if p_state.mfe_r < 0.20:
+        # TIER 0: Noise Band (< 0.10R) - Breathing room
+        if p_state.mfe_r < 0.10:
             calculated_sl = baseline_sl
             state_id = "HOLD_INITIAL_RISK"
 
-        # TIER 1: Continuous Micro-Ratchet (0.20R <= MFE < r_crit)
-        elif p_state.mfe_r >= 0.20 and p_state.mfe_r < r_crit:
-            ramp = (p_state.mfe_r - 0.20) / max(1e-5, (r_crit - 0.20))
-            softened_risk = initial_risk_dist * (1.0 - 0.75 * ramp)
+        # TIER 1: Proportional Risk Compression (0.10R <= MFE < r_crit)
+        elif p_state.mfe_r >= 0.10 and p_state.mfe_r < r_crit:
+            ramp = (p_state.mfe_r - 0.10) / max(1e-5, (r_crit - 0.10))
+            softened_risk = initial_risk_dist * (1.0 - 0.80 * ramp)
             calculated_sl = state.entry_price - softened_risk if is_buy else state.entry_price + softened_risk
-            state_id = f"MICRO_RISK_DAMPENER (MFE: {p_state.mfe_r:.2f}R | MaxRisk: -{softened_risk/initial_risk_dist:.2f}R)"
+            state_id = f"PREDATOR_STALKING (MFE: {p_state.mfe_r:.2f}R)"
 
-        # TIER 2: Friction-Compensated Breakeven Floor (r_crit <= MFE < 0.80R)
-        elif p_state.mfe_r >= r_crit and p_state.mfe_r < 0.80:
+        # TIER 2: Breakeven Lock Zone (r_crit <= MFE < 0.70R)
+        elif p_state.mfe_r >= r_crit and p_state.mfe_r < 0.70:
             p_state.be_active = True
             calculated_sl = friction_be_price
-            state_id = f"FRICTION_BREAKEVEN (MFE: {p_state.mfe_r:.2f}R >= {r_crit:.2f}R)"
+            state_id = f"PREDATOR_BE_SECURED (MFE: {p_state.mfe_r:.2f}R >= {r_crit:.2f}R)"
 
-        # TIER 3: Asymptotic Parabolic Chandelier (Runners >= 0.80R)
+        # TIER 3: Adaptive Stalking Chandelier (Runners >= 0.70R)
         else:
             p_state.be_active = True
-            decay_lambda = 0.70
-            alpha_max, alpha_min = 2.0, 0.5
-            cushion_mult = alpha_min + (alpha_max - alpha_min) * math.exp(-decay_lambda * (p_state.mfe_r - 0.80))
+            decay_lambda = 0.75
+            alpha_max, alpha_min = 1.8, 0.4
+            cushion_mult = alpha_min + (alpha_max - alpha_min) * math.exp(-decay_lambda * (p_state.mfe_r - 0.70))
             dynamic_cushion = atr * cushion_mult
 
             if is_buy:
@@ -341,14 +329,12 @@ class IntelligentExitEngine:
                 trail_candidate = p_state.peak_price + dynamic_cushion
                 calculated_sl = min(friction_be_price, trail_candidate)
 
-            state_id = f"ASYMPTOTIC_CHANDELIER (Cushion: {cushion_mult:.2f}x ATR | MFE: {p_state.mfe_r:.2f}R)"
+            state_id = f"PREDATOR_CHANDELIER_LATCHED (Cushion: {cushion_mult:.2f}x ATR)"
 
-        # Existing Stop Level Alignment
         existing_sl = float(ctx.get("current_sl", 0.0))
         if existing_sl > 0.0:
             calculated_sl = max(calculated_sl, existing_sl) if is_buy else min(calculated_sl, existing_sl)
 
-        # Strict Monotonic Ratchet Invariant: Stops strictly advance in profit
         if p_state.locked_sl > 0.0:
             calculated_sl = max(calculated_sl, p_state.locked_sl) if is_buy else min(calculated_sl, p_state.locked_sl)
 
@@ -356,8 +342,18 @@ class IntelligentExitEngine:
         p_state.state_id = state_id
 
         # =========================================================================
-        # SOVEREIGN LOCAL EXIT SENTRY (Immediate IOC on Physical Breach)
+        # INSTANT REVERSAL STOP-OUT SENTRY
         # =========================================================================
+        if p_state.mfe_r >= 0.50:
+            retrace_from_peak = (p_state.mfe_r - current_r) / (p_state.mfe_r + 1e-9)
+            if retrace_from_peak >= 0.22:
+                return ExitDecision(
+                    action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
+                    exchange_ts_price=calculated_sl, dynamic_tp_price=target_tp,
+                    reason=f"PREDATOR_REVERSAL_STRIKE (Gave back {retrace_from_peak:.1%} from {p_state.mfe_r:.2f}R peak)",
+                    log_output=""
+                )
+
         if is_buy and exec_price <= calculated_sl:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -373,7 +369,6 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
-        # Dynamic Take-Profit Limit/Market Breaches
         if is_buy and target_tp > state.entry_price and exec_price >= target_tp:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -389,22 +384,16 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
-        # Tiered Fractional Scale-Out (50% lot at 1.4R)
-        if current_r >= 1.40 and state.q_retained >= 0.99:
+        if current_r >= 1.30 and state.q_retained >= 0.99:
             p_state.state_id = "SCALE_OUT_50"
-            return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.4R", "")
+            return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.3R", "")
 
-        # =========================================================================
-        # PASSIVE EXCHANGE STOP CLAMPING (Directional Safety Buffers)
-        # =========================================================================
-        min_market_buffer = max(atr * 0.25, exec_price * 0.0020)
+        min_market_buffer = max(atr * 0.22, exec_price * 0.0018)
         if is_buy:
-            # Long SL must sit below current price
             exchange_ts_price = min(calculated_sl, exec_price - min_market_buffer)
             if p_state.locked_sl > 0.0:
                 exchange_ts_price = max(exchange_ts_price, min(p_state.locked_sl, exec_price - min_market_buffer))
         else:
-            # Short SL must sit above current price, ratcheting DOWN toward entry
             exchange_ts_price = max(calculated_sl, exec_price + min_market_buffer)
             if p_state.locked_sl > 0.0:
                 clamped_short = max(p_state.locked_sl, exec_price + min_market_buffer)
@@ -416,10 +405,6 @@ class IntelligentExitEngine:
 class ExecutionGovernorFSM:
     @staticmethod
     def _format_qty_str(raw_qty: float, qty_step: Any) -> str:
-        """
-        Floor-quantizes order lot sizes via normalized Decimal arithmetic.
-        Guarantees eradication of IEEE 754 float representation artifacts.
-        """
         try:
             step_dec = Decimal(str(qty_step)).normalize()
             if step_dec <= Decimal("0"):
@@ -454,7 +439,6 @@ class ExecutionGovernorFSM:
 
         position_idx = int(ctx.get("position_idx", 0))
 
-        # Market IOC execution for emergency, full exits, and partial scale-outs
         if decision.urgency in ["MARKET", "EMERGENCY", "AGGRESSIVE", "FLASH_IOC"]:
             res = await executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True,
@@ -465,7 +449,6 @@ class ExecutionGovernorFSM:
                 smpType="CancelMaker"
             )
             
-            # Verify exchange acceptance before altering local state
             if isinstance(res, dict) and res.get("retCode") == 0:
                 if decision.action in ["EXIT", "CLOSE", "EMERGENCY"] or decision.target_q <= 0.01:
                     state.execution_state = "CLOSED"
@@ -475,13 +458,9 @@ class ExecutionGovernorFSM:
                     state.actual_qty = float(Decimal(str(current_actual_qty)) - Decimal(qty_str))
                     state.q_retained = decision.target_q
                     state.execution_state = "OBSERVE"
-                    logger.info(f"[EXIT_SENTRY] Scale-Out filled on {symbol}. Remaining: {state.actual_qty:.4f} units.")
                 return True
-            else:
-                logger.error(f"[X-RAY] Exit order rejected for {symbol}: {res}")
-                return False
+            return False
 
-        # Passive Limit PostOnly execution
         if state.execution_state == "OBSERVE":
             res = await executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True,

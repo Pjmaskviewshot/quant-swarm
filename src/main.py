@@ -3,17 +3,13 @@ V45.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V45.0 Micro-Account Calibration):
-- Single-Ticket Notional Ceiling: Clamps max position notional to 25% of account balance
-  (or exchange minimum), preventing sub-$200 accounts from committing 90%+ equity to 1 ticket.
+Production Hardening & Proactive Upgrades (V45.0 Momentum Tape Alignment):
+- Proactive Momentum Tape Filter: Intercepts signals fighting heavy 15-minute price velocity
+  (blocks shorts during parabolic pumps and longs during vertical dumps).
+- Single-Ticket Notional Ceiling: Clamps max position notional to 25% of account balance.
 - Auto-Proportional Tail Risk Downscaling: Automatically reduces notional size when projected
-  tail risk exceeds the risk budget, permanently eliminating XRP/altcoin risk cap rejection loops.
-- Suspended Delta-Neutral Yield Harvester: Deactivates the altcoin basis daemon on micro accounts
-  to eliminate REST connection pool timeouts and conserve margin for directional alpha.
-- Directional Stop-Loss Ratchet Guard: Enforces monotonic progress checks across open positions
-  (Longs amend strictly UP, Shorts amend strictly DOWN by >= 0.15 * ATR).
-- Unlocked Dynamic Leverage Headroom: Leverages dynamic parameter scaling from params.json.
-- Cold-Start DNA Bypass: Keeps unvetted tokens trading live unless sample-proven unprofitable.
+  tail risk exceeds the risk budget.
+- Suspended Delta-Neutral Yield Harvester: Deactivates altcoin basis scanner on micro accounts.
 - Lowered Capital Governance Floor (50.0 USDT): Protects micro accounts from tripping equity locks.
 """
 
@@ -858,6 +854,21 @@ class DistributedQuantEngine:
                     logger.info(f"[RADAR] {symbol} Filtered: Action={action} | Prob {prob_success:.1%} < Gate {dynamic_gate:.1%}")
                     self.last_eval_time[symbol + "_gate_diag"] = now
                 return
+
+            # PROACTIVE MOMENTUM TAPE FILTER: Veto fighting strong 15m momentum slopes
+            if feature_engine:
+                mom_matrix = feature_engine.extract_multi_timeframe_momentum()
+                m_15m = mom_matrix.get("momentum_15", 0.0)
+                if action == "SELL" and m_15m > 0.025:
+                    if now - self.last_eval_time.get(symbol + "_mom_veto", 0.0) > 60.0:
+                        logger.info(f"[RADAR] {symbol} SELL Vetoed: Proactive block against strong 15m pump ({m_15m:.1%}).")
+                        self.last_eval_time[symbol + "_mom_veto"] = now
+                    return
+                if action == "BUY" and m_15m < -0.025:
+                    if now - self.last_eval_time.get(symbol + "_mom_veto", 0.0) > 60.0:
+                        logger.info(f"[RADAR] {symbol} BUY Vetoed: Proactive block against strong 15m dump ({m_15m:.1%}).")
+                        self.last_eval_time[symbol + "_mom_veto"] = now
+                    return
 
             # 2. Anti-Whipsaw Directional Lockout: Forbid flipping opposite following a loss
             last_exit = self.last_exit_direction.get(symbol)
