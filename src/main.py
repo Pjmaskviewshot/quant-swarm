@@ -1,24 +1,20 @@
 """
-V44.3 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V45.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V44.3 Directional Trailing & Stability):
-- Directional Stop-Loss Ratchet Guard: Enforces monotonic progress checks across open
-  positions (Longs amend strictly UP, Shorts amend strictly DOWN by >= 0.15 * ATR),
-  permanently eliminating Bybit API stop-loss amendment rejections and backoff spam.
-- In-Flight Headroom Typo Remediation: Replaces undefined `in_flight_notionals` with
-  `in_flight_notional_sum` in `_eval_gate` logging to eliminate Pylance static faults.
-- Unlocked Dynamic Leverage Headroom: Strips the hardcoded 2.0x clamp on `safe_leverage_headroom`,
-  allowing `LEVERAGE_CAP` from `params.json` to safely scale portfolio heat headroom.
-- Proportional Merton-Kelly Sizing: Re-scales fractional Kelly allocation against
-  `MAX_SINGLE_POSITION_RISK_PCT` from `.env`, ensuring sizing is not capped at 0.75%.
-- Cold-Start DNA Bypass: Prevents unvetted tokens from being trapped in Ghost Shadow
-  mode when historical sample size is under 15 verified trades.
-- Lowered Capital Governance Floor (50.0 USDT): Protects sub-$200 accounts from tripping
-  the hard equity veto on normal exchange fee or funding deductions.
-- Dynamic Target Leverage Daemon Propagation: Binds `int(vault_leverage_limit)` across
-  all position daemon instances instead of static 2x hardcodes.
+Production Hardening & Quantitative Upgrades (V45.0 Micro-Account Calibration):
+- Single-Ticket Notional Ceiling: Clamps max position notional to 25% of account balance
+  (or exchange minimum), preventing sub-$200 accounts from committing 90%+ equity to 1 ticket.
+- Auto-Proportional Tail Risk Downscaling: Automatically reduces notional size when projected
+  tail risk exceeds the risk budget, permanently eliminating XRP/altcoin risk cap rejection loops.
+- Suspended Delta-Neutral Yield Harvester: Deactivates the altcoin basis daemon on micro accounts
+  to eliminate REST connection pool timeouts and conserve margin for directional alpha.
+- Directional Stop-Loss Ratchet Guard: Enforces monotonic progress checks across open positions
+  (Longs amend strictly UP, Shorts amend strictly DOWN by >= 0.15 * ATR).
+- Unlocked Dynamic Leverage Headroom: Leverages dynamic parameter scaling from params.json.
+- Cold-Start DNA Bypass: Keeps unvetted tokens trading live unless sample-proven unprofitable.
+- Lowered Capital Governance Floor (50.0 USDT): Protects micro accounts from tripping equity locks.
 """
 
 import os
@@ -975,7 +971,17 @@ class DistributedQuantEngine:
             raw_notional = dollar_risk_budget / total_risk_dist_pct
 
             corr_haircut = self.risk_vault.calculate_correlation_haircut(symbol)
-            target_notional = raw_notional * corr_haircut
+            
+            # SINGLE-TICKET NOTIONAL CEILING: Clamp to max 25% equity per position ($25 on $100 bankroll)
+            max_ticket_ceiling = max(6.50, current_bal * 0.25)
+            target_notional = min(raw_notional * corr_haircut, max_ticket_ceiling)
+
+            # AUTO-DOWNSCALE RISK GUARD: Prevent risk vault rejection spam (e.g. XRP tail risk > budget)
+            max_allowed_risk_dollars = current_bal * max_single_risk
+            projected_tail_risk = target_notional * total_risk_dist_pct
+            if projected_tail_risk > max_allowed_risk_dollars and projected_tail_risk > 0:
+                scale_ratio = max_allowed_risk_dollars / projected_tail_risk
+                target_notional = max(6.50, target_notional * scale_ratio)
 
             # Dynamic Portfolio Headroom
             vault_leverage_limit = float(self.live_params.get("LEVERAGE_CAP", getattr(self.risk_vault, "max_leverage", 2.0)))
@@ -1617,13 +1623,13 @@ class DistributedQuantEngine:
                 remaining_size = float(pos_list[0].get("size", 0.0)) if pos_list else 0.0
                 
                 if remaining_size <= 0.0:
-                    logger.critical(f"✅ EMERGENCY ESCAPE VERIFIED // {symbol} inventory completely cleared.")
+                    logger.critical(f"  EMERGENCY ESCAPE VERIFIED // {symbol} inventory completely cleared.")
                     return
                 else:
                     qty_str = self.sor._format_qty_str(remaining_size, symbol)
-                    logger.warning(f"⚠️ Partial escape fill on {symbol}. Remaining: {remaining_size}. Retrying ({attempt + 1}/5)...")
+                    logger.warning(f"  Partial escape fill on {symbol}. Remaining: {remaining_size}. Retrying ({attempt + 1}/5)...")
                     
-            logger.critical(f"💀 FATAL: Emergency escape failed to zero {symbol} after 5 attempts. Engaging global emergency lock.")
+            logger.critical(f"  FATAL: Emergency escape failed to zero {symbol} after 5 attempts. Engaging global emergency lock.")
             self.fsm.trigger_global_emergency_lock()
 
         await asyncio.shield(_escape())
@@ -1798,7 +1804,7 @@ class DistributedQuantEngine:
             self._universe_refresher_loop,
             self.run_omni_swarm_director,
             self.run_fast_state_invariant_reconciliation,
-            self.yield_engine.run_yield_scanner_daemon,
+            # self.yield_engine.run_yield_scanner_daemon,  # Suspended for micro-account capital efficiency
             self.run_correlation_engine
         ]
 

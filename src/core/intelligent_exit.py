@@ -1,29 +1,21 @@
 """
-V44.3 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V45.0 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Quantitative Upgrades (V44.3 Directional Clamp Hotfix):
-- Directional Trailing Stop Clamp: Fixes asymmetric ratchet bug on SHORT positions by 
-  properly ratcheting exchange stops DOWNward as profit expands while keeping the buffer
-  strictly above prevailing mark price, eradicating Bybit API stop amendment rejections.
-- Latched Risk Distance Invariant: Latches initial risk distance on position inception
-  and enforces an absolute floor (max(2.5 * ATR, 1.5% entry)), eradicating the 
-  denominator-collapse glitch where trailing breakeven stops triggered phantom 25R anomalies.
-- Zero-Price Sanity Barrier: Validates top-of-book prices against None/zero unpopulated
-  dictionary payloads, eliminating corrupt phantom peaks and panic retracements.
-- Micro-Ratchet Dead-Zone Eradication: Progressively compresses stop distance from 
-  +0.15R upward, ensuring trades that show green cannot collapse into full -1.0R losses.
-- Un-Gated Early Microstructure Sentry: Intercepts adverse order-flow surges (Z > 2.0σ)
-  starting at +0.15R, locking in small gains before market reversals complete.
-- Stagnation Decay Ladder: Enforces a 30m stagnation scratch (R < 0.20), 45m time-decay 
-  scratch (R < 0.40), and 60m absolute holding horizon, eradicating 4-hour zombie locks.
-- Sovereign Local Exit Sentry: Physical stop breaches trigger instantaneous local Market
-  IOC exits, while the passive exchange stop is clamped to prevent Bybit API rejections.
-- Friction-Compensated Breakeven Floor (FC-BE): Anchors breakeven strictly to cover 
-  round-trip taker fees and execution slippage buffers once MFE reaches R_crit.
+Production Hardening & Quantitative Upgrades (V45.0 Execution Alignment):
+- Stagnation Scratch Relaxation: Expands the adverse holding threshold to 90 minutes
+  (only triggers if R < -0.35R) and sets the full horizon to 180 minutes, eradicating
+  premature chop exits on valid consolidation setups.
+- Exchange Stop Clamping Fix: Ensures short-side stops maintain a strict minimum buffer
+  above prevailing mark/exec price before amendment dispatch, eliminating Bybit API clashes.
+- Latched Risk Distance Invariant: Preserves the initial risk distance floor
+  (max(2.5 * ATR, 1.5% entry)), preventing denominator collapse on breakeven ratchets.
+- Zero-Price Sanity Barrier: Rejects unpopulated top-of-book data to protect state machines.
+- Friction-Compensated Breakeven Floor (FC-BE): Anchors breakeven to cover round-trip taker
+  fees and execution slippage buffers once MFE reaches R_crit.
 """
 
 import math
@@ -184,30 +176,21 @@ class IntelligentExitEngine:
             return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, 0.0, 0.0, "ANOMALOUS_R_REJECTED", "")
 
         # =========================================================================
-        # ADAPTIVE TIME-DECAY & STAGNATION LADDER (Anti-Zombie Sentry)
+        # ADAPTIVE TIME-DECAY & STAGNATION SENTRY (De-Choked)
         # =========================================================================
         duration_minutes = (now - state.entry_time) / 60.0
         
-        # Stage 1: Stagnation Scratch (30 min threshold without clearing +0.20R)
-        if duration_minutes >= 30.0 and current_r < 0.20:
+        # Stage 1: Adverse Stagnation Scratch (90m elapsed AND price is actively negative)
+        if duration_minutes >= 90.0 and current_r < -0.35:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
                 exchange_ts_price=0.0, dynamic_tp_price=0.0,
-                reason=f"STAGNATION_SCRATCH ({duration_minutes:.1f}m, Current R: {current_r:.2f}R < 0.20R)",
+                reason=f"ADVERSE_STAGNATION_SCRATCH ({duration_minutes:.1f}m, Current R: {current_r:.2f}R < -0.35R)",
                 log_output=""
             )
 
-        # Stage 2: Time-Decay Liquidation (45 min threshold without clearing +0.40R)
-        if duration_minutes >= 45.0 and current_r < 0.40:
-            return ExitDecision(
-                action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
-                exchange_ts_price=0.0, dynamic_tp_price=0.0,
-                reason=f"TIME_DECAY_EXHAUSTION ({duration_minutes:.1f}m, Current R: {current_r:.2f}R < 0.40R)",
-                log_output=""
-            )
-
-        # Stage 3: Absolute Micro-Scalp Horizon Hard Cap (60 mins)
-        if duration_minutes >= 60.0:
+        # Stage 2: Absolute Micro-Scalp Horizon Hard Cap (180 mins)
+        if duration_minutes >= 180.0:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
                 exchange_ts_price=0.0, dynamic_tp_price=0.0,
@@ -239,7 +222,7 @@ class IntelligentExitEngine:
             target_tp = state.entry_price + (initial_risk_dist * dynamic_rr) if is_buy else state.entry_price - (initial_risk_dist * dynamic_rr)
 
         # =========================================================================
-        # CONTINUOUS OPTIMAL STOPPING SENSORS (Active Across All Positive R)
+        # CONTINUOUS OPTIMAL STOPPING SENSORS
         # =========================================================================
         stat_engine = ctx.get("stat_engine")
         if stat_engine:
@@ -255,9 +238,9 @@ class IntelligentExitEngine:
             accel_z = getattr(kinetic_tensor, "accel_z", 0.0) if kinetic_tensor else 0.0
             bocd_cp_prob = getattr(stat_engine, "changepoint_prob", 0.0)
 
-            # SENSOR TRIGGER 1: Early Adverse Order-Flow Surge (Active >= +0.15R)
-            if current_r >= 0.15:
-                if adverse_flow_z > 2.0 and continuation_prob < 0.40:
+            # SENSOR TRIGGER 1: Early Adverse Order-Flow Surge (Active >= +0.25R)
+            if current_r >= 0.25:
+                if adverse_flow_z > 2.2 and continuation_prob < 0.38:
                     return ExitDecision(
                         action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
                         exchange_ts_price=p_state.locked_sl or baseline_sl, dynamic_tp_price=target_tp,
@@ -265,9 +248,9 @@ class IntelligentExitEngine:
                         log_output=""
                     )
 
-            # SENSOR TRIGGER 2: Alpha Drift Inversion (Active >= +0.35R)
-            if current_r >= 0.35:
-                if adverse_flow_z > 1.6 and continuation_prob < 0.44:
+            # SENSOR TRIGGER 2: Alpha Drift Inversion (Active >= +0.40R)
+            if current_r >= 0.40:
+                if adverse_flow_z > 1.8 and continuation_prob < 0.42:
                     return ExitDecision(
                         action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
                         exchange_ts_price=p_state.locked_sl or baseline_sl, dynamic_tp_price=target_tp,
@@ -295,10 +278,10 @@ class IntelligentExitEngine:
                     log_output=""
                 )
 
-        # SENSOR TRIGGER 5: Dynamic Profit Retracement Guard (Active >= +0.60R Peak)
-        if p_state.mfe_r >= 0.60:
+        # SENSOR TRIGGER 5: Dynamic Profit Retracement Guard (Active >= +0.70R Peak)
+        if p_state.mfe_r >= 0.70:
             retrace_pct = (p_state.mfe_r - current_r) / (p_state.mfe_r + 1e-9)
-            if retrace_pct >= 0.25:
+            if retrace_pct >= 0.28:
                 return ExitDecision(
                     action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
                     exchange_ts_price=p_state.locked_sl or baseline_sl, dynamic_tp_price=target_tp,
@@ -326,15 +309,14 @@ class IntelligentExitEngine:
         state_id = "HOLD_INITIAL_RISK"
 
         # TIER 0: Anti-Choking Entry Noise Filter
-        if p_state.mfe_r < 0.15:
+        if p_state.mfe_r < 0.20:
             calculated_sl = baseline_sl
             state_id = "HOLD_INITIAL_RISK"
 
-        # TIER 1: Continuous Micro-Ratchet (0.15R <= MFE < r_crit)
-        # Progressively compresses downside risk from -1.0R up to -0.20R
-        elif p_state.mfe_r >= 0.15 and p_state.mfe_r < r_crit:
-            ramp = (p_state.mfe_r - 0.15) / max(1e-5, (r_crit - 0.15))
-            softened_risk = initial_risk_dist * (1.0 - 0.80 * ramp)
+        # TIER 1: Continuous Micro-Ratchet (0.20R <= MFE < r_crit)
+        elif p_state.mfe_r >= 0.20 and p_state.mfe_r < r_crit:
+            ramp = (p_state.mfe_r - 0.20) / max(1e-5, (r_crit - 0.20))
+            softened_risk = initial_risk_dist * (1.0 - 0.75 * ramp)
             calculated_sl = state.entry_price - softened_risk if is_buy else state.entry_price + softened_risk
             state_id = f"MICRO_RISK_DAMPENER (MFE: {p_state.mfe_r:.2f}R | MaxRisk: -{softened_risk/initial_risk_dist:.2f}R)"
 
@@ -419,12 +401,14 @@ class IntelligentExitEngine:
         if is_buy:
             # Long SL must sit below current price
             exchange_ts_price = min(calculated_sl, exec_price - min_market_buffer)
+            if p_state.locked_sl > 0.0:
+                exchange_ts_price = max(exchange_ts_price, min(p_state.locked_sl, exec_price - min_market_buffer))
         else:
             # Short SL must sit above current price, ratcheting DOWN toward entry
             exchange_ts_price = max(calculated_sl, exec_price + min_market_buffer)
-            # Prevent short trailing stop from expanding past initial entry boundary
             if p_state.locked_sl > 0.0:
-                exchange_ts_price = min(exchange_ts_price, p_state.locked_sl)
+                clamped_short = max(p_state.locked_sl, exec_price + min_market_buffer)
+                exchange_ts_price = min(exchange_ts_price, clamped_short)
 
         return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, exchange_ts_price, target_tp, "HOLD_OPTIMAL_CONTINUATION", "")
 
