@@ -1,11 +1,14 @@
 """
-V44.2 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V44.3 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Quantitative Upgrades (V44.2 Hotfix):
+Production Hardening & Quantitative Upgrades (V44.3 Directional Clamp Hotfix):
+- Directional Trailing Stop Clamp: Fixes asymmetric ratchet bug on SHORT positions by 
+  properly ratcheting exchange stops DOWNward as profit expands while keeping the buffer
+  strictly above prevailing mark price, eradicating Bybit API stop amendment rejections.
 - Latched Risk Distance Invariant: Latches initial risk distance on position inception
   and enforces an absolute floor (max(2.5 * ATR, 1.5% entry)), eradicating the 
   denominator-collapse glitch where trailing breakeven stops triggered phantom 25R anomalies.
@@ -410,13 +413,18 @@ class IntelligentExitEngine:
             return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.4R", "")
 
         # =========================================================================
-        # PASSIVE EXCHANGE STOP CLAMPING (Prevents Bybit MarkPrice Rejections)
+        # PASSIVE EXCHANGE STOP CLAMPING (Directional Safety Buffers)
         # =========================================================================
-        min_market_buffer = max(atr * 0.25, exec_price * 0.0015)
+        min_market_buffer = max(atr * 0.25, exec_price * 0.0020)
         if is_buy:
+            # Long SL must sit below current price
             exchange_ts_price = min(calculated_sl, exec_price - min_market_buffer)
         else:
+            # Short SL must sit above current price, ratcheting DOWN toward entry
             exchange_ts_price = max(calculated_sl, exec_price + min_market_buffer)
+            # Prevent short trailing stop from expanding past initial entry boundary
+            if p_state.locked_sl > 0.0:
+                exchange_ts_price = min(exchange_ts_price, p_state.locked_sl)
 
         return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, exchange_ts_price, target_tp, "HOLD_OPTIMAL_CONTINUATION", "")
 

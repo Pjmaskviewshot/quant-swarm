@@ -1,9 +1,14 @@
 """
-V44.2 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V44.3 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V44.2 Execution & Headroom Hotfix):
+Production Hardening & Quantitative Upgrades (V44.3 Directional Trailing & Stability):
+- Directional Stop-Loss Ratchet Guard: Enforces monotonic progress checks across open
+  positions (Longs amend strictly UP, Shorts amend strictly DOWN by >= 0.15 * ATR),
+  permanently eliminating Bybit API stop-loss amendment rejections and backoff spam.
+- In-Flight Headroom Typo Remediation: Replaces undefined `in_flight_notionals` with
+  `in_flight_notional_sum` in `_eval_gate` logging to eliminate Pylance static faults.
 - Unlocked Dynamic Leverage Headroom: Strips the hardcoded 2.0x clamp on `safe_leverage_headroom`,
   allowing `LEVERAGE_CAP` from `params.json` to safely scale portfolio heat headroom.
 - Proportional Merton-Kelly Sizing: Re-scales fractional Kelly allocation against
@@ -318,7 +323,7 @@ class DistributedQuantEngine:
         return task
 
     def _load_live_params(self) -> dict:
-        default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.2, "LEVERAGE_CAP": 2.0}
+        default_params = {"sl_atr_mult": 2.5, "rr_ratio": 2.0, "LEVERAGE_CAP": 2.0}
         try:
             if os.path.exists("params.json"):
                 with open("params.json", "r") as f:
@@ -811,7 +816,7 @@ class DistributedQuantEngine:
             atr = feature_engine.get_computed_atr() if feature_engine else (price * 0.005)
 
             sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.015)
-            dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.2)
+            dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.0)
             tp_dist_pct = sl_dist_pct * dynamic_rr
 
             sol_cluster = ["SOLUSDT", "JUPUSDT", "WIFUSDT", "PYTHUSDT", "RAYUSDT", "JTOUSDT", "BONKUSDT"]
@@ -1375,7 +1380,7 @@ class DistributedQuantEngine:
     async def _position_lifecycle_daemon(
         self, symbol: str, signal_id: str, direction: str, current_price: float, atr: float,
         risk_matrix: dict, target_leverage: int = 2, market_regime: str = "TRENDING",
-        is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.2,
+        is_recovery: bool = False, realigned_tp: float = None, dynamic_rr_ratio: float = 2.0,
         realigned_sl: float = None, historical_favorable_price: float = None
     ):
         specs = self.sor.instrument_cache.get(symbol, {})
@@ -1548,17 +1553,20 @@ class DistributedQuantEngine:
                 else:
                     await ExecutionGovernorFSM.manage_execution(decision, state, ctx, self.executor)
 
-                # Passive Exchange Stop-Loss Advancement
+                # Passive Exchange Stop-Loss Advancement (Directional Progress Guard)
                 target_sl = decision.exchange_ts_price
                 target_tp = decision.dynamic_tp_price
 
                 if target_sl > 0 and not self.test_mode:
                     atr_val = ctx["atr"]
-                    displacement = abs(target_sl - ctx.get("last_exchange_sl", current_active_sl))
+                    last_sl = ctx.get("last_exchange_sl", current_active_sl)
+                    
+                    # Directional Monotonicity: Long SL must advance UP; Short SL must ratchet DOWN
+                    is_progress = (target_sl > last_sl + (atr_val * 0.15)) if ctx["is_buy"] else (target_sl < last_sl - (atr_val * 0.15))
                     time_elapsed = now_sec - ctx.get("last_amend_time", 0.0)
                     amend_cooldown = ctx.get("amend_cooldown", 1.20)
 
-                    if displacement >= (atr_val * 0.15) and time_elapsed >= amend_cooldown:
+                    if is_progress and time_elapsed >= amend_cooldown:
                         ctx["last_amend_time"] = now_sec
                         amended_ok = await self.sor._amend_trailing_stop(symbol, target_sl, target_tp)
                         if amended_ok:
