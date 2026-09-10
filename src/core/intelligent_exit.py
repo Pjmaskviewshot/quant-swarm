@@ -1,13 +1,16 @@
 """
-V44.0 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V44.2 APEX TITAN: CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Quantitative Upgrades (V44.0 Core Architecture):
+Production Hardening & Quantitative Upgrades (V44.2 Hotfix):
+- Latched Risk Distance Invariant: Latches initial risk distance on position inception
+  and enforces an absolute floor (max(2.5 * ATR, 1.5% entry)), eradicating the 
+  denominator-collapse glitch where trailing breakeven stops triggered phantom 25R anomalies.
 - Zero-Price Sanity Barrier: Validates top-of-book prices against None/zero unpopulated
-  dictionary payloads, eliminating corrupt 26.67R phantom peaks and panic retracements.
+  dictionary payloads, eliminating corrupt phantom peaks and panic retracements.
 - Micro-Ratchet Dead-Zone Eradication: Progressively compresses stop distance from 
   +0.15R upward, ensuring trades that show green cannot collapse into full -1.0R losses.
 - Un-Gated Early Microstructure Sentry: Intercepts adverse order-flow surges (Z > 2.0σ)
@@ -48,6 +51,7 @@ class ProfitProtectionState:
     rolling_mlofi_peak: float = 0.0
     be_active: bool = False
     r_crit: float = 0.45
+    initial_risk_dist: float = 0.0
 
 
 @dataclass
@@ -85,7 +89,7 @@ class ExitDecision:
 class PortfolioCommander:
     @staticmethod
     def evaluate(ctx: Dict[str, Any]) -> Tuple[bool, str]:
-        max_dd = float(ctx.get("max_drawdown_pct", 0.10))
+        max_dd = float(ctx.get("max_drawdown_pct", 0.15))
         current_dd = float(ctx.get("drawdown_pct", 0.0))
         if current_dd >= max_dd:
             return True, f"SYSTEMIC_DRAWDOWN_BREACH ({current_dd:.2%} >= {max_dd:.2%})"
@@ -119,7 +123,7 @@ class IntelligentExitEngine:
         symbol = ctx.get("symbol", "ASSET")
 
         # =========================================================================
-        # ZERO-PRICE SANITY BARRIER (Eradicates 26.67R Phantom Glitch)
+        # ZERO-PRICE SANITY BARRIER
         # =========================================================================
         ob = ctx.get("last_ob", {}) or {}
         raw_bid = ob.get("best_bid")
@@ -153,17 +157,22 @@ class IntelligentExitEngine:
 
         atr = float(ctx.get("atr", exec_price * 0.005))
         
-        # Initial risk distance anchored strictly to entry to eliminate denominator jitter
-        initial_risk_dist = float(ctx.get("initial_risk_dist", 0.0))
-        if initial_risk_dist <= 0.0:
-            initial_risk_dist = max(atr * 2.5, state.entry_price * 0.015)
+        # =========================================================================
+        # LATCHED INITIAL RISK DISTANCE (Eradicates Breakeven Denominator Collapse)
+        # =========================================================================
+        p_state = state.profit_state
+        if getattr(p_state, "initial_risk_dist", 0.0) <= 0.0:
+            raw_risk_dist = float(ctx.get("initial_risk_dist", 0.0))
+            min_risk_floor = max(atr * 2.5, state.entry_price * 0.015)
+            p_state.initial_risk_dist = max(raw_risk_dist, min_risk_floor)
+
+        initial_risk_dist = p_state.initial_risk_dist
 
         price_delta = (exec_price - state.entry_price) if is_buy else (state.entry_price - exec_price)
         current_r = price_delta / (initial_risk_dist + 1e-9)
         current_pnl = price_delta * total_qty
 
         # Structural Anomaly Barrier: Guard against corrupt spread snapshots
-        p_state = state.profit_state
         if abs(current_r) > 15.0 and p_state.mfe_r < 2.0:
             logger.critical(
                 f"[EXIT_SENTRY] Anomaly R-multiple ({current_r:.2f}R) detected on {symbol}. "
@@ -403,7 +412,6 @@ class IntelligentExitEngine:
         # =========================================================================
         # PASSIVE EXCHANGE STOP CLAMPING (Prevents Bybit MarkPrice Rejections)
         # =========================================================================
-        # Enforce safety buffer strictly on the passive payload sent to Bybit
         min_market_buffer = max(atr * 0.25, exec_price * 0.0015)
         if is_buy:
             exchange_ts_price = min(calculated_sl, exec_price - min_market_buffer)
