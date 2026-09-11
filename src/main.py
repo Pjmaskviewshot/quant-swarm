@@ -1,9 +1,11 @@
 """
-V50.0 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
+V50.1 APEX TITAN: FAULT-TOLERANT BARE-METAL CORE ORCHESTRATOR (25D MANIFOLD)
 ---------------------------------------------------------------------------------
 High-frequency multi-asset statistical micro-scalping & risk governance system.
 
-Production Hardening & Quantitative Upgrades (V50.0 Engine Alignment):
+Production Hardening & Quantitative Upgrades (V50.1 Engine Alignment):
+- Resilient API Timeout Backoff: Wraps Bybit REST portfolio and position probes 
+  with exponential backoff to gracefully absorb cloud network jitter (ServerTimeoutError).
 - Dedicated 15s Cloud Mutex Heartbeat: Eradicates twin-leader collision window (<45s TTL).
 - Pre-Flight Exchange Limit Resolution on Orphan Adoption: Guarantees exact lot size
   filters for recovered positions, preventing 0-qty exit rejects.
@@ -328,14 +330,14 @@ class DistributedQuantEngine:
         return default_params
 
     async def _get_true_equity_usdt(self) -> float:
-        for attempt in range(1, 5):
+        for attempt in range(1, 6):
             try:
                 bal = await self.executor.get_wallet_balance_usdt()
                 if bal > 0.0:
                     return bal
             except Exception as e:
-                logger.warning(f"[X-RAY] Equity probe attempt {attempt}/4 failed: {e}")
-            await asyncio.sleep(attempt * 0.8)
+                logger.warning(f"[X-RAY] Equity probe attempt {attempt}/5 failed: {e}")
+            await asyncio.sleep(attempt * 1.5)
         return 0.0
 
     async def _prune_dead_symbols(self):

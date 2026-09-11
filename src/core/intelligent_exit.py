@@ -1,17 +1,19 @@
 """
-V49.0 APEX TITAN: SMART PREDATOR CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V50.0 APEX TITAN: SMART PREDATOR CONTINUOUS AWAKENING MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Quantitative Upgrades (V49.0 Audit Resolutions):
+Production Hardening & Quantitative Upgrades (V50.0 Audit Resolutions):
+- Price-Capped Limit IOC Exits: Replaces unconstrained Market IOC exit orders with 
+  strict Limit IOC collars (max 15 bps slippage bound), eliminating destructive 
+  book-wiping slippage spikes (e.g., -57.2 bps ETH fills).
 - Dual-Basis Mark/Last Safety Clamping: Clamps server-side stops against MarkPrice and
   executable Top-of-Book, terminating Bybit Error 34036/110043 amendment rejections.
 - Micro-Account Notional Scale-Out Guard: Converts partial exits (< $6.50) into deferred
   full exits (>= 1.60R) to eliminate exchange order rejection loops.
 - Monotonic Ratchet Guarantee: Prevents volatility-induced stop degradation across both legs.
-- Basis Blowout Sentry: Reconciles local executable bid/ask stops with exchange MarkPrice.
 - Strict Decimal Quantization: Floors exit order lot sizes to exchange step sizes cleanly.
 """
 
@@ -404,17 +406,15 @@ class IntelligentExitEngine:
                 return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.3R", "")
 
         # =========================================================================
-        # MARK-PRICE EXCHANGE STOP CLAMPING (RESOLVES BYBIT 34036 / 110043)
+        # MARK-PRICE EXCHANGE STOP CLAMPING & SLIPPAGE-CAPPED EXIT COLLAR
         # =========================================================================
         min_market_buffer = max(atr * 0.20, mark_price * 0.0020)
         if is_buy:
-            # Long SL must be strictly below both executable bid and exchange MarkPrice
             reference_boundary = min(exec_price, mark_price)
             exchange_ts_price = min(calculated_sl, reference_boundary - min_market_buffer)
             if p_state.locked_sl > 0.0:
                 exchange_ts_price = max(exchange_ts_price, min(p_state.locked_sl, reference_boundary - min_market_buffer))
         else:
-            # Short SL must be strictly above both executable ask and exchange MarkPrice
             reference_boundary = max(exec_price, mark_price)
             exchange_ts_price = max(calculated_sl, reference_boundary + min_market_buffer)
             if p_state.locked_sl > 0.0:
@@ -463,10 +463,28 @@ class ExecutionGovernorFSM:
         position_idx = int(ctx.get("position_idx", 0))
 
         if decision.urgency in ["MARKET", "EMERGENCY", "AGGRESSIVE", "FLASH_IOC"]:
+            # Upgraded Slippage Collar: Use Limit IOC with 15 bps protective price collar 
+            # instead of unconstrained Market IOC to prevent book-wiping spikes (e.g., -57.2 bps ETH fills).
+            base_price = decision.limit_price
+            if base_price <= 0.0:
+                base_price = float(ctx.get("latest_tick_price", 0.0) or state.entry_price)
+            
+            collar_pct = 0.0015  # 15 bps max slippage collar
+            if state.exit_side == "Sell":  # Closing a Long
+                collar_price = base_price * (1.0 - collar_pct)
+            else:  # Closing a Short
+                collar_price = base_price * (1.0 + collar_pct)
+
+            # Format price string using SOR helper or default formatting
+            if hasattr(executor, 'core') and executor.core and hasattr(executor.core, 'sor'):
+                price_str = executor.core.sor._format_price_str(collar_price, symbol)
+            else:
+                price_str = f"{collar_price:.4f}"
+
             res = await executor.safe_call(
                 "POST", "/v5/order/create", is_execution=True,
                 category="linear", symbol=symbol,
-                side=state.exit_side, orderType="Market", qty=qty_str,
+                side=state.exit_side, orderType="Limit", price=price_str, qty=qty_str,
                 timeInForce="IOC", reduceOnly=True,
                 positionIdx=position_idx,
                 smpType="CancelMaker"
@@ -483,7 +501,7 @@ class ExecutionGovernorFSM:
                     state.execution_state = "OBSERVE"
                 return True
             else:
-                logger.error(f"[GOVERNOR] Market execution rejected on {symbol}: {res.get('retMsg') if isinstance(res, dict) else res}")
+                logger.error(f"[GOVERNOR] Limit-Capped IOC execution rejected on {symbol}: {res.get('retMsg') if isinstance(res, dict) else res}")
                 return False
 
         if state.execution_state == "OBSERVE":

@@ -1,19 +1,19 @@
 """
-V49.0 APEX TITAN: 25D VOLTERRA-RIEMANNIAN MICROSTRUCTURE ENGINE
+V50.0 APEX TITAN: 25D VOLTERRA-RIEMANNIAN MICROSTRUCTURE ENGINE
 --------------------------------------------------------------------------------
 Continuous-time microstructure forecasting engine integrating zero-allocation 
 feature buffers, closed-form Ornstein-Uhlenbeck calibration, regularized BOCD, 
 Joseph-form Adaptive Sparse Elastic RLS, and fractional Eighth-Kelly optimal control.
 
-Production Hardening & Quantitative Upgrades (V49.0 Audit Resolutions):
-1. Learning-Rate-Scaled Proximal Operator: Eliminates structural weight erosion 
+Production Hardening & Quantitative Upgrades (V50.0 Audit Resolutions):
+1. Information Clock Attribute Alignment: Corrected base_volume_ewma casing bug 
+   to eliminate runtime AttributeError exceptions during volume-time synchronization.
+2. Learning-Rate-Scaled Proximal Operator: Eliminates structural weight erosion 
    by scaling L1 and L2 penalties by the Kalman gain step magnitude.
-2. Calibrated Temperature-Gain Kernel: Rescales Platt logit gains (T=2.0, Gain=0.90) 
+3. Calibrated Temperature-Gain Kernel: Rescales Platt logit gains (T=2.0, Gain=0.90) 
    and clamps logit bounds to [-1.50, 1.50], enforcing the Bayesian probability band (52% - 78%).
-3. Microstructure Friction Deadband: Filters out 60-second bid-ask bounce noise (<3.5 bps) 
+4. Microstructure Friction Deadband: Filters out 60-second bid-ask bounce noise (<3.5 bps) 
    from the online continuous learning buffer.
-4. Bound-Clamped Return Percentages: Prevents outlier spikes from distorting Merton 
-   Jump Kelly covariance estimation.
 5. Whitener & RLS Full State Serialization: Preserves online whitening statistics 
    and regime covariance matrices across process restarts.
 """
@@ -328,12 +328,12 @@ class InformationTimeClock:
     def __init__(self):
         self.tau = 0.0
         self.last_physical_time = time.time()
-        self.base_volume_ewMA = 100.0
+        self.base_volume_ewma = 100.0  # Fixed attribute casing bug
 
     def tick(self, volume: float, spread_bps: float, physical_time: float) -> float:
         safe_vol = max(1.0, volume) if math.isfinite(volume) else 1.0
-        self.base_volume_ewMA = (0.99 * self.base_volume_ewMA) + (0.01 * safe_vol)
-        norm_vol = max(0.01, safe_vol) / self.base_volume_ewMA
+        self.base_volume_ewma = (0.99 * self.base_volume_ewma) + (0.01 * safe_vol)
+        norm_vol = max(0.01, safe_vol) / self.base_volume_ewma
         d_tau = norm_vol * max(1.0, spread_bps)
         self.tau += d_tau
         self.last_physical_time = physical_time
@@ -693,8 +693,7 @@ QuantumMarkovRegimeDetector = MarkovRegimeDetector
 class AdaptiveSparseRLS:
     """
     L1/L2 Elastic-Net Recursive Least Squares with Bucy-Joseph Covariance Stabilization.
-    Audit P1 #4 Resolution: Scales proximal shrinkage strictly by Kalman step size 
-    to eradicate structural model weight erosion.
+    Audit P1 #4 Resolution: Scales proximal shrinkage strictly by Kalman step size.
     """
     def __init__(self, dim: int = 25, p_init: float = 1.0, l1_penalty: float = 1e-4, l2_penalty: float = 1e-5):
         self.dim = dim
@@ -720,18 +719,14 @@ class AdaptiveSparseRLS:
 
         kalman_gain = (fx * fisher_var) / denom
 
-        # Step size based on Kalman gain norm and regime weight
         step_size = float(np.linalg.norm(kalman_gain)) * max(1e-3, abs(weight))
 
-        # Dynamic L2 regularized gradient update
         w_decayed = self.w * (1.0 - float(np.clip(self.l2_penalty * step_size, 0.0, 0.05)))
         w_temp = w_decayed + (kalman_gain.flatten() * err * weight)
 
-        # Proximal L1 Soft-Thresholding scaled strictly by effective step size
         gamma_l1 = self.l1_penalty * step_size
         self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - gamma_l1, 0.0)
 
-        # Joseph-form covariance update with bounded observation noise
         i_kx = self.eye - (kalman_gain @ x_vec.T)
         bounded_r = min(1000.0, 1.0 / fisher_var)
         noise_cov = (kalman_gain @ kalman_gain.T) * bounded_r
@@ -903,7 +898,6 @@ class ContinuousMicrostructureEngine:
         self.ecosystem_propagator = EcosystemPropagator()
         self.whitening_engine = BoundedAdaptiveWhitener(dim=self.raw_dim)
 
-        # Warm-Start Adaptive Sparse RLS 25D Matrices (with normalized step-scaled L1/L2 penalties)
         w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=self.feature_dim)
         self.rls_trend = AdaptiveSparseRLS(dim=self.feature_dim, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
         self.rls_range = AdaptiveSparseRLS(dim=self.feature_dim, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
@@ -1220,7 +1214,7 @@ class ContinuousMicrostructureEngine:
                     tp_reached = (old_action_dir == "BUY" and current_price >= old_virt_tp) or \
                                  (old_action_dir == "SELL" and current_price <= old_virt_tp)
 
-                    # Microstructure Noise Sieve: Ignore sub-spread jitter (Audit P1 #6 Resolution)
+                    # Microstructure Noise Sieve: Ignore sub-spread jitter
                     price_move_bps = abs(current_price - old_price) / old_price * 10000.0
                     if not sl_breached and not tp_reached and price_move_bps < 3.5:
                         continue
@@ -1234,7 +1228,6 @@ class ContinuousMicrostructureEngine:
                          
                     self.calibration_errors.append(abs(y_target - old_p_up))
 
-                    # Calibrated Expert Logit Predictions
                     p_trend = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_trend.w, old_v) * CALIBRATED_GAIN, -LOGIT_BOUND, LOGIT_BOUND))))
                     p_range = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_range.w, old_v) * CALIBRATED_GAIN, -LOGIT_BOUND, LOGIT_BOUND))))
                     p_spoof = 1.0 / (1.0 + math.exp(-float(np.clip(np.dot(self.rls_spoof.w, old_v) * CALIBRATED_GAIN, -LOGIT_BOUND, LOGIT_BOUND))))
