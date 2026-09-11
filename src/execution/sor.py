@@ -1,5 +1,5 @@
 """
-V45.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
+V48.1 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
 --------------------------------------------------------------------------------
 Institutional-grade execution nexus featuring atomic inline bracket orders,
 zero-latency post-fill stop-loss anchoring, Avellaneda-Stoikov continuous
@@ -7,13 +7,15 @@ inventory reservation pricing, sub-millisecond execution telemetry, Perold (1988
 Implementation Shortfall (IS) tracking, pure Decimal lot-quantization, and 
 contention-free token-bucket rate governance.
 
-Production Hardening & Proactive Upgrades (V45.0 Slip-Gate & Compliance Shield):
+Production Hardening & Quantitative Upgrades (V48.1):
+- Silent Fill Sentry: Probes live exchange positions upon WebSocket fill verification
+  timeout, preventing untracked orphan positions.
+- Stop Clamping Hardening: Strips error codes 34036/110043 from false-positive success
+  checks, routing mark-price clashes into active realignments.
 - Proactive Slippage Firewall: Pre-calculates order book traversal costs before execution;
-  automatically downgrades thin-book altcoin sweeps to passive Maker Pegs to eradicate 
-  high slippage drag (e.g., 148 bps fills).
-- Automatic Compliance Blacklisting: Captures Bybit Error 110126 ("Agreement Not Signed")
-  and Innovation Zone restrictions instantly, terminating repeat-error log spam.
-- Idempotent Selective Bracket Payloads: Dynamically isolates stopLoss and takeProfit.
+  automatically downgrades thin-book altcoin sweeps to passive Maker Pegs.
+- Automatic Compliance Blacklisting: Captures Bybit Error 110126 and Innovation Zone
+  restrictions instantly, terminating repeat-error log spam.
 """
 
 import os
@@ -42,7 +44,7 @@ class SmartOrderRouter:
         self.instrument_cache: Dict[str, Dict[str, Any]] = {}
         self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
         self._last_amend_time: Dict[str, float] = {}
-        self._amend_throttle_sec: float = 1.20  # Rate-limit hysteresis cooldown
+        self._amend_throttle_sec: float = 1.20
 
         # Avellaneda-Stoikov Base Parameters
         self.gamma_base = 0.08  # Baseline inventory risk-aversion
@@ -218,10 +220,13 @@ class SmartOrderRouter:
             )
             ret_code = res.get("retCode", -1)
             ret_msg = res.get("retMsg", "").lower()
-            if ret_code in [0, 34040, 34036, 110043] or any(k in ret_msg for k in ["not modified", "same", "identical"]):
+
+            # Clean success check
+            if ret_code == 0 or any(k in ret_msg for k in ["not modified", "same", "identical"]):
                 logger.info(f"[SOR_SENTRY] Stops anchored directly on {symbol} (SL: {sl}, TP: {tp}).")
                 return
 
+            # Mark price clash handling
             pos_res = await self.executor.safe_call(
                 "GET", "/v5/position/list", category="linear", symbol=symbol
             )
@@ -251,8 +256,10 @@ class SmartOrderRouter:
             fallback_res = await self.executor.safe_call(
                 "POST", "/v5/position/trading-stop", is_execution=True, **payload
             )
-            if fallback_res.get("retCode") in [0, 34040, 34036, 110043]:
+            if fallback_res.get("retCode") == 0 or any(k in fallback_res.get("retMsg", "").lower() for k in ["not modified", "same", "identical"]):
                 logger.info(f"[SOR_SENTRY] Fallback stops anchored on {symbol} successfully.")
+            else:
+                logger.warning(f"[SOR_SENTRY] Stop anchoring failed for {symbol}: {fallback_res.get('retMsg')}")
         except Exception as e:
             logger.debug(f"[SOR_SENTRY] Bracket integrity sentry error on {symbol}: {e}")
 
@@ -533,11 +540,13 @@ class SmartOrderRouter:
             ret_code = res.get("retCode")
             ret_msg = res.get("retMsg", "").lower()
 
-            if ret_code in [0, 34040, 34036, 110043] or any(k in ret_msg for k in ["not modified", "same", "identical"]):
+            # Clean success check
+            if ret_code == 0 or any(k in ret_msg for k in ["not modified", "same", "identical"]):
                 self._last_amend_time[symbol] = now
                 return True
 
-            if "clash" in ret_msg or "cannot be higher" in ret_msg or "cannot be lower" in ret_msg:
+            # Mark price clash handling
+            if ret_code in [34036, 110043] or any(k in ret_msg for k in ["clash", "cannot be higher", "cannot be lower", "out of range"]):
                 pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
                 positions = pos_res.get("result", {}).get("list", [])
                 if positions and float(positions[0].get("size", 0.0)) > 0:
@@ -548,13 +557,13 @@ class SmartOrderRouter:
                         realigned_sl = mark_p * (0.9955 if is_buy else 1.0045)
                         payload["stopLoss"] = self._format_price_str(realigned_sl, symbol)
                         retry_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
-                        if retry_res.get("retCode") in [0, 34040, 34036, 110043]:
+                        if retry_res.get("retCode") == 0 or any(k in retry_res.get("retMsg", "").lower() for k in ["not modified", "same", "identical"]):
                             self._last_amend_time[symbol] = now
                             return True
             return False
         except Exception as e:
             err_str = str(e).lower()
-            if any(k in err_str for k in ["not modified", "same", "identical", "34040", "110043"]):
+            if any(k in err_str for k in ["not modified", "same", "identical"]):
                 self._last_amend_time[symbol] = now
                 return True
             logger.debug(f"[X-RAY] Trailing stop amend fault for {symbol}: {e}")
@@ -611,11 +620,21 @@ class SmartOrderRouter:
             if response.get("retCode") == 0:
                 order_id = response.get("result", {}).get("orderId", client_link_id)
                 fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.75)
-                raw_exec = fill_report.get("cumExecQty") if fill_report else None
-                raw_avg = fill_report.get("avgPrice") if fill_report else None
-
-                total_executed = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else cleaned_qty
-                avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
+                
+                if fill_report and fill_report.get("cumExecQty"):
+                    total_executed = float(fill_report.get("cumExecQty"))
+                    raw_avg = fill_report.get("avgPrice")
+                    avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
+                else:
+                    # Fallback live position check to avoid unhedged state
+                    pos_fallback = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                    active_pos = pos_fallback.get("result", {}).get("list", [])
+                    if active_pos and float(active_pos[0].get("size", 0.0)) > 0:
+                        total_executed = float(active_pos[0]["size"])
+                        avg_price = float(active_pos[0].get("avgPrice", current_mid_price))
+                    else:
+                        total_executed = cleaned_qty
+                        avg_price = current_mid_price
 
                 if sl or tp:
                     await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
@@ -715,11 +734,21 @@ class SmartOrderRouter:
                 order_confirmed = True
                 order_id = response.get("result", {}).get("orderId", client_link_id)
                 fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.75)
-                if fill_report:
+                
+                if fill_report and fill_report.get("cumExecQty"):
                     raw_exec = fill_report.get("cumExecQty")
                     raw_avg = fill_report.get("avgPrice")
                     total_executed_qty = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else 0.0
                     avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
+                else:
+                    # Fallback live position check to eliminate silent fill disconnects
+                    pos_fallback = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                    active_pos = pos_fallback.get("result", {}).get("list", [])
+                    if active_pos and float(active_pos[0].get("size", 0.0)) > 0:
+                        total_executed_qty = float(active_pos[0]["size"])
+                        avg_price = float(active_pos[0].get("avgPrice", current_mid_price))
+                    else:
+                        total_executed_qty = 0.0
             else:
                 ret_code = response.get("retCode")
                 err_msg = response.get("retMsg", "")
@@ -1040,7 +1069,7 @@ class SmartOrderRouter:
         dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
         est_slippage = self.estimate_orderbook_slippage_bps(ob, direction, total_qty, current_mid_price)
 
-        # PROACTIVE SLIPPAGE FIREWALL: Downgrade thin books to Maker Peg instead of rejecting or taking 100+ bps drag
+        # PROACTIVE SLIPPAGE FIREWALL
         is_major = symbol in ["BTCUSDT", "ETHUSDT"]
         max_allowed_sweep_bps = 15.0 if is_major else 10.0
 

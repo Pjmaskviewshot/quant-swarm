@@ -1,17 +1,19 @@
 """
-V45.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER (25D FULL MANIFOLD)
+V50.0 APEX TITAN: HIGH-FIDELITY NEURAL BACKTESTER (25D FULL MANIFOLD)
 --------------------------------------------------------------------------------
-Institutional-grade historical simulation engine replicating the V45.0 25D 
+Institutional-grade historical simulation engine replicating the V50.0 25D 
 Volterra-Riemannian Manifold, exact Joseph-stabilized RLS, Bayesian-prior Merton 
 Jump Kelly allocation, and CAMB (Continuous Adaptive Microstructure Barrier).
 
-Quantitative Parity Upgrades (V45.0 Production Alignment):
-- Temperature-Scaled Platt Calibration: Eliminates the 99.33% boundary saturation trap
-  by scaling raw scores through CALIBRATED_GAIN = 1.25 / 1.6 clamped to [-3.0, 3.0].
-- 4-Tier CAMB Architecture: Anti-Choking (<0.20R), Micro-Risk Dampener (0.20R to R_crit),
-  Friction-Compensated Breakeven (R_crit to 0.80R), and Asymptotic Chandelier (>=0.80R).
-- De-Choked Holding Horizons: Relaxes the max trade horizon to 180 minutes and adds
-  an adverse stagnation scratch at 90 minutes (only if R < -0.35R).
+Quantitative Parity Upgrades (V50.0 Production Alignment):
+- Temperature-Scaled Platt Calibration: Aligned to CALIBRATED_GAIN = 0.90 / 2.0 (0.45)
+  clamped to [-1.50, 1.50], enforcing the 52% - 78% Bayesian confidence band.
+- Learning-Rate-Scaled L1 Proximal Step: Shrinkage is strictly scaled by the Kalman 
+  gain norm, eliminating the RLS weight-erosion defect.
+- Exact CAMB Parameter Parity: Noise band (0.10R), r_crit ([0.22, 0.38]), 50% scale-out 
+  (1.30R), Predator Reversal Strike (22% giveback from >= 0.50R), and Chandelier (>= 0.70R).
+- Microstructure Friction Deadband: Replay buffer drops sub-spread noise (< 3.5 bps) 
+  to prevent parameter overfitting.
 - Proportional Merton-Kelly Leverage: Maps fractional Kelly to max_single_risk_pct (2.5%).
 """
 
@@ -32,11 +34,11 @@ MAKER_FEE = 0.00020          # 2.0 bps
 FUNDING_PER_8H = 0.0001      # 1.0 bps per epoch
 BASE_SLIPPAGE_BPS = 4.0      # Baseline market impact
 
-# Temperature-Scaled Platt Logit Parameters (V45.0 Parity)
-LOGIT_GAIN = 1.25
-LOGIT_TEMPERATURE = 1.6
-CALIBRATED_GAIN = LOGIT_GAIN / LOGIT_TEMPERATURE  # ~0.78125
-LOGIT_BOUND = 3.0
+# Temperature-Scaled Platt Logit Parameters (Strict Production Parity)
+LOGIT_GAIN = 0.90
+LOGIT_TEMPERATURE = 2.0
+CALIBRATED_GAIN = LOGIT_GAIN / LOGIT_TEMPERATURE  # 0.45
+LOGIT_BOUND = 1.50  # Restricts p_up strictly to [0.182, 0.818]
 
 
 class AdaptiveSessionClock:
@@ -231,13 +233,17 @@ class BacktestAdaptiveWhitener:
 
 
 class BacktestRiemannianRLS:
-    """25D Joseph-Stabilized RLS with Bounded Observation Noise & L1 Sparsity."""
-    def __init__(self, dim: int = 25, p_init: float = 1.0, l1_penalty: float = 1e-4):
+    """
+    25D Joseph-Stabilized RLS with Bounded Observation Noise.
+    Audit Resolution: Proximal L1 penalty is scaled strictly by Kalman step size.
+    """
+    def __init__(self, dim: int = 25, p_init: float = 1.0, l1_penalty: float = 1e-4, l2_penalty: float = 1e-5):
         self.dim = dim
         self.w = np.zeros(dim, dtype=np.float64)
         self.f_inv = np.eye(dim, dtype=np.float64) * p_init
         self.eye = np.eye(dim, dtype=np.float64)
         self.l1_penalty = l1_penalty
+        self.l2_penalty = l2_penalty
         self.lambda_reg = 0.9995
 
     def update(self, x: np.ndarray, y_target: float, p_pred: float, weight: float = 1.0) -> float:
@@ -253,10 +259,15 @@ class BacktestRiemannianRLS:
             return err
 
         kalman_gain = (fx * fisher_var) / denom
-        w_temp = self.w + (kalman_gain.flatten() * err * weight)
+        step_size = float(np.linalg.norm(kalman_gain)) * max(1e-3, abs(weight))
 
-        # Proximal L1 Soft-Thresholding
-        self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - self.l1_penalty, 0.0)
+        # Dynamic L2 decay and gradient addition
+        w_decayed = self.w * (1.0 - float(np.clip(self.l2_penalty * step_size, 0.0, 0.05)))
+        w_temp = w_decayed + (kalman_gain.flatten() * err * weight)
+
+        # Proximal L1 Soft-Thresholding scaled by effective step size
+        gamma_l1 = self.l1_penalty * step_size
+        self.w = np.sign(w_temp) * np.maximum(np.abs(w_temp) - gamma_l1, 0.0)
 
         # Joseph-form covariance update with bounded observation noise
         i_kx = self.eye - (kalman_gain @ x_vec.T)
@@ -318,7 +329,7 @@ class BacktestMertonJumpKelly:
         self.avg_loss = 1.0
 
     def update(self, net_pnl: float, return_pct: float):
-        ret_mag = max(1e-4, abs(return_pct))
+        ret_mag = float(np.clip(abs(return_pct), 1e-4, 1.0))
         self.trials_accum += 1.0
         if net_pnl > 0:
             self.wins_accum += 1.0
@@ -489,14 +500,14 @@ def run_v40_backtest(
 
     hurst_estimator = BacktestHurstEstimator()
 
-    # V45.0 Full 25D RLS and Feature Engines
+    # V50.0 Full 25D RLS and Feature Engines
     w_t, w_r, w_s, w_c, p_scale = ClusterWarmStartRLS.get_cluster_priors(symbol, dim=25)
     whitening_engine = BacktestAdaptiveWhitener(dim=19, base_alpha=0.001)
 
-    rls_trend = BacktestRiemannianRLS(dim=25, p_init=p_scale)
-    rls_range = BacktestRiemannianRLS(dim=25, p_init=p_scale)
-    rls_spoof = BacktestRiemannianRLS(dim=25, p_init=p_scale)
-    rls_cascade = BacktestRiemannianRLS(dim=25, p_init=p_scale)
+    rls_trend = BacktestRiemannianRLS(dim=25, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
+    rls_range = BacktestRiemannianRLS(dim=25, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
+    rls_spoof = BacktestRiemannianRLS(dim=25, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
+    rls_cascade = BacktestRiemannianRLS(dim=25, p_init=p_scale, l1_penalty=1e-4, l2_penalty=1e-5)
 
     if initial_rls_state:
         rls_trend.w = initial_rls_state["w_trend"].copy()
@@ -649,17 +660,17 @@ def run_v40_backtest(
         # 25D Full Volterra Bilinear Interaction Manifold
         volterra = np.empty(25, dtype=np.float64)
         volterra[:19] = f
-        volterra[19] = f[11] * f[1]  # 19: Hurst x Hawkes interaction
-        volterra[20] = f[17] * f[0]  # 20: Squeeze Risk x MLOFI
-        volterra[21] = f[15] * f[0]  # 21: Macro Spillover x MLOFI
-        volterra[22] = f[14] * f[2]  # 22: CVD Divergence x Meso Momentum
-        volterra[23] = f[5] * f[1]   # 23: OU Mean Reversion x Hawkes
+        volterra[19] = f[11] * f[1]  # Hurst x Hawkes
+        volterra[20] = f[17] * f[0]  # Squeeze Risk x MLOFI
+        volterra[21] = f[15] * f[0]  # Macro Spillover x MLOFI
+        volterra[22] = f[14] * f[2]  # CVD Divergence x Meso Momentum
+        volterra[23] = f[5] * f[1]   # OU Mean Reversion x Hawkes
 
         # RMS Amplitude Scaling
         rms_scale = math.sqrt(float(np.mean(volterra[:24] ** 2)) + 1e-9)
         v_att = np.empty(25, dtype=np.float64)
         v_att[:24] = np.clip(volterra[:24] / max(1.0, rms_scale), -3.0, 3.0)
-        v_att[24] = 1.0  # Invariant Affine Intercept Bias
+        v_att[24] = 1.0  # Invariant Affine Bias
 
         # Bayesian Markov Regime Updates
         beliefs = regime_detector.update_beliefs(kaufman_er, shannon_entropy, 0.0, jump_z)
@@ -677,7 +688,7 @@ def run_v40_backtest(
         regime_logits = np.array([l_t, l_r, l_s, l_c], dtype=np.float64)
         raw_score = float(np.dot(gate_weights, regime_logits))
 
-        # Temperature-Scaled Platt Calibration (V45.0 Parity)
+        # Temperature-Scaled Platt Calibration (Strict V50.0 Production Alignment)
         logit = float(np.clip(raw_score * CALIBRATED_GAIN, -LOGIT_BOUND, LOGIT_BOUND))
         p_up = 1.0 / (1.0 + math.exp(-logit))
         p_down = 1.0 - p_up
@@ -702,7 +713,7 @@ def run_v40_backtest(
         if len(calibration_errors) >= 30:
             q_threshold = float(np.percentile(calibration_errors, 85))
         else:
-            q_threshold = 0.08
+            q_threshold = 0.06
         dynamic_gate = float(np.clip(0.51 + (q_threshold * 0.25), 0.52, 0.65))
 
         # Dynamic ATR Volatility Brackets
@@ -717,7 +728,7 @@ def run_v40_backtest(
         virt_sl = sim_price - (sl_dist_pct * sim_price) if action_dir == "BUY" else sim_price + (sl_dist_pct * sim_price)
         virt_tp = sim_price + (tp_dist_pct * sim_price) if action_dir == "BUY" else sim_price - (tp_dist_pct * sim_price)
 
-        # Replay Online Learning Buffer with Calibrated Temperature Scaling
+        # Replay Online Learning Buffer with Microstructure Noise Deadband
         while prediction_buffer and (now_ts - prediction_buffer[0][0]) >= 60000:
             _, old_price, old_features, old_p_up, old_virt_sl, old_virt_tp, old_action_dir, old_beliefs = prediction_buffer.popleft()
             if sim_price != old_price and old_price > 0:
@@ -725,6 +736,11 @@ def run_v40_backtest(
                               (old_action_dir == "SELL" and sim_price >= old_virt_sl)
                 tp_reached = (old_action_dir == "BUY" and sim_price >= old_virt_tp) or \
                              (old_action_dir == "SELL" and sim_price <= old_virt_tp)
+
+                # Microstructure Noise Sieve: Ignore sub-spread drift (<3.5 bps)
+                price_move_bps = abs(sim_price - old_price) / (old_price + 1e-9) * 10000.0
+                if not sl_breached and not tp_reached and price_move_bps < 3.5:
+                    continue
 
                 if sl_breached:
                     y_target = 0.0 if old_p_up > 0.5 else 1.0
@@ -791,7 +807,7 @@ def run_v40_backtest(
                     pnl_accum = 0.0
                     position_size = 1.0
 
-                    # 4-Point Micro-Trajectory Intra-Bar Simulation with CAMB V45.0 Parity
+                    # 4-Point Micro-Trajectory Intra-Bar Simulation with Full CAMB V50.0 Parity
                     for j in range(i + 1, min(i + 180, len(target_candles))):
                         bars_held = j - i
                         bar = target_candles[j]
@@ -809,40 +825,40 @@ def run_v40_backtest(
                             r_multiple = abs(max_favorable_price - entry) / (initial_risk + 1e-9)
                             current_r = (tick_p - entry) / (initial_risk + 1e-9) if action_dir == "BUY" else (entry - tick_p) / (initial_risk + 1e-9)
 
-                            # 1. Scale-out 50% at 1.4R (Parity with IntelligentExitEngine)
-                            if r_multiple >= 1.40 and position_size == 1.0:
+                            # 1. Scale-out 50% at 1.30R (Exact Parity with intelligent_exit.py)
+                            if r_multiple >= 1.30 and position_size == 1.0:
                                 partial_return = (tick_p - entry) / entry if action_dir == "BUY" else (entry - tick_p) / entry
                                 pnl_accum += partial_return * 0.5
                                 position_size = 0.5
 
-                            # 2. CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (V45.0 Parity)
+                            # 2. CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (V50.0 Parity)
                             vol_pct = atr_proxy / max(entry, 1e-9)
                             baseline_vol_pct = 0.005
                             vol_ratio = float(np.clip(vol_pct / max(baseline_vol_pct, 1e-5), 0.6, 2.0))
-                            r_crit = float(np.clip(0.35 + 0.20 * (vol_ratio - 0.6) / 1.4, 0.35, 0.55))
+                            r_crit = float(np.clip(0.24 + 0.12 * (vol_ratio - 0.6) / 1.4, 0.22, 0.38))
 
                             round_trip_friction = (fee_rate * 2.0) + (BASE_SLIPPAGE_BPS / 10000.0)
                             friction_be_price = entry * (1.0 + round_trip_friction) if action_dir == "BUY" else entry * (1.0 - round_trip_friction)
 
-                            # TIER 0: Anti-Choking Entry Noise Filter
-                            if r_multiple < 0.20:
+                            # TIER 0: Anti-Choking Entry Noise Filter (< 0.10R)
+                            if r_multiple < 0.10:
                                 calculated_sl = realigned_sl
 
-                            # TIER 1: Continuous Micro-Ratchet
-                            elif r_multiple >= 0.20 and r_multiple < r_crit:
-                                ramp = (r_multiple - 0.20) / max(1e-5, (r_crit - 0.20))
-                                softened_risk = initial_risk * (1.0 - 0.75 * ramp)
+                            # TIER 1: Continuous Micro-Ratchet (0.10R <= R < r_crit)
+                            elif r_multiple >= 0.10 and r_multiple < r_crit:
+                                ramp = (r_multiple - 0.10) / max(1e-5, (r_crit - 0.10))
+                                softened_risk = initial_risk * (1.0 - 0.80 * ramp)
                                 calculated_sl = entry - softened_risk if action_dir == "BUY" else entry + softened_risk
 
-                            # TIER 2: Friction-Compensated Breakeven Floor
-                            elif r_multiple >= r_crit and r_multiple < 0.80:
+                            # TIER 2: Friction-Compensated Breakeven Floor (r_crit <= R < 0.70R)
+                            elif r_multiple >= r_crit and r_multiple < 0.70:
                                 calculated_sl = friction_be_price
 
-                            # TIER 3: Asymptotic Parabolic Trailing Chandelier
+                            # TIER 3: Asymptotic Parabolic Trailing Chandelier (Runners >= 0.70R)
                             else:
-                                decay_lambda = 0.70
-                                alpha_max, alpha_min = 2.0, 0.5
-                                cushion_mult = alpha_min + (alpha_max - alpha_min) * math.exp(-decay_lambda * (r_multiple - 0.80))
+                                decay_lambda = 0.75
+                                alpha_max, alpha_min = 1.8, 0.4
+                                cushion_mult = alpha_min + (alpha_max - alpha_min) * math.exp(-decay_lambda * (r_multiple - 0.70))
                                 dynamic_cushion = atr_proxy * cushion_mult
 
                                 if action_dir == "BUY":
@@ -859,6 +875,14 @@ def run_v40_backtest(
                                 locked_sl = min(locked_sl, calculated_sl)
 
                             current_sl = locked_sl
+
+                            # Instant Predator Reversal Strike Guard (Gave back >= 22% from >= 0.50R peak)
+                            if r_multiple >= 0.50:
+                                retrace_from_peak = (r_multiple - current_r) / (r_multiple + 1e-9)
+                                if retrace_from_peak >= 0.22:
+                                    outcome, exit_price = "PREDATOR_REVERSAL_STRIKE", tick_p
+                                    tick_break = True
+                                    break
 
                             # Physical boundary breaches
                             hit_sl = tick_p <= current_sl if action_dir == "BUY" else tick_p >= current_sl
@@ -890,7 +914,7 @@ def run_v40_backtest(
                                 outcome, exit_price = "HAWKES_CLIMAX", c_j
                                 break
 
-                        # Profit Retracement Locking (Gave back 28% from >= 0.70R peak)
+                        # Profit Retracement Fallback (Gave back 28% from >= 0.70R peak)
                         if r_multiple >= 0.70:
                             retrace = (r_multiple - current_r) / (r_multiple + 1e-9)
                             if retrace >= 0.28:
@@ -1040,7 +1064,7 @@ def parameter_sweep(t_cand: List[Dict], b_cand: List[Dict], symbol: str) -> List
     Purges trade horizon (180 mins) and embargo window (60 mins) to score strictly on OOS splits.
     """
     results = []
-    print("\n  Running V45.0 Purged & Embargoed Walk-Forward Cross-Validation (5 Folds)...")
+    print("\n  Running V50.0 Purged & Embargoed Walk-Forward Cross-Validation (5 Folds)...")
 
     rr_ratios = [1.8, 2.0, 2.4]
     atr_mults = [2.0, 2.5, 3.0]
@@ -1140,7 +1164,7 @@ if __name__ == "__main__":
             initial_rls_state=trained_state, freeze_weights=True
         )
 
-        print("\n=== V45.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40% Frozen) ===")
+        print("\n=== V50.0 APEX TITAN OUT-OF-SAMPLE TEST (Last 40% Frozen) ===")
         for k, v in test.items():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")

@@ -1,19 +1,20 @@
 """
-V44.2 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
+V49.0 APEX TITAN: PURE-ASYNC FORENSIC & TCA MEMORY LEDGER
 --------------------------------------------------------------------------------
 Hyper-optimized persistent database connector and Transaction Cost Analysis (TCA) ledger.
 
-Production Hardening & Quantitative Upgrades (V44.2 Hotfix):
-1. Cold-Start Arming Activation: Defaults new and freshly scanned tokens to armed (is_armed=True)
-   on boot unless explicitly flagged for demotion, eradicating the 0-trade live execution lockout.
-2. Holographic Fallback Arming: Guarantees live execution remains active even when 
-   in-memory local holographic samples are sparse during initial warmup.
-3. Graceful SQLite-Only Degradation: Bypasses fatal boot crashes when SUPABASE credentials
-   are missing or unreachable, operating seamlessly in WAL mode.
-4. Shadow/Live Forensic Decoupling: Queries strictly constrain shadow resolutions to 
-   `WHERE resolved = 0 AND is_shadow = 1` to prevent overriding active real inventory.
-5. High-Throughput Micro-Batching: Asynchronously drains write queues into batched 
-   upserts/inserts with non-blocking SQLite checkpoints and clean task cancellation teardown.
+Production Hardening & Quantitative Upgrades (V49.0 Audit Resolutions):
+1. Strict Shadow-First Quarantine: Prevents newly rotated dynamic altcoins from 
+   trading live without statistical edge evidence. Only anchor pairs (BTC, ETH, SOL) 
+   permit cold-start arming; all other pairs must clear shadow promotion criteria.
+2. Holographic Fallback Hardening: Eliminates false-positive arming during cloud or
+   local cache cold starts.
+3. Thread-Safe WAL Concurrency: Strictly protects all SQLite read/write transactions
+   under asyncio lock to eliminate database table contention.
+4. Shadow/Live Forensic Decoupling: Constrains shadow resolution to is_shadow = 1 
+   to prevent overwriting live position execution records.
+5. Non-Blocking Batched Cloud Sync: High-throughput write queue with graceful flushing 
+   and clean task cancellation during emergency shutdown.
 """
 
 import os
@@ -35,10 +36,13 @@ except ImportError:
 
 logger = logging.getLogger("QUANT_CORE.MEMORY")
 
+# Institutional anchor assets permitted for cold-start initial live trading
+ANCHOR_ASSETS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+
 
 class MemoryBank:
     """
-    V44.2 PURE-ASYNC FORENSIC LEDGER
+    V49.0 PURE-ASYNC FORENSIC LEDGER
     Drives distributed trade forensics, shadow promotion gating, and Bayesian
     DNA clustering with resilient on-disk SQLite WAL reads and batched cloud persistence.
     """
@@ -694,7 +698,7 @@ class MemoryBank:
     async def compute_latent_dna_edge(self, current_dna: Dict[str, Any], k_neighbors: int = 30) -> Dict[str, Any]:
         """
         Computes k-NN Bayesian win probability instantly via Local SQLite Fast-Path.
-        Arms trading on cold starts unless an asset explicitly fails promotion gating.
+        Strictly quarantines dynamic altcoins in shadow until proven via sufficient sample evidence.
         """
         c_vol = min(float(current_dna.get("vol_mult", 1.0) or 1.0), 10.0)
         c_log_mlofi = float(current_dna.get("log_mlofi_z", 0.0) or 0.0)
@@ -735,17 +739,19 @@ class MemoryBank:
             self._ingest_hologram_data(historical_data)
             promo_eval = await self.evaluate_shadow_promotion(target_symbol)
 
-            # Cold-start resolution: Arm live trading unless the asset has explicitly triggered demotion
+            # Audit P1 #7 Fix: Enforce strict shadow quarantine for non-anchor assets
+            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL"])
             if len(historical_data) < k_neighbors:
-                is_armed_default = not promo_eval.get("should_demote", False)
+                # Anchor tokens may boot in armed state if not flagged for demotion; altcoins must prove edge first
+                is_armed_default = is_anchor and not promo_eval.get("should_demote", False)
                 result_payload = {
-                    "bayesian_edge": 0.55,
+                    "bayesian_edge": 0.55 if is_anchor else 0.50,
                     "is_armed": is_armed_default,
                     "matched_samples": len(historical_data),
                     "cluster_win_rate": 0.50,
                     "win_rate": 0.50,
                     "shadow_sharpe": promo_eval.get("shadow_sharpe", 0.0),
-                    "promotion_event": "COLD_START_ARMED" if is_armed_default else "COLD_START_DISARMED"
+                    "promotion_event": "COLD_START_ARMED_ANCHOR" if is_armed_default else "QUARANTINED_SHADOW_ACQUISITION"
                 }
                 self.dna_cache[dna_hash] = (current_time, result_payload)
                 return result_payload
@@ -803,17 +809,17 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"[X-RAY] 🛑 LOCAL DB FAULT: SQLite lookup failed ({e}). Engaging HOLOGRAPHIC FALLBACK.")
 
-            # Safe cold-start arming on holographic fallback
+            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL"])
             if not self.holo_warmed_up or self.holo_pointer == 0:
-                logger.info("[X-RAY] ⚡ Hologram uninitialized. Defaulting to armed for live execution.")
+                logger.info(f"[X-RAY] ⚡ Hologram uninitialized. Setting status for {target_symbol} (Anchor: {is_anchor}).")
                 return {
-                    "bayesian_edge": 0.55, 
-                    "is_armed": True, 
+                    "bayesian_edge": 0.55 if is_anchor else 0.50, 
+                    "is_armed": is_anchor, 
                     "matched_samples": 0,
                     "cluster_win_rate": 0.50, 
                     "win_rate": 0.50, 
                     "shadow_sharpe": 0.0,
-                    "promotion_event": "COLD_START_ARMED_SAFE"
+                    "promotion_event": "COLD_START_ARMED_ANCHOR" if is_anchor else "QUARANTINED_SHADOW_ACQUISITION"
                 }
 
             active_size = min(self.holo_pointer, self.holo_capacity)
@@ -837,7 +843,7 @@ class MemoryBank:
             total = k_actual
 
             bayesian_edge = (wins + 2.0) / (total + 4.0)
-            is_armed = bool(bayesian_edge >= 0.52)
+            is_armed = bool(bayesian_edge >= 0.52) if is_anchor else (bool(bayesian_edge >= 0.55) and active_size >= 35)
 
             logger.info(f"[X-RAY] 🌌 HOLOGRAPHIC SURVIVAL // Local Edge: {bayesian_edge:.2%} | Armed: {is_armed}")
 

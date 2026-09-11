@@ -1,19 +1,18 @@
 """
-V48.0 APEX TITAN: SMART PREDATOR CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
+V49.0 APEX TITAN: SMART PREDATOR CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
 -----------------------------------------------------------------------------------------
 High-frequency continuous-time optimal stopping and dynamic volatility barrier engine.
 Combines friction-compensated breakeven floors, empirical volatility ratio modulation,
 asymptotic parabolic chandelier ratchets, and Bayesian order flow exhaustion sentries.
 
-Production Hardening & Smart Predator Upgrades (V48.0):
-- Predator Breakeven Stalking: Actively pulls stop-losses to entry friction-breakeven 
-  the moment a trade clears shallow profit (MFE >= 0.30R), converting trades to free rolls.
-- Reversal Strike Guard: Instantly cuts winners if they give back >= 22% of their peak R-multiple,
-  preventing profitable trades from slipping back into full losses.
-- Noise Band Buffer: Provides a 0.10R initial breathing room buffer to prevent normal
-  bid-ask bounce from choking out positions prematurely.
-- Exchange Stop Clamping Fix: Ensures short and long stops maintain strict safety buffers
-  above/below mark price, eliminating Bybit API amendment rejections.
+Production Hardening & Quantitative Upgrades (V49.0 Audit Resolutions):
+- Dual-Basis Mark/Last Safety Clamping: Clamps server-side stops against MarkPrice and
+  executable Top-of-Book, terminating Bybit Error 34036/110043 amendment rejections.
+- Micro-Account Notional Scale-Out Guard: Converts partial exits (< $6.50) into deferred
+  full exits (>= 1.60R) to eliminate exchange order rejection loops.
+- Monotonic Ratchet Guarantee: Prevents volatility-induced stop degradation across both legs.
+- Basis Blowout Sentry: Reconciles local executable bid/ask stops with exchange MarkPrice.
+- Strict Decimal Quantization: Floors exit order lot sizes to exchange step sizes cleanly.
 """
 
 import math
@@ -43,7 +42,7 @@ class ProfitProtectionState:
     pnl_velocity: float = 0.0
     rolling_mlofi_peak: float = 0.0
     be_active: bool = False
-    r_crit: float = 0.30  # Predator breakeven activation threshold
+    r_crit: float = 0.28
     initial_risk_dist: float = 0.0
 
 
@@ -93,7 +92,7 @@ class PortfolioCommander:
 
 class IntelligentExitEngine:
     """
-    Continuous Microstructure Optimal Stopping & Smart Predator Volatility Barrier Policy.
+    Continuous Microstructure Optimal Stopping & Dynamic Volatility Barrier Policy.
     """
     @staticmethod
     def evaluate(ctx: Dict[str, Any], state: PositionExitState) -> ExitDecision:
@@ -115,7 +114,7 @@ class IntelligentExitEngine:
         symbol = ctx.get("symbol", "ASSET")
 
         # =========================================================================
-        # ZERO-PRICE SANITY BARRIER
+        # PRICING SANITY & DUAL-BASIS RESOLUTION
         # =========================================================================
         ob = ctx.get("last_ob", {}) or {}
         raw_bid = ob.get("best_bid")
@@ -128,12 +127,12 @@ class IntelligentExitEngine:
         if fallback_price <= 0.0:
             fallback_price = float(state.entry_price)
 
-        if is_buy:
-            exec_price = best_bid if best_bid > 0.0 else fallback_price
-        else:
-            exec_price = best_ask if best_ask > 0.0 else fallback_price
+        exec_price = (best_bid if best_bid > 0.0 else fallback_price) if is_buy else (best_ask if best_ask > 0.0 else fallback_price)
+        mark_price = float(ctx.get("mark_price", 0.0) or exec_price)
+        if mark_price <= 0.0:
+            mark_price = exec_price
 
-        # Reject corrupted/unpopulated tick pricing before state pollution
+        # Reject corrupted/unpopulated tick pricing
         if exec_price <= 0.0 or math.isnan(exec_price) or math.isinf(exec_price):
             logger.warning(f"[EXIT_SENTRY] Zero or invalid pricing on {symbol} ({exec_price}). Holding state.")
             return ExitDecision("HOLD", state.q_retained, "NONE", 0.0, 0.0, 0.0, "INVALID_ZERO_PRICE", "")
@@ -164,7 +163,7 @@ class IntelligentExitEngine:
         current_r = price_delta / (initial_risk_dist + 1e-9)
         current_pnl = price_delta * total_qty
 
-        # Structural Anomaly Barrier
+        # Structural Anomaly Filter
         if abs(current_r) > 15.0 and p_state.mfe_r < 2.0:
             logger.critical(
                 f"[EXIT_SENTRY] Anomaly R-multiple ({current_r:.2f}R) detected on {symbol}. "
@@ -193,7 +192,7 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
-        # Path Telemetry (MFE and MAE Tracking)
+        # Path Telemetry Tracking
         if p_state.peak_price <= 0.0:
             p_state.peak_price = state.entry_price
 
@@ -279,13 +278,13 @@ class IntelligentExitEngine:
                 )
 
         # =========================================================================
-        # SMART PREDATOR TIERED BARRIER (CAMB)
+        # CONTINUOUS ADAPTIVE MICROSTRUCTURE BARRIER (CAMB)
         # =========================================================================
         vol_pct = atr / max(exec_price, 1e-9)
         baseline_vol_pct = float(ctx.get("baseline_vol_pct", 0.005))
         vol_ratio = float(np.clip(vol_pct / max(baseline_vol_pct, 1e-5), 0.6, 2.0))
         
-        r_crit = float(np.clip(0.25 + 0.12 * (vol_ratio - 0.6) / 1.4, 0.22, 0.38))
+        r_crit = float(np.clip(0.24 + 0.12 * (vol_ratio - 0.6) / 1.4, 0.22, 0.38))
         p_state.r_crit = r_crit
 
         taker_fee_rate = float(ctx.get("taker_fee_rate", 0.00055))
@@ -296,7 +295,7 @@ class IntelligentExitEngine:
         calculated_sl = baseline_sl
         state_id = "HOLD_INITIAL_RISK"
 
-        # TIER 0: Noise Band (< 0.10R) - Breathing room
+        # TIER 0: Noise Band (< 0.10R)
         if p_state.mfe_r < 0.10:
             calculated_sl = baseline_sl
             state_id = "HOLD_INITIAL_RISK"
@@ -331,6 +330,7 @@ class IntelligentExitEngine:
 
             state_id = f"PREDATOR_CHANDELIER_LATCHED (Cushion: {cushion_mult:.2f}x ATR)"
 
+        # Monotonicity Enforcement
         existing_sl = float(ctx.get("current_sl", 0.0))
         if existing_sl > 0.0:
             calculated_sl = max(calculated_sl, existing_sl) if is_buy else min(calculated_sl, existing_sl)
@@ -354,6 +354,7 @@ class IntelligentExitEngine:
                     log_output=""
                 )
 
+        # Physical Boundary Breaches
         if is_buy and exec_price <= calculated_sl:
             return ExitDecision(
                 action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
@@ -384,19 +385,40 @@ class IntelligentExitEngine:
                 log_output=""
             )
 
+        # =========================================================================
+        # SCALE-OUT & MICRO-ACCOUNT NOTIONAL GUARD
+        # =========================================================================
         if current_r >= 1.30 and state.q_retained >= 0.99:
-            p_state.state_id = "SCALE_OUT_50"
-            return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.3R", "")
+            child_notional = (state.actual_qty * 0.5) * exec_price
+            if child_notional < 6.50:
+                if current_r >= 1.60:
+                    p_state.state_id = "SCALE_OUT_CONVERTED_EXIT"
+                    return ExitDecision(
+                        action="EXIT", target_q=0.0, urgency="FLASH_IOC", limit_price=exec_price,
+                        exchange_ts_price=calculated_sl, dynamic_tp_price=target_tp,
+                        reason="FULL_EXIT_DUE_TO_MIN_NOTIONAL", log_output=""
+                    )
+                # Else: Hold position through the runner
+            else:
+                p_state.state_id = "SCALE_OUT_50"
+                return ExitDecision("SCALE_OUT", 0.5, "FLASH_IOC", exec_price, calculated_sl, target_tp, "SCALE_OUT_1.3R", "")
 
-        min_market_buffer = max(atr * 0.22, exec_price * 0.0018)
+        # =========================================================================
+        # MARK-PRICE EXCHANGE STOP CLAMPING (RESOLVES BYBIT 34036 / 110043)
+        # =========================================================================
+        min_market_buffer = max(atr * 0.20, mark_price * 0.0020)
         if is_buy:
-            exchange_ts_price = min(calculated_sl, exec_price - min_market_buffer)
+            # Long SL must be strictly below both executable bid and exchange MarkPrice
+            reference_boundary = min(exec_price, mark_price)
+            exchange_ts_price = min(calculated_sl, reference_boundary - min_market_buffer)
             if p_state.locked_sl > 0.0:
-                exchange_ts_price = max(exchange_ts_price, min(p_state.locked_sl, exec_price - min_market_buffer))
+                exchange_ts_price = max(exchange_ts_price, min(p_state.locked_sl, reference_boundary - min_market_buffer))
         else:
-            exchange_ts_price = max(calculated_sl, exec_price + min_market_buffer)
+            # Short SL must be strictly above both executable ask and exchange MarkPrice
+            reference_boundary = max(exec_price, mark_price)
+            exchange_ts_price = max(calculated_sl, reference_boundary + min_market_buffer)
             if p_state.locked_sl > 0.0:
-                clamped_short = max(p_state.locked_sl, exec_price + min_market_buffer)
+                clamped_short = max(p_state.locked_sl, reference_boundary + min_market_buffer)
                 exchange_ts_price = min(exchange_ts_price, clamped_short)
 
         return ExitDecision("HOLD", state.q_retained, "NONE", exec_price, exchange_ts_price, target_tp, "HOLD_OPTIMAL_CONTINUATION", "")
@@ -433,6 +455,7 @@ class ExecutionGovernorFSM:
         try:
             qty_str = cls._format_qty_str(qty_to_close, qty_step)
             if Decimal(qty_str) <= Decimal("0"):
+                logger.warning(f"[GOVERNOR] Quantized close qty on {symbol} is zero ({qty_to_close} floored to step {qty_step}). Aborting.")
                 return False
         except Exception:
             qty_str = str(qty_to_close)
@@ -459,7 +482,9 @@ class ExecutionGovernorFSM:
                     state.q_retained = decision.target_q
                     state.execution_state = "OBSERVE"
                 return True
-            return False
+            else:
+                logger.error(f"[GOVERNOR] Market execution rejected on {symbol}: {res.get('retMsg') if isinstance(res, dict) else res}")
+                return False
 
         if state.execution_state == "OBSERVE":
             res = await executor.safe_call(
