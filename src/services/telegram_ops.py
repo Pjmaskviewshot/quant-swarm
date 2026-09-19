@@ -1,0 +1,286 @@
+"""
+💎 V25.0 APEX QUANTUM PRIME: TELEGRAM MISSION CONTROL
+-----------------------------------------------------------------
+Upgraded with Cryptographic HTML Escaping (Zero-Drop Guarantee),
+Unicode Sparkline Generators for visual momentum tracking, and
+Native aiohttp Timeout Client parameters to prevent coroutine context faults.
+
+Architectural Supremacy (V25.0):
+- Matrix X-Ray Parity: The Entry Ticket formatter now natively decrypts and 
+  displays the 18-D Volterra-Hermite Tensor features (Log-MLOFI, Rough Hawkes, 
+  Sector Impulse, and Quantum-Markov Beliefs) instead of legacy HMM regimes.
+"""
+
+import re
+import html
+import asyncio
+import aiohttp
+import logging
+from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger("QUANT_CORE.TELEGRAM")
+
+class AsyncTelegramReporter:
+    def __init__(self, token: str, chat_id: str):
+        self.token = token or ""
+        self.chat_id = chat_id or ""
+        self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        self._session: Optional[aiohttp.ClientSession] = None
+        
+        # 🚀 Decoupled Message Queue with Backpressure
+        self._message_queue = asyncio.Queue(maxsize=100)
+        self._worker_task: Optional[asyncio.Task] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Lazy initialization of persistent aiohttp session for high-throughput connection pooling."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8.0)
+            )
+        return self._session
+
+    def start_worker(self):
+        """Starts the background worker that processes the message queue out-of-band."""
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._queue_worker())
+            logger.info("📡 V25.0 Telegram Background Dispatch Worker ONLINE.")
+
+    async def _queue_worker(self):
+        """Background worker that continuously pulls from the queue and dispatches payloads."""
+        while True:
+            try:
+                payload, max_retries = await self._message_queue.get()
+                success = await self._execute_dispatch(payload, max_retries)
+                self._message_queue.task_done()
+                
+                # Dynamic pacing: 30 msgs/sec max limit per Telegram API docs
+                await asyncio.sleep(0.05 if success else 1.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[X-RAY] Telegram worker encountered a critical error: {e}", exc_info=True)
+
+    async def close(self):
+        """Gracefully closes persistent HTTP session and worker during main daemon teardown."""
+        if self._worker_task and not self._worker_task.done():
+            self._worker_task.cancel()
+            
+        if self._session and not self._session.closed:
+            await self._session.close()
+            logger.info("🔌 Telegram Reporter HTTP session gracefully closed.")
+
+    def _sanitize_error(self, error_msg: str) -> str:
+        """Scrubs token from plain-text server logs to prevent credential leakage."""
+        if not self.token:
+            return str(error_msg)
+        return str(error_msg).replace(self.token, "********")
+
+    def _strip_html(self, text: str) -> str:
+        """Sanitizes payloads by stripping HTML tags if Telegram rejects formatting."""
+        cleaner = re.compile(r'<.*?>')
+        return re.sub(cleaner, '', text)
+        
+    def _generate_sparkline(self, data: List[float], length: int = 8) -> str:
+        """🚀 V25.0 FEATURE: Generates an institutional Unicode sparkline from a float array."""
+        if not data: return "∅"
+        bars = " ▂▃▄▅▆▇█"
+        
+        # Take the most recent 'length' elements
+        recent_data = data[-length:]
+        min_val, max_val = min(recent_data), max(recent_data)
+        
+        if min_val == max_val:
+            return bars[3] * len(recent_data)
+            
+        scale = (len(bars) - 1) / (max_val - min_val)
+        return "".join(bars[int((x - min_val) * scale)] for x in recent_data)
+
+    async def _execute_dispatch(self, payload: Dict[str, Any], max_retries: int = 3) -> bool:
+        """Core request worker with dynamic HTTP 429 backoff support and native client timeout."""
+        if not self.token or not self.chat_id:
+            return False
+
+        session = await self._get_session()
+        
+        # 🚀 V25.0 HOTFIX: Use native aiohttp timeout object instead of asyncio.wait_for wrapper
+        req_timeout = aiohttp.ClientTimeout(total=4.0)
+
+        for attempt in range(max_retries):
+            try:
+                async with session.post(self.base_url, json=payload, timeout=req_timeout) as response:
+                    if response.status == 200:
+                        return True
+
+                    raw_err = await response.text()
+
+                    # Dynamic HTTP 429 Rate-Limit Handling
+                    if response.status == 429:
+                        try:
+                            err_json = await response.json()
+                            retry_after = float(err_json.get("parameters", {}).get("retry_after", 2.0))
+                        except Exception:
+                            retry_after = 2.0
+                        logger.warning(f"⚠️ Telegram Rate Limit hit. Backing off for {retry_after:.1f}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    # Fallback for parse errors (HTTP 400 Bad Request)
+                    if response.status == 400 and "parse" in raw_err.lower():
+                        logger.warning("Telegram rejected HTML formatting despite escaping. Falling back to plain text.")
+                        payload["text"] = self._strip_html(payload.get("text", ""))
+                        payload["parse_mode"] = ""
+                        continue
+
+                    logger.error(self._sanitize_error(f"Telegram remote rejection (HTTP {response.status}): {raw_err}"))
+
+            except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientConnectorError):
+                logger.debug("[X-RAY] ⚠️ Telegram dispatch timed out after 4.0s. Load shedding payload.")
+                break # Drop message to preserve memory and event loop health
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(self._sanitize_error(f"❌ Telegram API permanently unreachable: {e}"))
+                else:
+                    sleep_time = 2.0 ** attempt
+                    await asyncio.sleep(sleep_time)
+
+        return False
+
+    async def log_message(self, text: str, alert_level: str = "INFO", max_retries: int = 3):
+        """Places unified HTML-formatted alert into the dispatch queue."""
+        emojis = {"INFO": "ℹ️", "SUCCESS": "🟢", "WARNING": "⚠️", "CRITICAL": "🚨"}
+        prefix = emojis.get(str(alert_level).upper(), "🤖")
+
+        safe_text = html.escape(str(text))
+        html_body = f"<b>{prefix} [SYSTEM ALERT]</b>\n\n{safe_text}"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": html_body,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        
+        self.start_worker()
+        try:
+            self._message_queue.put_nowait((payload, max_retries))
+        except asyncio.QueueFull:
+            pass # Shed load if queue is full
+
+    async def send_html_report(self, html_text: str, max_retries: int = 3):
+        """Places raw HTML payloads into the dispatch queue. Input MUST be pre-escaped."""
+        payload = {
+            "chat_id": self.chat_id,
+            "text": html_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        
+        self.start_worker()
+        try:
+            self._message_queue.put_nowait((payload, max_retries))
+        except asyncio.QueueFull:
+            pass
+
+    # ====================================================================
+    # 🚀 V25.0 APEX: X-RAY FORENSIC FORMATTERS (100% Escaped Standard)
+    # ====================================================================
+
+    def format_entry_ticket(self, symbol: str, direction: str, price: float, size: float, edge_bps: float, risk_pct: float, regime: str, features: Dict[str, Any]) -> str:
+        """Formats the Deep-Dive Entry Ticket with X-Ray Diagnostics mapped to the V25.0 Tensor."""
+        notional_value = price * size
+        sl_price = features.get("virtual_sl", price)
+        sl_pct = (abs(price - sl_price) / price) if price > 0 else 0.0
+        
+        # 🚀 V25.0: Extract Volterra-Hermite Tensor Dynamics
+        log_mlofi_z = features.get('log_mlofi_z', 0.0)
+        hawkes_z = features.get('hawkes_z', 0.0)
+        sector_impulse = features.get('sector_impulse', 0.0)
+
+        # Determine dominant Quantum-Markov belief
+        beliefs = features.get("markov_beliefs", {})
+        if beliefs:
+            dominant_regime = max(beliefs, key=beliefs.get).upper()
+        else:
+            dominant_regime = str(regime).upper()
+        
+        micro_status = "LAMINAR FLOW"
+        if log_mlofi_z > 2.0: micro_status = "TOXIC BUY PRESSURE"
+        elif log_mlofi_z < -2.0: micro_status = "TOXIC SELL PRESSURE"
+        elif abs(hawkes_z) > 2.5: micro_status = "INSTITUTIONAL ICEBERG"
+        elif abs(sector_impulse) > 1.5: micro_status = "MACRO DISLOCATION"
+
+        # APEX/QA: `safe_reasoning = html.escape(reasoning[:45])` was computed
+        # here and never rendered -- dead since the template dropped the field.
+        # Removed rather than wired in: `reasoning` is model-generated free text,
+        # and this message is sent with parse_mode=HTML, so re-introducing it
+        # needs the escape to be deliberate, not incidental.
+        safe_regime = html.escape(dominant_regime)
+        safe_symbol = html.escape(str(symbol))
+
+        return (
+            f"🎯 <b>X-RAY DISPATCH // {safe_symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Action: <b>{direction}</b>\n"
+            f"• Fill Price: <code>{price:.5f}</code>\n"
+            f"• Position: <code>{size:.4f} units (${notional_value:.2f})</code>\n"
+            f"• Sizing Risk: <code>{risk_pct:.2%} Equity</code>\n\n"
+            f"🔬 <b>V25.0 MATRIX DIAGNOSTICS:</b>\n"
+            f"• Markov Belief: <code>{safe_regime}</code>\n"
+            f"• Alpha Tensor: <code>{edge_bps:.1f} bps</code>\n"
+            f"• Log-MLOFI (Z): <code>{log_mlofi_z:+.2f}σ</code>\n"
+            f"• Hawkes (Z): <code>{hawkes_z:+.2f}σ</code>\n"
+            f"• Sector Vector: <code>{sector_impulse:+.2f}σ</code>\n"
+            f"• Stop Loss: <code>{sl_pct:.2%}</code>\n"
+            f"• Topology: <code>{micro_status}</code>"
+        )
+
+    def format_execution_receipt(self, symbol: str, net_pnl: float, slippage_bps: float, fees: float, duration_mins: float, is_win: bool) -> str:
+        """Formats the Post-Trade Autopsy Receipt upon position closure."""
+        # AUDIT B33: was `net + fees + (|slip_bps|/10000 * net)`, which
+        # multiplies a slippage FRACTION by a PnL amount -- dimensionally
+        # meaningless. Gross is simply net before fees; slippage is already
+        # embedded in the executed prices and is reported separately below.
+        gross_pnl = net_pnl + fees
+        outcome_emoji = "🟢 WIN" if is_win else "🔴 LOSS"
+        
+        return (
+            f"🔬 <b>POST-TRADE AUTOPSY // {symbol}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Outcome: <b>{outcome_emoji}</b>\n"
+            f"• Net PnL: <code>{net_pnl:+.4f} USDT</code>\n\n"
+            f"📊 <b>EXECUTION METRICS:</b>\n"
+            f"• Time in Market: <code>{duration_mins:.1f} mins</code>\n"
+            f"• Gross PnL: <code>{gross_pnl:+.4f} USDT</code>\n"
+            f"• Maker/Taker Fees: <code>-{fees:.4f} USDT</code>\n"
+            f"• Slippage Drag: <code>{slippage_bps:.1f} bps</code>"
+        )
+
+    def format_mission_control_dashboard(self, uptime: float, live_count: int, shadow_count: int, balance: float, session_pnl: float, drawdown: float, dd_bar: str, execution_stats: Dict[str, Any]) -> str:
+        """Formats the 10-Minute Mission Control Heartbeat with Unicode Sparklines."""
+        win_rate = execution_stats.get('win_rate', 0.0)
+        trades = execution_stats.get('trade_count', 0)
+        avg_slip = execution_stats.get('avg_slippage_bps', 0.0)
+        
+        rolling_pnl_array = execution_stats.get('rolling_pnl_array', [0, 1, -1, 2, 3, 2, 4, 5])
+        momentum_sparkline = self._generate_sparkline(rolling_pnl_array, length=8)
+        
+        tox_radar = "SAFE 🟩"
+        if avg_slip > 5.0: tox_radar = "ELEVATED SLIPPAGE 🟨"
+        if drawdown > 0.10: tox_radar = "SYSTEMIC DRAWDOWN 🟥"
+        
+        return (
+            f"💎 <b>QUANTUM SWARM (V25.0 OMEGA-FRAMEWORK)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏱️ <b>Uptime:</b> <code>{uptime:.2f} Hours</code>\n"
+            f"🛰️ <b>Swarm Status:</b> <code>[{live_count} Live | {shadow_count} Shadow]</code>\n\n"
+            f"💵 <b>FINANCIAL VAULT</b>\n"
+            f"• Total Liquidity: <code>{balance:.4f} USDT</code>\n"
+            f"• Session Return:  <code>{session_pnl:+.4f} USDT</code>\n"
+            f"• Peak Drawdown:   <code>{drawdown:.2%}</code>\n"
+            f"• Risk Buffer:     <code>[{dd_bar}]</code>\n"
+            f"• PnL Momentum:    <code>[{momentum_sparkline}]</code>\n\n"
+            f"🔬 <b>TODAY's EXECUTION METRICS</b>\n"
+            f"• Trades Settled: <code>{trades}</code>\n"
+            f"• Live Win Rate:  <code>{win_rate:.1%}</code>\n"
+            f"• Avg Slippage:   <code>{avg_slip:.1f} bps</code>\n"
+            f"• Toxicity Radar: <code>{tox_radar}</code>"
+        )

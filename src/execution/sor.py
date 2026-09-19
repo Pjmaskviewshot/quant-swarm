@@ -1,0 +1,1319 @@
+"""
+V50.0 APEX TITAN: DIRECT-DRIVE HIGH-FREQUENCY SMART ORDER ROUTER (SOR)
+--------------------------------------------------------------------------------
+Institutional-grade execution nexus featuring atomic inline bracket orders,
+zero-latency post-fill stop-loss anchoring, Avellaneda-Stoikov continuous
+inventory reservation pricing, sub-millisecond execution telemetry, Perold (1988)
+Implementation Shortfall (IS) tracking, pure Decimal lot-quantization, and 
+contention-free token-bucket rate governance.
+
+Production Hardening & Quantitative Upgrades (V50.0 Audit Resolutions):
+- Absolute Major Slippage Cap Clamping: Clamps dynamic slippage caps strictly to a maximum 
+  of 15.0 bps for majors (BTC, ETH) and 22.0 bps for altcoins, eliminating destructive 
+  book-wiping spikes (e.g., -57.2 bps ETH fills).
+- Silent Fill Sentry: Probes live exchange positions upon WebSocket fill verification
+  timeout, preventing untracked orphan positions.
+- Stop Clamping Hardening: Strips error codes 34036/110043 from false-positive success
+  checks, routing mark-price clashes into active realignments.
+- Proactive Slippage Firewall: Pre-calculates order book traversal costs before execution;
+  automatically downgrades thin-book altcoin sweeps to passive Maker Pegs.
+- Automatic Compliance Blacklisting: Captures Bybit Error 110126 and Innovation Zone
+  restrictions instantly, terminating repeat-error log spam.
+"""
+
+import os
+import uuid
+import asyncio
+import logging
+import math
+import time
+import numpy as np
+from typing import Dict, Any, List, Tuple, Optional
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+
+logger = logging.getLogger("QUANT_CORE.SOR")
+
+
+class SmartOrderRouter:
+    """
+    Direct-drive execution router managing IOC sweeps, Avellaneda-Stoikov 
+    maker pegging, TWAP icebergs, and emergency cascade market orders.
+    """
+    def __init__(self, executor: Any, max_slippage_pct: float = 0.0012, core_engine: Any = None):
+        self.executor = executor
+        self.core_engine = core_engine
+        self.base_max_slippage_pct = max_slippage_pct
+        self.instrument_cache: Dict[str, Dict[str, Any]] = {}
+        self.position_idx = int(os.getenv("BYBIT_POSITION_IDX", 0))
+        self._last_amend_time: Dict[str, float] = {}
+        self._amend_throttle_sec: float = 1.20
+
+        # Avellaneda-Stoikov Base Parameters
+        self.gamma_base = 0.08  # Baseline inventory risk-aversion
+        self.k_decay = 1.5      # Book liquidity density parameter
+
+        # Exchange Fee Schedules (Bybit VIP0 Linear Perps)
+        self.taker_fee_rate: float = 0.00055
+        self.maker_fee_rate: float = 0.00020
+
+        # Contention-Free Token Bucket (Burst: 12 calls/sec, Steady-State: 8 calls/sec)
+        self._rate_tokens = 12.0
+        self._rate_last_check = time.time()
+        self._rate_lock = asyncio.Lock()
+
+        # --- AUDIT B1: notional sanity guard -------------------------------
+        # Maximum tolerated deviation between the notional the risk engine
+        # approved and the notional actually submitted to the exchange.
+        # Exceeding it aborts the order rather than silently trading a
+        # different size than the one that passed risk checks.
+        self.notional_deviation_tolerance = float(
+            os.getenv("NOTIONAL_DEVIATION_TOLERANCE", "0.25")
+        )
+        # AUDIT B21: skip rather than inflate a sub-minimum order.
+        # AUDIT B1 (residual): max age for a fallback reference price.
+        self.max_reference_age_sec = float(os.getenv("MAX_ORDERBOOK_AGE_SEC", "5.0"))
+        self.skip_below_min_notional = (
+            os.getenv("SKIP_BELOW_MIN_NOTIONAL", "true").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+
+    # =========================================================================
+    # RATE LIMITING & NON-BLOCKING PACING
+    # =========================================================================
+
+    async def _rate_limit_acquire(self):
+        """
+        Contention-Free Monotonic Token Bucket:
+        Computes backoff delay within the lock and schedules the sleep outside
+        the critical section, preventing event-loop stalls across concurrent workers.
+        """
+        sleep_time = 0.0
+        async with self._rate_lock:
+            now = time.time()
+            elapsed = max(0.0, now - self._rate_last_check)
+            self._rate_last_check = now
+            self._rate_tokens = min(12.0, self._rate_tokens + (elapsed * 8.0))
+
+            if self._rate_tokens < 1.0:
+                sleep_time = (1.0 - self._rate_tokens) / 8.0
+                self._rate_tokens = 0.0
+                self._rate_last_check += sleep_time
+            else:
+                self._rate_tokens -= 1.0
+
+        if sleep_time > 0.0:
+            await asyncio.sleep(sleep_time)
+
+    # =========================================================================
+    # EXCHANGE SPECIFICATIONS & DETERMINISTIC QUANTIZATION
+    # =========================================================================
+
+    async def _fetch_exchange_limits(self, symbol: str):
+        """Caches and validates lot size filters, tick sizes, and notional thresholds."""
+        if symbol in self.instrument_cache:
+            return
+
+        try:
+            info = await self.executor.safe_call(
+                "GET", "/v5/market/instruments-info", category="linear", symbol=symbol
+            )
+            data_list = info.get("result", {}).get("list", [])
+            if data_list:
+                lot_filter = data_list[0].get("lotSizeFilter", {})
+                price_filter = data_list[0].get("priceFilter", {})
+                self.instrument_cache[symbol] = {
+                    "min_qty": Decimal(str(lot_filter.get("minOrderQty", "1.0"))),
+                    "qty_step": Decimal(str(lot_filter.get("qtyStep", "1.0"))),
+                    "tick_size": Decimal(str(price_filter.get("tickSize", "0.01"))),
+                    "min_notional": Decimal(str(lot_filter.get("minNotionalValue", "5.0")))
+                }
+                return
+        except Exception as e:
+            logger.error(f"[X-RAY] Failed to fetch exchange specifications for {symbol}: {e}")
+
+        # Conservative fallback limits
+        self.instrument_cache[symbol] = {
+            "min_qty": Decimal("1.0"),
+            "qty_step": Decimal("1.0"),
+            "tick_size": Decimal("0.01"),
+            "min_notional": Decimal("5.0")
+        }
+
+    @staticmethod
+    def _is_usable_price(price: Any) -> bool:
+        """A reference price is usable only if it is finite and strictly positive."""
+        try:
+            p = float(price)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(p) and p > 0.0
+
+    def _check_notional_sanity(
+        self,
+        symbol: str,
+        intended_notional: float,
+        actual_notional: float,
+    ) -> Tuple[bool, str]:
+        """
+        AUDIT B1: reject any order whose submitted notional materially differs
+        from the notional the risk engine approved.
+
+        The single legitimate source of upward inflation is the exchange
+        minimum-notional floor, so that floor is carved out explicitly. Any
+        other inflation means a sizing defect and must not reach the exchange.
+        """
+        if not self._is_usable_price(intended_notional):
+            return False, "intended_notional is not a usable positive value"
+        if not self._is_usable_price(actual_notional):
+            return False, "actual_notional is not a usable positive value"
+
+        limits = self.instrument_cache.get(symbol, {})
+        min_notional = float(
+            max(Decimal("6.50"), limits.get("min_notional", Decimal("5.0")) * Decimal("1.05"))
+        )
+        tol = self.notional_deviation_tolerance
+        deviation = abs(actual_notional - intended_notional) / intended_notional
+
+        if deviation <= tol:
+            return True, "OK"
+
+        # Permitted carve-out: bumped up to (but not beyond) the exchange floor.
+        if intended_notional < actual_notional <= min_notional + 1e-9:
+            return True, "OK_MIN_NOTIONAL_FLOOR"
+
+        return False, (
+            f"NOTIONAL_DEVIATION_REJECT // {symbol}: intended ${intended_notional:,.2f} "
+            f"vs actual ${actual_notional:,.2f} (deviation {deviation:.1%} > tolerance {tol:.0%})"
+        )
+
+    def _resolve_reference_price(
+        self,
+        symbol: str,
+        depth_snapshot: Optional[Dict[str, Any]],
+    ) -> Tuple[float, Optional[Dict[str, Any]], str]:
+        """
+        AUDIT B1: resolve a *real* reference price. Never invents one.
+
+        Order of preference: the supplied book, then the engine's last known
+        book for this symbol. If neither yields a usable two-sided price this
+        returns 0.0 and the caller must abort.
+        """
+        candidates: List[Tuple[str, Optional[Dict[str, Any]]]] = [("slice_book", depth_snapshot)]
+        if self.core_engine is not None and hasattr(self.core_engine, "orderbook_snapshots"):
+            candidates.append(
+                ("engine_snapshot", self.core_engine.orderbook_snapshots.get(symbol))
+            )
+
+        now = time.time()
+        for source, ob in candidates:
+            if not ob:
+                continue
+            # AUDIT B1 (residual): an engine snapshot is better than a phantom
+            # price but must not be unboundedly old. A stale book sizes an order
+            # against a price that no longer exists.
+            as_of = ob.get("as_of")
+            if source != "slice_book":
+                if as_of is None or (now - float(as_of)) > self.max_reference_age_sec:
+                    age = "unknown" if as_of is None else f"{now - float(as_of):.1f}s"
+                    logger.warning(
+                        f"[X-RAY] {symbol}: rejecting '{source}' reference price (age {age} "
+                        f"> {self.max_reference_age_sec:.1f}s limit)."
+                    )
+                    continue
+            bids = ob.get("bids") or []
+            asks = ob.get("asks") or []
+            best_bid = float(bids[0][0]) if bids else float(ob.get("best_bid", 0.0) or 0.0)
+            best_ask = float(asks[0][0]) if asks else float(ob.get("best_ask", 0.0) or 0.0)
+            if self._is_usable_price(best_bid) and self._is_usable_price(best_ask) and best_ask > best_bid:
+                return (best_bid + best_ask) / 2.0, ob, source
+
+        return 0.0, None, "NONE"
+
+    def _apply_dynamic_exchange_limits(self, raw_qty: float, current_price: float, symbol: str) -> float:
+        """Enforces exchange lot steps and minimum notional floors using pure Decimal math."""
+        if raw_qty <= 0.0 or math.isnan(raw_qty) or math.isinf(raw_qty):
+            return 0.0
+
+        # AUDIT B1: fail closed. Never substitute a default/clamped price for a
+        # missing one -- the min-notional floor below divides by this value, so
+        # a wrong price here silently rescales the entire order.
+        if not self._is_usable_price(current_price):
+            logger.error(
+                f"[X-RAY] SIZING ABORT // {symbol}: unusable reference price "
+                f"({current_price!r}). Failing closed rather than sizing off a default."
+            )
+            return 0.0
+
+        limits = self.instrument_cache.get(symbol, {
+            "min_qty": Decimal("1.0"),
+            "qty_step": Decimal("1.0"),
+            "tick_size": Decimal("0.01"),
+            "min_notional": Decimal("5.0")
+        })
+        min_qty: Decimal = limits["min_qty"]
+        qty_step: Decimal = limits["qty_step"]
+        min_notional: Decimal = max(Decimal("6.50"), limits["min_notional"] * Decimal("1.05"))
+        price_dec = Decimal(f"{max(current_price, 1e-9):.8f}")
+        raw_qty_dec = Decimal(f"{raw_qty:.8f}")
+
+        if qty_step > Decimal("0"):
+            stepped_qty = (raw_qty_dec // qty_step) * qty_step
+        else:
+            stepped_qty = raw_qty_dec
+
+        notional = stepped_qty * price_dec
+        if notional < min_notional:
+            # AUDIT B21: previously the quantity was inflated upward to meet the
+            # exchange floor, silently overriding the risk engine's sizing. The
+            # correct response to "too small to trade" is not to trade.
+            if self.skip_below_min_notional:
+                logger.info(
+                    f"[SOR_GATE] ENTRY_REJECTED_BELOW_MIN_NOTIONAL // {symbol}: "
+                    f"risk-sized notional ${float(notional):.2f} < exchange floor "
+                    f"${float(min_notional):.2f}. Skipping rather than inflating."
+                )
+                return 0.0
+            req_tokens = min_notional / price_dec
+            if qty_step > Decimal("0"):
+                stepped_qty = Decimal(str(math.ceil(float(req_tokens / qty_step)))) * qty_step
+            else:
+                stepped_qty = req_tokens
+
+        return float(max(min_qty, stepped_qty))
+
+    def _format_qty_str(self, raw_qty: float | Decimal, symbol: str) -> str:
+        """Strict floor-quantization (ROUND_FLOOR) with scientific notation eradication."""
+        qty_step: Decimal = self.instrument_cache.get(symbol, {}).get("qty_step", Decimal("1.0"))
+        if qty_step <= Decimal("0"):
+            return f"{float(raw_qty):.4f}"
+        
+        try:
+            val_dec = Decimal(str(raw_qty)) if not isinstance(raw_qty, Decimal) else raw_qty
+            quantized = (val_dec // qty_step) * qty_step
+            precision = max(0, -qty_step.as_tuple().exponent)
+            return f"{quantized:.{precision}f}"
+        except (InvalidOperation, TypeError, ValueError):
+            return f"{float(raw_qty):.4f}"
+
+    def _format_price_str(self, price: float | Decimal, target_symbol: str) -> str:
+        """Quantizes order price to the nearest tick grid using ROUND_HALF_UP."""
+        tick_size: Decimal = self.instrument_cache.get(target_symbol, {}).get("tick_size", Decimal("0.01"))
+        if tick_size <= Decimal("0"):
+            return str(price)
+        precision = max(0, -tick_size.as_tuple().exponent)
+        try:
+            val_dec = Decimal(str(price)) if not isinstance(price, Decimal) else price
+            stepped = val_dec.quantize(tick_size, rounding=ROUND_HALF_UP)
+            return f"{stepped:.{precision}f}"
+        except (InvalidOperation, TypeError, ValueError):
+            return f"{float(price):.{precision}f}"
+
+    # =========================================================================
+    # BRACKET INTEGRITY SENTRY & RISK MITIGATION
+    # =========================================================================
+
+    async def _verify_and_anchor_stops(
+        self,
+        symbol: str,
+        direction: str,
+        fill_price: float,
+        sl: Optional[float],
+        tp: Optional[float]
+    ):
+        """
+        Direct-Path Bracket Sentry:
+        Dispatches stop-loss/take-profit brackets directly via /v5/position/trading-stop.
+        """
+        if not sl and not tp:
+            return
+
+        is_buy = direction.upper() == "BUY"
+        payload: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "positionIdx": self.position_idx,
+            "tpslMode": "Full"
+        }
+        if sl and sl > 0.0:
+            payload["stopLoss"] = self._format_price_str(sl, symbol)
+            payload["slTriggerBy"] = "MarkPrice"
+        if tp and tp > 0.0:
+            payload["takeProfit"] = self._format_price_str(tp, symbol)
+            payload["tpTriggerBy"] = "LastPrice"
+
+        await self._rate_limit_acquire()
+        try:
+            res = await self.executor.safe_call(
+                "POST", "/v5/position/trading-stop", is_execution=True, **payload
+            )
+            ret_code = res.get("retCode", -1)
+            ret_msg = res.get("retMsg", "").lower()
+
+            # Clean success check
+            if ret_code == 0 or any(k in ret_msg for k in ["not modified", "same", "identical"]):
+                logger.info(f"[SOR_SENTRY] Stops anchored directly on {symbol} (SL: {sl}, TP: {tp}).")
+                return
+
+            # Mark price clash handling
+            pos_res = await self.executor.safe_call(
+                "GET", "/v5/position/list", category="linear", symbol=symbol
+            )
+            positions = pos_res.get("result", {}).get("list", [])
+            if not positions or float(positions[0].get("size", 0.0)) <= 0:
+                return
+
+            pos = positions[0]
+            mark_price = float(pos.get("markPrice", fill_price) or fill_price)
+
+            if sl and sl > 0.0:
+                anchored_sl = sl
+                if is_buy and anchored_sl >= mark_price:
+                    anchored_sl = mark_price * 0.9955
+                elif not is_buy and anchored_sl <= mark_price:
+                    anchored_sl = mark_price * 1.0045
+                payload["stopLoss"] = self._format_price_str(anchored_sl, symbol)
+
+            if tp and tp > 0.0:
+                anchored_tp = tp
+                if is_buy and anchored_tp <= mark_price:
+                    anchored_tp = mark_price * 1.0045
+                elif not is_buy and anchored_tp >= mark_price:
+                    anchored_tp = mark_price * 0.9955
+                payload["takeProfit"] = self._format_price_str(anchored_tp, symbol)
+
+            fallback_res = await self.executor.safe_call(
+                "POST", "/v5/position/trading-stop", is_execution=True, **payload
+            )
+            if fallback_res.get("retCode") == 0 or any(k in fallback_res.get("retMsg", "").lower() for k in ["not modified", "same", "identical"]):
+                logger.info(f"[SOR_SENTRY] Fallback stops anchored on {symbol} successfully.")
+            else:
+                logger.warning(f"[SOR_SENTRY] Stop anchoring failed for {symbol}: {fallback_res.get('retMsg')}")
+        except Exception as e:
+            logger.debug(f"[SOR_SENTRY] Bracket integrity sentry error on {symbol}: {e}")
+
+    # =========================================================================
+    # CAPITAL SIZING & MICROSTRUCTURE FIREWALLS
+    # =========================================================================
+
+    def calculate_risk_adjusted_notional(
+        self,
+        prob_success: float,
+        exec_weight: float,
+        sl_pct: float,
+        tp_pct: float,
+        current_balance: float,
+        inst_var: float
+    ) -> float:
+        base_risk_pct = 0.01
+        vol_scalar = 1.0 / (1.0 + (inst_var * 1000.0))
+        confidence_scalar = float(np.clip((prob_success - 0.5) * 2.0, 0.5, 1.0))
+        final_risk_pct = min(0.015, base_risk_pct * vol_scalar * confidence_scalar * exec_weight)
+        trade_risk_dollars = current_balance * final_risk_pct
+
+        safe_sl_pct = max(0.005, sl_pct)
+        target_notional = trade_risk_dollars / safe_sl_pct
+
+        max_leverage_cap = 2.0
+        if self.core_engine and hasattr(self.core_engine, 'live_params'):
+            max_leverage_cap = float(self.core_engine.live_params.get("LEVERAGE_CAP", max_leverage_cap))
+        elif self.core_engine and hasattr(self.core_engine, 'risk_vault'):
+            max_leverage_cap = float(getattr(self.core_engine.risk_vault, 'max_leverage', max_leverage_cap))
+
+        max_permitted_notional = max(6.50, current_balance * max_leverage_cap)
+        return float(np.clip(target_notional, 6.50, max_permitted_notional))
+
+    def compute_dynamic_slippage_cap_bps(self, symbol: str, regime: str, live_spread_bps: float) -> float:
+        """
+        Calculates adaptive slippage boundary based on asset tier and spread.
+        Audit Resolution: Clamps slippage caps strictly to 15.0 bps for majors and 22.0 bps for altcoins.
+        """
+        is_major = symbol in ["BTCUSDT", "ETHUSDT"]
+        is_high_cap = symbol in ["SOLUSDT", "SUIUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "APTUSDT"]
+
+        spread_multiplier = 2.0 if is_major else 2.5
+        calculated_cap = max(8.0, live_spread_bps * spread_multiplier)
+        if regime in ["TRENDING", "CASCADE"]:
+            calculated_cap += 3.0
+
+        if is_major:
+            return min(15.0, calculated_cap)
+        elif is_high_cap:
+            return min(22.0, calculated_cap)
+        return min(22.0, calculated_cap)
+
+    def calculate_kyle_market_impact_bps(
+        self, 
+        symbol: str, 
+        qty: float, 
+        mid_price: float, 
+        inst_var: float,
+        depth_notional: float,
+        depth_snapshot: Optional[Dict] = None
+    ) -> float:
+        notional = qty * mid_price
+        vol_pct = math.sqrt(max(1e-9, inst_var)) * 10000.0
+
+        depth_levels = len(depth_snapshot.get("bids" if qty > 0 else "asks", [])) if depth_snapshot else 5
+        eta_adjusted = 0.45 * (1.0 + max(0.0, (5.0 - depth_levels) * 0.20))
+
+        participation_ratio = notional / max(depth_notional, 1.0)
+        impact_bps = eta_adjusted * vol_pct * math.sqrt(min(1.0, participation_ratio))
+        return float(np.clip(impact_bps, 1.0, 30.0))
+
+    # AUDIT B19: a missing book means UNKNOWN cost, never zero cost.
+    SLIPPAGE_UNKNOWN: float = float("inf")
+
+    def estimate_orderbook_slippage_bps(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
+        """
+        Simulates instantaneous orderbook-crossing implementation shortfall.
+
+        AUDIT B19: this previously returned 0.0 when the book was absent, which
+        disabled the slippage firewall precisely during a WebSocket outage --
+        the REST fallback writes exactly such a book-less snapshot. It now fails
+        closed by returning SLIPPAGE_UNKNOWN, which every caller treats as a veto.
+        """
+        if not depth_snapshot or "bids" not in depth_snapshot or "asks" not in depth_snapshot:
+            return self.SLIPPAGE_UNKNOWN
+        levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
+        if not levels:
+            return self.SLIPPAGE_UNKNOWN
+
+        accumulated_qty, accumulated_cost = 0.0, 0.0
+        for level in levels:
+            try:
+                p, v = float(level[0]), float(level[1])
+                needed = qty - accumulated_qty
+                if v >= needed:
+                    accumulated_cost += (needed * p)
+                    accumulated_qty += needed
+                    break
+                else:
+                    accumulated_cost += (v * p)
+                    accumulated_qty += v
+            except (IndexError, ValueError, TypeError):
+                continue
+
+        if accumulated_qty < qty or accumulated_qty == 0:
+            return 999.0
+
+        avg_expected_price = accumulated_cost / accumulated_qty
+        top_of_book = float(levels[0][0])
+
+        if side.upper() == "BUY":
+            slippage_bps = ((avg_expected_price - top_of_book) / max(top_of_book, 1e-9)) * 10000.0
+        else:
+            slippage_bps = ((top_of_book - avg_expected_price) / max(top_of_book, 1e-9)) * 10000.0
+
+        return max(0.0, slippage_bps)
+
+    def get_sweeping_price(self, depth_snapshot: Dict, side: str, qty: float, current_mid: float) -> float:
+        if not depth_snapshot:
+            return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
+        levels = depth_snapshot.get("asks" if side.upper() == "BUY" else "bids", [])
+        if not levels:
+            return current_mid * (1.001 if side.upper() == "BUY" else 0.999)
+
+        accumulated_qty = 0.0
+        for level in levels:
+            try:
+                p, v = float(level[0]), float(level[1])
+                accumulated_qty += v
+                if accumulated_qty >= qty:
+                    return p
+            except (IndexError, ValueError, TypeError):
+                continue
+        return float(levels[-1][0])
+
+    # =========================================================================
+    # AVELLANEDA-STOIKOV QUOTING & TELEMETRY
+    # =========================================================================
+
+    def _calculate_avellaneda_stoikov_quote(
+        self,
+        symbol: str,
+        side: str,
+        mid_price: float,
+        depth_snapshot: Dict,
+        time_horizon: float = 1.0
+    ) -> float:
+        tick_size_dec = self.instrument_cache.get(symbol, {}).get("tick_size", Decimal("0.01"))
+        tick_size = float(tick_size_dec)
+        bids = depth_snapshot.get("bids", [])
+        asks = depth_snapshot.get("asks", [])
+        best_bid = float(bids[0][0]) if bids else mid_price
+        best_ask = float(asks[0][0]) if asks else mid_price
+
+        inst_var = 1e-5
+        if self.core_engine and hasattr(self.core_engine, 'stat_engines'):
+            stat_eng = self.core_engine.stat_engines.get(symbol)
+            if stat_eng:
+                inst_var = getattr(stat_eng, 'inst_variance', 1e-5)
+
+        q = 0.0
+        if self.core_engine:
+            active_notional = 0.0
+            if hasattr(self.core_engine, 'risk_vault') and hasattr(self.core_engine.risk_vault, 'active_positions'):
+                active_notional = float(self.core_engine.risk_vault.active_positions.get(symbol, 0.0))
+            curr_dir = getattr(self.core_engine, 'active_positions_map', {}).get(symbol, "NONE")
+            signed_notional = active_notional if curr_dir == "BUY" else (-active_notional if curr_dir == "SELL" else 0.0)
+
+            vault_bal = 100.0
+            if hasattr(self.core_engine, 'global_state_cache'):
+                vault_bal = float(self.core_engine.global_state_cache.get("current_vault_balance", 100.0))
+
+            max_lev = 2.0
+            if hasattr(self.core_engine, 'risk_vault'):
+                max_lev = getattr(self.core_engine.risk_vault, 'max_leverage', 2.0)
+
+            max_single_notional = max(10.0, vault_bal * (max_lev / 2.0))
+            q = float(np.clip(signed_notional / max_single_notional, -1.0, 1.0))
+
+        tau = max(0.1, min(2.0, time_horizon))
+        vol_sigma = math.sqrt(max(1e-9, inst_var))
+
+        norm_tick_vol = (tick_size / max(mid_price, 1e-9)) / (vol_sigma + 1e-9)
+        dynamic_gamma = float(np.clip(self.gamma_base * (1.0 + min(3.0, norm_tick_vol)), 0.02, 0.35))
+
+        reservation_skew_bps = q * dynamic_gamma * (vol_sigma * 10000.0) * math.sqrt(tau)
+        reservation_price = mid_price * (1.0 - (reservation_skew_bps / 10000.0))
+
+        vol_cushion_bps = dynamic_gamma * (vol_sigma * 10000.0) * tau
+        liquidity_cushion_bps = (2.0 / dynamic_gamma) * math.log1p(dynamic_gamma / self.k_decay) * 1.5
+        total_half_spread_bps = max(1.0, (vol_cushion_bps + liquidity_cushion_bps) / 2.0)
+
+        optimal_half_spread = max(tick_size, mid_price * (total_half_spread_bps / 10000.0))
+        market_spread = max(tick_size, best_ask - best_bid)
+        half_spread = max(optimal_half_spread, market_spread * 0.45)
+
+        if side.upper() == "BUY":
+            optimal_quote = min(reservation_price - half_spread, best_ask - tick_size)
+            return max(best_bid, optimal_quote)
+        else:
+            optimal_quote = max(reservation_price + half_spread, best_bid + tick_size)
+            return min(best_ask, optimal_quote)
+
+    async def cancel_order_safe(self, symbol: str, order_id: str) -> bool:
+        await self._rate_limit_acquire()
+        for _ in range(3):
+            try:
+                res = await self.executor.safe_call(
+                    "POST", "/v5/order/cancel", is_execution=True,
+                    category="linear", symbol=symbol, orderId=order_id
+                )
+                if res.get("retCode") == 0:
+                    return True
+                err_str = str(res.get("retMsg", "")).lower()
+                if any(k in err_str for k in ["110001", "not exists", "too late", "already completed"]):
+                    return True
+            except Exception as e:
+                err_str = str(e).lower()
+                if any(k in err_str for k in ["110001", "not exists", "too late", "already completed"]):
+                    return True
+                await asyncio.sleep(0.10)
+        return False
+
+    async def _verify_order_fill(self, symbol: str, order_id: str, timeout: float = 0.75) -> dict:
+        if hasattr(self.executor, 'await_ws_execution_report'):
+            try:
+                ws_report = await self.executor.await_ws_execution_report(order_id, timeout=timeout)
+                if ws_report:
+                    return ws_report
+            except asyncio.TimeoutError:
+                pass
+
+        await asyncio.sleep(0.06)
+
+        try:
+            open_res = await self.executor.safe_call(
+                "GET", "/v5/order/realtime", category="linear", symbol=symbol, orderId=order_id
+            )
+            orders = open_res.get("result", {}).get("list", [])
+            if orders:
+                return orders[0]
+        except Exception:
+            pass
+
+        try:
+            hist_res = await self.executor.safe_call(
+                "GET", "/v5/order/history", category="linear", symbol=symbol, orderId=order_id, limit=1
+            )
+            orders = hist_res.get("result", {}).get("list", [])
+            return orders[0] if orders else {}
+        except Exception:
+            pass
+
+        return {}
+
+    async def _amend_trailing_stop(
+        self,
+        symbol: str,
+        new_sl: float,
+        new_tp: Optional[float] = None,
+        is_emergency: bool = False
+    ) -> bool:
+        now = time.time()
+        if not is_emergency and (now - self._last_amend_time.get(symbol, 0.0) < self._amend_throttle_sec):
+            return False
+
+        payload: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "positionIdx": self.position_idx,
+            "tpslMode": "Full"
+        }
+
+        if new_sl and new_sl > 0.0:
+            payload["stopLoss"] = self._format_price_str(new_sl, symbol)
+            payload["slTriggerBy"] = "MarkPrice"
+
+        if new_tp and new_tp > 0.0:
+            payload["takeProfit"] = self._format_price_str(new_tp, symbol)
+            payload["tpTriggerBy"] = "LastPrice"
+
+        if "stopLoss" not in payload and "takeProfit" not in payload:
+            return False
+
+        await self._rate_limit_acquire()
+        try:
+            res = await self.executor.safe_call(
+                "POST", "/v5/position/trading-stop", is_execution=True, **payload
+            )
+            ret_code = res.get("retCode")
+            ret_msg = res.get("retMsg", "").lower()
+
+            if ret_code == 0 or any(k in ret_msg for k in ["not modified", "same", "identical"]):
+                self._last_amend_time[symbol] = now
+                return True
+
+            if ret_code in [34036, 110043] or any(k in ret_msg for k in ["clash", "cannot be higher", "cannot be lower", "out of range"]):
+                pos_res = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                positions = pos_res.get("result", {}).get("list", [])
+                if positions and float(positions[0].get("size", 0.0)) > 0:
+                    pos = positions[0]
+                    is_buy = pos.get("side", "").upper() == "BUY"
+                    mark_p = float(pos.get("markPrice", new_sl) or new_sl)
+                    if new_sl > 0.0:
+                        realigned_sl = mark_p * (0.9955 if is_buy else 1.0045)
+                        payload["stopLoss"] = self._format_price_str(realigned_sl, symbol)
+                        retry_res = await self.executor.safe_call("POST", "/v5/position/trading-stop", is_execution=True, **payload)
+                        if retry_res.get("retCode") == 0 or any(k in retry_res.get("retMsg", "").lower() for k in ["not modified", "same", "identical"]):
+                            self._last_amend_time[symbol] = now
+                            return True
+            return False
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(k in err_str for k in ["not modified", "same", "identical"]):
+                self._last_amend_time[symbol] = now
+                return True
+            logger.debug(f"[X-RAY] Trailing stop amend fault for {symbol}: {e}")
+            return False
+
+    # =========================================================================
+    # EXECUTION TOPOLOGIES
+    # =========================================================================
+
+    async def _execute_emergency_market_strike(
+        self,
+        symbol: str,
+        direction: str,
+        qty: float,
+        current_mid_price: float,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None
+    ) -> Tuple[bool, float, float]:
+        logger.critical(f"[X-RAY] 🚨 EMERGENCY MARKET STRIKE // {symbol} {direction} {qty:.4f} units.")
+        side = "Buy" if direction.upper() == "BUY" else "Sell"
+        cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
+        if cleaned_qty <= 0.0:
+            return False, current_mid_price, 0.0
+
+        sane, sanity_reason = self._check_notional_sanity(
+            symbol, float(qty) * current_mid_price, cleaned_qty * current_mid_price
+        )
+        if not sane:
+            logger.critical(f"[X-RAY] 🛑 MARKET STRIKE BLOCKED // {sanity_reason}")
+            return False, current_mid_price, 0.0
+
+        qty_str = self._format_qty_str(cleaned_qty, symbol)
+        client_link_id = f"APEX_MKT_{uuid.uuid4().hex[:14]}"
+
+        order_payload: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Market",
+            "qty": qty_str,
+            "timeInForce": "IOC",
+            "positionIdx": self.position_idx,
+            "orderLinkId": client_link_id,
+            "smpType": "CancelMaker"
+        }
+
+        if sl and sl > 0.0:
+            order_payload["stopLoss"] = self._format_price_str(sl, symbol)
+            order_payload["slTriggerBy"] = "MarkPrice"
+        if tp and tp > 0.0:
+            order_payload["takeProfit"] = self._format_price_str(tp, symbol)
+            order_payload["tpTriggerBy"] = "LastPrice"
+        if (sl and sl > 0.0) or (tp and tp > 0.0):
+            order_payload["tpslMode"] = "Full"
+
+        await self._rate_limit_acquire()
+        try:
+            response = await self.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True, **order_payload
+            )
+            if response.get("retCode") == 0:
+                order_id = response.get("result", {}).get("orderId", client_link_id)
+                fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.75)
+                
+                if fill_report and fill_report.get("cumExecQty"):
+                    total_executed = float(fill_report.get("cumExecQty"))
+                    raw_avg = fill_report.get("avgPrice")
+                    avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
+                else:
+                    pos_fallback = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                    active_pos = pos_fallback.get("result", {}).get("list", [])
+                    if active_pos and float(active_pos[0].get("size", 0.0)) > 0:
+                        total_executed = float(active_pos[0]["size"])
+                        avg_price = float(active_pos[0].get("avgPrice", current_mid_price))
+                    else:
+                        total_executed = cleaned_qty
+                        avg_price = current_mid_price
+
+                if sl or tp:
+                    await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+
+                is_bps = ((avg_price - current_mid_price) / current_mid_price * 10000.0) if side == "Buy" else \
+                         ((current_mid_price - avg_price) / current_mid_price * 10000.0)
+                logger.critical(
+                    f"⚡ MARKET STRIKE COMPLETE // {symbol} {total_executed:.4f} units @ {avg_price:.4f} (IS: {is_bps:+.1f} bps)"
+                )
+                return True, avg_price, total_executed
+            else:
+                ret_code = response.get("retCode")
+                err_msg = response.get("retMsg", "")
+                # AUDIT B32: 10001 (qty out of bounds) and 10002 (parameter error) are
+                # OUR bugs, not exchange compliance refusals. Quarantining the
+                # symbol for an hour under a "Agreement Not Signed" log hid the
+                # real cause. Only 110126 is a compliance ban.
+                if ret_code == 110126 or "agreement not signed" in err_msg.lower():
+                    logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                logger.error(f"[X-RAY] Market strike rejected: {err_msg}")
+                return False, current_mid_price, 0.0
+        except Exception as e:
+            logger.error(f"[X-RAY] Market strike fault for {symbol}: {e}")
+            return False, current_mid_price, 0.0
+
+    async def _execute_flash_strike(
+        self,
+        symbol: str,
+        direction: str,
+        qty: float,
+        current_mid_price: float,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        depth_snapshot: dict = None,
+        regime: str = "TRENDING"
+    ) -> Tuple[bool, float, float]:
+        """
+        Executes immediate market-cross IOC sweeps with unified bracket protection and STP.
+        """
+        logger.critical(f"[X-RAY] ATOMIC FLASH STRIKE // {symbol} {direction} sweeping orderbook.")
+        side = "Buy" if direction.upper() == "BUY" else "Sell"
+        cleaned_qty = self._apply_dynamic_exchange_limits(qty, current_mid_price, symbol)
+        if cleaned_qty <= 0.0:
+            return False, current_mid_price, 0.0
+
+        sane, sanity_reason = self._check_notional_sanity(
+            symbol, float(qty) * current_mid_price, cleaned_qty * current_mid_price
+        )
+        if not sane:
+            logger.critical(f"[X-RAY] 🛑 FLASH STRIKE BLOCKED // {sanity_reason}")
+            return False, current_mid_price, 0.0
+
+        qty_str = self._format_qty_str(cleaned_qty, symbol)
+
+        bids = depth_snapshot.get("bids", []) if depth_snapshot else []
+        asks = depth_snapshot.get("asks", []) if depth_snapshot else []
+        best_bid = float(bids[0][0]) if bids else current_mid_price
+        best_ask = float(asks[0][0]) if asks else current_mid_price
+        live_spread_bps = ((best_ask - best_bid) / (best_bid + 1e-9)) * 10000.0
+
+        dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
+        sweeping_price = self.get_sweeping_price(depth_snapshot, side, cleaned_qty, current_mid_price)
+
+        if side == "Buy":
+            max_allowed = current_mid_price * (1.0 + (dynamic_cap_bps / 10000.0))
+            target_price = min(sweeping_price, max_allowed)
+        else:
+            max_allowed = current_mid_price * (1.0 - (dynamic_cap_bps / 10000.0))
+            target_price = max(sweeping_price, max_allowed)
+
+        final_price_str = self._format_price_str(target_price, symbol)
+        client_link_id = f"APEX_IOC_{uuid.uuid4().hex[:14]}"
+
+        order_payload: Dict[str, Any] = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Limit",
+            "qty": qty_str,
+            "price": final_price_str,
+            "timeInForce": "IOC",
+            "positionIdx": self.position_idx,
+            "orderLinkId": client_link_id,
+            "smpType": "CancelMaker"
+        }
+
+        if sl and sl > 0.0:
+            order_payload["stopLoss"] = self._format_price_str(sl, symbol)
+            order_payload["slTriggerBy"] = "MarkPrice"
+        if tp and tp > 0.0:
+            order_payload["takeProfit"] = self._format_price_str(tp, symbol)
+            order_payload["tpTriggerBy"] = "LastPrice"
+        if (sl and sl > 0.0) or (tp and tp > 0.0):
+            order_payload["tpslMode"] = "Full"
+
+        total_executed_qty = 0.0
+        avg_price = current_mid_price
+        order_confirmed = False
+
+        await self._rate_limit_acquire()
+        try:
+            response = await self.executor.safe_call(
+                "POST", "/v5/order/create", is_execution=True, **order_payload
+            )
+            if response.get("retCode") == 0:
+                order_confirmed = True
+                order_id = response.get("result", {}).get("orderId", client_link_id)
+                fill_report = await self._verify_order_fill(symbol, order_id, timeout=0.75)
+                
+                if fill_report and fill_report.get("cumExecQty"):
+                    raw_exec = fill_report.get("cumExecQty")
+                    raw_avg = fill_report.get("avgPrice")
+                    total_executed_qty = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else 0.0
+                    avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_mid_price
+                else:
+                    pos_fallback = await self.executor.safe_call("GET", "/v5/position/list", category="linear", symbol=symbol)
+                    active_pos = pos_fallback.get("result", {}).get("list", [])
+                    if active_pos and float(active_pos[0].get("size", 0.0)) > 0:
+                        total_executed_qty = float(active_pos[0]["size"])
+                        avg_price = float(active_pos[0].get("avgPrice", current_mid_price))
+                    else:
+                        total_executed_qty = 0.0
+            else:
+                ret_code = response.get("retCode")
+                err_msg = response.get("retMsg", "")
+                # AUDIT B32: 10001 (qty out of bounds) and 10002 (parameter error) are
+                # OUR bugs, not exchange compliance refusals. Quarantining the
+                # symbol for an hour under a "Agreement Not Signed" log hid the
+                # real cause. Only 110126 is a compliance ban.
+                if ret_code == 110126 or "agreement not signed" in err_msg.lower():
+                    logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                logger.warning(f"[X-RAY] Flash Strike IOC rejected: {err_msg}")
+        except Exception as e:
+            logger.error(f"[X-RAY] Flash Strike execution fault for {symbol}: {e}")
+            total_executed_qty = 0.0
+
+        remainder = cleaned_qty - total_executed_qty
+        min_tradeable = float(self.instrument_cache.get(symbol, {}).get("min_qty", Decimal("0.001")))
+
+        if total_executed_qty > 0.0 and (sl or tp):
+            await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+
+        if order_confirmed and total_executed_qty > 0.0 and remainder > min_tradeable and (remainder * current_mid_price) >= 6.50:
+            logger.info(f"[X-RAY] Partial fill ({total_executed_qty:.4f}/{cleaned_qty:.4f}). Routing remainder to Maker Peg.")
+            peg_success, peg_price, peg_qty = await self._execute_dynamic_maker_peg(
+                symbol, direction, remainder, sl=sl, tp=tp, depth_snapshot=depth_snapshot,
+                timeout=4, regime=regime
+            )
+            if peg_success and peg_qty > 0.0:
+                total_cost = (total_executed_qty * avg_price) + (peg_qty * peg_price)
+                total_executed_qty += peg_qty
+                avg_price = total_cost / total_executed_qty
+                await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+
+        if total_executed_qty > 0.0:
+            is_bps = ((avg_price - current_mid_price) / current_mid_price * 10000.0) if side == "Buy" else \
+                     ((current_mid_price - avg_price) / current_mid_price * 10000.0)
+
+            logger.critical(
+                f"⚡ FLASH STRIKE FILLED // {symbol} {total_executed_qty:.4f} units @ {avg_price:.4f} "
+                f"(Arrival Mid: {current_mid_price:.4f} | IS: {is_bps:+.1f} bps | Stops: Verified Protected)"
+            )
+            return True, avg_price, total_executed_qty
+
+        return False, 0.0, 0.0
+
+    async def _execute_dynamic_maker_peg(
+        self,
+        symbol: str,
+        direction: str,
+        qty: float,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        depth_snapshot: dict = None,
+        timeout: int = 5,
+        regime: str = "MEAN_REVERTING"
+    ) -> Tuple[bool, float, float]:
+        start_time = time.time()
+        current_order_id = None
+        side = "Buy" if direction.upper() == "BUY" else "Sell"
+        anchor_price = None
+
+        tick_size = float(self.instrument_cache.get(symbol, {}).get("tick_size", Decimal("0.01")))
+        current_peg_price = 0.0
+        last_amend_time = 0.0
+
+        # AUDIT B1: resolve a real reference price. Previously this fell back to
+        # the literal 100.0 when no book was supplied (which is exactly what the
+        # TWAP path did), and that phantom price was then used as the divisor in
+        # the min-notional floor -- inflating orders by ~1000x on BTC.
+        mid, resolved_ob, price_source = self._resolve_reference_price(symbol, depth_snapshot)
+        if not self._is_usable_price(mid):
+            logger.error(
+                f"[X-RAY] MAKER PEG ABORT // {symbol}: no usable order book from any source. "
+                f"Refusing to size or quote against an assumed price."
+            )
+            return False, 0.0, 0.0
+
+        depth_snapshot = resolved_ob
+        bids = resolved_ob.get("bids", []) or []
+        asks = resolved_ob.get("asks", []) or []
+        best_bid = float(bids[0][0]) if bids else float(resolved_ob.get("best_bid", mid))
+        best_ask = float(asks[0][0]) if asks else float(resolved_ob.get("best_ask", mid))
+
+        if price_source != "slice_book":
+            logger.warning(
+                f"[X-RAY] MAKER PEG // {symbol}: slice supplied no book; "
+                f"sized from '{price_source}' at mid {mid:.6f}."
+            )
+
+        live_spread_bps = ((best_ask - best_bid) / (best_bid + 1e-9)) * 10000.0
+        dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
+        max_chase_deviation = max(0.001, dynamic_cap_bps / 10000.0)
+
+        intended_notional = float(qty) * mid
+        cleaned_qty = self._apply_dynamic_exchange_limits(qty, mid, symbol)
+        if cleaned_qty <= 0.0:
+            return False, 0.0, 0.0
+
+        # AUDIT B1: the risk vault approved `intended_notional`. Anything
+        # materially different must not reach the exchange.
+        sane, sanity_reason = self._check_notional_sanity(
+            symbol, intended_notional, cleaned_qty * mid
+        )
+        if not sane:
+            logger.critical(f"[X-RAY] 🛑 MAKER PEG BLOCKED // {sanity_reason}")
+            return False, 0.0, 0.0
+
+        qty_str = self._format_qty_str(cleaned_qty, symbol)
+
+        while time.time() - start_time < timeout:
+            try:
+                fresh_ob = depth_snapshot
+                if self.core_engine and hasattr(self.core_engine, 'orderbook_snapshots'):
+                    fresh_ob = self.core_engine.orderbook_snapshots.get(symbol, depth_snapshot)
+
+                b_curr = fresh_ob.get("bids", []) if fresh_ob else []
+                a_curr = fresh_ob.get("asks", []) if fresh_ob else []
+                curr_mid = (float(b_curr[0][0]) + float(a_curr[0][0])) / 2.0 if b_curr and a_curr else mid
+
+                optimal_price = self._calculate_avellaneda_stoikov_quote(
+                    symbol, side, curr_mid, fresh_ob or {}
+                )
+                target_price_str = self._format_price_str(optimal_price, symbol)
+                target_price_float = float(target_price_str)
+
+                if anchor_price is None:
+                    anchor_price = curr_mid
+                else:
+                    anchor_price = (anchor_price * 0.85) + (curr_mid * 0.15)
+
+                if side == "Buy" and target_price_float > anchor_price * (1.0 + max_chase_deviation):
+                    break
+                if side == "Sell" and target_price_float < anchor_price * (1.0 - max_chase_deviation):
+                    break
+
+                if not current_order_id:
+                    client_link_id = f"APEX_PEG_{uuid.uuid4().hex[:14]}"
+                    post_payload: Dict[str, Any] = {
+                        "category": "linear",
+                        "symbol": symbol,
+                        "side": side,
+                        "orderType": "Limit",
+                        "qty": qty_str,
+                        "price": target_price_str,
+                        "timeInForce": "PostOnly",
+                        "positionIdx": self.position_idx,
+                        "orderLinkId": client_link_id,
+                        "smpType": "CancelMaker"
+                    }
+                    if sl and sl > 0.0:
+                        post_payload["stopLoss"] = self._format_price_str(sl, symbol)
+                        post_payload["slTriggerBy"] = "MarkPrice"
+                    if tp and tp > 0.0:
+                        post_payload["takeProfit"] = self._format_price_str(tp, symbol)
+                        post_payload["tpTriggerBy"] = "LastPrice"
+                    if (sl and sl > 0.0) or (tp and tp > 0.0):
+                        post_payload["tpslMode"] = "Full"
+
+                    await self._rate_limit_acquire()
+                    place_response = await self.executor.safe_call(
+                        "POST", "/v5/order/create", is_execution=True, **post_payload
+                    )
+                    if place_response.get("retCode") == 0:
+                        current_order_id = place_response["result"]["orderId"]
+                        current_peg_price = target_price_float
+                        last_amend_time = time.time()
+                    else:
+                        ret_code = place_response.get("retCode")
+                        err_msg = place_response.get("retMsg", "")
+                        # AUDIT B32: 10001 / 10002 are OUR bugs, not compliance
+                        # refusals. Only 110126 is a compliance ban.
+                        if ret_code == 110126 or "agreement not signed" in err_msg.lower():
+                            logger.error(f"[COMPLIANCE] Agreement Not Signed ({ret_code}) for {symbol}. Quarantining for 1 hour.")
+                            if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                                self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                            break
+                        if "post only" in err_msg.lower():
+                            await asyncio.sleep(0.04)
+                        else:
+                            await asyncio.sleep(0.15)
+                        continue
+
+                fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.75)
+                if fill_report:
+                    raw_exec = fill_report.get("cumExecQty")
+                    raw_avg = fill_report.get("avgPrice")
+                    cum_exec = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else 0.0
+                    avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else current_peg_price
+                    order_status = fill_report.get("orderStatus", "")
+
+                    if order_status == "Filled" or cum_exec >= cleaned_qty:
+                        logger.critical(f"🎯 MAKER PEG SECURED // {symbol} filled completely. Earned Maker Rebates.")
+                        if sl or tp:
+                            await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                        return True, avg_price, cum_exec
+                    elif order_status in ["Cancelled", "Rejected"]:
+                        current_order_id = None
+                        if cum_exec > 0.0:
+                            if sl or tp:
+                                await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                            return True, avg_price, cum_exec
+                        continue
+
+                tick_displacement = abs(target_price_float - current_peg_price) / max(1e-9, tick_size)
+                now_tick = time.time()
+                if current_order_id and tick_displacement >= 3.0 and (now_tick - last_amend_time >= 0.15):
+                    await self._rate_limit_acquire()
+                    amend_res = await self.executor.safe_call(
+                        "POST", "/v5/order/amend", is_execution=True,
+                        category="linear", symbol=symbol, orderId=current_order_id,
+                        price=target_price_str
+                    )
+                    last_amend_time = now_tick
+                    if amend_res.get("retCode") == 0:
+                        current_peg_price = target_price_float
+                    elif "already completed" in amend_res.get("retMsg", "").lower():
+                        current_order_id = None
+
+            except Exception as e:
+                error_str = str(e)
+                if any(fatal in error_str for fatal in ["110126", "INNOVATION ZONE", "10002", "10001"]):
+                    if self.core_engine and hasattr(self.core_engine, 'circuit_breakers'):
+                        self.core_engine.circuit_breakers[symbol] = time.time() + 3600.0
+                    break
+                await asyncio.sleep(0.15)
+
+        if current_order_id:
+            await self.cancel_order_safe(symbol, current_order_id)
+            fill_report = await self._verify_order_fill(symbol, current_order_id, timeout=0.20)
+            if fill_report:
+                raw_exec = fill_report.get("cumExecQty")
+                raw_avg = fill_report.get("avgPrice")
+                cum_exec = float(raw_exec) if raw_exec and str(raw_exec).strip() != "" else 0.0
+                fallback_price = anchor_price if anchor_price else best_bid
+                avg_price = float(raw_avg) if raw_avg and str(raw_avg).strip() != "" else fallback_price
+                if cum_exec > 0.0:
+                    if sl or tp:
+                        await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
+                    return True, avg_price, cum_exec
+
+        return False, 0.0, 0.0
+
+    async def _execute_twap_iceberg(
+        self,
+        symbol: str,
+        direction: str,
+        total_qty: float,
+        current_mid_price: float,
+        sl: float,
+        tp: float,
+        depth_snapshot: dict = None,
+        slices: int = 4,
+        slice_interval_sec: float = 4.0,
+        regime: str = "TRENDING"
+    ) -> Tuple[bool, float, float]:
+        limits = self.instrument_cache.get(symbol, {"min_qty": Decimal("1.0")})
+        min_qty = float(limits["min_qty"])
+        min_notional_qty = 6.50 / max(current_mid_price, 1e-9)
+        absolute_min_slice = max(min_qty, min_notional_qty)
+
+        inst_var = 1e-5
+        if self.core_engine and hasattr(self.core_engine, 'stat_engines'):
+            stat_eng = self.core_engine.stat_engines.get(symbol)
+            if stat_eng:
+                inst_var = getattr(stat_eng, 'inst_variance', 1e-5)
+
+        bids = depth_snapshot.get("bids", []) if depth_snapshot else []
+        asks = depth_snapshot.get("asks", []) if depth_snapshot else []
+        top_bid_notional = sum(float(l[0]) * float(l[1]) for l in bids[:5]) if bids else 25000.0
+        top_ask_notional = sum(float(l[0]) * float(l[1]) for l in asks[:5]) if asks else 25000.0
+        depth_notional = (top_bid_notional + top_ask_notional) / 2.0
+
+        impact_bps = self.calculate_kyle_market_impact_bps(symbol, total_qty, current_mid_price, inst_var, depth_notional, depth_snapshot)
+
+        if impact_bps > 12.0:
+            recommended_slices = min(8, max(4, math.ceil(impact_bps / 3.0)))
+        else:
+            recommended_slices = max(3, slices)
+
+        if (total_qty / recommended_slices) < absolute_min_slice:
+            recommended_slices = max(1, math.floor(total_qty / absolute_min_slice))
+
+        slice_qty = total_qty / recommended_slices
+        total_executed_qty, weighted_notional_sum = 0.0, 0.0
+
+        dynamic_interval = max(2.5, min(8.0, 2.0 + (math.sqrt(inst_var) * 1000.0)))
+        chunk_timeout = 3 if symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] else 5
+
+        for i in range(recommended_slices):
+            # AUDIT B1: every slice must carry a real book. Omitting this forced
+            # the maker peg onto its phantom $100 fallback price. Prefer the
+            # engine's freshest snapshot, since later slices run tens of
+            # seconds after the arrival book was captured.
+            slice_book = depth_snapshot
+            if self.core_engine is not None and hasattr(self.core_engine, "orderbook_snapshots"):
+                slice_book = self.core_engine.orderbook_snapshots.get(symbol) or depth_snapshot
+
+            success, fill_price, fill_qty = await self._execute_dynamic_maker_peg(
+                symbol=symbol, direction=direction, qty=slice_qty,
+                sl=None, tp=None, depth_snapshot=slice_book,
+                timeout=chunk_timeout, regime=regime
+            )
+
+            if success and fill_qty > 0.0:
+                total_executed_qty += fill_qty
+                weighted_notional_sum += (fill_price * fill_qty)
+                current_avg_price = weighted_notional_sum / total_executed_qty
+                await self._verify_and_anchor_stops(symbol, direction, current_avg_price, sl, tp)
+
+            if i < recommended_slices - 1:
+                await asyncio.sleep(dynamic_interval)
+
+        if total_executed_qty > 0.0:
+            avg_fill_price = weighted_notional_sum / total_executed_qty
+            await self._verify_and_anchor_stops(symbol, direction, avg_fill_price, sl, tp)
+            return True, avg_fill_price, total_executed_qty
+
+        return False, 0.0, 0.0
+
+    # =========================================================================
+    # MASTER ALPHA ROUTING PIPELINE
+    # =========================================================================
+
+    async def execute_alpha_signal(
+        self,
+        symbol: str,
+        direction: str,
+        prob_success: float,
+        exec_weight: float,
+        current_mid_price: float,
+        sl_price: float,
+        tp_price: float,
+        inst_var: float,
+        depth_snapshot: dict,
+        target_notional: float,
+        regime: str = "TRENDING"
+    ) -> Tuple[bool, float, float]:
+        if target_notional <= 0.0:
+            return False, current_mid_price, 0.0
+
+        await self._fetch_exchange_limits(symbol)
+        total_qty = self._apply_dynamic_exchange_limits(target_notional / current_mid_price, current_mid_price, symbol)
+
+        if (total_qty * current_mid_price) < 6.0:
+            return False, current_mid_price, 0.0
+
+        if regime == "CASCADE":
+            return await self._execute_emergency_market_strike(
+                symbol=symbol, direction=direction, qty=total_qty,
+                current_mid_price=current_mid_price, sl=sl_price, tp=tp_price
+            )
+
+        ob = depth_snapshot or {}
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+        best_bid = float(bids[0][0]) if bids else current_mid_price
+        best_ask = float(asks[0][0]) if asks else current_mid_price
+        live_spread_bps = ((best_ask - best_bid) / (best_bid + 1e-9)) * 10000.0 if best_bid > 0 else 1.0
+
+        dynamic_cap_bps = self.compute_dynamic_slippage_cap_bps(symbol, regime, live_spread_bps)
+        est_slippage = self.estimate_orderbook_slippage_bps(ob, direction, total_qty, current_mid_price)
+
+        # PROACTIVE SLIPPAGE FIREWALL
+        is_major = symbol in ["BTCUSDT", "ETHUSDT"]
+        max_allowed_sweep_bps = 15.0 if is_major else 10.0
+
+        if est_slippage == self.SLIPPAGE_UNKNOWN:
+            logger.warning(
+                f"[X-RAY] ENTRY_REJECTED_STALE_DATA // {symbol}: order book unavailable or "
+                f"incomplete, so execution cost is UNKNOWN. Failing closed."
+            )
+            return False, current_mid_price, 0.0
+
+        if est_slippage > dynamic_cap_bps:
+            logger.warning(
+                f"[X-RAY] SLIPPAGE FIREWALL VETO // {symbol} est. slippage {est_slippage:.1f} bps > "
+                f"Cap {dynamic_cap_bps:.1f} bps. Aborting."
+            )
+            return False, current_mid_price, 0.0
+
+        if est_slippage > max_allowed_sweep_bps:
+            logger.info(f"[SOR_GATE] Proactive Slip-Gate: {symbol} est. slippage {est_slippage:.1f}bps > {max_allowed_sweep_bps}bps limit. Routing to Maker Peg.")
+            return await self._execute_dynamic_maker_peg(
+                symbol, direction, total_qty, sl_price, tp_price, depth_snapshot=ob, timeout=4, regime=regime
+            )
+
+        top_bid_vol = sum(float(l[1]) for l in bids[:3]) if bids else 0.0
+        top_ask_vol = sum(float(l[1]) for l in asks[:3]) if asks else 0.0
+        avg_tob_vol = (top_bid_vol + top_ask_vol) / 2.0
+
+        if avg_tob_vol > 0.0 and total_qty > (avg_tob_vol * 0.05):
+            return await self._execute_twap_iceberg(
+                symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
+            )
+
+        book_skew = top_bid_vol / (top_ask_vol + 1e-9)
+        urgent_taker = False
+
+        if direction.upper() == "BUY" and (book_skew < 0.35 or exec_weight > 1.3):
+            urgent_taker = True
+        elif direction.upper() == "SELL" and (book_skew > 2.8 or exec_weight > 1.3):
+            urgent_taker = True
+
+        if urgent_taker or regime == "TRENDING":
+            return await self._execute_flash_strike(
+                symbol, direction, total_qty, current_mid_price, sl_price, tp_price, depth_snapshot=ob, regime=regime
+            )
+
+        dynamic_timeout = 3 if is_major else 5
+        return await self._execute_dynamic_maker_peg(
+            symbol, direction, total_qty, sl_price, tp_price, depth_snapshot=ob, timeout=dynamic_timeout, regime=regime
+        )

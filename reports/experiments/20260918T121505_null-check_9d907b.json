@@ -1,0 +1,147 @@
+{
+  "bars": 20000,
+  "cost_model": {
+    "base_slippage_bps": 4.0,
+    "fees_applied": true,
+    "funding_applied": true,
+    "funding_per_8h": 0.0001,
+    "maker_fee": 0.0002,
+    "slippage_applied": true,
+    "taker_fee": 0.00055
+  },
+  "costs_disabled": false,
+  "created_at": 1789733705.6937604,
+  "dataset_hash": "b9f088aa3ade098b",
+  "dataset_meta": {
+    "expected_edge": "NONE",
+    "generator": "random_walk",
+    "seed": 7,
+    "sigma": 0.0008
+  },
+  "dataset_name": "synthetic_random_walk_s7",
+  "dataset_source": "synthetic",
+  "duration_sec": 60.68143820762634,
+  "end_ts": 1701199940000,
+  "error": null,
+  "experiment_id": "20260918T121505_null-check_9d907b",
+  "hypothesis": "(none stated)",
+  "interval": "1",
+  "model_version": "v50.0-apex",
+  "name": "null-check",
+  "notes": [
+    "NOT REPRODUCIBLE \u2014 working tree was dirty or the commit is unknown. Commit before quoting this result."
+  ],
+  "params": {
+    "leverage": 2.0,
+    "rr_ratio": 2.0,
+    "sl_atr_mult": 2.5
+  },
+  "reproducible": false,
+  "results": {
+    "annualisation_days": 365.0,
+    "avg_loss": -0.01069092394079314,
+    "avg_win": 0.004785749684741501,
+    "by_regime": {
+      "MEAN_REVERTING": {
+        "net": -0.03800684406156613,
+        "trades": 50,
+        "win_rate": 0.7
+      },
+      "RANGING": {
+        "net": 0.011952027521932066,
+        "trades": 6,
+        "win_rate": 0.3333333333333333
+      },
+      "TRENDING": {
+        "net": 0.0,
+        "trades": 0,
+        "win_rate": 0.0
+      }
+    },
+    "calmar_ratio": -6.649764602894582,
+    "cvar_95": -0.025685995370370307,
+    "expectancy_per_trade": -0.0004652645810648937,
+    "max_drawdown_duration_trades": 55,
+    "max_drawdown_on_margin": 0.10296914545870242,
+    "periods_per_year": 1471.68,
+    "profit_factor": 0.8717317430055689,
+    "robustness": {
+      "cost_sensitivity": {
+        "breakeven_extra_cost_per_trade": 0.0,
+        "edge_survives_2x_costs": false,
+        "mean_net_per_trade": -0.00046526
+      },
+      "iterations": 2000,
+      "note": "Permutation preserves the trade set, so total PnL is invariant by construction. This measures ordering/drawdown risk and cost sensitivity only -- it is NOT evidence that the edge is real.",
+      "sequence_risk": {
+        "observed_max_drawdown": 0.102969,
+        "observed_was_luckier_than_median": false,
+        "permuted_median_max_drawdown": 0.07978,
+        "permuted_p95_max_drawdown": 0.116027
+      }
+    },
+    "sharpe_ratio": -1.859107860065735,
+    "sortino_ratio": -2.123098584280623,
+    "total_return_on_margin": -0.02605481653963409,
+    "trades": 56,
+    "win_rate": 0.6607142857142857
+  },
+  "revision": {
+    "branch": "unknown",
+    "commit": "unknown",
+    "dirty": null,
+    "numpy": "1.26.4",
+    "platform": "Windows-11-10.0.26100-SP0",
+    "python": "3.14.4"
+  },
+  "start_ts": 1700000000000,
+  "symbol": "SYNTHUSDT",
+  "validation": {
+    "gates": [
+      {
+        "detail": "56 trades (need >= 100); standard error of expectancy scales as 1/sqrt(n)",
+        "name": "sample_size",
+        "passed": false,
+        "threshold": 100.0,
+        "value": 56.0
+      },
+      {
+        "detail": "all frictions modelled",
+        "name": "costs_applied",
+        "passed": true,
+        "threshold": null,
+        "value": null
+      },
+      {
+        "detail": "random-walk expectancy -0.000465 over 56 trades (must be <= +0.000000). no edge found on noise, as required",
+        "name": "null_rejection",
+        "passed": true,
+        "threshold": 0.0,
+        "value": -0.0004652645810648937
+      },
+      {
+        "detail": "not supplied \u2014 no out-of-sample split was evaluated",
+        "name": "oos_decay",
+        "passed": false,
+        "threshold": null,
+        "value": null
+      },
+      {
+        "detail": "Sharpe -1.859 over 1 configurations and 56 trades deflates to -1.859 (annualised; need > 0.00) \u2014 reporting the best of a sweep without this correction is selection bias",
+        "name": "multiple_testing",
+        "passed": false,
+        "threshold": 0.0,
+        "value": -1.859107860065735
+      },
+      {
+        "detail": "not supplied \u2014 result rests on a single fold",
+        "name": "stability",
+        "passed": false,
+        "threshold": null,
+        "value": null
+      }
+    ],
+    "passed": false,
+    "verdict": "REJECTED"
+  }
+}

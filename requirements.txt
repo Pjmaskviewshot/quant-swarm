@@ -1,0 +1,16 @@
+# Runtime dependencies, pinned.
+# AUDIT B34: seven declared packages were never imported anywhere in src/ --
+# pybit, openai, groq, aiosqlite, asyncpg, pycryptodome, httpx. They have been
+# removed: an unused dependency is supply-chain surface for no benefit.
+# pybit is notable -- the official Bybit SDK was declared while the code
+# hand-rolls REST and WebSocket against /v5 directly.
+
+aiohttp==3.9.5
+numpy==1.26.4
+pandas==2.2.2
+python-dotenv==1.0.1
+flask==3.0.3
+supabase>=2.3.0
+postgrest>=0.16.0  # transitive via supabase; pinned deliberately
+requests>=2.31.0
+scipy>=1.11.0

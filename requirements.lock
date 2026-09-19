@@ -1,0 +1,99 @@
+# requirements.lock
+#
+# WHAT THIS FILE IS: the exact versions the APEX test suite was executed
+# against in the audit container. It is a record of what was verified, not a
+# resolved production lock.
+#
+# WHAT IT IS NOT: identical to requirements.txt. Several packages resolved to
+# NEWER versions here than the pins in requirements.txt request -- notably
+# aiohttp, pandas and Flask. That is stated rather than hidden, because it means
+# the suite has NOT been verified against the exact pinned set:
+#
+#     package    requirements.txt    actually tested here
+#     aiohttp    ==3.9.5             3.14.3
+#     pandas     ==2.2.2             3.0.2
+#     flask      ==3.0.3             3.1.3
+#
+# ALSO NOT VERIFIED HERE: `supabase` is not installed in this container, so the
+# cloud-ledger path ran only through its failure branches. The SQLite ledger is
+# covered; the PostgREST write path is not.
+#
+# TO PRODUCE A REAL PRODUCTION LOCK, in a clean environment:
+#     pip install -r requirements.txt && pip freeze > requirements.lock
+# then re-run the suite against it before deploying.
+#
+
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+argcomplete==3.1.4
+attrs==26.1.0
+babel==2.18.0
+beautifulsoup4==4.14.3
+blinker==1.9.0
+certifi==2026.4.22
+chardet==7.4.3
+charset-normalizer==3.4.7
+click==8.3.3
+colorama==0.4.6
+contourpy==1.3.3
+cycler==0.12.1
+defusedxml==0.7.1
+et_xmlfile==2.0.0
+Flask==3.1.3
+fonttools==4.62.1
+frozenlist==1.8.0
+ghp-import==2.1.0
+hypothesis==6.168.0
+idna==3.13
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+kiwisolver==1.5.0
+lxml==6.1.0
+Markdown==3.10.2
+markdown-it-py==4.0.0
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mdurl==0.1.2
+mergedeep==1.3.4
+mistune==3.2.0
+mkdocs==1.6.1
+mkdocs-get-deps==0.2.2
+multidict==6.8.0
+numpy==1.26.4
+odfpy==1.4.1
+openpyxl==3.1.5
+packaging==26.1
+pandas==3.0.2
+pathspec==1.1.0
+pillow==12.2.0
+platformdirs==4.9.6
+pluggy==1.6.0
+propcache==0.5.4
+psutil==7.2.2
+Pygments==2.20.0
+pyparsing==3.3.2
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+pyyaml_env_tag==1.1
+requests==2.33.1
+rich==15.0.0
+ruff==0.16.8
+scipy==1.17.1
+setuptools==68.1.2
+six==1.17.0
+sortedcontainers==2.4.0
+soupsieve==2.8.3
+tabulate==0.10.0
+threadpoolctl==3.6.0
+tomli==2.4.1
+typing_extensions==4.15.0
+urllib3==2.6.3
+watchdog==6.0.0
+Werkzeug==3.1.8
+wheel==0.42.0
+xlsxwriter==3.2.9
+yarl==1.25.1
