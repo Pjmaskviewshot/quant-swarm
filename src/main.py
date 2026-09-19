@@ -1080,7 +1080,7 @@ class DistributedQuantEngine:
 
             prob_success = max(state["p_up"], state["p_down"])
             action = state["action_dir"]
-            dynamic_gate = state.get("dynamic_gate", 0.52)
+            dynamic_gate = max(0.65, state.get("dynamic_gate", 0.52))
             dominant_regime = state.get("dominant_regime", "TRENDING")
 
             METRICS.incr("signals_generated")
