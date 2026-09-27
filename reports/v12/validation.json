@@ -1,0 +1,260 @@
+{
+  "config": {
+    "seeds": 6,
+    "minutes": 10000,
+    "jobs": 2,
+    "out": "/home/claude/quant-swarm/reports/v12"
+  },
+  "conditions": {
+    "NOISE (no edge exists)": {
+      "dashboard": {
+        "n": 0
+      },
+      "per_seed": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          0
+        ]
+      ],
+      "decisions": 60000,
+      "trade_decisions": 0,
+      "health": [
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP"
+      ]
+    },
+    "WEAK TREND (drift 0.15)": {
+      "dashboard": {
+        "n": 20,
+        "expectancy_bps": 135.5327250595413,
+        "expectancy_r": 1.6354434524108805,
+        "t_stat": 4.419964721648031,
+        "profit_factor": 7.6620388604617435,
+        "net_pnl": 69.50144976217636,
+        "max_drawdown": 0.0063909804105099065,
+        "avg_r": 1.6354434524108805,
+        "cost_per_trade_bps": 11.08083122138585,
+        "funding_total": 0.18353411568103165,
+        "mfe_captured": 0.9217885938721574,
+        "avg_mae_r": -0.40163639301388093,
+        "predicted_bps": 11.756,
+        "avg_hold_min": 139.35,
+        "win_rate": 0.75,
+        "exit_reasons": {
+          "HORIZON_EXHAUSTION": 3,
+          "EXCHANGE_TP": 12,
+          "ADVERSE_STAGNATION_SCRATCH": 3,
+          "EXCHANGE_STOP": 2
+        }
+      },
+      "per_seed": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          20,
+          69.50144976217636
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          0
+        ]
+      ],
+      "decisions": 57227,
+      "trade_decisions": 20,
+      "health": [
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP"
+      ]
+    },
+    "TREND (drift 0.30)": {
+      "dashboard": {
+        "n": 168,
+        "expectancy_bps": 166.81173682460926,
+        "expectancy_r": 1.864007644792297,
+        "t_stat": 15.624755949862587,
+        "profit_factor": 13.817144676278938,
+        "net_pnl": 782.8340318977719,
+        "max_drawdown": 0.01184532948570645,
+        "avg_r": 1.864007644792297,
+        "cost_per_trade_bps": 11.007595903095922,
+        "funding_total": -0.11709990752355255,
+        "mfe_captured": 0.8833150803765675,
+        "avg_mae_r": -0.2858724833262469,
+        "predicted_bps": 15.547678571428571,
+        "avg_hold_min": 117.11011904761905,
+        "win_rate": 0.8154761904761905,
+        "exit_reasons": {
+          "ADVERSE_STAGNATION_SCRATCH": 13,
+          "EXCHANGE_STOP": 13,
+          "HORIZON_EXHAUSTION": 16,
+          "EXCHANGE_TP": 114,
+          "RUNNER_TRAIL_STOP": 12
+        }
+      },
+      "per_seed": [
+        [
+          0,
+          25,
+          62.431205433295396
+        ],
+        [
+          1,
+          43,
+          275.4231774739163
+        ],
+        [
+          2,
+          40,
+          193.29166250453258
+        ],
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          34,
+          168.00960408430547
+        ],
+        [
+          5,
+          26,
+          83.67838240172212
+        ]
+      ],
+      "decisions": 31837,
+      "trade_decisions": 243,
+      "health": [
+        "OK",
+        "OK",
+        "OK",
+        "WARMING_UP",
+        "OK",
+        "OK"
+      ]
+    },
+    "TREND, 2x COSTS + 10s latency": {
+      "dashboard": {
+        "n": 39,
+        "expectancy_bps": 167.68680919914783,
+        "expectancy_r": 1.2231714092006174,
+        "t_stat": 4.4927639725062605,
+        "profit_factor": 5.761379412385086,
+        "net_pnl": 146.34452048547485,
+        "max_drawdown": 0.007195025046264958,
+        "avg_r": 1.2231714092006174,
+        "cost_per_trade_bps": 22.128167313528543,
+        "funding_total": 0.0590358879536603,
+        "mfe_captured": 0.8376117229897487,
+        "avg_mae_r": -0.34203552616087335,
+        "predicted_bps": 8.681538461538462,
+        "avg_hold_min": 166.32905982905982,
+        "win_rate": 0.6666666666666666,
+        "exit_reasons": {
+          "ADVERSE_STAGNATION_SCRATCH": 7,
+          "EXCHANGE_STOP": 6,
+          "HORIZON_EXHAUSTION": 1,
+          "EXCHANGE_TP": 19,
+          "RUNNER_TRAIL_STOP": 6
+        }
+      },
+      "per_seed": [
+        [
+          0,
+          10,
+          5.236842156399254
+        ],
+        [
+          1,
+          16,
+          121.240975051886
+        ],
+        [
+          2,
+          6,
+          10.668900913141254
+        ],
+        [
+          3,
+          1,
+          2.464466878085983
+        ],
+        [
+          4,
+          6,
+          6.733335485962328
+        ],
+        [
+          5,
+          0,
+          0
+        ]
+      ],
+      "decisions": 53276,
+      "trade_decisions": 41,
+      "health": [
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP",
+        "WARMING_UP"
+      ]
+    }
+  }
+}

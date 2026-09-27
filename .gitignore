@@ -1,0 +1,10 @@
+.env
+__pycache__/
+data/
+*.pyc
+.pytest_cache/
+sgd_state.json
+titan_memory_ledger.db
+titan_memory_ledger.db-*
+v12_journal.db
+v12_journal.db-*

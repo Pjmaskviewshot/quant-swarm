@@ -1,0 +1,94 @@
+name: CI
+
+# AUDIT: no CI configuration had ever existed in 395 commits, and there was no
+# test suite at all. Both are now required to pass before merge.
+
+on:
+  push:
+    branches: [main, "phase2/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Verify every module imports
+        run: |
+          python -c "import ast,pathlib,sys
+          bad=[]
+          for f in pathlib.Path('src').rglob('*.py'):
+              try: ast.parse(f.read_text())
+              except SyntaxError as e: bad.append(f'{f}: {e}')
+          sys.exit('\n'.join(bad)) if bad else print('all modules parse')"
+
+      - name: Run test suite (including the slow instrument tests)
+        # -m slow proves the backtester does not manufacture profit.
+        # Skipping these permanently would void every research number.
+        run: pytest -q
+
+      - name: Static analysis (undefined names, unused code, security)
+        # AUDIT D1: a NameError sat in the position exit loop, unbound and
+        # unreachable by unit tests that exercised the extracted pure function
+        # rather than its call site. ruff found it in under a second. A passing
+        # test suite does not make this step redundant.
+        run: |
+          pip install ruff bandit
+          ruff check src/ scripts/ tests/ --select F821,F811,E9 --output-format concise
+          bandit -r src/ scripts/ -ll -q
+
+      - name: Secrets scan
+        run: |
+          ! grep -rEil "(api[_-]?key|api[_-]?secret|password|private[_-]?key)[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9_/+=-]{12,}[\"']" src/ scripts/ tests/ .env.example
+          echo "no hard-coded secrets"
+
+      - name: Configuration documentation is current
+        run: pytest -q tests/test_env_documentation.py
+
+      - name: Assert PAPER is the default mode
+        # The single most important safety property: an empty environment must
+        # never resolve to live trading.
+        env:
+          BYBIT_API_KEY: dummy-key-for-ci
+          BYBIT_API_SECRET: dummy-secret-for-ci
+        run: |
+          PYTHONPATH=src python -c "
+          from runtime_config import RuntimeConfig, TradingMode
+          cfg = RuntimeConfig.from_env()
+          assert cfg.mode is TradingMode.PAPER, f'default mode is {cfg.mode}, expected PAPER'
+          assert not cfg.mode.places_real_orders
+          print('default mode is PAPER')"
+
+      - name: Assert no unused dependencies
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import pathlib, re, sys
+          declared = []
+          for line in pathlib.Path("requirements.txt").read_text().splitlines():
+              line = line.split("#")[0].strip()
+              if line and not line.startswith("-"):
+                  declared.append(re.split(r"[<>=]", line)[0].strip())
+          src = "\n".join(p.read_text() for p in pathlib.Path("src").rglob("*.py"))
+          alias = {"python-dotenv": "dotenv", "postgrest": None}
+          unused = []
+          for d in declared:
+              mod = alias.get(d, d)
+              if mod is None:
+                  continue
+              if not re.search(rf"^\s*(import|from)\s+{re.escape(mod)}", src, re.M):
+                  unused.append(d)
+          sys.exit(f"unused dependencies: {unused}") if unused else print("no unused dependencies")
+          PY
