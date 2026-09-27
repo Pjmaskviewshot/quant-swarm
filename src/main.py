@@ -141,8 +141,14 @@ class GlobalStateActor:
                 self.mutation_queue.task_done()
             except asyncio.CancelledError:
                 break
+            except RuntimeError as e:
+                if "event loop" in str(e).lower():
+                    break
+                logger.error(f"[X-RAY] State Actor Runtime Fault: {e}")
+                await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"[X-RAY] State Actor Fault: {e}", exc_info=True)
+                await asyncio.sleep(0.5)
 
     def _apply_mutation(self, cmd: MutationCommand):
         try:
