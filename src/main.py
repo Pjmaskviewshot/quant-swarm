@@ -40,6 +40,7 @@ from typing import Dict, List, Any, Callable, Set, Optional, Tuple
 from dataclasses import dataclass
 from decimal import Decimal
 from dotenv import load_dotenv
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
