@@ -1266,6 +1266,8 @@ class DistributedQuantEngine:
                 if now - self.last_eval_time.get(symbol + "_dna_diag", 0.0) > 120.0:
                     logger.info(f"[RADAR] {symbol} Filtered: DNA Quarantined in Shadow Ledger.")
                     self.last_eval_time[symbol + "_dna_diag"] = now
+                else:
+                    return
                 METRICS.reason(ReasonCode.DNA_QUARANTINE)
                 
                 shadow_sig_id = str(uuid.uuid4())
