@@ -1767,7 +1767,7 @@ class DistributedQuantEngine:
     async def stream_manager_loop(self):
         while True:
             stream_feed = MarketStateMatrix(
-                basket=self.asset_basket + self.shadow_basket[:4],
+                basket=list(dict.fromkeys(self.asset_basket + self.shadow_basket[:4] + list(self.active_positions_map.keys()))),
                 intervals=self.kline_intervals,
                 orderbook_callback=self.handle_incoming_orderbook_tick,
                 screener_callback=self.handle_incoming_basket_screener_update,
