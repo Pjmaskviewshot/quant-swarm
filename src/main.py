@@ -1417,26 +1417,31 @@ class DistributedQuantEngine:
                 return
             in_flight_reserved = True
 
-            # HARD_PRE_TRADE_GATES_V12: Block open-position flips, RANGE < 62%, prob < 56%, and < $15 scraps
+            # HARD_PRE_TRADE_GATES_V12: Parse exact ALPHA SIGNAL metrics before dispatch
+            _alpha_preview = f"  ALPHA SIGNAL // {symbol} {action} | Regime: {dominant_regime} | "
+                f"Prob: {prob_success:.2%} | Weight: {exec_weight:.2f}x | Haircut: {corr_haircut:.2f}x | Size: ${target_notional:.2f}"
             if symbol in self.active_positions_map:
                 self.in_flight_symbols.pop(symbol, None)
                 logger.info(f"[RADAR] {symbol} Filtered: ACTIVE_POSITION_LOCK (preventing flip collision)")
                 return
-            _m_state = str(locals().get("markov_state", locals().get("belief_state", ""))).upper()
-            _r_label = str(locals().get("regime_label", locals().get("regime", ""))).upper()
-            _prob_val = float(locals().get("prob", locals().get("win_prob", 1.0)))
-            _notional_val = float(locals().get("target_notional", locals().get("position_size_usd", 15.0)))
-            if ("RANGE" in _m_state or "RANG" in _r_label) and _prob_val < 0.62:
+            _m_reg = re.search(r"Regime:\s*([A-Za-z_]+)", _alpha_preview)
+            _m_prb = re.search(r"Prob:\s*([\d\.]+)%", _alpha_preview)
+            _m_sz  = re.search(r"Size:\s*\$([\d\.]+)", _alpha_preview)
+            _reg_str = _m_reg.group(1).upper() if _m_reg else ""
+            _prb_pct = float(_m_prb.group(1)) if _m_prb else 100.0
+            _sz_usd  = float(_m_sz.group(1)) if _m_sz else 15.0
+            _mkv_str = str(locals().get("markov_state", locals().get("belief_state", ""))).upper()
+            if ("RANG" in _reg_str or "RANGE" in _mkv_str) and _prb_pct < 62.0:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: RANGE_REGIME_BLOCK (Prob {_prob_val*100:.1f}% < 62.0%)")
+                logger.info(f"[RADAR] {symbol} Filtered: RANGE_REGIME_BLOCK (Regime={_reg_str} | Prob {_prb_pct:.2f}% < 62.0%)")
                 return
-            if _prob_val < 0.56:
+            if _prb_pct < 56.0:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: CONVICTION_FLOOR (Prob {_prob_val*100:.1f}% < 56.0%)")
+                logger.info(f"[RADAR] {symbol} Filtered: CONVICTION_FLOOR (Prob {_prb_pct:.2f}% < 56.0%)")
                 return
-            if _notional_val < 15.0:
+            if _sz_usd < 15.0:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: BELOW_15_USD_FLOOR (${_notional_val:.2f} < $15.00)")
+                logger.info(f"[RADAR] {symbol} Filtered: BELOW_15_USD_FLOOR (${_sz_usd:.2f} < $15.00)")
                 return
             logger.critical(
                 f"  ALPHA SIGNAL // {symbol} {action} | Regime: {dominant_regime} | "
