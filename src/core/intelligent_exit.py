@@ -59,9 +59,9 @@ class ExitPolicyConfig:
     real momentum signal has, which lives in the trades that keep running.
     """
     legacy: bool = False                 # True reproduces the pre-2026-09 ladder exactly
-    be_trigger_r: float = 1.0            # stop -> breakeven + costs only after +1R earned
-    trail_start_r: float = 1.5           # begin trailing once +1.5R has been reached
-    trail_distance_r: float = 1.0        # trail sits 1R behind the peak
+    be_trigger_r: float = 0.60            # stop -> breakeven + costs only after +1R earned
+    trail_start_r: float = 0.90           # begin trailing once +1.5R has been reached
+    trail_distance_r: float = 0.45        # trail sits 1R behind the peak
     min_reward_r: float = 3.0            # take-profit no closer than 3R
     flow_exit_min_r: float = 1.5         # order-flow exits may act only on trades already
                                          # locked above breakeven -- never on noise-sized gains
@@ -209,7 +209,7 @@ class IntelligentExitEngine:
                 # and the exchange TP drift apart from what the EV model priced.
                 min_risk_floor = state.entry_price * 0.003
             else:
-                min_risk_floor = max(atr * 2.5, state.entry_price * 0.015)
+                min_risk_floor = max(atr * 2.5, state.entry_price * 0.006)
             p_state.initial_risk_dist = max(raw_risk_dist, min_risk_floor)
 
         initial_risk_dist = p_state.initial_risk_dist

@@ -626,8 +626,8 @@ class DistributedQuantEngine:
                 direction = "BUY" if pos["side"].upper() == "BUY" else "SELL"
 
                 feature_eng = self.feature_engines.get(symbol)
-                computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.015)
-                atr = computed_atr if computed_atr > 0 else (entry_price * 0.015)
+                computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.0024)
+                atr = computed_atr if computed_atr > 0 else (entry_price * 0.0024)
 
                 self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                 risk_matrix = {
@@ -708,8 +708,8 @@ class DistributedQuantEngine:
                         qty_step_str = str(specs.get("qty_step", "0.001"))
 
                         feature_eng = self.feature_engines.get(ex_sym)
-                        computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.015)
-                        atr = computed_atr if computed_atr > 0 else (entry_price * 0.015)
+                        computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.0024)
+                        atr = computed_atr if computed_atr > 0 else (entry_price * 0.0024)
 
                         self.state_actor.dispatch(ex_sym, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                         self.daemon_tasks[ex_sym] = self.track_task(self._position_lifecycle_daemon(
@@ -822,7 +822,7 @@ class DistributedQuantEngine:
 
     async def handle_incoming_orderbook_tick(self, rich_payload: Dict[str, Any]):
         symbol = rich_payload.get("symbol")
-        if not symbol or (symbol not in self.asset_basket and symbol not in self.shadow_basket):
+        if not symbol or (symbol not in self.asset_basket and symbol not in self.shadow_basket and symbol not in self.active_positions_map and symbol not in self.in_flight_symbols):
             return
         now = time.time()
 
@@ -899,7 +899,7 @@ class DistributedQuantEngine:
 
     def handle_incoming_trade(self, trade_data: Dict[str, Any]):
         symbol = trade_data.get("symbol")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket:
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket and symbol not in self.active_positions_map and symbol not in self.in_flight_symbols:
             return
         now = time.time()
         price = float(trade_data.get("price", 0.0))
@@ -923,7 +923,7 @@ class DistributedQuantEngine:
 
     def handle_incoming_kline_update(self, data: Dict[str, Any]):
         symbol = data.get("symbol")
-        if symbol not in self.asset_basket and symbol not in self.shadow_basket:
+        if symbol not in self.asset_basket and symbol not in self.shadow_basket and symbol not in self.active_positions_map and symbol not in self.in_flight_symbols:
             return
         self._initialize_symbol_structures([symbol])
         interval, candle = str(data["interval"]), data["candle_data"]
@@ -1140,7 +1140,7 @@ class DistributedQuantEngine:
             feature_engine = self.feature_engines.get(symbol)
             atr = feature_engine.get_computed_atr() if feature_engine else (price * 0.005)
 
-            sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.015)
+            sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.006)
             dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.0)
             # APEX 2026-09: the exchange-native take-profit is placed HERE, at
             # entry. At 2R it closed trades before the exit engine's runner
@@ -1668,7 +1668,9 @@ class DistributedQuantEngine:
             # universe until an unrelated stream restart. Diff and resubscribe.
             previous_subscribed = set(self.asset_basket) | set(self.shadow_basket)
 
-            self.asset_basket = dynamic_basket[:active_limit]
+            pinned_syms = [s for s in list(self.active_positions_map.keys()) + list(self.in_flight_symbols.keys()) if s]
+            dynamic_basket = list(dict.fromkeys(pinned_syms + dynamic_basket))
+            self.asset_basket = dynamic_basket[:max(active_limit, len(pinned_syms))]
             self.shadow_basket = dynamic_basket[active_limit:active_limit + shadow_limit]
             new_subscribed = set(self.asset_basket) | set(self.shadow_basket)
 

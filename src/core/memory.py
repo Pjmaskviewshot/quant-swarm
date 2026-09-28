@@ -890,7 +890,7 @@ class MemoryBank:
             promo_eval = await self.evaluate_shadow_promotion(target_symbol)
 
             # Audit P1 #7 Fix: Enforce strict shadow quarantine for non-anchor assets
-            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL"])
+            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "LINK", "SUI", "NEAR", "AVAX", "ADA", "LTC", "BCH", "HYPE", "DOT", "UNI", "APT", "ARB", "OP", "ONDO", "PEPE", "WIF", "ZEC"])
             if len(historical_data) < k_neighbors:
                 # Anchor tokens may boot in armed state if not flagged for demotion; altcoins must prove edge first
                 is_armed_default = is_anchor and not promo_eval.get("should_demote", False)
@@ -959,7 +959,7 @@ class MemoryBank:
         except Exception as e:
             logger.error(f"[X-RAY] 🛑 LOCAL DB FAULT: SQLite lookup failed ({e}). Engaging HOLOGRAPHIC FALLBACK.")
 
-            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL"])
+            is_anchor = any(m in target_symbol for m in ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "LINK", "SUI", "NEAR", "AVAX", "ADA", "LTC", "BCH", "HYPE", "DOT", "UNI", "APT", "ARB", "OP", "ONDO", "PEPE", "WIF", "ZEC"])
             if not self.holo_warmed_up or self.holo_pointer == 0:
                 logger.info(f"[X-RAY] ⚡ Hologram uninitialized. Setting status for {target_symbol} (Anchor: {is_anchor}).")
                 return {
