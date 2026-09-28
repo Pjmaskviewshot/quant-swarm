@@ -294,7 +294,7 @@ class DistributedQuantEngine:
         self.risk_vault = InstitutionalRiskVault(
             max_drawdown_pct=max_dd_pct, 
             max_single_position_risk_pct=single_risk_pct,
-            exchange_min_notional=6.50,
+            exchange_min_notional=15.00,
             tail_gap_cushion_pct=0.0020
         )
         logger.info(
@@ -1337,7 +1337,7 @@ class DistributedQuantEngine:
             corr_haircut = self.risk_vault.calculate_correlation_haircut(symbol)
             
             # Single-Ticket Cap (Max 25% account balance)
-            max_ticket_ceiling = max(6.50, current_bal * 0.25)
+            max_ticket_ceiling = max(15.00, current_bal * 0.25)
             target_notional = min(raw_notional * corr_haircut, max_ticket_ceiling)
 
             # Risk Guard
@@ -1345,7 +1345,7 @@ class DistributedQuantEngine:
             projected_tail_risk = target_notional * total_risk_dist_pct
             if projected_tail_risk > max_allowed_risk_dollars and projected_tail_risk > 0:
                 scale_ratio = max_allowed_risk_dollars / projected_tail_risk
-                target_notional = max(6.50, target_notional * scale_ratio)
+                target_notional = max(15.00, target_notional * scale_ratio)
 
             # Portfolio Heat Ceiling
             vault_leverage_limit = float(self.live_params.get("LEVERAGE_CAP", getattr(self.risk_vault, "max_leverage", 2.0)))
@@ -1380,7 +1380,7 @@ class DistributedQuantEngine:
             if self.v12 is not None:
                 funding_8h = _finite_float(ob_payload.get("funding_rate"), 0.0)
                 v12_verdict = await asyncio.to_thread(
-                    self.v12.evaluate, symbol, action, now, current_bal, spread_bps, funding_8h, 6.50)
+                    self.v12.evaluate, symbol, action, now, current_bal, spread_bps, funding_8h, 15.00)
                 if not v12_verdict.would_allow:
                     METRICS.reason(ReasonCode.V12_GUARDIAN if v12_verdict.decision.is_trade
                                    else ReasonCode.V12_NO_TRADE)

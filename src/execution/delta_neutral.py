@@ -579,7 +579,7 @@ class DeltaNeutralYieldEngine:
 
         if total_bal < 100.0:
             yield_capital = min(max_safe_capital_headroom, idle_capital * 0.85, max(7.0, total_bal * 0.45))
-            min_yield_threshold = 6.50
+            min_yield_threshold = 15.00
         else:
             yield_capital = min(max_safe_capital_headroom, idle_capital * 0.90, total_bal * 0.20)
             min_yield_threshold = 15.0

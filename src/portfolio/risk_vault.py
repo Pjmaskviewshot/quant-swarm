@@ -35,7 +35,7 @@ class InstitutionalRiskVault:
         self, 
         max_drawdown_pct: float = 0.10,                  
         max_single_position_risk_pct: float = 0.015, 
-        exchange_min_notional: float = 6.50,
+        exchange_min_notional: float = 15.00,
         max_slots: int = 3,
         tail_gap_cushion_pct: float = 0.0020  # 20 bps gap/slippage allowance for tail stops
     ):

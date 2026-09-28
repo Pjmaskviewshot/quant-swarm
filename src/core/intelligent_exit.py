@@ -11,7 +11,7 @@ Production Hardening & Quantitative Upgrades (V50.0 Audit Resolutions):
   book-wiping slippage spikes (e.g., -57.2 bps ETH fills).
 - Dual-Basis Mark/Last Safety Clamping: Clamps server-side stops against MarkPrice and
   executable Top-of-Book, terminating Bybit Error 34036/110043 amendment rejections.
-- Micro-Account Notional Scale-Out Guard: Converts partial exits (< $6.50) into deferred
+- Micro-Account Notional Scale-Out Guard: Converts partial exits (< $15.00) into deferred
   full exits (>= 1.60R) to eliminate exchange order rejection loops.
 - Monotonic Ratchet Guarantee: Prevents volatility-induced stop degradation across both legs.
 - Strict Decimal Quantization: Floors exit order lot sizes to exchange step sizes cleanly.
@@ -464,7 +464,7 @@ class IntelligentExitEngine:
         # =========================================================================
         if current_r >= 1.30 and state.q_retained >= 0.99:
             child_notional = (state.actual_qty * 0.5) * exec_price
-            if child_notional < 6.50:
+            if child_notional < 15.00:
                 if current_r >= 1.60:
                     p_state.state_id = "SCALE_OUT_CONVERTED_EXIT"
                     return ExitDecision(

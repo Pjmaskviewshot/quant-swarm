@@ -169,7 +169,7 @@ class SmartOrderRouter:
 
         limits = self.instrument_cache.get(symbol, {})
         min_notional = float(
-            max(Decimal("6.50"), limits.get("min_notional", Decimal("5.0")) * Decimal("1.05"))
+            max(Decimal("15.00"), limits.get("min_notional", Decimal("5.0")) * Decimal("1.05"))
         )
         tol = self.notional_deviation_tolerance
         deviation = abs(actual_notional - intended_notional) / intended_notional
@@ -252,7 +252,7 @@ class SmartOrderRouter:
         })
         min_qty: Decimal = limits["min_qty"]
         qty_step: Decimal = limits["qty_step"]
-        min_notional: Decimal = max(Decimal("6.50"), limits["min_notional"] * Decimal("1.05"))
+        min_notional: Decimal = max(Decimal("15.00"), limits["min_notional"] * Decimal("1.05"))
         price_dec = Decimal(f"{max(current_price, 1e-9):.8f}")
         raw_qty_dec = Decimal(f"{raw_qty:.8f}")
 
@@ -419,8 +419,8 @@ class SmartOrderRouter:
         elif self.core_engine and hasattr(self.core_engine, 'risk_vault'):
             max_leverage_cap = float(getattr(self.core_engine.risk_vault, 'max_leverage', max_leverage_cap))
 
-        max_permitted_notional = max(6.50, current_balance * max_leverage_cap)
-        return float(np.clip(target_notional, 6.50, max_permitted_notional))
+        max_permitted_notional = max(15.00, current_balance * max_leverage_cap)
+        return float(np.clip(target_notional, 15.00, max_permitted_notional))
 
     def compute_dynamic_slippage_cap_bps(self, symbol: str, regime: str, live_spread_bps: float) -> float:
         """
@@ -926,7 +926,7 @@ class SmartOrderRouter:
         if total_executed_qty > 0.0 and (sl or tp):
             await self._verify_and_anchor_stops(symbol, direction, avg_price, sl, tp)
 
-        if order_confirmed and total_executed_qty > 0.0 and remainder > min_tradeable and (remainder * current_mid_price) >= 6.50:
+        if order_confirmed and total_executed_qty > 0.0 and remainder > min_tradeable and (remainder * current_mid_price) >= 15.00:
             logger.info(f"[X-RAY] Partial fill ({total_executed_qty:.4f}/{cleaned_qty:.4f}). Routing remainder to Maker Peg.")
             peg_success, peg_price, peg_qty = await self._execute_dynamic_maker_peg(
                 symbol, direction, remainder, sl=sl, tp=tp, depth_snapshot=depth_snapshot,
@@ -1162,7 +1162,7 @@ class SmartOrderRouter:
     ) -> Tuple[bool, float, float]:
         limits = self.instrument_cache.get(symbol, {"min_qty": Decimal("1.0")})
         min_qty = float(limits["min_qty"])
-        min_notional_qty = 6.50 / max(current_mid_price, 1e-9)
+        min_notional_qty = 15.00 / max(current_mid_price, 1e-9)
         absolute_min_slice = max(min_qty, min_notional_qty)
 
         inst_var = 1e-5
