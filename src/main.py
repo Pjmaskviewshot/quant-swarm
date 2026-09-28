@@ -626,8 +626,8 @@ class DistributedQuantEngine:
                 direction = "BUY" if pos["side"].upper() == "BUY" else "SELL"
 
                 feature_eng = self.feature_engines.get(symbol)
-                computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.0024)
-                atr = computed_atr if computed_atr > 0 else (entry_price * 0.0024)
+                computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.004)
+                atr = computed_atr if computed_atr > 0 else (entry_price * 0.004)
 
                 self.state_actor.dispatch(symbol, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                 risk_matrix = {
@@ -708,8 +708,8 @@ class DistributedQuantEngine:
                         qty_step_str = str(specs.get("qty_step", "0.001"))
 
                         feature_eng = self.feature_engines.get(ex_sym)
-                        computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.0024)
-                        atr = computed_atr if computed_atr > 0 else (entry_price * 0.0024)
+                        computed_atr = feature_eng.get_computed_atr() if feature_eng else (entry_price * 0.004)
+                        atr = computed_atr if computed_atr > 0 else (entry_price * 0.004)
 
                         self.state_actor.dispatch(ex_sym, "REGISTER_POSITION", {"direction": direction, "notional": qty * entry_price})
                         self.daemon_tasks[ex_sym] = self.track_task(self._position_lifecycle_daemon(
@@ -1140,7 +1140,7 @@ class DistributedQuantEngine:
             feature_engine = self.feature_engines.get(symbol)
             atr = feature_engine.get_computed_atr() if feature_engine else (price * 0.005)
 
-            sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.006)
+            sl_dist_pct = max((atr * self.live_params.get("sl_atr_mult", 2.5)) / (price + 1e-9), 0.010)
             dynamic_rr = feature_engine.get_dynamic_rr_ratio() if feature_engine else self.live_params.get("rr_ratio", 2.0)
             # APEX 2026-09: the exchange-native take-profit is placed HERE, at
             # entry. At 2R it closed trades before the exit engine's runner
@@ -1325,7 +1325,7 @@ class DistributedQuantEngine:
             # Proportional Merton-Kelly Sizing
             max_single_risk = float(getattr(self.risk_vault, "max_single_position_risk_pct", 0.025))
             kelly_f = state.get("kelly_fraction", 0.005)
-            base_risk = (kelly_f / 0.0075) * max_single_risk if kelly_f > 0 else (max_single_risk * 0.6)
+            base_risk = (kelly_f / 0.010) * max_single_risk if kelly_f > 0 else (max_single_risk * 0.6)
             target_risk_pct = float(np.clip(base_risk * exec_weight, 0.002, max_single_risk))
 
             slippage_gap_buffer = max(0.0020, getattr(stat_engine, 'rough_vol', 0.001) * 1.5)
@@ -1356,7 +1356,7 @@ class DistributedQuantEngine:
             in_flight_notional_sum = sum(self.in_flight_notionals.values())
             remaining_notional_capacity = max(0.0, max_portfolio_heat - (active_notional_sum + in_flight_notional_sum))
 
-            if remaining_notional_capacity < 6.50:
+            if remaining_notional_capacity < 15.00:
                 if now - self.last_eval_time.get(symbol + "_heat_deadlock", 0.0) > 60.0:
                     logger.info(
                         f"[RADAR] {symbol} Filtered: Portfolio Headroom Exhausted "
@@ -1365,7 +1365,7 @@ class DistributedQuantEngine:
                     self.last_eval_time[symbol + "_heat_deadlock"] = now
                 return
 
-            target_notional = float(np.clip(target_notional, 6.50, remaining_notional_capacity))
+            target_notional = float(np.clip(target_notional, 15.00, remaining_notional_capacity))
 
             # AUDIT B9/B10: capacity check and reservation are now ONE atomic
             # step. Previously the vault check ran outside the lock, so several
@@ -2031,7 +2031,7 @@ class DistributedQuantEngine:
             # 3. Post-Loss Asset Quarantine (only on a KNOWN loss)
             if settlement_resolved and net_pnl < 0:
                 async with self.circuit_breaker_lock:
-                    self.circuit_breakers[symbol] = time.time() + 180.0
+                    self.circuit_breakers[symbol] = time.time() + 300.0
                 logger.warning(f"[RISK] Post-loss quarantine engaged for {symbol}: locked for 180s. Net PnL: ${net_pnl:.4f}")
                 self.last_exit_direction[symbol] = (ctx["direction"], time.time(), "LOSS")
             else:
