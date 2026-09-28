@@ -266,6 +266,7 @@ class SmartOrderRouter:
             # AUDIT B21: previously the quantity was inflated upward to meet the
             # exchange floor, silently overriding the risk engine's sizing. The
             # correct response to "too small to trade" is not to trade.
+            # SOR_POST_ROUNDING_15_FLOOR
             if self.skip_below_min_notional:
                 logger.info(
                     f"[SOR_GATE] ENTRY_REJECTED_BELOW_MIN_NOTIONAL // {symbol}: "
