@@ -1417,24 +1417,26 @@ class DistributedQuantEngine:
                 return
             in_flight_reserved = True
 
-            # HARD_PRE_TRADE_GATES_V12: Direct check on dominant_regime, prob_success, and target_notional
+            # HARD_PRE_TRADE_GATES_V12: Native Python Variable Evaluation
             if symbol in self.active_positions_map:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: ACTIVE_POSITION_LOCK (preventing flip collision)")
+                logger.info(f"[RADAR] {symbol} Filtered: ACTIVE_POSITION_LOCK")
                 return
-            _reg_str = str(dominant_regime).upper()
-            _mkv_str = str(locals().get("markov_state", locals().get("belief_state", ""))).upper()
-            if ("RANG" in _reg_str or "RANGE" in _mkv_str) and float(prob_success) < 0.62:
+            _prob_val = float(locals().get("prob_success", locals().get("prob", 1.0)))
+            _not_val = float(locals().get("target_notional", 15.0))
+            _mkv = str(locals().get("markov_state", locals().get("belief_state", ""))).upper()
+            _reg = str(locals().get("regime_label", locals().get("dominant_regime", ""))).upper()
+            if ("RANG" in _reg or "RANGE" in _mkv) and _prob_val < 0.62:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: RANGE_REGIME_BLOCK (Regime={_reg_str} | Prob {prob_success:.2%} < 62.00%)")
+                logger.info(f"[RADAR] {symbol} Filtered: RANGE_REGIME_BLOCK (Prob: {_prob_val*100:.1f}% < 62.0%)")
                 return
-            if float(prob_success) < 0.56:
+            if _prob_val < 0.56:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: CONVICTION_FLOOR (Prob {prob_success:.2%} < 56.00%)")
+                logger.info(f"[RADAR] {symbol} Filtered: CONVICTION_FLOOR (Prob: {_prob_val*100:.1f}% < 56.0%)")
                 return
-            if float(target_notional) < 15.0:
+            if _not_val < 15.0:
                 self.in_flight_symbols.pop(symbol, None)
-                logger.info(f"[RADAR] {symbol} Filtered: BELOW_15_USD_FLOOR (${target_notional:.2f} < $15.00)")
+                logger.info(f"[RADAR] {symbol} Filtered: BELOW_15_USD_FLOOR (${_not_val:.2f} < $15.00)")
                 return
             logger.critical(
                 f"  ALPHA SIGNAL // {symbol} {action} | Regime: {dominant_regime} | "
